@@ -97,59 +97,31 @@ namespace Syntax.Process is
         si
     si
 
-    // A literal nested inside a stage body that reads the stage's own
-    // parameter cannot be inlined yet. The nested literal captures the
-    // parameter, and the capture chain walks out through the literal
-    // being inlined, which has no frame and is never emitted, so the
-    // nested literal's frame chain points at a frame nothing constructs
-    // and the program is rejected at load. A capture chain that skips a
-    // transparent inlined literal is what this needs; until then the stage
-    // keeps its delegate, which captures exactly as it always did.
-    //
-    // A nested literal that reads only the method's own locals is fine,
-    // so the scan asks for the parameter by name - a source identifier
-    // is the datum here, not a proxy for a symbol.
-    class NESTED_PARAMETER_CAPTURE_SCANNER: Visitor is
-        _parameter_name: string
+    // The literals written inside a stage body, outermost first. Each
+    // one's captures are recorded against the symbols its enclosing
+    // literal owned, so they are dropped before the body is walked
+    // inline and recorded afresh against the method's own locals.
+    class NESTED_LITERAL_COLLECTOR: Visitor is
+        _literals: LIST[Trees.Expressions.FUNCTION]
 
-        // How many literals deep the walk is. A flag would be cleared on
-        // leaving an inner literal while the walk is still inside an
-        // outer one, and a read of the parameter after that point would
-        // be taken for one the enclosing method makes.
-        _depth: int
-        _found: bool
-
-        init(parameter_name: string) is
+        init() is
             super.init()
 
-            _parameter_name = parameter_name
+            _literals = LIST[Trees.Expressions.FUNCTION]()
         si
 
-        captures_parameter(body: Trees.Bodies.Body?) -> bool is
-            _found = false
-            _depth = 0
+        collect(body: Trees.Bodies.Body?) -> Collections.List[Trees.Expressions.FUNCTION] is
+            _literals.clear()
 
             if body? then
                 body.walk(self)
             fi
 
-            return _found
+            return _literals
         si
 
         pre(function: Trees.Expressions.FUNCTION) -> bool is
-            _depth = _depth + 1
-
-            return false
-        si
-
-        visit(function: Trees.Expressions.FUNCTION) is
-            _depth = _depth - 1
-        si
-
-        pre(identifier: Trees.Expressions.IDENTIFIER) -> bool is
-            if _depth > 0 /\ identifier.identifier.name =~ _parameter_name then
-                _found = true
-            fi
+            _literals.add(function)
 
             return false
         si

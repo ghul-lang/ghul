@@ -195,6 +195,22 @@ namespace Semantic.Symbols is
             od
         si
 
+        // A literal written inside one that is being compiled inline
+        // captures different symbols than it did when the enclosing
+        // literal was a closure: what was the enclosing literal's
+        // parameter is a local of the method it is inlined into. The
+        // captures an earlier walk recorded name the symbols it read
+        // then, and a capture is keyed on the symbol while the frame
+        // field it declares is keyed on the name, so keeping both sets
+        // leaves the frame with one field and the constructor call with
+        // two arguments. Dropping them lets the walk that follows record
+        // what the body now reads.
+        reset_captures() is
+            is_self_captured = false
+            captured_values = null
+            frame = null
+        si
+
         convert_to_delegate() is
             assert could_be_delegate
 
@@ -1527,14 +1543,20 @@ namespace Semantic.Symbols is
                     elif scope.is_closure then
                         let c = cast Closure?(scope)!
 
-                        // FIXME: probably redundant
-                        c.find_or_add_capture(symbol)
+                        // A literal compiled inline has no frame to relay
+                        // the value through, so the walk continues past it
+                        // to whatever encloses it. Capturing into it would
+                        // record a field on a frame nothing constructs.
+                        if !c.is_inlined then
+                            // FIXME: probably redundant
+                            c.find_or_add_capture(symbol)
 
-                        c.load_captured_value(location, symbol, loader)
+                            c.load_captured_value(location, symbol, loader)
 
-                        let result = c.load_captured_value(location, symbol, loader)
+                            let result = c.load_captured_value(location, symbol, loader)
 
-                        return result
+                            return result
+                        fi
                     fi
                 fi
 

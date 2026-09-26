@@ -1040,43 +1040,62 @@ namespace Syntax.Process is
                 return
             fi
 
-            if NESTED_PARAMETER_CAPTURE_SCANNER(param_name).captures_parameter(body) then
-                return
-            fi
-
             // The parameter local the fused loop stores each element into.
             // It is declared in a scope of its own so its name cannot
             // collide with anything the method already has - nothing ever
             // looks it up by name, since the loader translates the
             // literal's parameter symbol to it directly.
-            let scope = Semantic.BLOCK_SCOPE(_symbol_table.current_scope)
+            //
+            // The body is walked again on every body retry, and the local
+            // has to be the same one each time. A nested literal captures
+            // it, and a capture is keyed on the symbol, so a second local
+            // would leave that capture naming a slot the retained walk
+            // never declares.
+            let local: Semantic.Symbols.Symbol mut
 
-            // The local-id generator is only in a function frame during
-            // the declare pass; push one so the LOCAL_VARIABLE ctor can
-            // mint an id, then give the local a globally-unique IL slot
-            // name so it can't collide with an enclosing local.
-            let local_id_generator = IoC.CONTAINER.instance.local_id_generator
+            if let inlined = closure.inlined_into then
+                local = inlined.parameter
+            else
+                let scope = Semantic.BLOCK_SCOPE(_symbol_table.current_scope)
 
-            local_id_generator.enter_function()
+                // The local-id generator is only in a function frame during
+                // the declare pass; push one so the LOCAL_VARIABLE ctor can
+                // mint an id, then give the local a globally-unique IL slot
+                // name so it can't collide with an enclosing local.
+                let local_id_generator = IoC.CONTAINER.instance.local_id_generator
 
-            let local = scope.declare_variable(function.location, param_name, false, null)
+                local_id_generator.enter_function()
 
-            local_id_generator.leave_function()
+                let declared = scope.declare_variable(function.location, param_name, false, null)
 
-            if !isa Semantic.Symbols.Variable(local) \/ !isa Semantic.Types.SettableTyped(local) then
-                return
+                local_id_generator.leave_function()
+
+                if !isa Semantic.Symbols.Variable(declared) \/ !isa Semantic.Types.SettableTyped(declared) then
+                    return
+                fi
+
+                declared.il_name_override = ".fused_param.{_next_fused_local_id()}"
+
+                (cast Semantic.Symbols.Variable(declared)).define()
+                (cast Semantic.Types.SettableTyped(declared)).set_type(param_type)
+
+                local = declared
             fi
-
-            local.il_name_override = ".fused_param.{_next_fused_local_id()}"
-
-            (cast Semantic.Symbols.Variable(local)).define()
-            (cast Semantic.Types.SettableTyped(local)).set_type(param_type)
 
             // Compile the body inline: the literal keeps its own scope, so
             // every name in it resolves exactly as it does when the literal
             // is compiled as a closure, at every nesting depth. The marker
             // is what makes those names load as the method's locals.
             closure.inlined_into = (_symbol_table.current_function!, param_symbol, cast Semantic.Symbols.Variable(local))
+
+            // A literal written inside the body captured the parameter
+            // this walk reads as a method local, so what it recorded
+            // names a symbol the body no longer reads.
+            for nested in NESTED_LITERAL_COLLECTOR().collect(body) do
+                if let nested_closure = cast Semantic.Symbols.Closure?(_symbol_table.scope_for(nested)) then
+                    nested_closure.reset_captures()
+                fi
+            od
 
             let harvest_site = RETRY_SITE_STATS.enter("fusion.harvest", RetrySiteKind.ALTERNATIVE)
 
