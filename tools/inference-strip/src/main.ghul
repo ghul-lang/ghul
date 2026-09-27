@@ -27,8 +27,13 @@ namespace InferenceStrip is
         // sorted: a variant that builds with different ones has changed
         // what the program means, whatever its output.
         baseline_warnings: string? public;
+        // With --casts: the unstripped build's disassembly, and one line per
+        // cast site describing it and its verdict.
+        baseline_il: string? public;
+        cast_results: LIST[string];
 
         init(..) is
+            cast_results = LIST[string]()
             sources = LIST[string](Directory.get_files(directory, "*.ghul"))
             sources.sort()
             sites = LIST[string]()
@@ -59,18 +64,32 @@ namespace InferenceStrip is
     read(path: string) -> string => if File.exists(path) then File.read_all_text(path) else "" fi
 
     class HARNESS(compiler: string, work: string, root: string) is
+        // With --casts the sites are the targets of explicit casts, and a
+        // stripped copy counts as unchanged only when its disassembly is
+        // the unstripped build's: the same output could hide a target that
+        // inference picked differently.
+        casts: bool public
+        ildasm: string public
+
+        init(..) is
+            casts = false
+            ildasm = "ildasm"
+        si
+
         // The stripping sites of every source of the task, numbered per
         // file by the compiler's `list` selection.
         list_sites(task: TASK) is
+            let selection = if casts then "cast:list" else "list" fi
+
             for i in 0..task.sources.count do
                 let listing = Path.combine(work, "sites.txt")
 
-                run(task.directory, "dotnet {quote(compiler)} --strip-annotations list {quote(task.sources[i])} > {quote(listing)} 2>/dev/null")
+                run(task.directory, "dotnet {quote(compiler)} --strip-annotations {selection} {quote(task.sources[i])} > {quote(listing)} 2>/dev/null")
 
                 let text = read(task.sources[i])
 
                 for line in read(listing).split(['\n']) do
-                    if line.trim().length > 0 /\ !WIDER_ANNOTATION.declares(text, line.trim()) then
+                    if line.trim().length > 0 /\ (casts \/ !WIDER_ANNOTATION.declares(text, line.trim())) then
                         task.sites.add("{i}:{line.trim()}")
                     fi
                 od
@@ -131,6 +150,21 @@ namespace InferenceStrip is
                 return (verdict = "C", detail = first_diagnostic(build_out))
             fi
 
+            if casts then
+                let il = disassemble(directory)
+
+                if selected.count == 0 then
+                    task.baseline_il = il
+                    return (verdict = "=", detail = "")
+                elif il =~ task.baseline_il ?? "" then
+                    if let baseline = task.baseline_warnings /\ !(baseline =~ warnings) then
+                        return (verdict = "N", detail = "warnings differ from the unstripped build")
+                    fi
+
+                    return (verdict = "=", detail = "")
+                fi
+            fi
+
             // A task that reads input has its input beside it, under the
             // name ghul-test feeds it from; without it the stripped copy
             // reads end of file and is judged on output it never had the
@@ -159,7 +193,94 @@ namespace InferenceStrip is
                 return (verdict = "N", detail = "warnings differ from the unstripped build")
             fi
 
+            if casts then
+                return (verdict = "T", detail = "a different target inferred, same output")
+            fi
+
             (verdict = "=", detail = "")
+        si
+
+        // The built program's disassembly, without the lines that differ
+        // between two builds of the same source.
+        disassemble(directory: string) -> string is
+            run(directory, "{quote(ildasm)} -out=il.txt bin/Debug/net10.0/binary.dll > /dev/null 2>&1")
+
+            // A file-private namespace is named after the directory the
+            // copy was built in.
+            let private_prefix = "{Path.get_file_name(directory)}__"
+            let lines = LIST[string]()
+
+            for line in read(Path.combine(directory, "il.txt")).replace(private_prefix, "__").split(['\n']) do
+                let trimmed = line.trim()
+
+                if !trimmed.starts_with("//") /\ !trimmed.contains("MVID") then
+                    lines.add(line)
+                fi
+            od
+
+            // Alignment follows the length of the names, so the spacing goes.
+            Regex.replace(lines |> join(" "), "\\s+", " ")
+        si
+
+        // Each cast site of the task on its own, then every site that
+        // stripped on its own together; one result line per site.
+        strip_casts(task: TASK) is
+            let everything = variant(task, task.sites, "all")
+
+            if everything.verdict =~ "=" then
+                for site in task.sites do
+                    task.cast_results.add(describe(task, site, "=", ""))
+                od
+
+                task.stripped = task.sites.count
+                task.verdict = "="
+
+                return
+            fi
+
+            let passing = LIST[string]()
+            let index mut = 0
+
+            for site in task.sites do
+                let label = "site-{index}"
+                let result = variant(task, LIST[string]([site]), label)
+
+                task.cast_results.add(describe(task, site, result.verdict, result.detail))
+
+                if result.verdict =~ "=" then
+                    passing.add(site)
+                fi
+
+                Directory.delete(Path.combine(Path.combine(work, task.name), label), true)
+
+                index = index + 1
+            od
+
+            task.stripped = passing.count
+
+            if passing.count == 0 then
+                task.verdict = "C"
+            elif passing.count == 1 then
+                task.verdict = "P"
+            else
+                let together = variant(task, passing, "together")
+
+                task.verdict = if together.verdict =~ "=" then "P" else "J" fi
+                task.detail = together.detail
+            fi
+        si
+
+        // A result line: task, file, line, target, position, operand,
+        // verdict, and the diagnostic with its numbers taken out.
+        describe(task: TASK, site: string, verdict: string, detail: string) -> string is
+            let colon = site.index_of(':')
+            let file = int.parse(site.substring(0, colon))
+            let listing = site.substring(colon + 1)
+            let line = listing.split([' '])[2].split([','])[0]
+            let described = CAST_SITE(read(task.sources[file]), listing)
+            let clean = (s: string) => s.replace("\t", " ").replace("\n", " ")
+
+            [task.name, Path.get_file_name(task.sources[file])!, line, clean(described.target), described.position, clean(described.operand), verdict, clean(bucket(detail))] |> join("\t")
         si
 
         // The warnings a build reported, without their positions, which an
@@ -274,6 +395,11 @@ namespace InferenceStrip is
         let want_bisect mut = false
         let json: string? mut = null
         let collect: string? mut = null
+        let want_casts mut = false
+        let ildasm mut = "ildasm"
+        let sites_path: string? mut = null
+        let shard mut = 0
+        let shards mut = 1
         let i mut = 3
 
         while i < args.count do
@@ -298,6 +424,20 @@ namespace InferenceStrip is
             elif args[i] =~ "--collect" then
                 collect = Path.get_full_path(args[i + 1])
                 i = i + 2
+            elif args[i] =~ "--casts" then
+                want_casts = true
+                i = i + 1
+            elif args[i] =~ "--ildasm" then
+                ildasm = Path.get_full_path(args[i + 1])
+                i = i + 2
+            elif args[i] =~ "--sites" then
+                sites_path = Path.get_full_path(args[i + 1])
+                i = i + 2
+            elif args[i] =~ "--shard" then
+                let parts = args[i + 1].split(['/'])
+                shard = int.parse(parts[0])
+                shards = int.parse(parts[1])
+                i = i + 2
             else
                 write_line("unknown option {args[i]}")
                 return 1
@@ -316,17 +456,26 @@ namespace InferenceStrip is
         od
 
         let harness = HARNESS(compiler, work, tasks_directory)
+
+        harness.casts = want_casts
+        harness.ildasm = ildasm
         let tasks = LIST[TASK]()
         let directories = LIST[string](Directory.get_directories(tasks_directory))
 
         directories.sort()
+
+        let seen mut = 0
 
         for d in directories do
             let name = Path.get_file_name(d)!
 
             if Directory.get_files(d, "*.ghulproj").count > 0 /\ File.exists(Path.combine(d, "run.expected")) then
                 if (!filter_text? \/ name.contains(filter_text)) /\ !skipped.contains(name) then
-                    tasks.add(TASK(name, d))
+                    if seen % shards == shard then
+                        tasks.add(TASK(name, d))
+                    fi
+
+                    seen = seen + 1
                 fi
             fi
         od
@@ -346,6 +495,19 @@ namespace InferenceStrip is
                 if !(base.verdict =~ "=") then
                     task.verdict = "B"
                     task.detail = "unstripped build does not reproduce run.expected: {base.detail}"
+
+                    done = done + 1
+                    IO.Std.write("\r{done} of {tasks.count}  ")
+
+                    continue
+                fi
+
+                if want_casts then
+                    harness.strip_casts(task)
+
+                    if let path = sites_path then
+                        File.append_all_lines(path, task.cast_results)
+                    fi
 
                     done = done + 1
                     IO.Std.write("\r{done} of {tasks.count}  ")
