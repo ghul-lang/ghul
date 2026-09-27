@@ -303,14 +303,6 @@ namespace Syntax.Process is
                 enter_block(cast IR.Values.BLOCK?(list.value)!)
             fi
 
-            let return_type = current_function!.return_type
-
-            let return_needed: TEMP? mut
-            let return_value: TEMP? mut = _
-            let label: LOOP_LABELS? mut = _
-
-            let outer_try: LOOP_LABELS? mut = _
-
             // A statement list leaves its tail value on the stack for
             // whatever consumes the list - the function epilogue's
             // `ret`, or an enclosing expression. A disposal region is
@@ -319,42 +311,36 @@ namespace Syntax.Process is
             // region is behind it.
             let tail_value: TEMP? mut = _
 
-            let brancher = get_brancher_for_block()
+            // The same, for a tail statement that is itself a disposal
+            // region because it holds a `let use ... in` expression.
+            let statement_tail: TEMP? mut = _
 
-            // A `.try` inside a state-machine body needs its own
-            // dispatch holder (so awaits/yields inside register here,
-            // keeping the `beq cold_resume_N` and the target label
-            // in the same protected region) plus a state-guarded
-            // finally body (skip dispose / user-cleanup on suspend
-            // `leave`). Both works the same way for let-use and
-            // user-written try; the helpers below no-op outside a
-            // state machine.
-            let dispatch_holder: ASYNC_DISPATCH_HOLDER? mut = null
-
-            // The disposal region's own extent. A disposed local is
-            // declared outside it, so that `finally` can still reach
-            // the local after an exception has left the block.
-            let dispose_extent = Values.TRY_EXTENT()
-            let dispose_region = Values.PROTECTED_REGION(dispose_extent, null)
-
-            if list.want_dispose then
-                (outer_try, return_needed, return_value) = get_exception_handler_temps()
-
-                for v in list.variables_to_dispose do
-                    _declare_local(v)
-                od
-
-                label = _loops.enter_try(return_needed, return_value)
-
-                add(Values.TRY_START(dispose_extent))
-
-                dispatch_holder = _maybe_push_dispatch_holder()
-            fi
+            let region =
+                if list.want_dispose then
+                    _open_disposal_region(list.variables_to_dispose)
+                else
+                    null
+                fi
 
             for s in list.statements do
                 enter_node(s)
                 try
-                    s.walk(self)
+                    if let disposals = s.let_in_disposals then
+                        let statement_region = _open_disposal_region(disposals)
+
+                        s.walk(self)
+
+                        if list.value? /\ s == list.last then
+                            if let value = s.value then
+                                statement_tail = TEMP(current_block, "tail", _tail_type(list))
+                                statement_tail.store(value)
+                            fi
+                        fi
+
+                        _close_disposal_region(statement_region, disposals, s.location)
+                    else
+                        s.walk(self)
+                    fi
                 finally
                     leave_node(s)
                 yrt
@@ -362,92 +348,20 @@ namespace Syntax.Process is
 
             if list.value? then
                 if let list.last?, last.value? then
-                    if list.want_dispose then
-                        // The type the tail presents rather than the
-                        // value's own: a tail of `null` has the null
-                        // type, which no local can be declared with,
-                        // and a body whose every contribution is null
-                        // takes its type from what the function
-                        // returns.
-                        let block = cast IR.Values.BLOCK?(list.value)!
+                    let tail = statement_tail?.load() ?? value
 
-                        let tail_type =
-                            if block.type.is_null /\ return_type? then
-                                return_type
-                            else
-                                block.type
-                            fi
+                    if region? then
+                        tail_value = TEMP(current_block, "tail", _tail_type(list))
 
-                        tail_value = TEMP(current_block, "tail", tail_type)
-
-                        tail_value.store(value)
+                        tail_value.store(tail)
                     else
-                        add(value)
+                        add(tail)
                     fi
                 fi
             fi
 
-            if list.want_dispose then
-                let try_label = label!
-
-                _maybe_pop_dispatch_holder(dispatch_holder)
-
-                ensure_runtime_symbols_are_materialized()
-
-                try_label.is_in_finally = true
-
-                brancher.leave(try_label.start)
-
-                add(Values.TRY_END(dispose_extent))
-                add(Values.HANDLER_START(dispose_region))
-
-                let skip_dispose_label = _open_finally_state_guard()
-
-                let to_dispose = list.variables_to_dispose
-
-                let i mut = to_dispose.count - 1
-
-                while i >= 0 do
-                    let v = to_dispose[i]
-
-                    let skip_label: LABEL? mut = null
-
-                    if !v.type!.is_value_type then
-                        skip_label = LABEL()
-
-                        // v.load rather than load_local_variable: a top-level
-                        // `let use` promotes the variable to a field on the
-                        // globals container, whose owner is not the current
-                        // function, and load_local_variable would route it
-                        // through the captured-value path. Both loads carry
-                        // the variable's own location rather than the list's:
-                        // the list starts before the declaration, which a
-                        // top-level variable reads as use-before-declaration.
-                        brancher.branch(BRANCH.Z, v.load(v.location, null, _symbol_loader), skip_label)
-                    fi
-
-                    let variable_value = v.load(v.location, null, _symbol_loader)
-                    let dispose_call = _dispose.call(list.location, variable_value, System.Array.empty`[Value](), null, _function_caller)
-
-                    add(dispose_call)
-
-                    if skip_label? then
-                        brancher.label(skip_label)
-                    fi
-
-                    i = i - 1
-                od
-
-                _close_finally_state_guard(skip_dispose_label)
-
-                brancher.label(try_label.middle)
-
-                add(Values.INSTRUCTION(ILOpCode.ENDFINALLY))
-                add(Values.HANDLER_END(dispose_region))
-
-                _loops.leave_loop()
-
-                gen_exception_handler_exit(outer_try, try_label, return_value)
+            if region? then
+                _close_disposal_region(region, list.variables_to_dispose, list.location)
 
                 if tail_value? then
                     add(tail_value.load())
@@ -457,6 +371,115 @@ namespace Syntax.Process is
             if list.value? then
                 leave_block()
             fi
+        si
+
+        // The type a list's tail presents rather than the value's own: a
+        // tail of `null` has the null type, which no local can be
+        // declared with, and a body whose every contribution is null
+        // takes its type from what the function returns.
+        _tail_type(list: Statements.LIST) -> Semantic.Types.Type is
+            let block = cast IR.Values.BLOCK?(list.value)!
+            let return_type = current_function!.return_type
+
+            return
+                if block.type.is_null /\ return_type? then
+                    return_type
+                else
+                    block.type
+                fi
+        si
+
+        // Opens a `.try` whose `finally` disposes `variables`. The locals
+        // are declared outside it, so that `finally` can still reach them
+        // after an exception has left the region. Inside a state machine
+        // the region gets its own dispatch holder, so that awaits and
+        // yields within it register there and keep their resume branches
+        // in the same protected region.
+        _open_disposal_region(variables: Collections.List[Semantic.Symbols.Variable]) -> DISPOSAL_REGION is
+            let (outer_try, return_needed, return_value) = get_exception_handler_temps()
+
+            for v in variables do
+                _declare_local(v)
+            od
+
+            let label = _loops.enter_try(return_needed, return_value)
+            let extent = Values.TRY_EXTENT()
+
+            add(Values.TRY_START(extent))
+
+            return DISPOSAL_REGION(outer_try, return_value, label, extent, _maybe_push_dispatch_holder())
+        si
+
+        // Closes a region opened by _open_disposal_region, disposing its
+        // locals in reverse order of declaration and skipping any that
+        // are null. The finally body is state-guarded, so a suspend's
+        // `leave` does not dispose.
+        _close_disposal_region(
+            region: DISPOSAL_REGION,
+            variables: Collections.List[Semantic.Symbols.Variable],
+            location: Source.LOCATION
+        ) is
+            let brancher = get_brancher_for_block()
+            let try_label = region.label
+
+            _maybe_pop_dispatch_holder(region.dispatch_holder)
+
+            ensure_runtime_symbols_are_materialized()
+
+            try_label.is_in_finally = true
+
+            brancher.leave(try_label.start)
+
+            let handler = Values.PROTECTED_REGION(region.extent, null)
+
+            add(Values.TRY_END(region.extent))
+            add(Values.HANDLER_START(handler))
+
+            let skip_dispose_label = _open_finally_state_guard()
+
+            let i mut = variables.count - 1
+
+            while i >= 0 do
+                let v = variables[i]
+
+                let skip_label: LABEL? mut = null
+
+                if !v.type!.is_value_type then
+                    skip_label = LABEL()
+
+                    // v.load rather than load_local_variable: a top-level
+                    // `let use` promotes the variable to a field on the
+                    // globals container, whose owner is not the current
+                    // function, and load_local_variable would route it
+                    // through the captured-value path. Both loads carry
+                    // the variable's own location rather than the list's:
+                    // the list starts before the declaration, which a
+                    // top-level variable reads as use-before-declaration.
+                    brancher.branch(BRANCH.Z, v.load(v.location, null, _symbol_loader), skip_label)
+                fi
+
+                let variable_value = v.load(v.location, null, _symbol_loader)
+                let dispose_call = _dispose.call(location, variable_value, System.Array.empty`[Value](), null, _function_caller)
+
+                add(dispose_call)
+
+                if skip_label? then
+                    brancher.label(skip_label)
+                fi
+
+                i = i - 1
+            od
+
+            _close_finally_state_guard(skip_dispose_label)
+
+            brancher.label(try_label.middle)
+
+            add(Values.INSTRUCTION(ILOpCode.ENDFINALLY))
+            add(Values.HANDLER_END(handler))
+
+            _loops.leave_loop()
+
+            gen_exception_handler_exit(region.outer_try, try_label, region.return_value)
         si
 
         pre(pragma: Statements.PRAGMA) -> bool is
@@ -581,4 +604,14 @@ namespace Syntax.Process is
         si
 
     si
+
+    // A disposal region between _open_disposal_region and
+    // _close_disposal_region.
+    class DISPOSAL_REGION(
+        outer_try: LOOP_LABELS?,
+        return_value: TEMP?,
+        label: LOOP_LABELS,
+        extent: IR.Values.TRY_EXTENT,
+        dispatch_holder: ASYNC_DISPATCH_HOLDER?
+    )
 si

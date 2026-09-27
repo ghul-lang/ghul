@@ -408,6 +408,14 @@ namespace Syntax.Process is
         pre(expression_body: Bodies.EXPRESSION) -> bool is
             add(Values.MAX_STACK(64))
 
+            _expression_body_regions.add(
+                if let disposals = expression_body.let_in_disposals then
+                    _open_disposal_region(disposals)
+                else
+                    null
+                fi
+            )
+
             return super.pre(expression_body)
         si
 
@@ -423,6 +431,18 @@ namespace Syntax.Process is
 
                     return
                 fi
+            fi
+
+            let region = _expression_body_regions[_expression_body_regions.count - 1]
+
+            _expression_body_regions.remove_at(_expression_body_regions.count - 1)
+
+            if let disposals = expression_body.let_in_disposals, open = region then
+                _gen_disposing_expression_body(expression_body, disposals, open)
+
+                super.visit(expression_body)
+
+                return
             fi
 
             let body_value = expression_body.expression.value
@@ -453,6 +473,44 @@ namespace Syntax.Process is
             add(Values.RET())
 
             super.visit(expression_body)
+        si
+
+        // An expression body holding `let use ... in` locals: the value is
+        // left in a temporary inside the disposal region, since a region
+        // is left with `leave`, which empties the stack, and returned once
+        // the region is behind it.
+        _gen_disposing_expression_body(
+            expression_body: Bodies.EXPRESSION,
+            disposals: Collections.List[Semantic.Symbols.Variable],
+            region: DISPOSAL_REGION
+        ) is
+            let return_type = current_function!.return_type!
+            let result: TEMP? mut = null
+
+            if let value = expression_body.expression.value, value_type = value.type then
+                if return_type.is_void then
+                    add(value)
+
+                    if !value_type.is_void then
+                        add(Values.INSTRUCTION(ILOpCode.POP))
+                    fi
+                else
+                    let temp = TEMP(current_block, "body", return_type)
+
+                    temp.store(_boxer.box_if_needed(value, return_type))
+                    result = temp
+                fi
+            fi
+
+            _close_disposal_region(region, disposals, expression_body.location)
+
+            if let r = result then
+                add(r.load())
+            elif !return_type.is_void then
+                add(Values.DEFAULT_RETURN(return_type))
+            fi
+
+            add(Values.RET())
         si
 
         pre(property: Definitions.PROPERTY) -> bool is

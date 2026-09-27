@@ -1,0 +1,128 @@
+namespace Syntax.Process is
+    use IR.Values.Value
+
+    use Logging
+
+    // Reports a sequence that holds a resource being read in a way that
+    // can stop before it ends, with nothing holding it to dispose. A
+    // read to the end lets the sequence close itself, so only a read
+    // that can stop early is reported: an early-exit `Ghul.Pipes`
+    // function (first, find, any, take, ...), or a `for` loop whose body
+    // can leave it. The call producing the sequence has to be written
+    // directly as that read's source, or reached from it through other
+    // `Ghul.Pipes` stages; a result held by a `let use`, or anywhere
+    // else first, is not seen.
+    class UNDISPOSED_SOURCE_CHECK(
+        _logger: Logger,
+        _innate_symbol_lookup: Semantic.Lookups.InnateSymbolLookup
+    ) is
+        check_call(call: Trees.Expressions.CALL, value: Value?) is
+            if
+                let pipes_call: IR.Values.Call.GLOBAL = value /\
+                _innate_symbol_lookup.stops_early(pipes_call.function) /\
+                call.arguments.count > 0
+            then
+                _check_source(call.arguments.expressions[0])
+            fi
+        si
+
+        check_loop(source: Trees.Expressions.Expression, loop: Trees.Statements.Statement, body: Trees.Statements.LIST) is
+            let finder = LOOP_EXIT_FINDER(loop)
+
+            body.walk(finder)
+
+            if finder.found then
+                _check_source(source)
+            fi
+        si
+
+        // Follows `expression` down through the `Ghul.Pipes` stages built on
+        // it to the call at the bottom. The walk stops without reporting at
+        // a stage that reads all of its source, which lets the source close
+        // itself, and at an early-exit stage, which is reported where it is
+        // called.
+        _check_source(expression: Trees.Expressions.Expression) is
+            let source mut = expression
+
+            while
+                let
+                    call: Trees.Expressions.CALL = source /\ call.arguments.count > 0,
+                    stage: IR.Values.Call.GLOBAL = call.value /\ _innate_symbol_lookup.is_pipes_function(stage.function)
+            do
+                if
+                    _innate_symbol_lookup.stops_early(stage.function) \/
+                    _innate_symbol_lookup.reads_whole_source(stage.function)
+                then
+                    return
+                fi
+
+                source = call.arguments.expressions[0]
+            od
+
+            if
+                let value = source.value, function = _called_function(value) /\ _innate_symbol_lookup.holds_resource(function)
+            then
+                let location = source.location
+
+                _logger.warn(location, "undisposed-source", "{function.name} is not disposed if this read stops early")
+                _logger.hint(location, "undisposed-source", "hold its iterator under let use")
+            fi
+        si
+
+        _called_function(value: Value) -> Semantic.Symbols.Function? =>
+            if let call: IR.Values.Call.STATIC = value then
+                call.function
+            elif let call: IR.Values.Call.GLOBAL = value then
+                call.function
+            elif let call: IR.Values.Call.INSTANCE = value then
+                call.function
+            elif let call: IR.Values.Call.STRUCT = value then
+                call.function
+            else
+                null
+            fi
+    si
+
+    // Whether a loop body can leave the loop before its source ends: a
+    // `return`, or a `break` that targets this loop. A `break` inside a
+    // nested loop targets that loop unless it names this one, and a
+    // function literal's body is a body of its own.
+    class LOOP_EXIT_FINDER(_loop: Trees.Statements.Statement): Visitor is
+        found: bool public
+        _depth: int
+
+        pre(function: Trees.Expressions.FUNCTION) -> bool => true
+
+        pre(`for: Trees.Statements.FOR) -> bool is
+            _depth = _depth + 1
+            return false
+        si
+
+        visit(`for: Trees.Statements.FOR) is
+            _depth = _depth - 1
+        si
+
+        pre(`do: Trees.Statements.DO) -> bool is
+            _depth = _depth + 1
+            return false
+        si
+
+        visit(`do: Trees.Statements.DO) is
+            _depth = _depth - 1
+        si
+
+        visit(`break: Trees.Statements.BREAK) is
+            if let target = `break.resolved_target then
+                if target == _loop then
+                    found = true
+                fi
+            elif _depth == 0 then
+                found = true
+            fi
+        si
+
+        visit(`return: Trees.Statements.RETURN) is
+            found = true
+        si
+    si
+si

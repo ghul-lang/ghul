@@ -592,6 +592,13 @@ namespace Syntax.Process is
 
             let function = current_function
 
+            // A body an async state machine emits leaves its value in the
+            // machine's result rather than returning it, so it has no end
+            // to dispose at.
+            if !function? \/ !Semantic.Symbols.async_state_machine_for(function)? then
+                disposal_host = expression
+            fi
+
             if
                 !function? \/
                 !function.return_type?
@@ -659,6 +666,8 @@ namespace Syntax.Process is
 
         visit(expression: Trees.Bodies.EXPRESSION) is
             let function = current_function
+
+            disposal_host = null
 
             // A diverging body — `=> throw E`, or an `=> if/case` whose
             // every arm diverges — yields no value but is valid. Keep an
@@ -1124,12 +1133,22 @@ namespace Syntax.Process is
                     last.compile_expressions_state.void_tolerated = list.void_tolerated
                 fi
 
+                let enclosing_disposal_host = disposal_host
+                let block = innermost_val_block
+                let hosts_disposal = !block? \/ block.body != list
+
                 for s in list.statements do
                     self.enter_node(s)
+
+                    if hosts_disposal then
+                        disposal_host = s
+                    fi
+
                     try
                         s.walk(self)
                     finally
                         self.leave_node(s)
+                        disposal_host = enclosing_disposal_host
                     yrt
                 od
 

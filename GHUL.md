@@ -260,6 +260,24 @@ let first = 1, second: int = 0, third = "three";
 
 The name `_` is a discard placeholder: it stands in for a variable name, but the value that would be assigned to it is discarded. It is accepted in `let` definitions, tuple destructuring, lambda parameters, and `for` loop variables.
 
+`let use` declares a local whose value is disposed when the block it is declared in ends, on every path out of the block, an exception included. The value's type has to be `Ghul.Disposable`, and a local that is absent when the block ends is skipped. Locals are disposed in the reverse of the order they were declared:
+
+```ghul
+let use file = IO.File.open_read(path)
+let use reader = IO.StreamReader(file)
+
+return reader.read_line()
+```
+
+`let use ... in` is the expression form. The local is disposed once the statement holding the expression has run, or, in an expression-bodied function, once the body has been evaluated, so it fits where a block does not:
+
+```ghul
+first_line(path: string) -> string? =>
+    (let use lines = IO.File.read_lines(path).iterator in cursor(lines) |> first())
+```
+
+An asynchronous function's expression body that awaits has nowhere to dispose the local, and there the form is rejected.
+
 Variables are block-scoped — visible from their declaration to the end of the innermost enclosing block — and `let` can only be used inside function, method, or property bodies.
 
 A variable declared at namespace scope is a **global variable**. It is written as a plain name and type, without `let`, and cannot carry an initializer:
@@ -1683,7 +1701,7 @@ let m = (box.v = 7; box.v * 2);             // assignment statement, then the va
 
 A parenthesised group commits to the block reading at the first top-level `;` — or immediately, on a token that can only open a statement (`let`, `try`, `return`, ...) — and stays a tuple, a parenthesised expression, or a lambda's formal parameters otherwise. A compound statement (`if`, `case`, `for`, `while`, `do`) opening the group commits the block reading the same way when what follows cannot continue its expression: `(for x in xs do f(x) od 0)` is a block whose tail is `0`, no `;` needed. An operator-headed tail on the same line is the one exception: any operator can also continue the expression, so the group keeps the expression reading there and the compound statement is the operator's left operand (`(if c then 2 else 5 fi - 1)` is 1 when `c` is true). Only the same line does that — the compound statement ends the line it is written on, so an operator opening the next line begins a new statement like any other, and `(if c then 2 else 5 fi` / `-1)` is a block whose tail is `-1` with no `;` needed. So `(a = f(x), b = g(y))` constructs a named tuple while `(a = f(x); b = g(y); a + b)` runs two assignments and yields the sum; the `,`/`;` is the whole difference, and the elements themselves can be any expression in both. A statement whose expression form already exists keeps it: `(let x = 5 in x * 2)` is the `let ... in` expression, unchanged, while `(let x = 5; x * 2)` is a block with a `let` statement and a tail.
 
-A `let use` written directly in a block is rejected: the block has no disposal region to close it in. One written in a statement list nested inside the block - the body of an `if`, of a loop, of a `try` - has a region of its own and is unaffected.
+A `let use` written directly in a block is rejected: the block has no disposal region to close it in. One written in a statement list nested inside the block - the body of an `if`, of a loop, of a `try` - has a region of its own and is unaffected. The expression form, `let use ... in`, is accepted directly in a block: its local is disposed once the statement holding the block has run (see [variables](#variables)).
 
 A common use is loop-as-expression — fold an iterable into a value with the loop body updating a `mut` accumulator and the tail expression handing back the result:
 
@@ -1957,6 +1975,16 @@ for line in lines do
     fi
 od
 ```
+
+A pipe is built over the held iterator with `cursor`, which reads the iterator it is given rather than asking the source for a new one, so an early-exit terminal on it leaves the resource to `let use`:
+
+```ghul
+let use lines = IO.File.read_lines(path).iterator
+
+return cursor(lines) |> skip(wanted - 1) |> first()
+```
+
+The `undisposed-source` warning reports a read that can stop before the end of one of these sources with nothing holding it: an early-exit terminal or stage such as `first`, `find`, `any`, `all`, `only` or `take`, or a `for` loop whose body can `break` out of it or `return`. The call to the source has to be the read's source, or be reached from it through other pipe stages. A read to the end lets the source close itself and draws nothing, and so does a stage that reads all of its source before passing anything on, such as `sort` or `reverse`. A sequence held in a local variable, a field or anywhere else first is not followed.
 
 A pipe can also be started from nothing. `repeat(value)` yields `value` without end and `repeat(value, count)` yields it `count` times; `from(start)` counts upwards from `start` without end, and `from(start, step)` counts in steps of `step`. Collected, a bounded `repeat` is how a list of a given size is made:
 
