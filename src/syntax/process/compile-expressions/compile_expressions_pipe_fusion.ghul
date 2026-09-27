@@ -511,6 +511,18 @@ namespace Syntax.Process is
                         func_type.arguments[func_type.arguments.count - 1]
                     fi
 
+                // sum_by totals what the selector returns, so the running
+                // total is of the selector's type rather than the element's,
+                // and it is that type whose addition has to be the `add`
+                // instruction.
+                if consumer_kind =~ "sum_by" then
+                    if !_is_add_instruction_type(result_type) then
+                        return _decline_consumer(call, recognizer, consumer_kind, "sum-element-not-add-instruction")
+                    fi
+
+                    fused.seed_init = IR.Values.DEFAULT(result_type)
+                fi
+
                 let call_arguments = Collections.LIST[IR.Values.Value]()
                 call_arguments.add(final_element_load)
 
@@ -538,6 +550,17 @@ namespace Syntax.Process is
                 fused.consumer_arg_init = accumulator
                 fused.consumer_apply = IR.Values.Call.CLOSURE(
                     IR.Values.Load.TEMP(arg_il_name, func_type), running_type, false, func_type, call_arguments)
+            elif consumer_kind =~ "sum" then
+                // The running total starts at the element type's zero and
+                // the loop adds each element with one instruction. A type
+                // whose `+` is an operator method - decimal, bigint, an
+                // INumber implementor of its own - cannot be added that
+                // way, and keeps the runtime's sum.
+                if !_is_add_instruction_type(built.final_type) then
+                    return _decline_consumer(call, recognizer, consumer_kind, "sum-element-not-add-instruction")
+                fi
+
+                fused.seed_init = IR.Values.DEFAULT(built.final_type)
             fi
 
             // find / first return a MAYBE: seed with the empty MAYBE, and
@@ -766,8 +789,18 @@ namespace Syntax.Process is
         // Decline a consumer whose chain resolved but whose own shape did
         // not - an unresolved function argument, list constructor or
         // member - recording the site as declined for the study.
-        _decline_consumer(call: Trees.Expressions.CALL, recognizer: PIPE_FUSION_RECOGNIZER, consumer_kind: string) -> IR.Values.FUSED_CONSUMER? is
-            _chain_resolve_reason = "consumer-unresolved"
+        _decline_consumer(call: Trees.Expressions.CALL, recognizer: PIPE_FUSION_RECOGNIZER, consumer_kind: string) -> IR.Values.FUSED_CONSUMER? =>
+            _decline_consumer(call, recognizer, consumer_kind, "consumer-unresolved")
+
+        // `reason` is what the study records, so a decline the fuser could
+        // one day lift is told apart from one it cannot.
+        _decline_consumer(
+            call: Trees.Expressions.CALL,
+            recognizer: PIPE_FUSION_RECOGNIZER,
+            consumer_kind: string,
+            reason: string
+        ) -> IR.Values.FUSED_CONSUMER? is
+            _chain_resolve_reason = reason
 
             _note_fusion_site(call.location, _pipes_function_name(call) ?? consumer_kind, true, recognizer, false)
 
@@ -1155,6 +1188,41 @@ namespace Syntax.Process is
 
             stage.param_local = cast Semantic.Symbols.Variable(local)
             stage.inline_body = block
+        si
+
+        // Whether `type`'s addition is the `add` instruction, which is what
+        // a fused sum emits. It is, for every integer width and both float
+        // widths: the compiler emits a bare `add` for each of them, narrow
+        // ones included. `decimal` and `bigint` are not here because their
+        // addition is a call to the type's own operator, and neither is a
+        // type parameter, whose instantiation is not known here.
+        _is_add_instruction_type(type: Type?) -> bool is
+            if !type? then
+                return false
+            fi
+
+            for addable in
+                [
+                    _innate_symbol_lookup.get_byte_type(),
+                    _innate_symbol_lookup.get_ubyte_type(),
+                    _innate_symbol_lookup.get_short_type(),
+                    _innate_symbol_lookup.get_ushort_type(),
+                    _innate_symbol_lookup.get_int_type(),
+                    _innate_symbol_lookup.get_uint_type(),
+                    _innate_symbol_lookup.get_long_type(),
+                    _innate_symbol_lookup.get_ulong_type(),
+                    _innate_symbol_lookup.get_word_type(),
+                    _innate_symbol_lookup.get_uword_type(),
+                    _innate_symbol_lookup.get_single_type(),
+                    _innate_symbol_lookup.get_double_type()
+                ]
+            do
+                if type.matches(addable) then
+                    return true
+                fi
+            od
+
+            return false
         si
 
         // Drop what the literals in a stage body captured, so the walk that
