@@ -64,12 +64,22 @@ namespace Syntax.Process is
             // types on the for-each dispatch, locals init for the
             // iterator current, etc.) reach `!N` — MoveNext has no
             // type parameters of its own — rather than `!!N`.
+            // The destructured formal arguments are unpacked into their
+            // leaf frame fields before the body reads them: the plain
+            // path's AST walk does this from visit(Variables.VARIABLE),
+            // and this path drives its own walk and never reaches those
+            // nodes.
             _gen_generator_move_next(
                 function,
-                function.body,
                 state_machine,
                 frame,
-                () => _gen_destructured_formal_prologue(function)
+                () is
+                    _gen_destructured_formal_prologue(function)
+
+                    if function.body? then
+                        function.body.walk(self)
+                    fi
+                si
             )
 
             // Skip the framework's default body walk + the framework's
@@ -82,13 +92,12 @@ namespace Syntax.Process is
         // A generator's MoveNext: the body of a generator function or a
         // generator literal, walked into a block of its own and queued
         // with its state machine for emission once the enclosing class
-        // has closed. `prologue` unpacks any destructured parameters.
+        // has closed. `emit_body` emits the body into MoveNext's block.
         _gen_generator_move_next(
             scope: Trees.ScopeCarrier,
-            body: Trees.Bodies.Body?,
             state_machine: Semantic.Symbols.STATE_MACHINE,
             frame: Semantic.Symbols.STATE_MACHINE_FRAME,
-            prologue: () -> void
+            emit_body: () -> void
         ) is
             state_machine.install_body_emission_overrides()
 
@@ -135,19 +144,9 @@ namespace Syntax.Process is
             add(_build_frame_rewind(frame))
             brancher.label(not_done)
 
-            // Unpack any destructured formal arguments into their leaf
-            // frame fields before the body reads them. The plain path's
-            // AST walk does this from visit(Variables.VARIABLE); this
-            // path drives its own walk and never reaches those nodes.
-            prologue()
-
-            // Walk the body. Visitors fire pre/visit on every
-            // node; visit(YIELD) is the interesting one — it
-            // appends state-machine IL into current_block
-            // (which IS move_next_block).
-            if body? then
-                body.walk(self)
-            fi
+            // The body, emitted into current_block, which is MoveNext's
+            // block: each yield appends its suspend here.
+            emit_body()
 
             // Fell-off-end trailer: mark done, return false. The next
             // MoveNext rewinds the frame and starts the body over, as any
@@ -205,10 +204,12 @@ namespace Syntax.Process is
 
             _gen_generator_move_next(
                 function,
-                function.body,
                 state_machine,
                 frame,
-                () => _gen_closure_destructure_prologue(function, closure)
+                () is
+                    _gen_closure_destructure_prologue(function, closure)
+                    function.body.walk(self)
+                si
             )
 
             _emit_generator_outer_method_srm(closure, frame, state_machine)

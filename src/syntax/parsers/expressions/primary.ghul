@@ -139,17 +139,22 @@ namespace Syntax.Parsers.Expressions is
             return null
         si
 
-        // `[element for p in source if condition ...]`, entered with the
-        // element parsed and `for` current. Clauses need no separator:
-        // each starts with its own keyword, and a source or condition
-        // ends at the next one or at the closing bracket.
-        _parse_comprehension(context: CONTEXT, start: LOCATION, element: Trees.Expressions.Expression) -> Trees.Expressions.Expression is
+        // `[element for p in source if condition ...]`, or the same in
+        // braces for a lazy comprehension, entered with the element parsed
+        // and `for` current. Clauses need no separator: each starts with
+        // its own keyword, and a source or condition ends at the next one
+        // or at the closing bracket or brace.
+        _parse_comprehension(context: CONTEXT, start: LOCATION, element: Trees.Expressions.Expression, is_lazy: bool) -> Trees.Expressions.Expression is
+            let closer = if is_lazy then Lexical.TOKEN.BRACE_CLOSE else Lexical.TOKEN.SQUARE_CLOSE fi
+            let closer_text = if is_lazy then "'}}'" else "']'" fi
+            let what = if is_lazy then "comprehension" else "list comprehension" fi
+
             let use open =
                 context.open_construct(
                     Collections.LIST[Lexical.TOKEN]([
                         Lexical.TOKEN.FOR,
                         Lexical.TOKEN.IF,
-                        Lexical.TOKEN.SQUARE_CLOSE
+                        closer
                     ])
                 )
 
@@ -174,7 +179,7 @@ namespace Syntax.Parsers.Expressions is
                         break
                     fi
 
-                    if !context.next_token(Lexical.TOKEN.IN, "in list comprehension") then
+                    if !context.next_token(Lexical.TOKEN.IN, "in {what}") then
                         should_poison = true
                         clause_failed = true
                         break
@@ -210,15 +215,15 @@ namespace Syntax.Parsers.Expressions is
             // If the bracket never comes, the skip stops at whatever an
             // enclosing construct is waiting for, or at the next line
             // written level with the one the comprehension started on.
-            if context.current.token != Lexical.TOKEN.SQUARE_CLOSE then
+            if context.current.token != closer then
                 if !clause_failed then
-                    context.error(context.location, "expected for, if or ']' in list comprehension")
+                    context.error(context.location, "expected for, if or {closer_text} in {what}")
                     should_poison = true
                 fi
 
                 while
                     !context.is_end_of_file /\
-                    context.current.token != Lexical.TOKEN.SQUARE_CLOSE /\
+                    context.current.token != closer /\
                     !context.is_awaited_ender(context.current.token) /\
                     !context.is_level_with_open_construct
                 do
@@ -228,12 +233,14 @@ namespace Syntax.Parsers.Expressions is
                 end = context.location
             fi
 
-            if context.current.token == Lexical.TOKEN.SQUARE_CLOSE then
+            if context.current.token == closer then
                 context.next_token()
             fi
 
+            // Only the array form takes a written type: a lazy one is a
+            // pipe of its element type.
             let type_expression: Trees.TypeExpressions.TypeExpression =
-                if context.current.token == Lexical.TOKEN.COLON then
+                if !is_lazy /\ context.current.token == Lexical.TOKEN.COLON then
                     context.next_token()
                     let parsed = type_parser.parse(context)!
                     end = parsed.location
@@ -267,7 +274,8 @@ namespace Syntax.Parsers.Expressions is
                     start::end,
                     element,
                     first_for,
-                    type_expression
+                    type_expression,
+                    is_lazy
                 )
 
             result.poison(should_poison)
@@ -390,7 +398,7 @@ namespace Syntax.Parsers.Expressions is
                         fi
 
                     if first? /\ context.current.token == Lexical.TOKEN.FOR then
-                        return _parse_comprehension(context, start, first)
+                        return _parse_comprehension(context, start, first, false)
                     fi
 
                     let elements =
@@ -415,6 +423,25 @@ namespace Syntax.Parsers.Expressions is
                     return Trees.Expressions.SEQUENCE(start::end, elements, type_expression)
                 si,
                 Lexical.TOKEN.SQUARE_OPEN
+            )
+
+            // `{element for p in source ...}`: a lazy comprehension. Braces
+            // mean nothing else in an expression, so what follows the
+            // element has to be a `for` clause.
+            add_parser(
+                (context) is
+                    let start = context.location
+                    context.next_token()
+
+                    let element = expression_parser.parse(context)!
+
+                    if context.current.token != Lexical.TOKEN.FOR then
+                        context.error(context.location, "expected for in comprehension")
+                    fi
+
+                    return _parse_comprehension(context, start, element, true)
+                si,
+                Lexical.TOKEN.BRACE_OPEN
             )
 
             add_parser(

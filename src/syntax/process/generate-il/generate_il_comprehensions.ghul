@@ -15,6 +15,12 @@ namespace Syntax.Process is
         pre(comprehension: Expressions.COMPREHENSION) -> bool is
             super.pre(comprehension)
 
+            if comprehension.is_lazy then
+                _emit_lazy_comprehension(comprehension)
+
+                return true
+            fi
+
             if
                 !comprehension.value? \/
                 !isa Values.BLOCK(comprehension.value) \/
@@ -65,7 +71,7 @@ namespace Syntax.Process is
 
                     _gen_comprehension_for(comprehension, comprehension.first, fill, brancher, Values.Load.TEMP(source_name, source_type))
 
-                    spiller.emit_value(fill.result.load())
+                    spiller.emit_value(fill.result!.load())
                 else
                     let fill =
                         COMPREHENSION_FILL(
@@ -81,7 +87,7 @@ namespace Syntax.Process is
                     spiller.emit_value(
                         comprehension.list_to_array!.call(
                             comprehension.location,
-                            fill.result.load(),
+                            fill.result!.load(),
                             Collections.LIST[Value](0),
                             null,
                             _function_caller
@@ -96,6 +102,53 @@ namespace Syntax.Process is
         si
 
         visit(comprehension: Expressions.COMPREHENSION) is
+            super.visit(comprehension)
+        si
+
+        // A lazy comprehension: the generator literal it owns is emitted as
+        // any generator literal is, with the clause loops as its MoveNext
+        // body and each element yielded rather than stored. The value
+        // compile-expressions left, a call to the literal, is emitted where
+        // the comprehension is used.
+        _emit_lazy_comprehension(comprehension: Expressions.COMPREHENSION) is
+            let generator = cast Semantic.Symbols.Closure?(comprehension.scope)
+
+            if !generator? \/ isa Values.DUMMY(comprehension.value) then
+                return
+            fi
+
+            let state_machine = Semantic.Symbols.state_machine_for(generator)
+
+            if !state_machine? then
+                return
+            fi
+
+            generator.map_type_arguments()
+
+            if let frame = state_machine.frame then
+                frame.declare()
+
+                let enclosing_loops = _loops
+
+                _loops = LOOP_LABEL_STACK()
+
+                _gen_generator_move_next(
+                    comprehension,
+                    state_machine,
+                    frame,
+                    () is
+                        let brancher = get_brancher_for_block()
+
+                        _gen_comprehension_clause(comprehension, comprehension.first, COMPREHENSION_FILL(state_machine), brancher)
+                    si
+                )
+
+                _loops = enclosing_loops
+
+                _emit_generator_outer_method_srm(generator, frame, state_machine)
+            fi
+
+            generator.unmap_type_arguments()
         si
 
         _gen_comprehension_clause(
@@ -120,8 +173,10 @@ namespace Syntax.Process is
             // block's captured IL - before its value is emitted.
             element.walk(self)
 
-            if let index = fill.index then
-                add(Values.STORE_ARRAY_ELEMENT(fill.result.load(), index.load(), element.value!, comprehension.element_type!))
+            if let state_machine = fill.state_machine then
+                _gen_yield_value(state_machine, element.value)
+            elif let index = fill.index then
+                add(Values.STORE_ARRAY_ELEMENT(fill.result!.load(), index.load(), element.value!, comprehension.element_type!))
 
                 index.store(
                     Values.INT_ARITHMETIC(
@@ -140,7 +195,7 @@ namespace Syntax.Process is
                 add(
                     comprehension.list_add!.call(
                         element.location,
-                        fill.result.load(),
+                        fill.result!.load(),
                         arguments,
                         null,
                         _function_caller
@@ -180,18 +235,33 @@ namespace Syntax.Process is
 
                 clause.variable.walk(self)
 
-                let temp = TEMP(current_block, "comprehension_iterator", iterator)
+                // Inside a state machine the iterator is kept in the frame
+                // field compile-expressions allocated for it, as a `for`
+                // loop's is, so it survives each suspend between elements.
+                let iterator_field = clause.iterator_field
+                let iterator_frame = _current_state_machine_frame()
+
+                let load_iterator: () -> Value =
+                    if let stored = iterator_field, frame = iterator_frame then
+                        add(_build_frame_field_store(frame, stored, iterator))
+
+                        () => cast Value(IR.Values.Load.INSTANCE_FIELD(IR.Values.Load.REFERENCE_SELF(frame, frame.type), stored))
+                    else
+                        let temp = TEMP(current_block, "comprehension_iterator", iterator)
+
+                        () => cast Value(temp.load())
+                    fi
 
                 let start = LABEL()
                 let end = LABEL()
 
                 brancher.label(start)
 
-                let has_next = clause.move_next!.call(source.location, temp.load(), Collections.LIST[Value](0), null, _function_caller)
+                let has_next = clause.move_next!.call(source.location, load_iterator(), Collections.LIST[Value](0), null, _function_caller)
 
                 brancher.branch(BRANCH.Z, has_next, end)
 
-                let current = clause.read_current!.call(source.location, temp.load(), Collections.LIST[Value](0), null, _function_caller)
+                let current = clause.read_current!.call(source.location, load_iterator(), Collections.LIST[Value](0), null, _function_caller)
 
                 gen_destructuring_initialize(clause.variable.left, current)
 
@@ -225,9 +295,11 @@ namespace Syntax.Process is
     si
 
     // Where a comprehension's elements go: straight into an array at a
-    // running index when its length is known up front, or into a list.
+    // running index when its length is known up front, into a list, or,
+    // for a lazy comprehension, out of its generator one yield at a time.
     class COMPREHENSION_FILL is
-        result: TEMP
+        result: TEMP?
+        state_machine: Semantic.Symbols.STATE_MACHINE?
         index: TEMP?
         int_type: Semantic.Types.Type?
 
@@ -239,6 +311,10 @@ namespace Syntax.Process is
             self.result = result
             self.index = index
             self.int_type = int_type
+        si
+
+        init(state_machine: Semantic.Symbols.STATE_MACHINE) is
+            self.state_machine = state_machine
         si
     si
 si

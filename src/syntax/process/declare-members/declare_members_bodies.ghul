@@ -477,6 +477,42 @@ namespace Syntax.Process is
             leave_scope(let_in)
         si
 
+        // A lazy comprehension owns a generator literal taking no
+        // arguments: its clauses and element are that literal's body, so
+        // the variables it reads from outside are captured as any literal's
+        // are.
+        pre(comprehension: Expressions.COMPREHENSION) -> bool is
+            if !comprehension.is_lazy then
+                return false
+            fi
+
+            let generator = self.current_function!.declare_generator_closure(
+                comprehension.location,
+                next_anon_name(),
+                cast Semantic.Scope?(current_closure_context)!,
+                current_scope,
+                false,
+                _symbol_definition_listener
+            )
+
+            generator.mark_synthesized()
+
+            associate_and_enter_scope(comprehension, generator)
+
+            if let function: Semantic.Symbols.Function = generator then
+                function.start_declaring_arguments()
+                function.end_declaring_arguments()
+            fi
+
+            return false
+        si
+
+        visit(comprehension: Expressions.COMPREHENSION) is
+            if comprehension.is_lazy then
+                leave_scope(comprehension)
+            fi
+        si
+
         // A comprehension's for clause scopes its pattern over the clauses
         // after it and the element. It declares no loop label: nothing can
         // break out of a comprehension.

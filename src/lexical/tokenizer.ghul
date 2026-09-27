@@ -94,6 +94,12 @@ namespace Lexical is
         _cursor: LOCATION_CURSOR
 
         _interpolation_depth: int
+
+        // How many braces are open in the code at each level of string
+        // interpolation, outermost first, so a `}` closes a brace the code
+        // opened before it ends an interpolation. Always one entry more
+        // than the interpolation depth.
+        _open_braces: Collections.LIST[int]
         _expect_format_string: bool
 
         _trivia: Collections.LIST[TRIVIA]
@@ -289,6 +295,7 @@ namespace Lexical is
             _logger = logger
 
             _end_of_file = false
+            _open_braces = Collections.LIST[int]([0])
             end_of_input_error_locations = Collections.LIST[LOCATION]()
             _input = i
 
@@ -806,8 +813,11 @@ namespace Lexical is
             when '"' then
                 return string_enter()
 
+            when '{' then
+                return _open_brace()
+
             when '}' then
-                return interpolation_exit('}')
+                return _close_brace_or_exit_interpolation()
 
             else
                 return TOKEN_PAIR(TOKEN.UNKNOWN, location, "{c}")
@@ -1048,11 +1058,11 @@ namespace Lexical is
             if c == '"' then
                 return TOKEN_PAIR(TOKEN.STRING_LITERAL, loc, fragment)
             elif c == '\n' \/ _end_of_file then
-                _interpolation_depth = 0
+                _reset_interpolation()
 
                 return TOKEN_PAIR(TOKEN.CANCEL_STRING, loc, fragment)
             elif c == '{' then
-                _interpolation_depth = _interpolation_depth + 1
+                _enter_interpolation()
 
                 return TOKEN_PAIR(TOKEN.ENTER_STRING, loc, fragment)
             else
@@ -1063,7 +1073,41 @@ namespace Lexical is
         si
 
         interpolation_clear() is
+            _reset_interpolation()
+        si
+
+        _enter_interpolation() is
+            _interpolation_depth = _interpolation_depth + 1
+            _open_braces.add(0)
+        si
+
+        _leave_interpolation() is
+            _interpolation_depth = _interpolation_depth - 1
+            _open_braces.remove_at(_open_braces.count - 1)
+        si
+
+        _reset_interpolation() is
             _interpolation_depth = 0
+            _open_braces.clear()
+            _open_braces.add(0)
+        si
+
+        _open_brace() -> TOKEN_PAIR is
+            _open_braces[_open_braces.count - 1] = _open_braces[_open_braces.count - 1] + 1
+
+            return TOKEN_PAIR(TOKEN.BRACE_OPEN, location, "")
+        si
+
+        _close_brace_or_exit_interpolation() -> TOKEN_PAIR is
+            let open = _open_braces[_open_braces.count - 1]
+
+            if open > 0 then
+                _open_braces[_open_braces.count - 1] = open - 1
+
+                return TOKEN_PAIR(TOKEN.BRACE_CLOSE, location, "")
+            fi
+
+            return interpolation_exit('}')
         si
 
         interpolation_exit(c: char mut) -> TOKEN_PAIR is
@@ -1084,11 +1128,11 @@ namespace Lexical is
 
             // Closing quote first, for the same reason as in string_enter.
             if c == '"' then
-                _interpolation_depth = _interpolation_depth - 1
+                _leave_interpolation()
 
                 return TOKEN_PAIR(TOKEN.EXIT_STRING, loc, fragment)
             elif c == '\n' \/ _end_of_file then
-                _interpolation_depth = 0
+                _reset_interpolation()
                 return TOKEN_PAIR(TOKEN.CANCEL_STRING, loc, fragment)
             elif c == '{' then
                 return TOKEN_PAIR(TOKEN.CONTINUE_STRING, loc, fragment)
