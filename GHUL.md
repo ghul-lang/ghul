@@ -407,6 +407,15 @@ let p = primes[2];                      // indexing, 0-based
 
 The empty array literal `[]` is accepted wherever the element type comes from context — an explicitly-typed `let`, a `return`, a call argument's parameter type, a sibling element of an enclosing array literal, or the other arms of an `if` or `case` expression it is an arm of. An untyped immutable local initialized with `[]` takes its element type from its later uses in the same body, such as being passed where an array is expected or placed in an array literal that is; when nothing uses it that way, its element type is `object`.
 
+A sequence of `E`, anything a `for` loop can walk, is written `E{}`: it is `Collections.Iterable[E]`, the .NET `IEnumerable<E>`, spelled the way `E[]` spells an array. The two spellings are the same type, so either is accepted wherever the other is, and diagnostics, hover and inlays show `E{}`. The braces follow the element type in every position a type can appear, and combine with the other suffixes: `int{}?` is an optional sequence, `int[]{}` a sequence of arrays and `int{}{}` a sequence of sequences. A tuple or function type is parenthesised first, as it is for `[]`:
+
+```ghul
+total(values: int{}) -> int => values |> sum()
+
+let words: string{} = ["alpha", "beta"]
+let pairs: (int, string){} = [(1, "one")]
+```
+
 Indexing with a **range** takes a slice of the source rather than a single element. `..` and `::` count both endpoints from the start, as they do everywhere else; `..<` and `::<` count the end back from the end of the source, and `..<<` and `::<<` count both endpoints back. The number of `<` says how many endpoints are counted back, filling from the right. `<0` is the length, so `a..<0` runs from `a` to the end:
 
 ```ghul
@@ -1889,7 +1898,7 @@ A generator's return type has to be `Pipe[T]` — `yield` in a function declared
 
 See <https://ghul.dev/functional-programming.html>.
 
-`Collections.List[T]` is the read-only list trait (the .NET `IReadOnlyList<T>`); `Collections.LIST[T]` is the mutable list. `MAP`/`Map` pair the same way for dictionaries, and `SET` is the mutable hash set, with `Set` (the .NET `IReadOnlySet<T>`) as its read-only trait and `MutableSet` (`ISet<T>`) as its mutable one. `MutableList`, `MutableMap`, `Bag`, `MutableBag` and `STACK` round out the mapping. There is no map literal syntax. A map with fixed contents is written as a list literal of key and value pairs, collected with `collect_map()`, which throws if a key is given twice:
+`Collections.Iterable[T]`, written `T{}`, is any sequence (the .NET `IEnumerable<T>`). `Collections.List[T]` is the read-only list trait (the .NET `IReadOnlyList<T>`); `Collections.LIST[T]` is the mutable list. `MAP`/`Map` pair the same way for dictionaries, and `SET` is the mutable hash set, with `Set` (the .NET `IReadOnlySet<T>`) as its read-only trait and `MutableSet` (`ISet<T>`) as its mutable one. `MutableList`, `MutableMap`, `Bag`, `MutableBag` and `STACK` round out the mapping. There is no map literal syntax. A map with fixed contents is written as a list literal of key and value pairs, collected with `collect_map()`, which throws if a key is given twice:
 
 ```ghul
 let scores = [("alice", 1), ("bob", 2)] |> collect_map();

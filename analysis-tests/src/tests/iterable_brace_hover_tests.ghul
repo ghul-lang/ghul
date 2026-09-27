@@ -1,0 +1,81 @@
+namespace Analysis.Tests is
+    use Collections.LIST
+
+    use IO.File
+
+    use Analysis.Protocol.ANALYSER_PROCESS
+    use Analysis.Protocol.Response
+
+    use TestClass = Microsoft.VisualStudio.TestTools.UnitTesting.TestClassAttribute
+    use Test = Microsoft.VisualStudio.TestTools.UnitTesting.TestMethodAttribute
+    use Assertions
+
+    // `T{}` is how an iterable is written and how hover shows one, whether
+    // the source wrote the braces or `Iterable[T]`.
+    @TestClass()
+    class ITERABLE_BRACE_HOVER_TESTS is
+        init() is si
+
+        prime(analyser: ANALYSER_PROCESS) is
+            let path = fixture_path("iterable-brace-hover/iterable-brace-hover.ghul")
+
+            assert File.exists(path) else "fixture missing: {path}"
+
+            analyser.send_edit("iterable-brace-hover.ghul", File.read_all_text(path))
+
+            let diagnostics = analyser.read_response()
+            assert isa Response.DIAGNOSTICS(diagnostics) else "expected DIAGNOSTICS response"
+
+            let user_diagnostics = LIST(user_diagnostics_of(diagnostics))
+
+            are_equal(0, user_diagnostics.count, diagnostics_summary("EDIT had unexpected diagnostics", user_diagnostics))
+        si
+
+        hover(analyser: ANALYSER_PROCESS, line: int, column: int) -> string is
+            analyser.send_hover("iterable-brace-hover.ghul", line, column)
+
+            let response = analyser.read_query_response()
+            assert isa Response.HOVER(response) else "expected HOVER response"
+
+            return response.signature ?? ""
+        si
+
+        assert_contains(actual: string, expected: string, analyser: ANALYSER_PROCESS) is
+            is_true(
+                actual.contains(expected),
+                "expected HOVER to contain '{expected}', got '{actual}'.\n--- analyser stderr ---\n{analyser.stderr_capture}")
+        si
+
+        @Test()
+        hover_on_a_braced_parameter__shows_the_braces() is
+            let use analyser = ANALYSER_PROCESS()
+            prime(analyser)
+
+            assert_contains(hover(analyser, 4, 5), "words: string{{}}", analyser)
+        si
+
+        @Test()
+        hover_on_a_written_out_iterable__shows_the_braces() is
+            let use analyser = ANALYSER_PROCESS()
+            prime(analyser)
+
+            assert_contains(hover(analyser, 5, 5), "words: string{{}}", analyser)
+        si
+
+        @Test()
+        hover_on_a_local_typed_from_a_braced_parameter__shows_the_braces() is
+            let use analyser = ANALYSER_PROCESS()
+            prime(analyser)
+
+            assert_contains(hover(analyser, 8, 13), "string{{}}", analyser)
+        si
+
+        @Test()
+        hover_on_a_nested_iterable__shows_both_braces() is
+            let use analyser = ANALYSER_PROCESS()
+            prime(analyser)
+
+            assert_contains(hover(analyser, 9, 13), "int{{}}{{}}", analyser)
+        si
+    si
+si
