@@ -16,7 +16,7 @@ namespace Syntax.Process.UnitTests is
     use Semantic.Types.GENERIC
 
     use Syntax.Process.PIPE_FUSION_RECOGNIZER
-    use Syntax.Process.NESTED_PARAMETER_CAPTURE_SCANNER
+    use Syntax.Process.NESTED_LITERAL_COLLECTOR
     use Syntax.Trees.Expressions.IDENTIFIER
 
     use Syntax.Trees.Expressions.Expression
@@ -202,74 +202,22 @@ namespace Syntax.Process.UnitTests is
 
         named_type() -> NAMED => NAMED(loc(), Identifier(loc(), "T"))
 
-        // A nested literal that reads the stage's own parameter cannot be
-        // inlined yet: it captures the parameter, and the capture chain
-        // walks out through the literal being inlined, which has no frame.
+        // Every literal in the body, at any depth, so each one's captures
+        // can be dropped before the body is walked inline.
         @Test()
-        Calling__captures_parameter__with_a_nested_literal_reading_the_parameter__returns_true() is
-            let inner_body = EXPRESSION(loc(), IDENTIFIER(loc(), Identifier(loc(), "n")))
-            let lambda = FUNCTION(loc(), ExpressionList(loc(), Collections.LIST[Expression]()), INFER(loc()), inner_body, false)
-            let outer_body = EXPRESSION(loc(), lambda)
+        Calling__collect__with_a_literal_nested_two_deep__returns_both() is
+            let innermost = FUNCTION(loc(), ExpressionList(loc(), Collections.LIST[Expression]()), INFER(loc()), EXPRESSION(loc(), IDENTIFIER(loc(), Identifier(loc(), "k"))), false)
+            let outer = FUNCTION(loc(), ExpressionList(loc(), Collections.LIST[Expression]()), INFER(loc()), EXPRESSION(loc(), innermost), false)
 
-            is_true(NESTED_PARAMETER_CAPTURE_SCANNER("n").captures_parameter(outer_body))
+            are_equal(2, NESTED_LITERAL_COLLECTOR().collect(EXPRESSION(loc(), outer)).count)
         si
 
-        // A nested literal reading only the method's own locals captures
-        // nothing of the stage's, so the stage still inlines.
+        // A body with no literal in it has nothing to reset.
         @Test()
-        Calling__captures_parameter__with_a_nested_literal_reading_another_name__returns_false() is
-            let inner_body = EXPRESSION(loc(), IDENTIFIER(loc(), Identifier(loc(), "other")))
-            let lambda = FUNCTION(loc(), ExpressionList(loc(), Collections.LIST[Expression]()), INFER(loc()), inner_body, false)
-            let outer_body = EXPRESSION(loc(), lambda)
-
-            is_false(NESTED_PARAMETER_CAPTURE_SCANNER("n").captures_parameter(outer_body))
-        si
-
-        // The parameter read directly in the stage body, with no nested
-        // literal, is the ordinary inlined case and must not decline.
-        @Test()
-        Calling__captures_parameter__with_the_parameter_read_outside_any_literal__returns_false() is
+        Calling__collect__with_no_literal_in_the_body__returns_nothing() is
             let body = EXPRESSION(loc(), IDENTIFIER(loc(), Identifier(loc(), "n")))
 
-            is_false(NESTED_PARAMETER_CAPTURE_SCANNER("n").captures_parameter(body))
-        si
-
-        // A read of the parameter after an inner literal has closed is
-        // still a read from inside the outer one, so the walk has to
-        // count how deep it is rather than remember only that it entered
-        // a literal at some point.
-        @Test()
-        Calling__captures_parameter__with_the_parameter_read_after_a_deeper_literal_closes__returns_true() is
-            let innermost = FUNCTION(loc(), ExpressionList(loc(), Collections.LIST[Expression]()), INFER(loc()), EXPRESSION(loc(), IDENTIFIER(loc(), Identifier(loc(), "k"))), false)
-
-            let outer_parts = Collections.LIST[Expression]()
-
-            outer_parts.add(innermost)
-            outer_parts.add(IDENTIFIER(loc(), Identifier(loc(), "n")))
-
-            let outer = FUNCTION(loc(), ExpressionList(loc(), Collections.LIST[Expression]()), INFER(loc()), EXPRESSION(loc(), ExpressionList(loc(), outer_parts)), false)
-
-            is_true(NESTED_PARAMETER_CAPTURE_SCANNER("n").captures_parameter(EXPRESSION(loc(), outer)))
-        si
-
-        // A named function written among a block's statements is a literal
-        // the statement carries, so the walk reaches it as it reaches any
-        // other literal and a read of the parameter inside one counts.
-        @Test()
-        Calling__captures_parameter__with_a_nested_named_function_reading_the_parameter__returns_true() is
-            let inner = FUNCTION(loc(), ExpressionList(loc(), Collections.LIST[Expression]()), INFER(loc()), EXPRESSION(loc(), IDENTIFIER(loc(), Identifier(loc(), "n"))), false)
-
-            let named = Syntax.Trees.Statements.FUNCTION(loc(), Identifier(loc(), "f"), inner)
-
-            let statements = Collections.LIST[Syntax.Trees.Statements.Statement]()
-
-            statements.add(named)
-
-            let block = Syntax.Trees.Bodies.BLOCK(loc(), Syntax.Trees.Statements.LIST(loc(), statements))
-
-            let outer = FUNCTION(loc(), ExpressionList(loc(), Collections.LIST[Expression]()), INFER(loc()), block, false)
-
-            is_true(NESTED_PARAMETER_CAPTURE_SCANNER("n").captures_parameter(EXPRESSION(loc(), outer)))
+            are_equal(0, NESTED_LITERAL_COLLECTOR().collect(body).count)
         si
     si
 si

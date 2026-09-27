@@ -960,10 +960,11 @@ namespace Syntax.Process is
         // method (not the closure), the parameter and any captured outer
         // locals resolve as ordinary local loads. The re-walk's
         // diagnostics and symbol-use records are discarded (the first,
-        // normal walk already recorded them); the harvested IR is kept.
-        // A second, restoring walk of the whole lambda puts the
-        // closure-context IR back on the shared AST nodes so the (now
-        // unused) closure method body still emits valid IL.
+        // normal walk already recorded them). The body's nodes keep the
+        // loop-context IR, and generate-il walks the body where the loop
+        // wants it, so the closure's own method is never emitted. Only a
+        // decline after that walk restores the nodes, by walking the whole
+        // lambda again.
         _try_inline_stage(stage: PIPE_FUSION_STAGE) is
             // A body whose statements become a state machine keeps its
             // loops as pipe objects, so the stage's delegate is still
@@ -1040,43 +1041,55 @@ namespace Syntax.Process is
                 return
             fi
 
-            if NESTED_PARAMETER_CAPTURE_SCANNER(param_name).captures_parameter(body) then
-                return
-            fi
-
             // The parameter local the fused loop stores each element into.
             // It is declared in a scope of its own so its name cannot
             // collide with anything the method already has - nothing ever
             // looks it up by name, since the loader translates the
             // literal's parameter symbol to it directly.
-            let scope = Semantic.BLOCK_SCOPE(_symbol_table.current_scope)
+            //
+            // The body is walked again on every body retry, and the local
+            // has to be the same one each time. A nested literal captures
+            // it, and a capture is keyed on the symbol, so a second local
+            // would leave that capture naming a slot the retained walk
+            // never declares.
+            let local: Semantic.Symbols.Symbol mut
 
-            // The local-id generator is only in a function frame during
-            // the declare pass; push one so the LOCAL_VARIABLE ctor can
-            // mint an id, then give the local a globally-unique IL slot
-            // name so it can't collide with an enclosing local.
-            let local_id_generator = IoC.CONTAINER.instance.local_id_generator
+            if let inlined = closure.inlined_into then
+                local = inlined.local
+            else
+                let scope = Semantic.BLOCK_SCOPE(_symbol_table.current_scope)
 
-            local_id_generator.enter_function()
+                // The local-id generator is only in a function frame during
+                // the declare pass; push one so the LOCAL_VARIABLE ctor can
+                // mint an id, then give the local a globally-unique IL slot
+                // name so it can't collide with an enclosing local.
+                let local_id_generator = IoC.CONTAINER.instance.local_id_generator
 
-            let local = scope.declare_variable(function.location, param_name, false, null)
+                local_id_generator.enter_function()
 
-            local_id_generator.leave_function()
+                let declared = scope.declare_variable(function.location, param_name, false, null)
 
-            if !isa Semantic.Symbols.Variable(local) \/ !isa Semantic.Types.SettableTyped(local) then
-                return
+                local_id_generator.leave_function()
+
+                if !isa Semantic.Symbols.Variable(declared) \/ !isa Semantic.Types.SettableTyped(declared) then
+                    return
+                fi
+
+                declared.il_name_override = ".fused_param.{_next_fused_local_id()}"
+
+                (cast Semantic.Symbols.Variable(declared)).define()
+                (cast Semantic.Types.SettableTyped(declared)).set_type(param_type)
+
+                local = declared
             fi
-
-            local.il_name_override = ".fused_param.{_next_fused_local_id()}"
-
-            (cast Semantic.Symbols.Variable(local)).define()
-            (cast Semantic.Types.SettableTyped(local)).set_type(param_type)
 
             // Compile the body inline: the literal keeps its own scope, so
             // every name in it resolves exactly as it does when the literal
             // is compiled as a closure, at every nesting depth. The marker
             // is what makes those names load as the method's locals.
             closure.inlined_into = (_symbol_table.current_function!, param_symbol, cast Semantic.Symbols.Variable(local))
+
+            _reset_nested_captures(body)
 
             let harvest_site = RETRY_SITE_STATS.enter("fusion.harvest", RetrySiteKind.ALTERNATIVE)
 
@@ -1111,6 +1124,8 @@ namespace Syntax.Process is
 
                 let restore_site = RETRY_SITE_STATS.enter("fusion.restore", RetrySiteKind.ALTERNATIVE)
 
+                _reset_nested_captures(body)
+
                 _logger.speculate()
                 _symbol_use_locations.speculate()
 
@@ -1137,6 +1152,23 @@ namespace Syntax.Process is
 
             stage.param_local = cast Semantic.Symbols.Variable(local)
             stage.inline_body = block
+        si
+
+        // Drop what the literals in a stage body captured, so the walk that
+        // follows records what the body reads under the rule now in force.
+        // A capture is keyed on the symbol while the frame field it declares
+        // is keyed on the name, so a walk that resolves the same name to a
+        // different symbol than the last one adds a second value under a
+        // name the frame already has one field for, and the frame's
+        // constructor is then called with one argument too many. Neither
+        // walk's captures are part of what the logger rolls back, so each
+        // walk over the body is preceded by this.
+        _reset_nested_captures(body: Trees.Bodies.EXPRESSION) is
+            for nested in NESTED_LITERAL_COLLECTOR().collect(body) do
+                if let nested_closure = cast Semantic.Symbols.Closure?(_symbol_table.scope_for(nested)) then
+                    nested_closure.reset_captures()
+                fi
+            od
         si
 
         // Fill the fusion plan's iterator slots for `type`, mirroring
