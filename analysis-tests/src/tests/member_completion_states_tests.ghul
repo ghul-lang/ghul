@@ -1,0 +1,77 @@
+namespace Analysis.Tests is
+    use Analysis.Protocol.ANALYSER_PROCESS
+    use Analysis.Protocol.Response
+    use Ghul.Pipes
+
+    use TestClass = Microsoft.VisualStudio.TestTools.UnitTesting.TestClassAttribute
+    use Test = Microsoft.VisualStudio.TestTools.UnitTesting.TestMethodAttribute
+    use Assertions
+
+    // Member completion at a dot, asked in the three states tools/completion-fuzz
+    // asks about: the finished program, the program with the member name and
+    // the rest of its line removed, and the program cut off after the dot. The
+    // name was valid in the finished program, so each state has to offer it.
+    // `^` marks where the member name starts, and is removed from the source.
+    @TestClass()
+    class MEMBER_COMPLETION_STATES_TESTS is
+        init() is si
+
+        offered(analyser: ANALYSER_PROCESS, text: string, line: int, column: int, name: string) -> bool is
+            analyser.send_edit("states.ghul", text)
+
+            let _ = analyser.read_response()
+
+            analyser.send_member_completion("states.ghul", line, column)
+
+            if let completion: Response.COMPLETION = analyser.read_query_response() then
+                completion.items |> any(i => i.name =~ name)
+            else
+                false
+            fi
+        si
+
+        check(marked: string, name: string) is
+            let at = marked.index_of('^')
+            let text = marked.remove(at, 1)
+            let before = text.substring(0, at)
+            let line = before.split(['\n']).count
+            let column = at - before.last_index_of('\n')
+
+            let line_end mut = text.index_of('\n', at)
+
+            if line_end < 0 then
+                line_end = text.length
+            fi
+
+            let use analyser = ANALYSER_PROCESS()
+
+            is_true(offered(analyser, text, line, column, name), "finished program should offer {name}")
+            is_true(offered(analyser, "{text.substring(0, at)}{text.substring(line_end)}", line, column, name), "line cut should offer {name}")
+            is_true(offered(analyser, text.substring(0, at), line, column, name), "file cut should offer {name}")
+        si
+
+        @Test()
+        static_member_at_top_level() is
+            check("let lines = IO.File.^read_lines(\"x\")\nlet n = 1\n", "read_lines")
+        si
+
+        @Test()
+        string_member_at_top_level() is
+            check("let s = \"x\"\nlet n = s.^length\nlet m = 1\n", "length")
+        si
+
+        @Test()
+        function_literal_parameter_in_a_function() is
+            check(
+                "namespace P is\n    use Ghul.Pipes\n\n    entry() is\n        let words = [\"a\"]\n        let long = words |> filter(w => w.^length > 3) |> collect()\n    si\nsi\n",
+                "length")
+        si
+
+        @Test()
+        let_use_initializer_in_a_function() is
+            check(
+                "namespace P is\n    use IO.Std.write_line\n\n    entry() is\n        let use lines = IO.File.^read_lines(\"x\").iterator\n\n        for line in lines do\n            write_line(line)\n        od\n    si\nsi\n",
+                "read_lines")
+        si
+    si
+si

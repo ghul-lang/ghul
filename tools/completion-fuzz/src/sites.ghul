@@ -1,0 +1,85 @@
+namespace CompletionFuzz is
+    use Collections.LIST
+
+    // A member access in a source file: the offset of its dot, the name read
+    // after it, and the 1-based line and column of the name's first character,
+    // which is where completion is asked for.
+    class SITE(dot: int, name: string, line: int, column: int, receiver: string)
+
+    // Finds the member accesses in a source file by reading its characters,
+    // skipping string literals and comments. A dot counts when it follows a
+    // name, a closing bracket or a closing quote, and a name starts right
+    // after it: `x.y`, `f().y`, `xs[0].y`. A second dot (`..`, `::`) and a
+    // number (`1.5`) do not count.
+    class SITES is
+        find(text: string) -> LIST[SITE] static is
+            let result = LIST[SITE]()
+            let line mut = 1
+            let line_start mut = 0
+            let i mut = 0
+
+            while i < text.length do
+                let c = text[i]
+
+                if c == '\n' then
+                    line = line + 1
+                    line_start = i + 1
+                    i = i + 1
+                elif c == '/' /\ i + 1 < text.length /\ text[i + 1] == '/' then
+                    while i < text.length /\ text[i] != '\n' do
+                        i = i + 1
+                    od
+                elif c == '"' then
+                    i = i + 1
+
+                    while i < text.length /\ text[i] != '"' /\ text[i] != '\n' do
+                        if text[i] == '\\' then
+                            i = i + 1
+                        fi
+
+                        i = i + 1
+                    od
+
+                    i = i + 1
+                elif c == '\'' /\ i + 2 < text.length /\ text[i + 2] == '\'' then
+                    i = i + 3
+                elif c == '.' /\ i > 0 /\ i + 1 < text.length then
+                    let before = text[i - 1]
+                    let after = text[i + 1]
+
+                    let follows_value =
+                        is_name_char(before) \/ before == ')' \/ before == ']' \/ before == '"'
+
+                    let is_number = char.is_digit(before) /\ char.is_digit(after)
+
+                    if follows_value /\ !is_number /\ before != '.' /\ is_name_start(after) then
+                        let end mut = i + 1
+
+                        while end < text.length /\ is_name_char(text[end]) do
+                            end = end + 1
+                        od
+
+                        let receiver_start = if i - 30 > line_start then i - 30 else line_start fi
+
+                        result.add(SITE(
+                            i,
+                            text.substring(i + 1, end - i - 1),
+                            line,
+                            i + 2 - line_start,
+                            text.substring(receiver_start, i - receiver_start).trim()))
+                    fi
+
+                    i = i + 1
+                else
+                    i = i + 1
+                fi
+            od
+
+            result
+        si
+
+        is_name_start(c: char) -> bool static => char.is_letter(c) \/ c == '_'
+
+        is_name_char(c: char) -> bool static => char.is_letter_or_digit(c) \/ c == '_'
+    si
+si

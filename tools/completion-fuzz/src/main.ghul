@@ -1,0 +1,229 @@
+namespace CompletionFuzz is
+    use IO.File
+    use IO.Directory
+    use IO.Path
+
+    use Collections.LIST
+    use Collections.MAP
+
+    use Ghul.Pipes
+
+    use Analysis.Protocol.ANALYSER_PROCESS
+    use Analysis.Protocol.Response
+
+    // Asks for member completion where a program is being typed, and checks the
+    // answer against the program as it was finished. At a member access
+    // `x.name` the name was valid, so completion at the dot should offer it.
+    // Three variants per site: the finished file (the control), the file with
+    // the name and the rest of its line cut, as while typing the line, and the
+    // file cut off after the dot, as while typing at its end. A site where the
+    // control does not offer the name is a gap in completion itself, and the
+    // other two are only judged where it does.
+    class RESULT(site: SITE, file: string, variant: string, count: int, offered: bool, first: string)
+
+    class FUZZER is
+        _analyser: ANALYSER_PROCESS?
+
+        init() is
+            _analyser = null
+        si
+
+        // One edit and one completion, restarting the analyser if it fails.
+        complete(text: string, line: int, column: int) -> Response.COMPLETION? is
+            for attempt in 0..2 do
+                try
+                    let analyser = _analyser ?? ANALYSER_PROCESS()
+
+                    _analyser = analyser
+
+                    analyser.send_edit("fuzz.ghul", text)
+
+                    let _ = analyser.read_response()
+
+                    analyser.send_member_completion("fuzz.ghul", line, column)
+
+                    return cast Response.COMPLETION?(analyser.read_query_response())
+                catch e: System.Exception
+                    IO.Std.error.write_line("analyser failed: {e.message}")
+
+                    try
+                        _analyser?.dispose()
+                    catch ignored: System.Exception
+                    yrt
+
+                    _analyser = null
+                yrt
+            od
+
+            null
+        si
+
+        judge(file: string, site: SITE, variant: string, text: string) -> RESULT is
+            let completion = complete(text, site.line, site.column)
+
+            if let c = completion then
+                let names = c.items |> map(i => i.name) |> collect()
+
+                RESULT(site, file, variant, names.count, names |> any(n => n =~ site.name), names |> take(4) |> join(","))
+            else
+                RESULT(site, file, variant, -1, false, "")
+            fi
+        si
+
+        dispose() is
+            _analyser?.dispose()
+        si
+    si
+
+    // Every .ghul file under a corpus root one or two levels down: a Rosetta
+    // task directory or a ghul-dev example directory each hold one. Files
+    // using the raster library are left out, since the analyser here is given
+    // only the runtime's references, and so are examples meant not to compile.
+    corpus_files(root: string) -> LIST[string] is
+        let result = LIST[string]()
+
+        for directory in Directory.get_directories(root) do
+            let sources = Directory.get_files(directory, "*.ghul")
+
+            if sources.count == 1 then
+                let text = File.read_all_text(sources[0])
+
+                if !text.contains("Raster") /\ !text.contains("// expect: error") then
+                    result.add(sources[0])
+                fi
+            fi
+        od
+
+        result.sort()
+        result
+    si
+
+    entry(args: string[]) -> int is
+        let roots = LIST[string]()
+        let output mut = "completion-fuzz.tsv"
+        let per_file mut = 2
+        let limit mut = 300
+        let seed mut = 1
+        let i mut = 0
+
+        while i < args.count do
+            if args[i] =~ "--out" then
+                output = args[i + 1]
+                i = i + 2
+            elif args[i] =~ "--per-file" then
+                per_file = int.parse(args[i + 1])
+                i = i + 2
+            elif args[i] =~ "--limit" then
+                limit = int.parse(args[i + 1])
+                i = i + 2
+            elif args[i] =~ "--seed" then
+                seed = int.parse(args[i + 1])
+                i = i + 2
+            else
+                roots.add(args[i])
+                i = i + 1
+            fi
+        od
+
+        if roots.count == 0 then
+            IO.Std.error.write_line("usage: completion-fuzz <corpus-root>... [--out <tsv>] [--per-file N] [--limit N] [--seed N]")
+            return 1
+        fi
+
+        let random = System.Random(seed)
+        let files = LIST[string]()
+
+        for root in roots do
+            for f in corpus_files(root) do
+                files.add(f)
+            od
+        od
+
+        // A fixed shuffle, so a limit takes a spread of the corpus rather
+        // than its alphabetical head.
+        let shuffled = files |> map(f => (key = random.next(), file = f)) |> sort_by(p => p.key) |> map(p => p.file) |> collect()
+
+        let fuzzer = FUZZER()
+        let results = LIST[RESULT]()
+        let sites_done mut = 0
+
+        let writer = IO.StreamWriter(output)
+
+        writer.write_line("file\tline\tcolumn\tname\treceiver\tvariant\tcount\toffered\tfirst")
+
+        for file in shuffled do
+            if sites_done >= limit then
+                break
+            fi
+
+            let text = File.read_all_text(file)
+            let all = SITES.find(text)
+
+            if all.count == 0 then
+                continue
+            fi
+
+            let chosen = all |> map(s => (key = random.next(), site = s)) |> sort_by(p => p.key) |> take(per_file) |> map(p => p.site) |> collect()
+
+            for site in chosen do
+                let line_end mut = text.index_of('\n', site.dot)
+
+                if line_end < 0 then
+                    line_end = text.length
+                fi
+
+                let variants = [
+                    (name = "control", text = text),
+                    (name = "line-cut", text = "{text.substring(0, site.dot + 1)}{text.substring(line_end)}"),
+                    (name = "file-cut", text = text.substring(0, site.dot + 1))
+                ]
+
+                for v in variants do
+                    let r = fuzzer.judge(file, site, v.name, v.text)
+
+                    results.add(r)
+
+                    writer.write_line("{file}\t{site.line}\t{site.column}\t{site.name}\t{site.receiver.replace("\t", " ")}\t{v.name}\t{r.count}\t{r.offered}\t{r.first}")
+                od
+
+                writer.flush()
+
+                sites_done = sites_done + 1
+
+                IO.Std.error.write("\r{sites_done} of {limit} sites  ")
+            od
+        od
+
+        writer.dispose()
+        fuzzer.dispose()
+
+        IO.Std.error.write_line("")
+
+        report(results)
+
+        0
+    si
+
+    report(results: LIST[RESULT]) is
+        let controls = MAP[string, bool]()
+
+        for r in results do
+            if r.variant =~ "control" then
+                controls["{r.file}:{r.site.dot}"] = r.offered
+            fi
+        od
+
+        let offered_in_control = controls.values |> count(v => v)
+
+        IO.Std.write_line("sites: {controls.count}; control offers the name at {offered_in_control}")
+
+        for variant in ["line-cut", "file-cut"] do
+            let judged = results |> filter(r => r.variant =~ variant /\ controls["{r.file}:{r.site.dot}"]) |> collect()
+            let empty = judged |> count(r => r.count == 0)
+            let failed = judged |> count(r => r.count < 0)
+            let missing = judged |> count(r => r.count > 0 /\ !r.offered)
+
+            IO.Std.write_line("{variant}: {judged.count} judged; offered {judged |> count(r => r.offered)}, empty {empty}, name missing from a non-empty list {missing}, no answer {failed}")
+        od
+    si
+si
