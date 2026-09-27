@@ -1,0 +1,52 @@
+use IO.Std.write_line
+use Ghul.Pipes
+
+// A sequence holding a file is held under let use through its iterator,
+// and read only part way. Each read below stops early, and each is
+// followed by opening the file for exclusive write, which only succeeds
+// once the reader has been closed.
+
+closed(path: string) -> string is
+    try
+        let use stream = IO.File.open(path, IO.FileMode.OPEN, IO.FileAccess.WRITE, IO.FileShare.NONE)
+
+        return "closed"
+    catch e: IO.IOException
+        return "still open"
+    yrt
+si
+
+line_by_loop(path: string, wanted: int) -> string? is
+    let use lines = IO.File.read_lines(path).iterator
+    let number mut = 0
+
+    for text in lines do
+        number = number + 1
+
+        if number == wanted then
+            return text
+        fi
+    od
+
+    return null
+si
+
+line_by_chain(path: string, wanted: int) -> string? is
+    let use lines = IO.File.read_lines(path).iterator
+
+    return cursor(lines) |> skip(wanted - 1) |> first()
+si
+
+line_by_expression(path: string) -> string? =>
+    (let use lines = IO.File.read_lines(path).iterator in cursor(lines) |> map(text => text.to_upper()) |> first())
+
+let path = IO.Path.combine(IO.Path.get_temp_path(), "let-use-held-iterator-early-exit.txt")
+
+IO.File.write_all_lines(path, ["alpha", "beta", "gamma"])
+
+write_line("loop: {line_by_loop(path, 2)}, {closed(path)}")
+write_line("chain: {line_by_chain(path, 2)}, {closed(path)}")
+write_line("expression: {line_by_expression(path)}, {closed(path)}")
+write_line("past the end: {line_by_loop(path, 9) ?? "none"}, {closed(path)}")
+
+IO.File.delete(path)
