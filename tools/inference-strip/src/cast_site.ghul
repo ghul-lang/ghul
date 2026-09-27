@@ -1,0 +1,175 @@
+namespace InferenceStrip is
+    use default
+
+    // What a cast site is, read from its source text: the written target,
+    // the value cast, and where the cast sits, so results can be grouped by
+    // the context `cast(v)` would have to take its target from.
+    class CAST_SITE is
+        target: string
+        operand: string
+        position: string
+
+        // `site` is a line of the compiler's `--strip-annotations cast:list`
+        // output: number, kind, cast position, mode, then the target's span.
+        init(text: string, site: string) is
+            let fields = site.split([' '])
+            let starts = _line_starts(text)
+
+            let at = (span: string, index: int) -> int is
+                let parts = span.split([','])
+                starts[int.parse(parts[index]) - 1] + int.parse(parts[index + 1]) - 1
+            si
+
+            let cast_start = at(fields[2], 0)
+            let type_start = at(fields[4], 0)
+            let type_end = at(fields[5], 0) + 1
+
+            target = text.substring(type_start, type_end - type_start)
+
+            let open = text.index_of('(', type_end)
+            let close = _matching(text, open)
+
+            operand = if open >= 0 /\ close > open then text.substring(open + 1, close - open - 1).trim() else "" fi
+
+            let before = text.substring(0, cast_start).trim_end()
+            let after = if close >= 0 then text.substring(close + 1).trim_start() else "" fi
+
+            position = _position(text, cast_start, before, after)
+        si
+
+        _position(text: string, cast_start: int, before: string, after: string) -> string static is
+            if _ends_with_operator(before) \/ _starts_with_operator(after) then
+                return "operand"
+            fi
+
+            if before.ends_with("return") \/ before.ends_with("=>") then
+                return "return"
+            fi
+
+            if before.ends_with("=") then
+                let line_start = text.last_index_of('\n', cast_start) + 1
+                let line = text.substring(line_start, cast_start - line_start)
+
+                return if line.contains("let ") then "initializer" else "assignment" fi
+            fi
+
+            if after.starts_with(".") then
+                return "receiver"
+            fi
+
+            let opener = _enclosing(text, cast_start)
+
+            if opener >= 0 then
+                let c = text[opener]
+                let prior = text.substring(0, opener).trim_end()
+                let called = prior.length > 0 /\ (char.is_letter_or_digit(prior[prior.length - 1]) \/ prior.ends_with("_") \/ prior.ends_with("]") \/ prior.ends_with(")"))
+
+                if c == '(' /\ called then
+                    return "argument"
+                elif c == '[' /\ called then
+                    return "index"
+                elif c == '{' then
+                    return "interpolation"
+                elif c == '[' then
+                    return "element"
+                fi
+            fi
+
+            "other"
+        si
+
+        _ends_with_operator(text: string) -> bool static is
+            if text.length == 0 \/ text.ends_with("=>") \/ text.ends_with("->") then
+                return false
+            fi
+
+            let c = text[text.length - 1]
+
+            if "+-*/%<>&|^\\".index_of(c) >= 0 then
+                return true
+            fi
+
+            if (c == '=' \/ c == '~') /\ text.length > 1 then
+                return "=!<>".index_of(text[text.length - 2]) >= 0
+            fi
+
+            false
+        si
+
+        _starts_with_operator(text: string) -> bool static is
+            if text.length == 0 \/ text.starts_with("=>") \/ text.starts_with("->") then
+                return false
+            fi
+
+            let c = text[0]
+
+            if "+-*/%<>&|^\\".index_of(c) >= 0 then
+                return true
+            fi
+
+            text.starts_with("==") \/ text.starts_with("!=") \/ text.starts_with("=~") \/ text.starts_with("!~")
+        si
+
+        // The innermost bracket open at `position`, or -1.
+        _enclosing(text: string, position: int) -> int static is
+            let depth mut = 0
+            let i mut = position - 1
+
+            while i >= 0 do
+                let c = text[i]
+
+                if c == ')' \/ c == ']' \/ c == '}' then
+                    depth = depth + 1
+                elif c == '(' \/ c == '[' \/ c == '{' then
+                    if depth == 0 then
+                        return i
+                    fi
+
+                    depth = depth - 1
+                fi
+
+                i = i - 1
+            od
+
+            -1
+        si
+
+        _matching(text: string, open: int) -> int static is
+            if open < 0 then
+                return -1
+            fi
+
+            let depth mut = 0
+
+            for i in open..text.length do
+                let c = text[i]
+
+                if c == '(' then
+                    depth = depth + 1
+                elif c == ')' then
+                    depth = depth - 1
+
+                    if depth == 0 then
+                        return i
+                    fi
+                fi
+            od
+
+            -1
+        si
+
+        _line_starts(text: string) -> LIST[int] static is
+            let result = LIST[int]()
+
+            result.add(0)
+
+            for i in 0..text.length do
+                if text[i] == '\n' then
+                    result.add(i + 1)
+                fi
+            od
+
+            result
+        si
+    si
+si

@@ -74,14 +74,16 @@ namespace Syntax.Process.Printer.UnitTests is
 
         // The sites listed for `source`, parsed and printed as the driver's
         // `--strip-annotations list` does.
-        list_sites(source: string) -> Collections.LIST[string] is
+        list_sites(source: string) -> Collections.LIST[string] => list_sites(source, "list")
+
+        list_sites(source: string, selection: string) -> Collections.LIST[string] is
             let logger = Logging.DIAGNOSTICS_STORE()
             let source_file = Compiler.COMPILER().parse("strip.ghul", IO.StringReader(source), false, false, false, logger)
 
             is_false(logger.any_errors, "fixture did not parse")
 
             let formatter = FORMATTER(source_file.trivia, 100)
-            let stripper = ANNOTATION_STRIPPER("list")
+            let stripper = ANNOTATION_STRIPPER(selection)
 
             formatter.stripper = stripper
             formatter.format(source_file.definition)
@@ -128,6 +130,33 @@ namespace Syntax.Process.Printer.UnitTests is
         @Test()
         Formatting__a_typed_parameter_stripping_another_site__should_keep_its_type() is
             are_equal("x: int", format(parameter(), "5"))
+        si
+
+        @Test()
+        Listing__with_the_cast_prefix__should_give_only_the_cast_target() is
+            let sites = list_sites("let n = 3\nlet d: double = cast double(n)\n", "cast:list")
+
+            are_equal(1, sites.count)
+            are_equal("0 cast 2,17 type 2,22,2,27 2,27", sites[0])
+        si
+
+        @Test()
+        Listing__without_the_cast_prefix__should_leave_cast_targets_out() is
+            let sites = list_sites("let d: double = cast double(3)\n")
+
+            are_equal(1, sites.count)
+            is_true(sites[0].contains(" local "))
+        si
+
+        @Test()
+        Formatting__a_cast_stripping_its_target__should_print_the_untyped_cast() is
+            let logger = Logging.DIAGNOSTICS_STORE()
+            let source_file = Compiler.COMPILER().parse("strip.ghul", IO.StringReader("let d: double = cast double(3)\n"), false, false, false, logger)
+            let formatter = FORMATTER(source_file.trivia, 100)
+
+            formatter.stripper = ANNOTATION_STRIPPER("cast:all")
+
+            is_true(formatter.format(source_file.definition).contains("let d: double = cast(3)"))
         si
     si
 si
