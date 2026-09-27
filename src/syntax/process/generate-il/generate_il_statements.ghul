@@ -107,6 +107,15 @@ namespace Syntax.Process is
 
                 _val_block_il_stack.add(frame_il)
 
+                // A block whose own statements dispose something runs
+                // them in a disposal region. A value cannot stay on the
+                // stack across the region's end, so the tail goes to the
+                // cross-try temp inside it and is loaded back after it,
+                // as a return that crosses an inner try already does.
+                let disposals = if block.body.want_dispose then block.body.variables_to_dispose else null fi
+                let region = if disposals? then _open_disposal_region(disposals) else null fi
+                let holds_tail_in_temp = region? /\ !is_void /\ !spiller.is_spilling
+
                 try
                     for s in block.body.statements do
                         self.enter_node(s)
@@ -143,12 +152,24 @@ namespace Syntax.Process is
                                 value
                             fi
 
-                        spiller.emit_value(coerced)
+                        if holds_tail_in_temp then
+                            frame_il.cross_try_temp!.store(coerced)
+                        else
+                            spiller.emit_value(coerced)
+                        fi
                     fi
                 finally
                     assert _val_block_il_stack.count > 0 else "val_block_il_stack underflow"
                     _val_block_il_stack.remove_at(_val_block_il_stack.count - 1)
                 yrt
+
+                if region? then
+                    _close_disposal_region(region, disposals!, block.location)
+
+                    if holds_tail_in_temp then
+                        add(frame_il.cross_try_temp!.load())
+                    fi
+                fi
 
                 // Capture-mode cross-try paths stashed their value
                 // into cross_try_temp and `leave`d to cross_try_

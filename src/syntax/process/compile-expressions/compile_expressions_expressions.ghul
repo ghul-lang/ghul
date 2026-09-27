@@ -38,7 +38,9 @@ namespace Syntax.Process is
         visit(function: Trees.Expressions.FUNCTION) is
             let mark = _logger.mark()
             let enclosing_disposal_host = disposal_host
+            let enclosing_disposal_list = disposal_list
             disposal_host = null
+            disposal_list = null
             let use uses_guard = _symbol_use_locations.mark_then_release()
 
             // The lambda body walks under the enclosing method's
@@ -89,6 +91,7 @@ namespace Syntax.Process is
             yrt
 
             disposal_host = enclosing_disposal_host
+            disposal_list = enclosing_disposal_list
 
             _flow.set_env(saved_env)
 
@@ -397,6 +400,113 @@ namespace Syntax.Process is
             // type so surrounding expressions / let-bindings see the
             // right type at compile-expressions time.
             `await.compile_expressions_state.value = IR.Values.WRAPPER(DUMMY(element_type, `await.location))
+        si
+
+        _use_local_id_counter: int static
+
+        // `use E` holds E's value in a local of its own and registers
+        // that local for disposal at the end of the enclosing statement
+        // list, or of the expression body where there is no list. The
+        // expression is the value, so it reads as E wherever it appears.
+        visit(`use: Trees.Expressions.USE) is
+            `use.compile_expressions_state.value = null
+
+            let operand = `use.operand.value
+
+            if !operand? \/ !operand.type? then
+                `use.compile_expressions_state.value = DUMMY(Semantic.Types.ERROR(), `use.location)
+                return
+            fi
+
+            let type = operand.type
+
+            if type.is_error then
+                `use.compile_expressions_state.value = operand
+                return
+            fi
+
+            if !_innate_symbol_lookup.get_idisposable_type().is_assignable_from(type) then
+                _logger.error(`use.operand.location, "not disposable")
+                `use.compile_expressions_state.value = operand
+                return
+            fi
+
+            let target = _use_target(`use, type)
+
+            if !target? then
+                `use.compile_expressions_state.value = operand
+                return
+            fi
+
+            if let list = disposal_list then
+                if !list.want_dispose \/ !(list.variables_to_dispose |> any(v => v == target)) then
+                    list.add_variable_to_dispose(target)
+                fi
+            elif let host = disposal_host then
+                let registered = host.let_in_disposals
+
+                if !registered? \/ !(registered |> any(v => v == target)) then
+                    host.add_let_in_disposal(target)
+                fi
+            else
+                _logger.error(`use.location, "cannot dispose a value here")
+                `use.compile_expressions_state.value = operand
+                return
+            fi
+
+            let block = IR.Values.BLOCK(type)
+
+            block.add(target.store(`use.location, null, operand, _symbol_loader, true))
+            block.add(target.load(`use.location, null, _symbol_loader))
+            block.close()
+
+            `use.compile_expressions_state.value = block
+        si
+
+        // The local a `use` holds its value in, declared on the first walk
+        // and kept on the node for later ones, since a registration or a
+        // frame field made on one walk has to name the same local on the
+        // next. It is declared in a scope of its own, so nothing can look
+        // it up by name, with an IL name no source local can have.
+        _use_target(`use: Trees.Expressions.USE, type: Semantic.Types.Type) -> Semantic.Symbols.Variable? is
+            let variable: Semantic.Symbols.Variable mut
+
+            if let existing = `use.target then
+                variable = existing
+            else
+                let scope = Semantic.BLOCK_SCOPE(_symbol_table.current_scope)
+                let local_id_generator = IoC.CONTAINER.instance.local_id_generator
+
+                local_id_generator.enter_function()
+
+                let declared = scope.declare_variable(`use.location, "use", false, null)
+
+                local_id_generator.leave_function()
+
+                if let local: Semantic.Symbols.Variable = declared then
+                    variable = local
+                else
+                    return null
+                fi
+
+                variable.il_name_override = ".use.{_use_local_id_counter}"
+                _use_local_id_counter = _use_local_id_counter + 1
+
+                variable.define()
+                variable.mark_synthesized()
+
+                `use.target = variable
+            fi
+
+            if let settable: Semantic.Types.SettableTyped = variable then
+                settable.set_type(type)
+            fi
+
+            if let frame = _enclosing_state_machine_frame() then
+                frame.declare_local_field(variable)
+            fi
+
+            return variable
         si
 
         // The `cast` keyword's own span. A CAST's location runs to the
