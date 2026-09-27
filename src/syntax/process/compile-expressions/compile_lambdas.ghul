@@ -1146,8 +1146,12 @@ namespace Syntax.Process is
                     // produced nothing, and this one has not answered yet:
                     // the return stays inferred for the walk that settles
                     // the operand to pin.
+                elif let settled = _settled_return(function) then
+                    // An earlier walk left the return waiting, and what the
+                    // literal was used with has settled it since.
+                    closure.set_return_type(settled)
                 elif let tail_type = tail_value?.type /\ tail_type.is_error then
-                    closure.set_return_type(Semantic.Types.ERROR())
+                    _await_return(function, closure, Semantic.OBLIGATIONS.LITERAL_RETURN_AFTER_ERROR)
                 elif
                     let from_slot = _slot_return_type(function) /\
                     (tail_is_null \/ closure.returned_genuine_null)
@@ -1164,9 +1168,7 @@ namespace Syntax.Process is
                     // settle it at.
                     function.returned_only_null_without_slot = true
 
-                    _logger.error(function.location, "cannot infer type here")
-
-                    closure.set_return_type(Semantic.Types.ERROR())
+                    _await_return(function, closure, Semantic.OBLIGATIONS.LITERAL_RETURN)
                 else
                     closure.set_return_type(_innate_symbol_lookup.get_void_type())
 
@@ -1265,6 +1267,60 @@ namespace Syntax.Process is
                     fi
                 fi
             od
+        si
+
+        // The origin standing for a function literal's return in the body
+        // being compiled, when its body has not said what the return is.
+        _return_origin(function: Trees.Expressions.FUNCTION) -> Semantic.Symbols.INFERRED_RESULT_ORIGIN? is
+            let enclosing = _symbol_table.current_function
+
+            if !enclosing? then
+                return null
+            fi
+
+            let origin =
+                Semantic.RESULT_ORIGINS.origin_for(
+                    function,
+                    function.location,
+                    cast Semantic.Scope(enclosing),
+                    "$return:{function.location.start_column}")
+
+            if origin? then
+                origin.description = "the return type of this function literal"
+            fi
+
+            return origin
+        si
+
+        // The type an earlier walk's waiting return has settled to since.
+        _settled_return(function: Trees.Expressions.FUNCTION) -> Type? is
+            if let origin = _return_origin(function), inferred = origin.try_get_inferred_type() /\ inferred.is_settled then
+                return inferred
+            fi
+
+            return null
+        si
+
+        // Leaves the literal's return waiting on its origin under `rule`,
+        // for a later walk or the fixing step to settle. With no body
+        // around the literal there are no later walks, so it settles as
+        // an error at once.
+        _await_return(function: Trees.Expressions.FUNCTION, closure: Semantic.Symbols.Closure, rule: string) is
+            if let origin = _return_origin(function) then
+                let placeholder = Semantic.Types.INFERRED_VARIABLE_TYPE(origin)
+
+                closure.set_return_type(placeholder)
+
+                Semantic.OBLIGATIONS.defer(rule, placeholder, function.location)
+
+                return
+            fi
+
+            if rule =~ Semantic.OBLIGATIONS.LITERAL_RETURN then
+                _logger.error(function.location, "cannot infer type here")
+            fi
+
+            closure.set_return_type(Semantic.Types.ERROR())
         si
 
         // Walk a literal's body with a purity frame in force, so the
