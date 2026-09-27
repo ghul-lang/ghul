@@ -260,14 +260,18 @@ let first = 1, second: int = 0, third = "three";
 
 The name `_` is a discard placeholder: it stands in for a variable name, but the value that would be assigned to it is discarded. It is accepted in `let` definitions, tuple destructuring, lambda parameters, and `for` loop variables.
 
-`let use` declares a local whose value is disposed when the block it is declared in ends, on every path out of the block, an exception included. The value's type has to be `Ghul.Disposable`, and a local that is absent when the block ends is skipped. Locals are disposed in the reverse of the order they were declared:
+`use E` evaluates `E` and disposes the value when the innermost enclosing block ends, on every path out of the block, an exception included. The expression's value is `E`'s, so it can be written wherever `E` could: as an initializer, an argument, an operand. The value's type has to be `Ghul.Disposable`, and a value that is absent is skipped. Values are disposed in the reverse of the order their `use` ran:
 
 ```ghul
-let use file = IO.File.open_read(path)
-let use reader = IO.StreamReader(file)
+let file = use IO.File.open_read(path)
+let reader = use IO.StreamReader(file)
 
 return reader.read_line()
 ```
+
+What is disposed is the value `use` saw, so reassigning a `mut` local initialized from one does not change it. Inside a body a statement can start with it, `use R()` on its own holding a value for the rest of the block. At file or namespace level a `use` is an import, so a top-level statement that starts with the operator is written in parentheses, `(use E)`. Disposal belongs to the block, not to the expression: `for x in use f().iterator do ... od` disposes the iterator when the block holding the loop ends, not when the loop does, and `return use E` hands back a value that has already been disposed.
+
+`let use x = E` is the older spelling of `let x = use E`. It cannot be combined with `mut`.
 
 `let use ... in` is the expression form. The local is disposed once the statement holding the expression has run, or, in an expression-bodied function, once the body has been evaluated, so it fits where a block does not:
 
@@ -1701,7 +1705,7 @@ let m = (box.v = 7; box.v * 2);             // assignment statement, then the va
 
 A parenthesised group commits to the block reading at the first top-level `;` — or immediately, on a token that can only open a statement (`let`, `try`, `return`, ...) — and stays a tuple, a parenthesised expression, or a lambda's formal parameters otherwise. A compound statement (`if`, `case`, `for`, `while`, `do`) opening the group commits the block reading the same way when what follows cannot continue its expression: `(for x in xs do f(x) od 0)` is a block whose tail is `0`, no `;` needed. An operator-headed tail on the same line is the one exception: any operator can also continue the expression, so the group keeps the expression reading there and the compound statement is the operator's left operand (`(if c then 2 else 5 fi - 1)` is 1 when `c` is true). Only the same line does that — the compound statement ends the line it is written on, so an operator opening the next line begins a new statement like any other, and `(if c then 2 else 5 fi` / `-1)` is a block whose tail is `-1` with no `;` needed. So `(a = f(x), b = g(y))` constructs a named tuple while `(a = f(x); b = g(y); a + b)` runs two assignments and yields the sum; the `,`/`;` is the whole difference, and the elements themselves can be any expression in both. A statement whose expression form already exists keeps it: `(let x = 5 in x * 2)` is the `let ... in` expression, unchanged, while `(let x = 5; x * 2)` is a block with a `let` statement and a tail.
 
-A `let use` written directly in a block is rejected: the block has no disposal region to close it in. One written in a statement list nested inside the block - the body of an `if`, of a loop, of a `try` - has a region of its own and is unaffected. The expression form, `let use ... in`, is accepted directly in a block: its local is disposed once the statement holding the block has run (see [variables](#variables)).
+A block is a block for disposal too: a `use` or `let use` in one disposes when the block ends, before the block's value is used (see [variables](#variables)).
 
 A common use is loop-as-expression — fold an iterable into a value with the loop body updating a `mut` accumulator and the tail expression handing back the result:
 
@@ -1964,24 +1968,20 @@ nothing.
 
 Every read of a pipe starts from the beginning, and two reads in progress at once are independent. That holds however it is read — through `for`, a combinator, a terminal or interpolation — so `for x in p` twice sees every element twice, a read that stops part way leaves nothing behind for the next, and `p |> count()` followed by `p |> only()` walks the whole sequence both times. `p |> take(2)` yields the first two elements every time it is read, and `skip` is how to page. The combinators return `T{}`, and each read of what they return reads its source afresh in turn. Neither a terminal nor a `for` loop disposes the iterator it reads, whether or not it reads to the end (below). A generator's `dispose()` releases nothing - it does not run the body's `finally` clauses or dispose an iterator the body is walking with `yield in`. `memo` reads its source once, and every read of it replays what it cached, asking the source for more only past the end of the cache.
 
-A `for` loop does not dispose what it iterated, so a sequence that holds a resource is disposed by naming its iterator and letting `let use` close it. That covers the few that hold one: file and directory enumeration, a database reader, a PLINQ query, and a .NET iterator written with a `using`. It matters where the loop can be left early, since the iterator is then still open.
+A `for` loop does not dispose what it iterated, so a sequence that holds a resource is disposed by taking its iterator with `use`. That covers the few that hold one: file and directory enumeration, a database reader, a PLINQ query, and a .NET iterator written with a `using`. It matters where the loop can be left early, since the iterator is then still open.
 
 ```ghul
-let use lines = IO.File.read_lines(path).iterator
-
-for line in lines do
+for line in use IO.File.read_lines(path).iterator do
     if line.starts_with(wanted) then
         return line
     fi
 od
 ```
 
-A pipe is built over the held iterator with `cursor`, which reads the iterator it is given rather than asking the source for a new one, so an early-exit terminal on it leaves the resource to `let use`:
+A pipe is built over the held iterator with `cursor`, which reads the iterator it is given rather than asking the source for a new one, so an early-exit terminal on it leaves the resource to `use`:
 
 ```ghul
-let use lines = IO.File.read_lines(path).iterator
-
-return cursor(lines) |> skip(wanted - 1) |> first()
+return cursor(use IO.File.read_lines(path).iterator) |> skip(wanted - 1) |> first()
 ```
 
 The `undisposed-source` warning reports a read that can stop before the end of one of these sources with nothing holding it: an early-exit terminal or stage such as `first`, `find`, `any`, `all`, `only` or `take`, or a `for` loop whose body can `break` out of it or `return`. The call to the source has to be the read's source, or be reached from it through other pipe stages. A read to the end lets the source close itself and draws nothing, and so does a stage that reads all of its source before passing anything on, such as `sort` or `reverse`. A sequence held in a local variable, a field or anywhere else first is not followed.
@@ -2008,7 +2008,7 @@ let c = 5 |> double() |> add(1); // add(double(5), 1) is 11
 
 `|>` and `~>` are a precedence level of their own, below range and above relational (see [operators](#operators)), so the subject is everything to the left that binds tighter: `1 + 2 |> double()` is `double(1 + 2)`, and `0..n |> map(f)` maps the whole range. A comparison or a boolean operator stays outside the chain, so `xs |> count() > 3` compares the count and `ready /\ xs |> any(p)` tests `ready` first.
 
-A prefix operator applies to its operand before the chain does, so `!xs |> any(p)` negates `xs` rather than the answer, and `await t |> f()` is `f(await t)`. Parenthesise the chain for the other reading: `!(xs |> any(p))`.
+A prefix operator applies to its operand before the chain does, so `!xs |> any(p)` negates `xs` rather than the answer, and `await t |> f()` is `f(await t)`. `use` binds the same way: `use open(p) |> first()` disposes what `open(p)` returns, while `use open(p).iterator` disposes the iterator, since a member access binds tighter than any prefix operator. Parenthesise the chain for the other reading: `!(xs |> any(p))`.
 
 The subject goes into the last call written on the right-hand side, so `x |> box.combine(a)` is `box.combine(x, a)` and `x |> BOX(1).combine(a)` is `BOX(1).combine(x, a)`. Member access, indexing, `!` and `?` written after that call apply to its result, as they would after any call: `xs |> collect_mutable()[0]` is the first element and `xs |> collect_mutable().count` the count. An operator written after the call applies to the result of the whole chain, so `xs |> count() % 2` is `count(xs) % 2`.
 
