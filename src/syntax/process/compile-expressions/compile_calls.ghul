@@ -414,7 +414,7 @@ namespace Syntax.Process is
                 return false
             fi
 
-            let use retry_site = RETRY_SITE_STATS.enter("calls.resolve_deferred_defaults", RetrySiteKind.REWALK_WITH_INFORMATION)
+            let use retry_site = RETRY_SITE_STATS.enter("calls.resolve_deferred_defaults")
             _logger.roll_back()
             _logger.speculate()
             _flow.restore()
@@ -579,7 +579,7 @@ namespace Syntax.Process is
             argument_expression: Trees.Expressions.Expression
         ) -> (Value, Value) is
             if isa Trees.Expressions.FUNCTION(argument_expression) then
-                let use retry_site = RETRY_SITE_STATS.enter("calls.delegate_value_construction", RetrySiteKind.REWALK_WITH_INFORMATION)
+                let use retry_site = RETRY_SITE_STATS.enter("calls.delegate_value_construction")
                 _logger.roll_back()
                 _logger.speculate()
                 _flow.restore()
@@ -784,7 +784,7 @@ namespace Syntax.Process is
                     let specialized_candidate = _specialise_candidate_from_concrete_siblings(candidate, argument_types, cache_key, location)
 
                     if specialized_candidate? /\ specialized_candidate != candidate then
-                        let use retry_site = RETRY_SITE_STATS.enter("calls.constructor_sibling_specialisation", RetrySiteKind.REWALK_WITH_INFORMATION)
+                        let use retry_site = RETRY_SITE_STATS.enter("calls.constructor_sibling_specialisation")
                         _logger.roll_back()
                         _logger.speculate()
                         _flow.restore()
@@ -811,67 +811,6 @@ namespace Syntax.Process is
                 fi
             fi
 
-            // An empty literal takes `object` as its element type with
-            // nothing around it to say otherwise, so it resolves either no
-            // constructor of the written type or one of the wrong
-            // instantiation. The candidate this call is for - specialised
-            // from the constraint where there is one - is pushed as the
-            // formals and the arguments walked again, the same recovery an
-            // ordinary call makes.
-            if
-                COMPILE_CALLS.has_empty_array_literal_argument(argument_expressions.expressions) /\
-                (overload_result == null \/ constraint?)
-            then
-                let specialised =
-                    if constraint? then
-                        _constructor_constraint_retry.try_specialise_candidates(
-                            location,
-                            if named_restrict? then named_restrict else function_group.functions fi,
-                            constraint)
-                    else
-                        null
-                    fi
-
-                let candidate =
-                    if specialised? /\ specialised.count == 1 then
-                        specialised[0]
-                    else
-                        _try_find_single_arity_candidate(function_group, argument_types.count, true)
-                    fi
-
-                if candidate? /\ candidate.arguments.count == argument_expressions.expressions.count then
-                    let use retry_site = RETRY_SITE_STATS.enter("calls.constructor_empty_literal", RetrySiteKind.REWALK_WITH_INFORMATION)
-                    _logger.roll_back()
-                    _logger.speculate()
-                    _flow.restore()
-
-                    for (index, a) in argument_expressions |> index() do
-                        a.set_expected_type(candidate.arguments[index], "{{0}} is not assignable to {{1}}")
-
-                        _visitor.rewalk(a)
-
-                        if let a.value? /\ value.type? /\ value.check_is_consumable(_logger, a.location) then
-                            arguments[index] = value
-                            argument_types[index] = value.type!
-                        else
-                            let t = Semantic.Types.ERROR()
-                            arguments[index] = DUMMY(t, a.location)
-                            argument_types[index] = t
-                        fi
-                    od
-
-                    overload_result =
-                        _overload_resolver.resolve(
-                            location,
-                            function_group,
-                            argument_types,
-                            false,
-                            true,
-                            true,
-                            specialised ?? named_restrict)
-                fi
-            fi
-
             // Return-type-constraint fall-back: first resolve returned
             // null AND we have a constraint pushed in by an enclosing
             // return / let-init / assignment. The candidate's owner-
@@ -889,7 +828,7 @@ namespace Syntax.Process is
                 let pre_specialised = _constructor_constraint_retry.try_specialise_candidates(location, search, constraint)
 
                 if pre_specialised? then
-                    let use retry_site = RETRY_SITE_STATS.enter("calls.constructor_constraint_retry", RetrySiteKind.REWALK_WITH_INFORMATION)
+                    let use retry_site = RETRY_SITE_STATS.enter("calls.constructor_constraint_retry")
                     _logger.roll_back()
                     _logger.speculate()
 
@@ -902,7 +841,7 @@ namespace Syntax.Process is
             fi
 
             if overload_result.needs_retry then
-                let use retry_site = RETRY_SITE_STATS.enter("calls.constructor_needs_retry", RetrySiteKind.REWALK_WITH_INFORMATION)
+                let use retry_site = RETRY_SITE_STATS.enter("calls.constructor_needs_retry")
                 _logger.roll_back()
                 _logger.speculate()
                 _flow.restore()
@@ -937,6 +876,10 @@ namespace Syntax.Process is
 
             function = _owner_constraint_specializer.specialize_from_constraint(location, function, constraint)
             function = _type_arg_placeholder_registry.specialize_with_placeholders(location, function, cache_key)
+
+            for (formal, actual) in function.arguments |> zip(argument_types) do
+                Semantic.RESULT_ORIGIN_OFFER.offer(formal, actual)
+            od
 
             let _ = _resolve_deferred_defaults(function, argument_expressions.expressions, arguments, argument_types)
 
@@ -1450,7 +1393,7 @@ namespace Syntax.Process is
                     push_candidate = _owner_type_arg_specializer.specialize_function_own_args_from_concrete_siblings(effective_candidate, argument_types, phantom_origins, argument_location)
                 fi
 
-                let use retry_site = RETRY_SITE_STATS.enter("calls.try_overload_after_null", RetrySiteKind.REWALK_WITH_INFORMATION)
+                let use retry_site = RETRY_SITE_STATS.enter("calls.try_overload_after_null")
                 _logger.roll_back()
                 _logger.speculate()
                 _flow.restore()
@@ -2275,7 +2218,7 @@ namespace Syntax.Process is
             // the failed resolve's diagnostics and the flow state it
             // left behind are both dropped first - the same contract
             // every other retry in this file walks under.
-            let use retry_site = RETRY_SITE_STATS.enter("calls.normalise_spread", RetrySiteKind.ALTERNATIVE)
+            let use retry_site = RETRY_SITE_STATS.enter("calls.normalise_spread")
             _logger.roll_back()
             _logger.speculate()
             _flow.restore()
@@ -2573,7 +2516,7 @@ namespace Syntax.Process is
                 fi
             fi
 
-            let use retry_site = RETRY_SITE_STATS.enter("calls.try_overload_on_partial", RetrySiteKind.REWALK_WITH_INFORMATION)
+            let use retry_site = RETRY_SITE_STATS.enter("calls.try_overload_on_partial")
             _logger.roll_back()
             _logger.speculate()
             _flow.restore()

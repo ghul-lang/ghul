@@ -260,6 +260,44 @@ namespace Syntax.Process is
             tuple.compile_expressions_state.value = TUPLE(type, values)
         si
 
+        // The element type of an empty literal nothing around it has
+        // typed. The literal stands as an array of a placeholder while the
+        // body is walked: a sibling it joins with, or a formal it is
+        // passed to, bounds the placeholder, and the next walk types the
+        // literal from that. A placeholder nothing bounds is taken to
+        // object by the fixing step, and null here then lets the caller
+        // take that default.
+        _await_element_type(sequence: Trees.Expressions.SEQUENCE) -> Type? is
+            let function = _visitor.current_function
+
+            if !function? then
+                return null
+            fi
+
+            let origin =
+                Semantic.RESULT_ORIGINS.origin_for(
+                    sequence,
+                    sequence.location,
+                    cast Semantic.Scope(function),
+                    "$[]@{sequence.location.start_line}:{sequence.location.start_column}")
+
+            if !origin? \/ Semantic.OBLIGATIONS.has_default_for(origin) then
+                return null
+            fi
+
+            let inferred = origin.try_get_inferred_type()
+
+            if inferred? /\ inferred.is_settled then
+                return inferred
+            fi
+
+            let placeholder = Semantic.Types.INFERRED_VARIABLE_TYPE(origin)
+
+            Semantic.OBLIGATIONS.defer(Semantic.OBLIGATIONS.EMPTY_LITERAL, placeholder, sequence.location)
+
+            return placeholder
+        si
+
         visit_sequence(sequence: Trees.Expressions.SEQUENCE) is
             let type: Type? mut = _
             let have_explicit_type: bool mut = _
@@ -285,11 +323,14 @@ namespace Syntax.Process is
                 if constraint_type? then
                     type = constraint_type
                     have_explicit_type = true
+                elif let awaited = _await_element_type(sequence) then
+                    type = awaited
                 else
-                    // No elements to infer from and no constraint pushed by
-                    // the surrounding context: fall back to an object
-                    // element type, the same as a literal whose elements
-                    // are all null.
+                    // No elements to infer from, no constraint pushed by
+                    // the surrounding context, and nothing the walks
+                    // recorded against the element type: fall back to an
+                    // object element type, the same as a literal whose
+                    // elements are all null.
                     _logger.hint(
                         sequence.location,
                         "infer-object-from-list-literal",
@@ -306,19 +347,8 @@ namespace Syntax.Process is
                 let tuples_element_count mut = -1
                 let any_tuple_argument_is_null mut = false
                 let lub = LEAST_UPPER_BOUND_MAP()
-                let seen_empty_literal mut = false
 
                 for v in elements do
-                    // An empty literal with nothing around it to say what
-                    // it holds takes its type from its siblings, so it
-                    // stays out of their join and is re-walked at the
-                    // element type they settle on.
-                    if CONTEXTLESS_EMPTY_LITERAL.is_expression(v) then
-                        seen_empty_literal = true
-                        all_tuple_literals = false
-                        continue
-                    fi
-
                     let is_tuple =
                         v.is_tuple_literal \/
                         (v.value? /\ v.value.type? /\ (v.value.type.is_value_tuple \/ isa Semantic.Types.TUPLE(v.value.type)) /\ !v.value.type.is_optional)
@@ -370,19 +400,6 @@ namespace Syntax.Process is
                     fi
                 od
 
-                // With no sibling to take a type from, the empty literals
-                // join as they are.
-                if seen_empty_literal /\ !seen_any then
-                    for v in elements do
-                        if CONTEXTLESS_EMPTY_LITERAL.is_expression(v) /\ v.value? /\ v.value.type? then
-                            seen_any = true
-                            lub.add(v.value.type)
-                        fi
-                    od
-
-                    seen_empty_literal = false
-                fi
-
                 if !type? then
                     type = lub.get_result()
 
@@ -429,7 +446,7 @@ namespace Syntax.Process is
 
                         type = Semantic.TUPLE_ELEMENT_LUB(_innate_symbol_lookup).combine(tuple_types, lub.element_names)
 
-                        let use retry_site = RETRY_SITE_STATS.enter("tuples.sequence_element_rewalk", RetrySiteKind.REWALK_WITH_INFORMATION)
+                        let use retry_site = RETRY_SITE_STATS.enter("tuples.sequence_element_rewalk")
                         // going to walk the elements again, so roll back
                         // and re-speculate to avoid duplicate / misleading
                         // error messages
@@ -438,18 +455,6 @@ namespace Syntax.Process is
 
                         // re-walk the type expression if present, to avoid
                         // hiding any error message it may generate
-
-                        sequence.type_expression.walk(_visitor)
-
-                        for e in sequence.elements do
-                            e.set_expected_type(type, "element type {{0}} not compatible with inferred list type {{1}}")
-                            _visitor.rewalk(e)
-                        od
-                    elif seen_empty_literal /\ type? /\ isa Semantic.Types.ARRAY(type) then
-                        let use retry_site = RETRY_SITE_STATS.enter("tuples.sequence_empty_element_rewalk", RetrySiteKind.REWALK_WITH_INFORMATION)
-
-                        _logger.roll_back()
-                        _logger.speculate()
 
                         sequence.type_expression.walk(_visitor)
 

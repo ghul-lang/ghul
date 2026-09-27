@@ -1,0 +1,81 @@
+namespace Syntax.Process.UnitTests is
+    use Collections.LIST
+
+    use Ghul.Pipes
+
+    use Syntax.Process.RETRY_SITES
+    use Syntax.Process.RetrySiteKind
+    use TestClass = Microsoft.VisualStudio.TestTools.UnitTesting.TestClassAttribute
+    use Test = Microsoft.VisualStudio.TestTools.UnitTesting.TestMethodAttribute
+    use Assertions
+
+    // Pins the local re-walks compile-expressions performs. A re-walk
+    // with information is one the obligation queue is meant to replace,
+    // so this list is expected to shrink. Adding a site means adding it
+    // here, next to the reason it is not a queue candidate if it is an
+    // alternative.
+    @TestClass()
+    class RETRY_SITES_TESTS is
+        init() is si
+
+        expected() -> LIST[string] =>
+            [
+                // Alternatives: each re-walks under a different reading
+                // or lowering rather than with information an earlier
+                // walk found, so none has an obligation to wait on.
+
+                // A pragma resolves to an attribute constructor another
+                // way when the first reading finds none.
+                "attributes.constructor_fallback ALTERNATIVE",
+                // Probes an assignment target without committing to it.
+                "bindings.assignment_target_probe ALTERNATIVE",
+                // Spread and tuple readings of a pack argument.
+                "calls.normalise_spread ALTERNATIVE",
+                // Pipe fusion inlines and restores a stage body: lowering,
+                // not typing.
+                "fusion.harvest ALTERNATIVE",
+                "fusion.restore ALTERNATIVE",
+                // A function literal walked again as a delegate.
+                "lambdas.convert_to_delegate ALTERNATIVE",
+
+                // Re-walks with information: queue candidates.
+                "calls.constructor_constraint_retry REWALK_WITH_INFORMATION",
+                "calls.constructor_needs_retry REWALK_WITH_INFORMATION",
+                "calls.constructor_sibling_specialisation REWALK_WITH_INFORMATION",
+                "calls.delegate_value_construction REWALK_WITH_INFORMATION",
+                "calls.resolve_deferred_defaults REWALK_WITH_INFORMATION",
+                "calls.try_overload_after_null REWALK_WITH_INFORMATION",
+                "calls.try_overload_on_partial REWALK_WITH_INFORMATION",
+                "lambdas.recursive_rewalk REWALK_WITH_INFORMATION",
+                "lambdas.return_defaulted_recursive_rewalk REWALK_WITH_INFORMATION",
+                "operators.resolve_deferred_index REWALK_WITH_INFORMATION",
+                "operators.resolve_deferred_operands REWALK_WITH_INFORMATION",
+                "tuples.sequence_element_rewalk REWALK_WITH_INFORMATION"
+            ] |> sort() |> collect_mutable()
+
+        @Test()
+        Reading__inventory__should_list_exactly_the_expected_sites() is
+            let actual = RETRY_SITES.inventory |> map(entry => "{entry.site} {entry.kind}") |> sort() |> collect_mutable()
+
+            are_equal(expected() |> join("\n"), actual |> join("\n"))
+        si
+
+        @Test()
+        Calling__kind_of__with_a_listed_site__should_return_its_kind() is
+            are_equal(RetrySiteKind.ALTERNATIVE, RETRY_SITES.kind_of("fusion.harvest"))
+        si
+
+        @Test()
+        Calling__kind_of__with_an_unlisted_site__should_throw() is
+            let thrown mut = false
+
+            try
+                let _ = RETRY_SITES.kind_of("nowhere.not_a_site")
+            catch e: System.InvalidOperationException
+                thrown = true
+            yrt
+
+            is_true(thrown)
+        si
+    si
+si
