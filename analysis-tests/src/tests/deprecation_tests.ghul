@@ -1,0 +1,111 @@
+namespace Analysis.Tests is
+    use Analysis.Protocol.ANALYSER_PROCESS
+    use Analysis.Protocol.Response
+
+    use TestClass = Microsoft.VisualStudio.TestTools.UnitTesting.TestClassAttribute
+    use Test = Microsoft.VisualStudio.TestTools.UnitTesting.TestMethodAttribute
+    use Assertions
+
+    // A declaration carrying System.Obsolete is reported where it is used,
+    // and hover and completion say it is deprecated.
+    @TestClass()
+    class DEPRECATION_TESTS is
+        init() is si
+
+        source: string =>
+            "class TOOLS is\n"
+            "    init() is si\n"
+            "\n"
+            "    @System.Obsolete(\"use twice instead\")\n"
+            "    double(x: int) -> int => x * 2\n"
+            "\n"
+            "    twice(x: int) -> int => x * 2\n"
+            "\n"
+            "    @System.Obsolete(\"gone\", true)\n"
+            "    triple(x: int) -> int => x * 3\n"
+            "si\n"
+            "\n"
+            "use_them() is\n"
+            "    let t = TOOLS()\n"
+            "    let a = t.double(1)\n"
+            "    let b = t.twice(1)\n"
+            "si\n"
+
+        prime() -> ANALYSER_PROCESS is
+            let analyser = ANALYSER_PROCESS()
+
+            analyser.send_edit("deprecation.ghul", source)
+
+            let diagnostics = analyser.read_response()
+            assert isa Response.DIAGNOSTICS(diagnostics) else "expected DIAGNOSTICS response"
+
+            let found mut = false
+
+            for d in (cast Response.DIAGNOSTICS(diagnostics)).diagnostics do
+                if d.message.contains("double is deprecated: use twice instead") then
+                    found = true
+                fi
+            od
+
+            is_true(found, "expected the deprecated use to be reported")
+
+            return analyser
+        si
+
+        hover(analyser: ANALYSER_PROCESS, line: int, column: int) -> Response.HOVER is
+            analyser.send_hover("deprecation.ghul", line, column)
+
+            let response = analyser.read_query_response()
+            assert isa Response.HOVER(response) else "expected HOVER response"
+
+            return cast Response.HOVER(response)
+        si
+
+        @Test()
+        hover_on_a_deprecated_use_carries_the_message() is
+            let use analyser = prime()
+
+            let result = hover(analyser, 15, 15)
+
+            is_true(result.deprecated)
+            are_equal("use twice instead", result.deprecation_message)
+            is_false(result.deprecation_is_error)
+        si
+
+        @Test()
+        hover_on_a_current_use_is_not_deprecated() is
+            let use analyser = prime()
+
+            let result = hover(analyser, 16, 15)
+
+            is_false(result.deprecated)
+            is_null(result.deprecation_message)
+        si
+
+        @Test()
+        completion_marks_deprecated_members() is
+            let use analyser = prime()
+
+            analyser.send_member_completion("deprecation.ghul", 15, 15)
+
+            let response = analyser.read_query_response()
+            assert isa Response.COMPLETION(response) else "expected COMPLETION response"
+
+            let items = (cast Response.COMPLETION(response)).items
+
+            let double_deprecated: bool? mut = null
+            let twice_deprecated: bool? mut = null
+            let triple_deprecated: bool? mut = null
+
+            for item in items do
+                if item.name =~ "double" then double_deprecated = item.deprecated fi
+                if item.name =~ "twice" then twice_deprecated = item.deprecated fi
+                if item.name =~ "triple" then triple_deprecated = item.deprecated fi
+            od
+
+            are_equal(true, double_deprecated)
+            are_equal(false, twice_deprecated)
+            are_equal(true, triple_deprecated)
+        si
+    si
+si

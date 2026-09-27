@@ -1,0 +1,161 @@
+namespace Syntax.Process is
+    use Collections.LIST
+
+    use Source.LOCATION
+    use Trees
+
+    use Logging.Logger
+
+    // Reports each use of a symbol whose declaration carries
+    // System.ObsoleteAttribute: a warning, or an error where the attribute
+    // says so. Runs over the uses compile-expressions recorded, once every
+    // file's attributes are resolved, so a deprecation declared in one file
+    // is seen at a use in any other. The declaration itself is not a use,
+    // and nor is anything written inside a deprecated declaration: code
+    // that is itself on its way out can go on using what it always did.
+    class CHECK_DEPRECATED_USES(
+        _logger: Logger,
+        _symbol_use_locations: Semantic.SYMBOL_USE_LOCATIONS
+    ) is
+        // A constructor call reads as the type it constructs, so a
+        // constructor with no deprecation of its own reports its type's.
+        _reported(symbol: Semantic.Symbols.Symbol) -> Semantic.Symbols.Symbol is
+            if !symbol.deprecation? /\ symbol.is_constructor then
+                if let owner: Semantic.Symbols.Symbol = symbol.owner then
+                    return owner
+                fi
+            fi
+
+            return symbol
+        si
+
+        check(source_file: Compiler.SOURCE_FILE) is
+            let uses = _symbol_use_locations.symbol_uses_in_file(source_file.file_name)
+
+            let deprecated_names = LIST[LOCATION]()
+
+            for found in uses do
+                let symbol = _reported(found.value)
+
+                if symbol.deprecation? then
+                    deprecated_names.add(symbol.location)
+                fi
+            od
+
+            if deprecated_names.count == 0 then
+                return
+            fi
+
+            let regions = DEPRECATED_REGIONS(deprecated_names).collect(source_file.definition)
+
+            for found in uses do
+                if found.location =~ found.value.location then
+                    continue
+                fi
+
+                if _is_inside_any(found.location, regions) then
+                    continue
+                fi
+
+                let symbol = _reported(found.value)
+
+                if let deprecation = symbol.deprecation then
+                    let message =
+                        if let text = deprecation.message then
+                            "{symbol.name} is deprecated: {text}"
+                        else
+                            "{symbol.name} is deprecated"
+                        fi
+
+                    if deprecation.is_error then
+                        _logger.error(found.location, message)
+                    else
+                        _logger.warn(found.location, "deprecated", message)
+                    fi
+                fi
+            od
+        si
+
+        _is_inside_any(location: LOCATION, regions: LIST[LOCATION]) -> bool is
+            for region in regions do
+                if region.contains(location) then
+                    return true
+                fi
+            od
+
+            return false
+        si
+    si
+
+    // The source ranges of the declarations in one file whose names sit
+    // at the given locations: the whole declaration, body and members
+    // included.
+    class DEPRECATED_REGIONS: Visitor is
+        _names: LIST[LOCATION]
+        _regions: LIST[LOCATION]
+
+        init(names: LIST[LOCATION]) is
+            super.init()
+
+            _names = names
+            _regions = LIST[LOCATION]()
+        si
+
+        collect(definition: Definitions.Definition) -> LIST[LOCATION] is
+            definition.walk(self)
+
+            return _regions
+        si
+
+        _note(name: Identifiers.Identifier?, location: LOCATION) is
+            if let n = name then
+                for declared in _names do
+                    if declared =~ n.location then
+                        _regions.add(location)
+                        return
+                    fi
+                od
+            fi
+        si
+
+        pre(`class: Definitions.CLASS) -> bool is
+            _note(`class.name, `class.location)
+            return false
+        si
+
+        pre(`trait: Definitions.TRAIT) -> bool is
+            _note(`trait.name, `trait.location)
+            return false
+        si
+
+        pre(`struct: Definitions.STRUCT) -> bool is
+            _note(`struct.name, `struct.location)
+            return false
+        si
+
+        pre(`union: Definitions.UNION) -> bool is
+            _note(`union.name, `union.location)
+            return false
+        si
+
+        pre(variant: Definitions.VARIANT) -> bool is
+            _note(variant.name, variant.location)
+            return false
+        si
+
+        pre(`enum: Definitions.ENUM) -> bool is
+            _note(`enum.name, `enum.location)
+            return false
+        si
+
+        pre(function: Definitions.FUNCTION) -> bool is
+            _note(function.name, function.location)
+            return false
+        si
+
+        pre(property: Definitions.PROPERTY) -> bool is
+            _note(property.name, property.location)
+            return false
+        si
+    si
+si

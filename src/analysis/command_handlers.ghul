@@ -51,6 +51,20 @@ namespace Analysis is
             return null
         si
 
+        // As with the doc, a constructor with no deprecation of its own
+        // shows its type's.
+        _deprecation_for(symbol: Semantic.Symbols.Symbol) -> Semantic.DEPRECATION? is
+            if let deprecation = symbol.deprecation then
+                return deprecation
+            fi
+
+            if symbol.is_constructor then
+                return (cast Semantic.Symbols.Symbol?(symbol.owner))?.deprecation
+            fi
+
+            return null
+        si
+
         handle_request(request: Protocol.Request.HOVER, writer: IO.TextWriter) is
             let path = request.path
             let line = request.line
@@ -60,6 +74,7 @@ namespace Analysis is
             let kind_label: string? mut = null
             let description: string mut = ""
             let doc: string? mut = null
+            let deprecation: Semantic.DEPRECATION? mut = null
 
             try
                 if !_watchdog.want_restart then
@@ -76,6 +91,7 @@ namespace Analysis is
                         kind_label = hover.kind_label
                         description = hover.description
                         doc = _doc_for(hover.symbol.collapse_group_if_single_member())
+                        deprecation = _deprecation_for(hover.symbol.collapse_group_if_single_member())
                     fi
                 fi
             catch ex: Exception
@@ -86,7 +102,14 @@ namespace Analysis is
 
             Std.error.flush()
 
-            JSON_PROTOCOL.write_response(writer, Protocol.Response.HOVER(signature, kind_label, description, doc))
+            JSON_PROTOCOL.write_response(writer, Protocol.Response.HOVER(
+                    signature,
+                    kind_label,
+                    description,
+                    doc,
+                    deprecation?,
+                    deprecation?.message,
+                    deprecation?.is_error ?? false))
         si
     si
 
@@ -2483,7 +2506,8 @@ namespace Analysis is
                                     else
                                         ""
                                     fi,
-                                    pair.value.collapse_group_if_single_member().doc
+                                    pair.value.collapse_group_if_single_member().doc,
+                                    pair.value.collapse_group_if_single_member().deprecation?
                                 )
                             )
                         od
@@ -2498,7 +2522,8 @@ namespace Analysis is
                                     "",
                                     "keyword",
                                     keyword.snippet,
-                                    null
+                                    null,
+                                    false
                                 )
                             )
                         od

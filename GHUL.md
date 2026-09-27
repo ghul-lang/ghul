@@ -2490,6 +2490,16 @@ app.map_get(
 
 A parameter attribute is recognised only where a formal parameter can appear: a named function or method's parameter list, or a lambda literal's — not on a `let` or a primary-constructor parameter. Written on an element of a parenthesised expression that turns out not to be a lambda (an ordinary value tuple), it's rejected with an error rather than silently ignored.
 
+`System.Obsolete` marks a declaration as deprecated, whether it is written as a pragma in ghūl or carried by a .NET assembly. Every use of the declaration from elsewhere is then reported as `<name> is deprecated: <message>`, or `<name> is deprecated` where the attribute gives no message. The report is a `deprecated` warning, suppressible like any other, or an error when the attribute's second argument is `true`. Using a class's constructor counts as using the class. A use written inside a declaration that is itself deprecated is not reported, so an old member can go on using another. Hover shows the message under the signature, and completion marks the item as deprecated.
+
+```ghul
+@System.Obsolete("use scaled instead")
+doubled(x: int) -> int => x * 2;
+
+@System.Obsolete("removed", true)
+tripled(x: int) -> int => x * 3;
+```
+
 `System.Runtime.InteropServices.DllImport` on a static method with no body declares a call into a shared library. The method is emitted as the call itself rather than as a method carrying an attribute, so it needs no body and cannot have one:
 
 ```ghul
