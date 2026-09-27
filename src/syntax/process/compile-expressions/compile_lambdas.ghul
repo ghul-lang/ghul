@@ -689,6 +689,16 @@ namespace Syntax.Process is
                 fi
             fi
 
+            // A generator literal's frame likewise: its element type and
+            // the local fields its body registers belong to this walk.
+            let generator = Semantic.Symbols.state_machine_for(closure)
+
+            if let state_machine = generator then
+                if let dropped = state_machine.reset() then
+                    _composite_spill_state.drop_owned_by(dropped)
+                fi
+            fi
+
             let implied_type: Type mut
             let implied_argument_types: Collections.List[Type]? mut = null
             let constraint_return_type: Type? mut = null
@@ -813,13 +823,28 @@ namespace Syntax.Process is
                 // a reference type is left alone and keeps the more
                 // precise type it produced.
                 if
+                    !generator? /\
                     closure.return_type_was_inferred /\
                     Semantic.VALUE_RETURN_PIN.applies_to_slot(slot_return_type)
                 then
                     closure.pin_inferred_return_at = slot_return_type
                 fi
 
-                if function.contains_let_await then
+                if generator? then
+                    // A generator literal returns Pipe[T]. A declared
+                    // return type names it; otherwise a slot expecting a
+                    // sequence names T; otherwise T is left for the first
+                    // yield to settle.
+                    if closure.return_type_was_inferred then
+                        if
+                            let element_type = Semantic.Symbols.sequence_element_type(slot_return_type),
+                            pipe_type = Semantic.Symbols.generator_return_type(element_type)
+                        then
+                            return_type = pipe_type
+                            closure.return_type_was_inferred = false
+                        fi
+                    fi
+                elif function.contains_let_await then
                     closure.is_void_async = false
                     closure.wrap_inferred_return_as_task = false
                     closure.async_task_like_template = null
@@ -1081,16 +1106,14 @@ namespace Syntax.Process is
                 fi
             fi
 
-            // Default an unresolved return type to void only when the
-            // arguments are *fully* resolved — concrete types, not still
-            // INFERRED_VARIABLE_TYPE placeholders. With placeholder args,
-            // an unresolved return is the symptom of an identity-shaped
-            // body (`a => a`) where the body offered no constraint and
-            // we're depending on the call-site formal-arg-push to
-            // resolve the args on the next outer iteration. Defaulting
-            // the return to void here would lock in `*** -> void` and
-            // poison the overload resolution that follows.
-            if closure.return_type!.is_inferred /\ closure.arguments |> all(a => a.is_settled) then
+            // A generator literal whose return is still inferred had no
+            // yield whose type could settle it, and void is not a
+            // generator's return.
+            if generator? /\ closure.return_type!.is_inferred /\ closure.arguments |> all(a => a.is_settled) then
+                _logger.error(function.location, "cannot infer the element type of this generator")
+
+                closure.set_return_type(Semantic.Types.ERROR())
+            elif closure.return_type!.is_inferred /\ closure.arguments |> all(a => a.is_settled) then
                 // A body whose tail failed to compile says nothing about what
                 // the literal returns. Settled as void, the literal would
                 // take a shape that a later walk, once the failure clears,
