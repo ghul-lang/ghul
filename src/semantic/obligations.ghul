@@ -70,6 +70,16 @@ namespace Semantic is
         // `take_defaults` answers.
         EMPTY_LITERAL: string static => "empty_literal"
 
+        // The return of a function literal whose body produced only null
+        // with no slot to say what it is optional of. Reported by the
+        // fixing step if nothing settles it.
+        LITERAL_RETURN: string static => "literal_return"
+
+        // The return of a function literal whose tail failed to compile.
+        // The tail's own diagnostic is the report, so the fixing step
+        // adds none.
+        LITERAL_RETURN_AFTER_ERROR: string static => "literal_return_after_error"
+
         begin_walk() static is
             if _bodies.count == 0 then
                 return
@@ -209,6 +219,26 @@ namespace Semantic is
             for obligation in standing do
                 if let placeholder: Types.INFERRED_VARIABLE_TYPE = obligation.awaiting then
                     let origin = placeholder.origin
+
+                    if obligation.rule =~ LITERAL_RETURN_AFTER_ERROR then
+                        continue
+                    fi
+
+                    if let result_origin: Symbols.INFERRED_RESULT_ORIGIN = origin then
+                        if reported.contains(origin) \/ has_default_for(origin) then
+                            continue
+                        fi
+
+                        if let resolved = origin.try_get_inferred_type() /\ resolved.is_settled then
+                            continue
+                        fi
+
+                        reported.add(origin)
+
+                        logger.error(origin.location, "cannot infer {result_origin.description}")
+
+                        continue
+                    fi
 
                     if isa Symbols.INFERRED_TYPE_ARG_ORIGIN(origin) \/ origin.name.starts_with("$") then
                         continue
