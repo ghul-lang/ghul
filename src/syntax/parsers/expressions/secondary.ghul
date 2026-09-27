@@ -282,10 +282,74 @@ namespace Syntax.Parsers.Expressions is
             start: LOCATION,
             result_in: Trees.Expressions.Expression,
             tokenizer_state: Syntax.Parsers.TOKEN_LOOKAHEAD_SPECULATE_THEN_COMMIT
+        ) -> Trees.Expressions.Expression =>
+            _parse_trailers(context, start, result_in, tokenizer_state, null, null)
+
+        // A member name written on the line after its `.`. Wrapping a chain
+        // that way is legal, but so is a `.` left dangling at the end of a
+        // half-written line, and then the next line is some other statement
+        // or definition whose first name the `.` would take. The member and
+        // everything after it are read speculatively, and kept only if they
+        // parse without complaint; otherwise the name is reported missing
+        // after the `.` and the next line is left to be read as what it is.
+        // A program that parses keeps its reading whatever its layout.
+        _parse_member_on_next_line(
+            context: CONTEXT,
+            start: LOCATION,
+            left: Trees.Expressions.Expression,
+            completion_target_start: LOCATION,
+            tokenizer_state: Syntax.Parsers.TOKEN_LOOKAHEAD_SPECULATE_THEN_COMMIT
+        ) -> Trees.Expressions.Expression is
+            let missing_at = context.previous_end
+
+            let use diagnostics_snapshot = context.diagnostics_speculate_then_backtrack()
+            let use snapshot = context.tokenizer_speculate_then_backtrack_bounded()
+
+            let errors_before = context.logger.error_count
+
+            let member = identifier_parser.parse(context)!
+
+            let result =
+                _parse_trailers(
+                    context,
+                    start,
+                    Trees.Expressions.MEMBER(start::member.location, left, member, completion_target_start::member.location),
+                    tokenizer_state,
+                    left,
+                    member
+                )
+
+            if !result.is_poisoned /\ context.logger.error_count == errors_before then
+                snapshot.commit()
+                diagnostics_snapshot.commit()
+
+                return result
+            fi
+
+            snapshot.backtrack()
+            diagnostics_snapshot.backtrack()
+
+            context.error(missing_at, "expected a member name here")
+
+            return Trees.Expressions.MEMBER(
+                start..context.location,
+                left,
+                Trees.Identifiers.Identifier(completion_target_start, ""),
+                completion_target_start::context.location
+            )
+        si
+
+        _parse_trailers(
+            context: CONTEXT,
+            start: LOCATION,
+            result_in: Trees.Expressions.Expression,
+            tokenizer_state: Syntax.Parsers.TOKEN_LOOKAHEAD_SPECULATE_THEN_COMMIT,
+            previous_left_in: Trees.Expressions.Expression?,
+            previous_identifier_in: Trees.Identifiers.Identifier?
         ) -> Trees.Expressions.Expression is
             let result: Trees.Expressions.Expression mut = result_in
-            let previous_left: Trees.Expressions.Expression? mut = _
-            let previous_identifier: Trees.Identifiers.Identifier? mut = _
+            let previous_left: Trees.Expressions.Expression? mut = previous_left_in
+            let previous_identifier: Trees.Identifiers.Identifier? mut = previous_identifier_in
 
             do
                 // A trailer that could equally open a new member or
@@ -402,6 +466,11 @@ namespace Syntax.Parsers.Expressions is
                     context.next_token()
 
                     if
+                        context.current.token == Lexical.TOKEN.IDENTIFIER /\
+                        context.current.first_on_line
+                    then
+                        return _parse_member_on_next_line(context, start, result, completion_target_start, tokenizer_state)
+                    elif
                         context.current.token == Lexical.TOKEN.IDENTIFIER
                     then
                         let member = identifier_parser.parse(context)!
