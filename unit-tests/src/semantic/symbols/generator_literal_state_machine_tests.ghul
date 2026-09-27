@@ -1,0 +1,97 @@
+namespace Semantic.Symbols.UnitTests is
+    use Microsoft.VisualStudio.TestTools.UnitTesting.Assert
+
+    use Source.LOCATION
+    use TestClass = Microsoft.VisualStudio.TestTools.UnitTesting.TestClassAttribute
+    use Test = Microsoft.VisualStudio.TestTools.UnitTesting.TestMethodAttribute
+    use Assertions
+
+    // A function literal that yields is a generator closure: it owns a
+    // STATE_MACHINE, and its frame exists before the literal's element
+    // type does, because the body registers local fields on the frame
+    // while the walk that settles the element type is still going.
+    @TestClass()
+    class GENERATOR_LITERAL_STATE_MACHINE_TESTS is
+        _scope: Semantic.BLOCK_SCOPE
+
+        init() is
+            if !LOCATION.internal? then
+                LOCATION.init_static()
+            fi
+
+            _scope = Semantic.BLOCK_SCOPE()
+
+            if !isa Semantic.UnitTests.TEST_INNATE_SYMBOL_LOOKUP(IoC.CONTAINER.instance.innate_symbol_lookup) then
+                IoC.CONTAINER.instance.innate_symbol_lookup = Semantic.UnitTests.TEST_INNATE_SYMBOL_LOOKUP()
+            fi
+        si
+
+        loc() -> LOCATION => LOCATION("test.ghul", 1, 1, 1, 1)
+
+        owner() -> CLASS => CLASS(loc(), loc(), _scope, "Owner", System.Array.empty[string](), Semantic.BLOCK_SCOPE())
+
+        inferred_literal() -> GLOBAL_GENERATOR_CLOSURE is
+            let literal = GLOBAL_GENERATOR_CLOSURE(loc(), owner(), "$anon_1", Semantic.BLOCK_SCOPE(), false)
+
+            literal.set_return_type(Semantic.Types.INFERRED_RETURN_TYPE())
+
+            return literal
+        si
+
+        @Test()
+        Calling__state_machine_for__on_each_generator_literal_kind__should_return_its_state_machine() is
+            let instance = INSTANCE_GENERATOR_CLOSURE(loc(), owner(), "$anon_1", Semantic.BLOCK_SCOPE(), false)
+            let static_literal = STATIC_GENERATOR_CLOSURE(loc(), owner(), "$anon_2", Semantic.BLOCK_SCOPE(), false)
+            let global = GLOBAL_GENERATOR_CLOSURE(loc(), owner(), "$anon_3", Semantic.BLOCK_SCOPE(), false)
+
+            are_same(instance.state_machine, state_machine_for(instance))
+            are_same(static_literal.state_machine, state_machine_for(static_literal))
+            are_same(global.state_machine, state_machine_for(global))
+        si
+
+        @Test()
+        Calling__state_machine_for__on_a_plain_literal__should_return_null() is
+            let plain = GLOBAL_CLOSURE(loc(), owner(), "$anon_1", Semantic.BLOCK_SCOPE(), false)
+
+            is_null(state_machine_for(plain))
+        si
+
+        @Test()
+        Reading__frame__for_a_literal_with_an_inferred_return__should_make_a_frame_with_no_element_type() is
+            let literal = inferred_literal()
+
+            let frame = literal.state_machine.frame
+
+            is_true(frame?)
+            is_false(frame!.ensure_element_type())
+        si
+
+        @Test()
+        Calling__declare__before_the_element_type_is_known__should_declare_nothing_yet() is
+            let frame = inferred_literal().state_machine.frame!
+
+            frame.declare()
+
+            let count mut = 0
+
+            for f in frame.argument_fields do
+                count = count + 1
+            od
+
+            are_equal(0, count)
+            is_false(frame.ensure_element_type())
+        si
+
+        @Test()
+        Calling__reset__should_make_the_next_read_build_a_new_frame() is
+            let state_machine = inferred_literal().state_machine
+
+            let first = state_machine.frame
+
+            let dropped = state_machine.reset()
+
+            are_same(first, dropped)
+            are_not_same(first, state_machine.frame)
+        si
+    si
+si
