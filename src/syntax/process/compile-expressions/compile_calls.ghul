@@ -228,6 +228,11 @@ namespace Syntax.Process is
                 _logger.error(construct.location, "cannot call superclass constructor {function}", function.location, "constructor declared here")
             fi
 
+            if function.is_scalar_conversion then
+                construct.compile_expressions_state.value = _convert_scalar(construct.location, arguments[0], type)
+                return
+            fi
+
             if let target = function.constructor_target then
                 construct.compile_expressions_state.value = _call_constructor_target(function, target, type, arguments, argument_types)
                 return
@@ -919,11 +924,27 @@ namespace Syntax.Process is
                 fi
             fi
 
+            if function.is_scalar_conversion then
+                return (cast Value(Load.SYMBOL(null, function_group)), _convert_scalar(location, arguments[0], type))
+            fi
+
             if let target = function.constructor_target then
                 return (cast Value(Load.SYMBOL(null, function_group)), _call_constructor_target(function, target, type, arguments, argument_types))
             fi
 
             return (cast Value(Load.SYMBOL(null, function_group)), _function_caller.call_constructor(function, arguments, type))
+        si
+
+        // A scalar constructed from another scalar is that scalar cast to it,
+        // with the same conversion and the same rejections.
+        _convert_scalar(location: LOCATION, value: Value, type: Semantic.Types.Type) -> Value is
+            let caster = IoC.CONTAINER.instance.type_caster
+
+            if !caster.check_cast_is_valid(location, value.type!, type) then
+                return DUMMY(type, location)
+            fi
+
+            return caster.cast_value(location, value, type, false, true)
         si
 
         // A constructor the runtime supplies is a static method. Its type

@@ -332,6 +332,15 @@ let b = 1.0 + cast double(1);    // ok, explicit cast
 let o: object = "hello";         // ok, string is an object
 ```
 
+A scalar type is also a constructor from any other scalar, converting exactly as a cast to it does: `double(n)` is `cast double(n)`, `int(x)` truncates as `cast int(x)` does, and a value out of range wraps the same way. `_(n)` converts to the scalar type the context expects. The source has to be a scalar: `int("42")` is not a parse, and a value held as `object` or a type parameter is converted with `cast`, which unboxes it.
+
+```ghul
+let n = 7;
+let half = double(n) / 2.0;      // 3.5
+let code = int('A');             // 65
+let total: long = _(n);          // 7
+```
+
 The target type can be left out when the surrounding expression already determines it. `cast(v)` converts `v` to whatever type the position it sits in calls for — a typed `let` initializer, an assignment, a `return` or `=>` body, an argument, an operator's other formal, an index, or the callee of a call:
 
 ```ghul

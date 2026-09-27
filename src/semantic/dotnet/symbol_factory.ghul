@@ -473,6 +473,63 @@ namespace Semantic.DotNet is
             inherit_default_trait_members(result, type)
 
             _add_constructor_intrinsics(result, type)
+            _add_scalar_conversions(result, type)
+        si
+
+        // The language's scalar types: the value types it names in
+        // Ghul.Intrinsics, other than bool and void, which convert between
+        // one another with `cast`.
+        _is_scalar(type: TYPE) -> bool =>
+            type.is_value_type /\ !type.is_enum /\ !type.is_generic_type /\
+            type != _bool_type /\ type != _void_type /\
+            (_type_details_lookup.get_type_details_by_dotnet_type(type)?.ghul_namespace =~ "Ghul.Intrinsics")
+
+        _scalar_types() -> Collections.List[TYPE] is
+            let result = LIST[TYPE]()
+
+            if let details = _type_details_lookup.get_all_type_details_in_ghul_namespace("Ghul.Intrinsics") then
+                for detail in details do
+                    if _is_scalar(detail.dotnet_type) then
+                        result.add(detail.dotnet_type)
+                    fi
+                od
+            fi
+
+            return result
+        si
+
+        // A scalar type is constructed from any other scalar, converting the
+        // way `cast` does: `double(n)` is `cast double(n)`. Where .NET
+        // already gives the type a constructor from that source, as decimal
+        // and BigInteger do for the wider numeric types, that constructor
+        // stays and none is added beside it.
+        _add_scalar_conversions(owner: Symbols.Scoped, type: TYPE) is
+            if !_is_scalar(type) then
+                return
+            fi
+
+            let scalars = _scalar_types()
+
+            let location = Source.LOCATION.reflected
+
+            for source in scalars do
+                let existing =
+                    type.get_constructors() |> any(c => c.is_public /\ c.get_parameters().count == 1 /\ c.get_parameters()[0].parameter_type == source)
+
+                if existing then
+                    continue
+                fi
+
+                let result = Symbols.STRUCT_METHOD(location, location, owner, "init", owner)
+
+                result.argument_names = LIST[string](["value"])
+                result.arguments = LIST[Type]([_type_mapper.get_type(source)])
+                result.return_type = _type_mapper.get_type(_void_type)
+                result.is_scalar_conversion = true
+                result.mark_synthesized()
+
+                owner.add_member(result)
+            od
         si
 
         // Copy any concrete (`is_default_trait_method`) method from
