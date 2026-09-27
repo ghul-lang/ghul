@@ -1898,6 +1898,14 @@ let total = scores["alice"];
 
 A map computed from a sequence takes a key and a value function instead, `words |> collect_map(w => w, w => w.length)`, and one that starts empty and is filled later is constructed with no arguments, `MAP()`, its types taken from how it is used.
 
+A sequence is closed off into a collection by constructing the collection from it: `ARRAY(p)`, `LIST(p)` and `SET(p)` take any sequence, and `MAP(p)` a sequence of key and value pairs, throwing on a repeated key as `collect_map` does. The element types come from the sequence, so a constructor can end a `|>` chain, and `_(p)` constructs whichever of them the context expects:
+
+```ghul
+let names = people |> map(p => p.name) |> ARRAY();
+let by_name = MAP(people |> map(p => (p.name, p)));
+let seen: SET[string] = _(names);
+```
+
 The sequence combinators are global functions in `Ghul.Pipes`, each taking the sequence as its first argument, so the thread-first operator `|>` chains them. ghūl provides the usual set, in the manner of LINQ, and none of them mutate the source. They split into lazy stages that return a new sequence — `map`, `filter`, `flat_map`, `skip`, `take`, `cat`, `index`, `zip`, `sort` — and terminals that consume it and produce a value: `reduce`, `sum`, `product`, `collect` / `collect_mutable` / `collect_set` / `collect_map`, `count`, `find`, `find_map`, `first`, `only`, `any`, `all`, `each`, `join`, `append_to`. `collect` produces an array, and `collect_mutable` a `LIST` that can be changed.
 
 ```ghul

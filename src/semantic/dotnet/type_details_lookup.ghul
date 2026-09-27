@@ -34,6 +34,12 @@ namespace Semantic.DotNet is
         // of them - have to answer without walking their type details.
         _namespaces_with_globals_carrier: SET[string]
 
+        // Runtime methods marked as `constructor.` intrinsics, keyed by the
+        // generic definition of the type each returns, and those returning
+        // an array, which the language's own ARRAY type answers for.
+        _constructor_intrinsics: MutableMap[TYPE, MutableList[System.Reflection.MethodInfo]]
+        _array_constructor_intrinsics: MutableList[System.Reflection.MethodInfo]
+
         ghul_namespaces: Iterable[string] => _type_details_by_ghul_namespace.keys
 
         has_globals_carrier(namespace_name: string) -> bool =>
@@ -44,7 +50,41 @@ namespace Semantic.DotNet is
             _type_details_by_ghul_namespace = MAP[string, MutableList[TYPE_DETAILS]]()
             _variants_by_union_full_name = MAP[string, MutableList[TYPE]]()
             _namespaces_with_globals_carrier = SET[string]()
+            _constructor_intrinsics = MAP[TYPE, MutableList[System.Reflection.MethodInfo]]()
+            _array_constructor_intrinsics = LIST[System.Reflection.MethodInfo]()
         si
+
+        register_constructor_intrinsic(method: System.Reflection.MethodInfo) is
+            let result_type = method.return_type
+
+            if result_type.is_array then
+                _array_constructor_intrinsics.add(method)
+                return
+            fi
+
+            let key = if result_type.is_generic_type then result_type.get_generic_type_definition() else result_type fi
+            let list: MutableList[System.Reflection.MethodInfo] mut
+
+            if !_constructor_intrinsics.try_get_value(key, list ref) then
+                list = LIST[System.Reflection.MethodInfo]()
+
+                _constructor_intrinsics.add(key, list)
+            fi
+
+            list.add(method)
+        si
+
+        constructor_intrinsics_for(type: TYPE) -> Iterable[System.Reflection.MethodInfo] is
+            let result: MutableList[System.Reflection.MethodInfo] mut
+
+            if _constructor_intrinsics.try_get_value(type, result ref) then
+                return result
+            fi
+
+            return LIST[System.Reflection.MethodInfo]()
+        si
+
+        array_constructor_intrinsics: Iterable[System.Reflection.MethodInfo] => _array_constructor_intrinsics
 
         register_variant(union_full_name: string, variant_type: TYPE) is
             let list: MutableList[TYPE] mut

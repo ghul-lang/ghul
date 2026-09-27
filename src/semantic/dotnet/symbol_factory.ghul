@@ -470,6 +470,8 @@ namespace Semantic.DotNet is
             fi
 
             inherit_default_trait_members(result, type)
+
+            _add_constructor_intrinsics(result, type)
         si
 
         // Copy any concrete (`is_default_trait_method`) method from
@@ -1085,7 +1087,9 @@ namespace Semantic.DotNet is
 
             let intrinsic_operation = _intrinsic_operation(method.get_custom_attributes_data())
 
-            if intrinsic_operation? then
+            // A constructor intrinsic is an ordinary method: it is reached
+            // as a constructor of the type it returns, and called as itself.
+            if intrinsic_operation? /\ !intrinsic_operation.starts_with("constructor.") then
                 let globals_namespace = if method.is_static then _globals_owner_namespace(owner) else null fi
 
                 if globals_namespace? then
@@ -1728,17 +1732,82 @@ namespace Semantic.DotNet is
         // imported method bearing the marker is reconstructed as an innate
         // function whose calls lower to IL opcodes, matching a source-
         // declared intrinsic.
-        _intrinsic_operation(attributes: Collections.Iterable[System.Reflection.CustomAttributeData]) -> string? is
-            try
-                for attr in attributes do
-                    if attr.attribute_type.full_name =~ "Ghul.Internal.INTRINSIC_ATTRIBUTE" then
-                        for argument in attr.constructor_arguments do
-                            return cast string?(argument.value)
-                        od
+        _intrinsic_operation(attributes: Collections.Iterable[System.Reflection.CustomAttributeData]) -> string? =>
+            INTRINSIC_OPERATION.of(attributes)
+
+        // The constructors the runtime supplies for a type that has none of
+        // its own for the argument, as `init` overloads calling the runtime
+        // method in place of a newobj. Their parameters are the method's,
+        // with its type parameters read as the type's own.
+        _add_constructor_intrinsics(owner: Symbols.Scoped, type: TYPE) is
+            let methods =
+                if _intrinsic_operation(type.get_custom_attributes_data()) =~ "type.array" then
+                    _type_details_lookup.array_constructor_intrinsics
+                else
+                    _type_details_lookup.constructor_intrinsics_for(type)
+                fi
+
+            for method in methods do
+                let target = _find_reflected_function(method)
+
+                if !target? then
+                    continue
+                fi
+
+                let shaped =
+                    if method.is_generic_method_definition /\ type.is_generic_type_definition then
+                        method.make_generic_method(type.get_generic_arguments())
+                    else
+                        method
                     fi
+
+                let location = Source.LOCATION.reflected
+                let result = Symbols.INSTANCE_METHOD(location, location, owner, "init", owner)
+
+                let argument_names = LIST[string]()
+                let argument_types = LIST[Type]()
+
+                for parameter in shaped.get_parameters() do
+                    argument_names.add(parameter.name ?? "")
+                    argument_types.add(_type_mapper.get_type(parameter.parameter_type))
                 od
-            catch ex: System.Exception
-            yrt
+
+                result.argument_names = argument_names
+                result.arguments = argument_types
+                result.return_type = _type_mapper.get_type(_void_type)
+                result.constructor_target = target
+                result.mark_synthesized()
+
+                owner.add_member(result)
+            od
+        si
+
+        _find_reflected_function(method: System.Reflection.MethodInfo) -> Symbols.Function? is
+            let carrier_type = method.declaring_type
+
+            if !carrier_type? then
+                return null
+            fi
+
+            let carrier = cast Symbols.Scoped?(_symbol_table.get_symbol(carrier_type))
+
+            if !carrier? then
+                return null
+            fi
+
+            let group = cast Symbols.FUNCTION_GROUP?(carrier.find_direct(method.name))
+
+            if !group? then
+                return null
+            fi
+
+            let parameter_count = method.get_parameters().count
+
+            for function in group.functions do
+                if function.arguments.count == parameter_count then
+                    return function
+                fi
+            od
 
             return null
         si
