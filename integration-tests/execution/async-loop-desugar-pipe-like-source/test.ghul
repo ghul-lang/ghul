@@ -1,14 +1,11 @@
 namespace Test is
     use Std = IO.Std;
 
-    // A Pipe-like type that implements BOTH Iterable[int] AND
-    // Iterator[int]. A `for` loop over a value of such a type
-    // should iterate via the Iterator face directly rather than
-    // call `.iterator` (which would return a fresh enumerator
-    // and lose iteration state). To prove the preference, this
-    // type's `iterator` returns a *decoy* that yields a single
-    // sentinel value; a wrong-path implementation would surface
-    // that sentinel.
+    // A type that implements both Iterable[int] and Iterator[int].
+    // A `for` loop over a value of such a type reads it through the
+    // iterator it hands out, as every read of a pipe does. To show
+    // which face is used, this type's `iterator` returns a separate
+    // iterator yielding a single marker value.
     class PIPE_LIKE: Collections.Iterable[int], Collections.Iterator[int] is
         _values: Collections.List[int];
         _index: int;
@@ -27,13 +24,12 @@ namespace Test is
         reset() is _index = -1; si
         dispose() is si
 
-        // Iterable[int] member — deliberately returns a "wrong"
-        // iterator to prove the lowering uses the Iterator path
-        // and never calls .iterator.
-        iterator: Collections.Iterator[int] => DECOY_ITERATOR();
+        // Iterable[int] member: an iterator of its own, which the
+        // loop reads.
+        iterator: Collections.Iterator[int] => MARKER_ITERATOR();
     si
 
-    class DECOY_ITERATOR: Collections.Iterator[int] is
+    class MARKER_ITERATOR: Collections.Iterator[int] is
         _delivered: bool;
         init() is _delivered = false; si
         current: int => 99;
@@ -52,10 +48,9 @@ namespace Test is
                 (t: Tasks.TASK) -> int => x * 2
             );
 
-        // `pipe` is statically typed as PIPE_LIKE — both Iterable[int]
-        // and Iterator[int]. The for-loop must iterate it through the
-        // Iterator face (the real values), not call `.iterator` (the
-        // decoy's single 99).
+        // `pipe` is statically typed as PIPE_LIKE - both Iterable[int]
+        // and Iterator[int]. The for-loop asks it for `.iterator` and
+        // reads the single 99 that yields.
         sum_pipe(pipe: PIPE_LIKE) -> Tasks.TASK[int] static is
             let total mut = 0;
             for x in pipe do
@@ -69,9 +64,8 @@ namespace Test is
             let values: Collections.List[int] = [10, 20, 30];
             let pipe = PIPE_LIKE(values);
             let result = sum_pipe(pipe).result;
-            // If lowering correctly picks Iterator: 10*2+20*2+30*2 = 120.
-            // If it wrongly picks Iterable (calling .iterator on pipe):
-            //   the decoy yields just 99, so 99*2 = 198.
+            // Read through `.iterator`: 99 * 2 = 198. Driven through its
+            // own Iterator face it would be 10*2 + 20*2 + 30*2 = 120.
             Std.write_line("result={result}");
         si
     si

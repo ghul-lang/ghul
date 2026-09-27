@@ -35,7 +35,7 @@ namespace Syntax.Process is
             let frame = state_machine.frame
 
             if !frame? then
-                _logger.error(function.location, "generator must return Pipe[T]")
+                _logger.error(function.location, "generator must return Iterable[T], Iterator[T] or Pipe[T]")
 
                 return true
             fi
@@ -125,27 +125,23 @@ namespace Syntax.Process is
             let prev_yield_return = _current_generator_yield_return_label
             _current_generator_yield_return_label = null
 
-            // A frame whose previous pass ran out is put back as
-            // constructed here, on the next MoveNext, rather than where
-            // the stream ended: a bare `return` can sit under a `try`
-            // whose finally still reads the locals, so the end paths only
-            // mark the frame done and the rewind waits for the next pull.
+            // A frame whose stream has ended stays ended: a read that wants
+            // to start over takes a fresh frame from GetEnumerator.
             let int_type = _innate_symbol_lookup.get_int_type()
             let brancher = get_brancher_for_block()
             let not_done = LABEL()
 
             brancher.branch(BRANCH.NE, cast Value(Values.Load.TEMP(".gen_state", int_type)), cast Value(Literal.NUMBER(-1, int_type)), not_done)
-            add(_build_frame_rewind(frame))
+            add(Values.INSTRUCTION(ILOpCode.LDC_I4_0))
+            add(Values.RET())
             brancher.label(not_done)
 
             // The body, emitted into current_block, which is MoveNext's
             // block: each yield appends its suspend here.
             emit_body()
 
-            // Fell-off-end trailer: mark done, return false. The next
-            // MoveNext rewinds the frame and starts the body over, as any
-            // pipe does once it has run out. Plain `ret` since we're at the
-            // MoveNext outer scope (no open `.try`).
+            // Fell-off-end trailer: mark done, return false. Plain `ret`
+            // since we're at the MoveNext outer scope (no open `.try`).
             add(_build_frame_field_store(
                 frame, frame.state_field, Values.INSTRUCTION(ILOpCode.LDC_I4_M1)))
             add(Values.INSTRUCTION(ILOpCode.LDC_I4_0))
@@ -342,41 +338,6 @@ namespace Syntax.Process is
             state_machine.uninstall_body_emission_overrides()
         si
 
-        // The IL that puts a frame back as constructed: the state to its
-        // initial value, each argument field restored from its pristine
-        // twin (the body may have written the working copy - a parameter
-        // is just a local to it), and every hoisted field back to its
-        // default, so a body that re-runs from the top behaves exactly as
-        // a freshly constructed one would. Re-entering at state 0 re-runs
-        // initializers for locals it re-declares; a deferred-init local
-        // without one reads the default here rather than a stale value
-        // from the previous pass. Emitted as the Reset member, and at the
-        // top of MoveNext for a frame whose previous pass ran out, since a
-        // pipe starts over once it has run out.
-        _build_frame_rewind(frame: Semantic.Symbols.STATE_MACHINE_FRAME) -> Values.BLOCK is
-            let block = Values.BLOCK()
-
-            block.add(_build_frame_field_store(
-                frame, frame.state_field, Values.INSTRUCTION(ILOpCode.LDC_I4_0)))
-
-            let initial_fields = frame.argument_initial_fields
-            let index mut = 0
-
-            for arg_field in frame.argument_fields do
-                block.add(_build_frame_field_store(
-                    frame, arg_field, _build_frame_field_load(frame, initial_fields[index])))
-
-                index = index + 1
-            od
-
-            for local_field in frame.local_fields do
-                block.add(_build_frame_field_store(
-                    frame, local_field, Values.DEFAULT(local_field.type!)))
-            od
-
-            return block
-        si
-
         // A frame member the lowering synthesises, encoded into a body
         // of its own and deposited against the (frame, member) key the
         // structure walk reads when it writes the row. There is no
@@ -439,9 +400,9 @@ namespace Syntax.Process is
             od
 
             // Copy each freshly stored argument into its pristine twin,
-            // so the emitted Reset can put the working fields back to
-            // what the generator was constructed with after the body
-            // has written them.
+            // so a fresh frame can be constructed from what this one was
+            // constructed with after the body has written the working
+            // fields.
             let index mut = 0
 
             for arg_field in frame.argument_fields do
@@ -452,6 +413,10 @@ namespace Syntax.Process is
 
                 index = index + 1
             od
+
+            body.ldarg(0)
+            body.call(_context.resolve_current_managed_thread_id())
+            body.stfld(_context.resolve_field_target(frame.thread_field))
 
             body.ret()
 
@@ -465,8 +430,8 @@ namespace Syntax.Process is
         // The iterator surface every consumer reaches a frame through.
         // Each body is fixed and small, so they are built here rather
         // than walked: get_Current reads the current field,
-        // GetEnumerator returns self, Dispose does nothing, Reset zeroes
-        // the state, and ToString joins the pipe.
+        // GetEnumerator returns the frame itself or a fresh one, Dispose
+        // and Reset do nothing, and ToString joins the pipe.
         _gen_state_machine_accessors_srm(frame: Semantic.Symbols.STATE_MACHINE_FRAME) is
             let assembly_emitter = _context.srm_assembly_emitter
             let handles = assembly_emitter.handles
@@ -481,10 +446,42 @@ namespace Syntax.Process is
                 IR.Emitter.FrameMember.GET_CURRENT,
                 get_current.flush(assembly_emitter))
 
-            // GetEnumerator — the frame implements Iterator[T] itself,
-            // so it is its own enumerator.
+            // GetEnumerator — the frame implements Iterator[T] itself, so
+            // the first read from the thread that made it is the frame.
+            // Every other read is a fresh frame, constructed from the
+            // arguments this one was, so each read starts from the
+            // beginning and reads in progress at once are independent.
             let get_enumerator = IR.Emitter.SRM_METHOD_BODY_EMITTER()
+            let fresh = IR.LABEL()
+
             get_enumerator.ldarg(0)
+            get_enumerator.ldfld(_context.resolve_field_target(frame.claimed_field))
+            get_enumerator.branch(ILOpCode.BRTRUE, fresh)
+
+            get_enumerator.call(_context.resolve_current_managed_thread_id())
+            get_enumerator.ldarg(0)
+            get_enumerator.ldfld(_context.resolve_field_target(frame.thread_field))
+            get_enumerator.branch(ILOpCode.BNE_UN, fresh)
+
+            get_enumerator.ldarg(0)
+            get_enumerator.op(ILOpCode.LDC_I4_1)
+            get_enumerator.stfld(_context.resolve_field_target(frame.claimed_field))
+            get_enumerator.ldarg(0)
+            get_enumerator.ret()
+
+            get_enumerator.mark_label(fresh)
+
+            if let outer_self_field = frame.outer_self_field then
+                get_enumerator.ldarg(0)
+                get_enumerator.ldfld(_context.resolve_field_target(outer_self_field))
+            fi
+
+            for initial_field in frame.argument_initial_fields do
+                get_enumerator.ldarg(0)
+                get_enumerator.ldfld(_context.resolve_field_target(initial_field))
+            od
+
+            get_enumerator.new_object(_context.resolve_call_target(frame.constructor))
             get_enumerator.ret()
             handles.set_frame_member_body(
                 frame,
@@ -498,10 +495,12 @@ namespace Syntax.Process is
             handles.set_frame_member_body(
                 frame, IR.Emitter.FrameMember.DISPOSE, dispose.flush(assembly_emitter))
 
-            // Reset — rewind to a freshly constructed frame, then return.
-            let reset = _build_frame_rewind(frame)
-            reset.add(Values.RET())
-            _emit_frame_member_body_srm(frame, IR.Emitter.FrameMember.RESET, reset)
+            // Reset — a no-op: a read that wants to start over takes a
+            // fresh frame from GetEnumerator.
+            let reset = IR.Emitter.SRM_METHOD_BODY_EMITTER()
+            reset.ret()
+            handles.set_frame_member_body(
+                frame, IR.Emitter.FrameMember.RESET, reset.flush(assembly_emitter))
 
             // ToString — a generator is a Pipe[T], so stringify it the
             // way every other Pipe does. The trait's default is a

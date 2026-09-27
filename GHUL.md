@@ -1533,7 +1533,7 @@ for (key, value) in dictionary do
 od
 ```
 
-Every loop supports `break` to exit and `continue` to skip to the next iteration. A loop disposes nothing it iterated: for a sequence holding a resource, see [collections and pipes](#collections-and-pipes). The range operators work in any expression: `..` is inclusive of its start and exclusive of its end (`0..3` is 0, 1, 2), and `::` is inclusive of both (`1::5` is 1 through 5). The from-the-end forms (`..<`, `::<`, `..<<`, `::<<`) are for indexing rather than iteration — see [arrays](#types-and-literals).
+A value that is a sequence and its own iterator as well, as a generator is, is read through the iterator it hands out, so each loop over it starts from its beginning; a struct iterator such as a range is read directly. Every loop supports `break` to exit and `continue` to skip to the next iteration. A loop disposes nothing it iterated: for a sequence holding a resource, see [collections and pipes](#collections-and-pipes). The range operators work in any expression: `..` is inclusive of its start and exclusive of its end (`0..3` is 0, 1, 2), and `::` is inclusive of both (`1::5` is 1 through 5). The from-the-end forms (`..<`, `::<`, `..<<`, `::<<`) are for indexing rather than iteration — see [arrays](#types-and-literals).
 
 Any loop (`for`, `while`, `do`) can be labelled by prefixing it with an identifier and a colon, and `break` and `continue` can then name the loop they act on, letting an inner loop exit or advance an outer one:
 
@@ -1844,10 +1844,10 @@ An asynchronous function whose return type carries no result - `Tasks.TASK`, or 
 
 ### generators
 
-A function that returns `Ghul.Pipes.Pipe[T]` and contains `yield` is a *generator*: each `yield` hands the next element to the consumer and suspends, resuming where it left off when another element is asked for. The elements are produced lazily, so a generator can be unbounded.
+A function that returns `T{}` — an `Iterable[T]` — and contains `yield` is a *generator*: each `yield` hands the next element to the consumer and suspends, resuming where it left off when another element is asked for. The elements are produced lazily, so a generator can be unbounded.
 
 ```ghul
-counting(limit: int) -> Ghul.Pipes.Pipe[int] is
+counting(limit: int) -> int{} is
     let i mut = 0;
     while i < limit do
         yield i;
@@ -1862,12 +1862,12 @@ od
 let evens = counting(6) |> filter(x => x % 2 == 0);
 ```
 
-The result is an ordinary `Pipe[T]`, so the pipe combinators chain onto it with `|>`, and it behaves as any pipe does: read part way it carries on, and once it has run out it rewinds itself - restoring the arguments the generator was called with - so the next read starts it over.
+The pipe combinators chain onto the result with `|>`. Each read of it starts the body from the beginning, with the arguments the generator was called with, and two reads in progress at once are independent: the first read from the thread that called the generator runs it in place, and any other read runs a fresh copy.
 
 `yield in E` yields every element of `E` in turn, where `E` is anything a `for` loop can iterate — a pipe, an array, a list, an iterator. The elements are pulled one at a time as the consumer asks for them, exactly as writing the loop out by hand would, which is what makes it the natural shape for a recursive generator:
 
 ```ghul
-preorder[T](tree: Tree[T]) -> Ghul.Pipes.Pipe[T] is
+preorder[T](tree: Tree[T]) -> T{} is
     if let (value, left, right): Tree.NODE = tree then
         yield value;
         yield in preorder(left);
@@ -1880,7 +1880,7 @@ si
 
 A bare `return` ends the stream early, exactly as falling off the end of the body does. It carries no value: the declared `Pipe[T]` describes the stream the generator produces, not something a `return` inside it hands back.
 
-A function literal whose body contains `yield` is a generator too. It captures the variables around it as any literal does, so a `let` is read as it stood when the literal was constructed and a `let mut` is shared, and a pipe it returns re-runs the body, reading them again, each time it rewinds. Its element type comes from its declared return type, or from the slot it is written into when that expects a `Pipe[T]`, `Iterable[T]` or `Iterator[T]`, or otherwise from its first `yield`; one that no `yield` settles is an error. A nested named function that yields is a generator literal as well, and reaches itself by name for `yield in`:
+A function literal whose body contains `yield` is a generator too. It captures the variables around it as any literal does, so a `let` is read as it stood when the literal was constructed and a `let mut` is shared, and each read of what it returns runs the body again, reading them again. Its element type comes from its declared return type, or from the slot it is written into when that expects a `Pipe[T]`, `Iterable[T]` or `Iterator[T]`, or otherwise from its first `yield`; one that no `yield` settles is an error. A nested named function that yields is a generator literal as well, and reaches itself by name for `yield in`:
 
 ```ghul
 let evens = (limit: int) is
@@ -1901,7 +1901,7 @@ walk(t: Tree) -> Pipe[int] is
 si
 ```
 
-A generator's return type has to be `Pipe[T]` — `yield` in a function declared otherwise is an error. A function cannot be both a generator and asynchronous. And as with `await`, `yield` is not yet supported inside a `catch` or `finally` handler.
+A generator's return type has to be `T{}`, `Iterator[T]` or `Ghul.Pipes.Pipe[T]` — `yield` in a function declared otherwise is an error. One returning an `Iterator[T]` is read once: the iterator it returns is the one read. A function cannot be both a generator and asynchronous. And as with `await`, `yield` is not yet supported inside a `catch` or `finally` handler.
 
 ## collections and pipes
 
@@ -1944,7 +1944,7 @@ or `1` rather than an absent value, which is where the two differ from `min` and
 `max`: those answer with a `MAYBE[T]`, since there is no least element of
 nothing.
 
-A pipe is a cursor over its source. Read part way and then read again — by the same consumer or another, through `for`, a combinator, a terminal or interpolation — it carries on from wherever the last read stopped; nothing distinguishes those cases. Once it has run out it rewinds itself, so the next read starts from the beginning: `for x in p` twice sees every element twice, and `p |> count()` followed by `p |> only()` walks the whole sequence both times. A stage reaching its own end counts as the end of everything below it, so `p |> take(2)` yields the first two elements every time it is read, and `skip` is how to page. The rewind is in place, so every holder of the pipe sees it start over. `p.reset()` rewinds early. Nothing disposes on its own: `p.dispose()` on a combinator chain releases every iterator its stages hold, file readers included, while a generator's `dispose()` releases nothing - it does not run the body's `finally` clauses or dispose an iterator the body is walking with `yield in`. `memo` is the one stage whose rewind never asks its source again — it replays what it cached.
+Every read of a pipe starts from the beginning, and two reads in progress at once are independent. That holds however it is read — through `for`, a combinator, a terminal or interpolation — so `for x in p` twice sees every element twice, a read that stops part way leaves nothing behind for the next, and `p |> count()` followed by `p |> only()` walks the whole sequence both times. `p |> take(2)` yields the first two elements every time it is read, and `skip` is how to page. The combinators return `T{}`, and each read of what they return reads its source afresh in turn. A terminal that stops before the end, such as `first` or `find`, disposes the iterator it read, as .NET's own LINQ operators do; a `for` loop does not (below). A generator's `dispose()` releases nothing - it does not run the body's `finally` clauses or dispose an iterator the body is walking with `yield in`. `memo` reads its source once, and every read of it replays what it cached, asking the source for more only past the end of the cache.
 
 A `for` loop does not dispose what it iterated, so a sequence that holds a resource is disposed by naming its iterator and letting `let use` close it. That covers the few that hold one: file and directory enumeration, a database reader, a PLINQ query, and a .NET iterator written with a `using`. It matters where the loop can be left early, since the iterator is then still open.
 
@@ -2061,7 +2061,7 @@ A string or character is quoted only inside a value, and only by `inspect`: at t
 - a class, struct or union variant ghūl compiled, with no `to_string` of its own, as its type and members: `POINT(x = 3, y = 4)`, `Shape.DOT(size = 2)`
 - a value of a type from another language, with no `to_string` of its own, as its .NET type name. Its members are not read, since a property getter can do anything - a task's result waits for the task
 
-A sequence stops after 100 elements with `, ...]`, so an unbounded pipe is written too; a pipe left part way through by that is rewound, as reading it to the end would have left it. A value that contains itself reads `<cycle>` where it recurs, and the same value in two places is written in full both times.
+A sequence stops after 100 elements with `, ...]`, so an unbounded pipe is written too; stopping there leaves nothing behind for the next read of the value. A value that contains itself reads `<cycle>` where it recurs, and the same value in two places is written in full both times.
 
 A type chooses how it is displayed by implementing `Ghul.Displayable`, whose one method writes the value through a `Ghul.DISPLAY_STATE`. Write a child value with `state.render(child)` rather than with `$(child)`: the state carries the element limit and the values already being written, which a fresh call to `$` starts without. `state.mode` says whether the text is for `$`, `DisplayMode.CLEAN`, or for `inspect`, `DisplayMode.DETAILED`:
 

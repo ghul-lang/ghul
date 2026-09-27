@@ -145,6 +145,8 @@ namespace Semantic.Symbols is
         // declare() for static and global generators.
         _state_field: Field?
         _current_field: Field?
+        _claimed_field: Field?
+        _thread_field: Field?
 
         element_type: Type => _element_type!
 
@@ -157,6 +159,12 @@ namespace Semantic.Symbols is
         // Non-null once declare() has run.
         state_field: Field => _state_field!
         current_field: Field => _current_field!
+
+        // Whether the frame has already been handed out as its own
+        // enumerator, and the thread that made it: the first read from that
+        // thread is the frame itself, and every other read a fresh frame.
+        claimed_field: Field => _claimed_field!
+        thread_field: Field => _thread_field!
 
         next_id: int static is
             let result = _next_id
@@ -231,6 +239,16 @@ namespace Semantic.Symbols is
             current_field.set_type(_class_relative(_element_type!))
             declare(LOCATION.internal, current_field, listener)
             _current_field = current_field
+
+            let claimed_field = Symbols.INSTANCE_FIELD(LOCATION.internal, self, "$claimed")
+            claimed_field.set_type(IoC.CONTAINER.instance.innate_symbol_lookup.get_bool_type())
+            declare(LOCATION.internal, claimed_field, listener)
+            _claimed_field = claimed_field
+
+            let thread_field = Symbols.INSTANCE_FIELD(LOCATION.internal, self, "$thread")
+            thread_field.set_type(int_type)
+            declare(LOCATION.internal, thread_field, listener)
+            _thread_field = thread_field
 
             let ctor_argument_names = Collections.LIST[string]()
             let ctor_argument_types = Collections.LIST[Type]()
@@ -365,8 +383,9 @@ namespace Semantic.Symbols is
         si
     si
 
-    // The element type a generator produces: T from its Pipe[T] return
-    // type, or null when the return type is not one.
+    // The element type a generator produces: T from its Pipe[T],
+    // Iterable[T] or Iterator[T] return type, or null when the return
+    // type is none of those.
     generator_element_type(function: Function) -> Type? is
         let return_type = function.return_type
 
@@ -376,16 +395,14 @@ namespace Semantic.Symbols is
 
         let lookup = IoC.CONTAINER.instance.innate_symbol_lookup
 
-        // A generator returns Pipe[T]; extract T from the Pipe
-        // itself (self-match), not from its Iterable[T] base - the
-        // base carries Pipe's own type parameter, not the concrete
-        // element type the return is constructed over. When Pipe is
-        // unavailable (no runtime referenced) fall back to the bare
-        // Iterable[T] / Iterator[T] forms.
-        let pipe = lookup.get_unspecialized_pipe_type()
-
-        if pipe? then
-            return TYPE_ARGUMENT_EXTRACTOR.extract(return_type, pipe)
+        // A Pipe[T] return, or a trait extending one, is matched against
+        // Pipe first: its Iterable[T] base carries Pipe's own type
+        // parameter rather than the element type the return is
+        // constructed over.
+        if let pipe = lookup.get_unspecialized_pipe_type() then
+            if let element = TYPE_ARGUMENT_EXTRACTOR.extract(return_type, pipe) then
+                return element
+            fi
         fi
 
         let candidates = Collections.LIST[Type]()

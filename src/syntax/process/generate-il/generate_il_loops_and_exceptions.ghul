@@ -720,14 +720,7 @@ namespace Syntax.Process is
 
             _setup_fused_stages(fusion, stage_delegates, stage_counters)
 
-            // A spent take leaves the loop with the cursor part way
-            // through, so it lands on its own label to rewind it before
-            // falling into the loop exit. Nothing else needs it: an
-            // exhausted source has already rewound itself, and a `break`
-            // in the body abandons the chain exactly as the unfused
-            // lowering does.
-            let pipe_reset = fusion.pipe_reset
-            let take_exit = if pipe_reset? then LABEL() else loop.end fi
+            let take_exit = loop.end
 
             brancher.label(loop.start)
 
@@ -758,20 +751,6 @@ namespace Syntax.Process is
             body.walk(self)
 
             brancher.branch(loop.start)
-
-            // Rewinding asks the cursor at run time whether it is a
-            // `Pipe[E]`, exactly as a stage pipe's own rewind does: one is
-            // reset in place so every holder sees it start over, and
-            // anything else is left where it stopped.
-            if let reset = pipe_reset, pipe_type = fusion.pipe_type then
-                brancher.label(take_exit)
-
-                let as_pipe = TEMP(current_block, "fused_pipe", cast Value(CAST(pipe_type, temp.load(), false)))
-
-                brancher.branch(BRANCH.Z, as_pipe.load(), loop.end)
-
-                add(reset.call(source.location, as_pipe.load(), Collections.LIST[Value](0), null, _function_caller))
-            fi
 
             brancher.label(loop.end)
 
