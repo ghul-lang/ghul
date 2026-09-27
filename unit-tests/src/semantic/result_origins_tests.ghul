@@ -1,0 +1,123 @@
+namespace Semantic.UnitTests is
+    use Collections.LIST
+
+    use Source.LOCATION
+
+    use Logging.DIAGNOSTICS_STORE
+
+    use Semantic.Symbols.INFERRED_RESULT_ORIGIN
+    use Semantic.Symbols.LOCAL_VARIABLE
+    use Semantic.Types.INFERRED_VARIABLE_TYPE
+    use TestClass = Microsoft.VisualStudio.TestTools.UnitTesting.TestClassAttribute
+    use Test = Microsoft.VisualStudio.TestTools.UnitTesting.TestMethodAttribute
+    use Assertions
+
+    // RESULT_ORIGINS gives an expression the same origin on every walk of
+    // the body being compiled, so the bounds one walk records are there
+    // for the next; RESULT_ORIGIN_OFFER bounds such an origin from the
+    // settled formal it is passed to.
+    @TestClass()
+    class RESULT_ORIGINS_TESTS is
+        init() is
+            if !IoC.CONTAINER.instance.local_id_generator? then
+                IoC.CONTAINER.instance.local_id_generator = IR.LOCAL_ID_GENERATOR()
+            fi
+
+            IoC.CONTAINER.instance.local_id_generator.enter_function()
+        si
+
+        loc() -> LOCATION => LOCATION("test.ghul", 1, 1, 1, 1)
+
+        object_type() -> Semantic.Types.Type is
+            let c = Semantic.Symbols.CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "object", LIST[string](), Semantic.BLOCK_SCOPE())
+            c.mark_is_object()
+            return c.type!
+        si
+
+        @Test()
+        Calling__origin_for__twice_for_one_node__should_return_the_same_origin() is
+            let node = object()
+
+            RESULT_ORIGINS.begin_body()
+
+            let first = RESULT_ORIGINS.origin_for(node, loc(), Semantic.BLOCK_SCOPE(), "$first")
+            let second = RESULT_ORIGINS.origin_for(node, loc(), Semantic.BLOCK_SCOPE(), "$second")
+
+            RESULT_ORIGINS.end_body()
+
+            is_not_null(first)
+            are_same(first, second)
+        si
+
+        @Test()
+        Calling__origin_for__for_two_nodes__should_return_two_origins() is
+            RESULT_ORIGINS.begin_body()
+
+            let first = RESULT_ORIGINS.origin_for(object(), loc(), Semantic.BLOCK_SCOPE(), "$a")
+            let second = RESULT_ORIGINS.origin_for(object(), loc(), Semantic.BLOCK_SCOPE(), "$b")
+
+            RESULT_ORIGINS.end_body()
+
+            are_not_same(first, second)
+        si
+
+        @Test()
+        Calling__origin_for__outside_any_body__should_return_null() is
+            is_null(RESULT_ORIGINS.origin_for(object(), loc(), Semantic.BLOCK_SCOPE(), "$none"))
+        si
+
+        // A body compiled again starts from nothing: what an earlier
+        // compile of it bounded is not carried over.
+        @Test()
+        Calling__origin_for__in_a_later_body__should_return_a_fresh_origin() is
+            let node = object()
+
+            RESULT_ORIGINS.begin_body()
+            let first = RESULT_ORIGINS.origin_for(node, loc(), Semantic.BLOCK_SCOPE(), "$a")
+            RESULT_ORIGINS.end_body()
+
+            RESULT_ORIGINS.begin_body()
+            let second = RESULT_ORIGINS.origin_for(node, loc(), Semantic.BLOCK_SCOPE(), "$a")
+            RESULT_ORIGINS.end_body()
+
+            are_not_same(first, second)
+        si
+
+        @Test()
+        Calling__offer__with_a_result_placeholder_actual__should_bound_its_origin() is
+            IoC.CONTAINER.instance.logger = DIAGNOSTICS_STORE()
+
+            let origin = INFERRED_RESULT_ORIGIN(loc(), Semantic.BLOCK_SCOPE(), "$[]")
+            let formal = object_type()
+
+            RESULT_ORIGIN_OFFER.offer(formal, INFERRED_VARIABLE_TYPE(origin))
+
+            are_same(formal, origin.try_get_inferred_type())
+        si
+
+        // A local's type is its initializer's and its assignments'; a call
+        // it is passed to only checks that type.
+        @Test()
+        Calling__offer__with_a_local_placeholder_actual__should_not_bound_the_local() is
+            IoC.CONTAINER.instance.logger = DIAGNOSTICS_STORE()
+
+            let local = LOCAL_VARIABLE(loc(), Semantic.BLOCK_SCOPE(), "a")
+
+            RESULT_ORIGIN_OFFER.offer(object_type(), INFERRED_VARIABLE_TYPE(local))
+
+            is_null(local.try_get_inferred_type())
+        si
+
+        @Test()
+        Calling__offer__with_an_unsettled_formal__should_not_bound_the_origin() is
+            IoC.CONTAINER.instance.logger = DIAGNOSTICS_STORE()
+
+            let origin = INFERRED_RESULT_ORIGIN(loc(), Semantic.BLOCK_SCOPE(), "$[]")
+            let other = INFERRED_RESULT_ORIGIN(loc(), Semantic.BLOCK_SCOPE(), "$other")
+
+            RESULT_ORIGIN_OFFER.offer(INFERRED_VARIABLE_TYPE(other), INFERRED_VARIABLE_TYPE(origin))
+
+            is_null(origin.try_get_inferred_type())
+        si
+    si
+si

@@ -581,8 +581,6 @@ namespace Syntax.Process is
 
             let arm_join = Semantic.EXPECTED_ARM_JOIN(expected_type)
 
-            let empty_literal_arms = Collections.LIST[Trees.Statements.LIST]()
-
             for i in `if.branches do
                 let branch = i.body
 
@@ -626,8 +624,6 @@ namespace Syntax.Process is
                     _match_propagator.propagate_match(expected_type, value.type!)
 
                     arm_join.add(value.type!)
-                elif CONTEXTLESS_EMPTY_LITERAL.is_arm(branch) then
-                    empty_literal_arms.add(branch)
                 elif value.type!.is_null then
                     // could also be error
                     seen_null_values = true
@@ -647,11 +643,6 @@ namespace Syntax.Process is
 
                 seen_any_values = true
             od
-
-            if _settle_empty_literal_arms(empty_literal_arms, lub, seen_non_null_values) then
-                seen_non_null_values = true
-                all_tuple_literals = false
-            fi
 
             // A missing unconditional else makes the construct refutable:
             // it yields an optional of its completing arms' LUB, absent
@@ -757,39 +748,6 @@ namespace Syntax.Process is
             else
                 `if.compile_expressions_state.value = IR.Values.BLOCK(type)
             fi
-        si
-
-        // Arms that are an empty list literal with nothing to say what
-        // it holds have stayed out of the join. Where the other arms
-        // join to an array, each is walked again at that type; otherwise
-        // they join as they are. Answers whether any arm was added.
-        _settle_empty_literal_arms(
-            arms: Collections.List[Trees.Statements.LIST],
-            lub: LEAST_UPPER_BOUND_MAP,
-            seen_sibling: bool
-        ) -> bool is
-            if arms.count == 0 then
-                return false
-            fi
-
-            let sibling_type: Type? = if seen_sibling then lub.get_result() else null fi
-
-            if sibling_type? /\ isa Semantic.Types.ARRAY(sibling_type) /\ !sibling_type.contains_inferred then
-                let use retry_site = RETRY_SITE_STATS.enter("conditionals.empty_literal_arm_rewalk", RetrySiteKind.REWALK_WITH_INFORMATION)
-
-                for arm in arms do
-                    arm.set_expected_type(sibling_type, "arm type {{0}} not compatible with type {{1}} of the other arms")
-                    _visitor.rewalk(arm)
-                od
-            fi
-
-            for arm in arms do
-                if let arm.value? /\ value.type? then
-                    lub.add(value.type)
-                fi
-            od
-
-            return true
         si
 
         // Undo the value request an arm was walked under, once the
@@ -1242,8 +1200,6 @@ namespace Syntax.Process is
 
             let lub = LEAST_UPPER_BOUND_MAP()
 
-            let empty_literal_arms = Collections.LIST[Trees.Statements.LIST]()
-
             for m in `case.matches do
                 let body = m.statements
 
@@ -1273,8 +1229,6 @@ namespace Syntax.Process is
                         let use qualified = IoC.CONTAINER.instance.name_display.qualifying_alike(value.type, type)
                         _logger.error(body.location, string.format(`case.expected_type_error_message!, value.type, type))
                     fi
-                elif CONTEXTLESS_EMPTY_LITERAL.is_arm(body) then
-                    empty_literal_arms.add(body)
                 elif value.type!.is_null then
                     seen_null_values = true
 
@@ -1289,10 +1243,6 @@ namespace Syntax.Process is
 
                 seen_any_values = true
             od
-
-            if _settle_empty_literal_arms(empty_literal_arms, lub, seen_non_null_values) then
-                seen_non_null_values = true
-            fi
 
             if !expected_type? then
                 type = lub.get_result()
