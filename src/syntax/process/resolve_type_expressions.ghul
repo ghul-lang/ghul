@@ -648,6 +648,42 @@ namespace Syntax.Process is
                     get_type_or_any(array.element.type))
         si
 
+        // `T{}` is a spelling of Collections.Iterable[T] rather than a
+        // type of its own, so it resolves to the same instantiation the
+        // written-out form does and neither is preferred anywhere.
+        visit(iterable: Trees.TypeExpressions.ITERABLE) is
+            let element = get_type_or_any(iterable.element.type)
+
+            if element.is_error then
+                iterable.type = element
+
+                return
+            fi
+
+            let unspecialized = _innate_symbol_lookup.get_unspecialized_iterable_type()
+
+            // Specializing the unspecialized type is what the written-out
+            // `Collections.Iterable[T]` resolves to as well. Building a
+            // GENERIC from its symbol instead gives a type that prints the
+            // same and does not unify with it.
+            if let classy: Semantic.Symbols.Classy = unspecialized.symbol /\
+                    classy.argument_names.count == 1 then
+                let parameter = classy.find_direct(classy.argument_names[0])
+
+                if parameter? then
+                    let map = Collections.MAP[Semantic.Symbols.Symbol, Semantic.Types.Type]()
+
+                    map[parameter] = element
+
+                    iterable.type = unspecialized.specialize(map)
+                else
+                    iterable.type = Semantic.Types.ERROR()
+                fi
+            else
+                iterable.type = Semantic.Types.ERROR()
+            fi
+        si
+
         visit(pointer: Trees.TypeExpressions.POINTER) is
             pointer.type =
                 _innate_symbol_lookup.get_pointer_type(
