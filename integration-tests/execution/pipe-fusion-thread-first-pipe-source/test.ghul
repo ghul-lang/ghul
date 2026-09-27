@@ -5,11 +5,10 @@ namespace Test is
     use Ghul.Pipes;
 
     // A thread-first chain is routinely written straight off a generator
-    // or a stream, so it fuses over a Pipe source like any other. Driving
-    // that source's own cursor brings an obligation with it: a take stage
-    // running out leaves the loop part way through the source, where the
-    // unfused lowering would have reset it, so the fused loop resets it at
-    // the same point. Reading the source afterwards starts again.
+    // or a stream, so it fuses over a Pipe source like any other. The loop
+    // reads the source through an iterator it asks for, so however the
+    // read ends - a take running out, a consumer stopping at its first
+    // hit, the source running out - the next read starts again.
 
     class Main is
         entry() static is
@@ -33,8 +32,8 @@ namespace Test is
             Std.write_line("adaptor: {$(collect_mutable(adapted |> take(2)))}");
             Std.write_line("after: {adapted |> first()}");
 
-            // No take stage: the source runs out and resets itself, so the
-            // second pass sees the same elements as the first.
+            // No take stage: the source runs out, and the second read sees
+            // the same elements as the first.
             let finite =
                 stream(
                     1,
@@ -45,16 +44,15 @@ namespace Test is
             Std.write_line("exhausted: {$(collect_mutable(finite |> map(v => v * 2)))}");
             Std.write_line("again: {$(collect_mutable(finite |> map(v => v * 2)))}");
 
-            // A consumer that stops at its first hit abandons the chain,
-            // which is what the unfused lowering does too - the source is
-            // left where the consumer stopped reading it.
+            // A consumer that stops at its first hit leaves nothing behind
+            // for the next read, which starts from the beginning.
             let searched = stream(1, (n: int) => n || n + 1);
 
             Std.write_line("found: {searched |> find(v => v == 2)}");
             Std.write_line("after: {searched |> first()}");
 
             // A source that is not a Pipe hands out a fresh iterator per
-            // pass and has nothing to restore.
+            // read in the same way.
             let values = [1, 2, 3, 4, 5];
 
             Std.write_line("raw: {$(collect_mutable(values |> filter(v => v % 2 == 1) |> take(2)))}");
