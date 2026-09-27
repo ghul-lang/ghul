@@ -40,6 +40,8 @@ namespace Semantic.Lookups is
         HELD_SHAPES: Collections.SET[string] static
 
         FUSION_COMBINATOR_ROLES: Collections.LIST[string] static
+        EARLY_EXIT_NAMES: Collections.LIST[string] static
+        WHOLE_READ_NAMES: Collections.LIST[string] static
 
         _source_declared: Collections.MAP[string, Semantic.Symbols.Symbol]
 
@@ -49,8 +51,20 @@ namespace Semantic.Lookups is
         _unbounded_sources: Collections.SET[Semantic.Symbols.Symbol]?
         _unbounded_sources_pipes: Scope?
 
+        _source_reads: Collections.MAP[Semantic.Symbols.Symbol, bool]?
+        _source_reads_pipes: Scope?
+
         init() static is
             HELD_SHAPES = Collections.SET[string](["ARRAY", "POINTER", "REFERENCE"])
+            EARLY_EXIT_NAMES = Collections.LIST[string]([
+                "first", "first_map", "first_or_throw", "first_map_or_throw",
+                "find", "find_map", "find_or_throw", "find_map_or_throw",
+                "any", "all", "only", "take", "take_while"
+            ])
+            WHOLE_READ_NAMES = Collections.LIST[string]([
+                "sort", "sort_descending", "sort_by", "sort_by_descending",
+                "reverse", "group", "group_by", "transpose", "permutations"
+            ])
             FUSION_COMBINATOR_ROLES = Collections.LIST[string]([
                 "map", "filter", "take", "skip", "memo", "index",
                 "count", "any", "all", "each", "reduce", "find", "first", "collect_list", "collect_mutable",
@@ -201,6 +215,51 @@ namespace Semantic.Lookups is
             _unbounded_sources_pipes = pipes
 
             return result
+        si
+
+        // How far the `Ghul.Pipes` functions that read their source other
+        // than one element at a time read it: true for those that can stop
+        // before it ends (the terminals that answer from a prefix, and the
+        // stages that pass only a prefix on), false for the stages that
+        // read all of it before passing anything on. Keyed and held the
+        // way unbounded_sources is.
+        source_reads: Collections.MAP[Semantic.Symbols.Symbol, bool] is
+            let pipes = cast Scope?(namespace_scope.find_direct("Pipes"))
+
+            if _source_reads? /\ _source_reads_pipes == pipes then
+                return _source_reads
+            fi
+
+            let result = Collections.MAP[Semantic.Symbols.Symbol, bool]()
+
+            if pipes? then
+                for (names, stops_early) in [(EARLY_EXIT_NAMES, true), (WHOLE_READ_NAMES, false)] do
+                    for name in names do
+                        if let group: Semantic.Symbols.FUNCTION_GROUP = pipes.find_direct(name) then
+                            for f in group.functions do
+                                result[f.root_specialized_from] = stops_early
+                            od
+                        fi
+                    od
+                od
+            fi
+
+            _source_reads = result
+            _source_reads_pipes = pipes
+
+            return result
+        si
+
+        // Whether `function` is one of the `Ghul.Pipes` functions.
+        is_pipes_function(function: Semantic.Symbols.Function) -> bool is
+            let pipes = cast Scope?(namespace_scope.find_direct("Pipes"))
+            let root = function.root_specialized_from
+
+            if let group: Semantic.Symbols.FUNCTION_GROUP = pipes?.find_direct(root.name) then
+                return group.functions |> Ghul.Pipes.any(f => f.root_specialized_from == root)
+            fi
+
+            return false
         si
 
         get_type(

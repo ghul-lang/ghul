@@ -277,11 +277,44 @@ namespace Syntax.Process is
         si
 
         visit_let_in(let_in: Trees.Expressions.LET_IN) is
+            if let_in.want_dispose then
+                _dispose_let_in_variables(let_in)
+            fi
+
             if let let_in.expression.value? /\ value.check_is_consumable_allow_void(_logger, let_in.expression.location) then
                 let_in.compile_expressions_state.value = value
             else
                 let_in.compile_expressions_state.value = IR.Values.DUMMY(Semantic.Types.ERROR(), let_in.location)
             fi
+        si
+
+        // A `let use ... in` local is disposed when the statement or the
+        // expression body holding the expression completes, the nearest
+        // point where a disposal region can begin and end with nothing else
+        // on the evaluation stack.
+        _dispose_let_in_variables(let_in: Trees.Expressions.LET_IN) is
+            let host = _visitor.disposal_host
+
+            if !host? then
+                _logger.error(let_in.location, "cannot dispose a local declared here")
+                return
+            fi
+
+            let idisposable = _innate_symbol_lookup.get_idisposable_type()
+
+            for v in let_in.variables do
+                for name in v.names do
+                    if let variable: Semantic.Symbols.Variable = _visitor.find(name) then
+                        variable.is_disposed = true
+
+                        if variable.type? /\ !idisposable.is_assignable_from(variable.type) then
+                            _logger.error(name.location, "not disposable")
+                        fi
+
+                        host.add_let_in_disposal(variable)
+                    fi
+                od
+            od
         si
 
         pre_assignment(assignment: Trees.Statements.ASSIGNMENT) -> bool is

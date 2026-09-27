@@ -1,0 +1,104 @@
+use IO.Std.write_line
+use Ghul.Pipes
+
+class RESOURCE(name: string): Ghul.Disposable is
+    value: int => 5
+
+    dispose() is
+        write_line("disposed {name}")
+    si
+si
+
+add(a: int, b: int) -> int => a + b
+
+fail(n: int) -> int => throw System.Exception("failed with {n}")
+
+disposed_after_its_statement() -> int is
+    let x = let use r = RESOURCE("statement") in r.value
+
+    write_line("after the statement")
+
+    return x
+si
+
+in_an_argument() -> int is
+    return add(1, let use r = RESOURCE("argument") in r.value)
+si
+
+in_a_parenthesised_block() -> int is
+    let x = (let use r = RESOURCE("block") in r.value + 1)
+
+    return x
+si
+
+several() -> int is
+    let x = let use a = RESOURCE("first"), b = RESOURCE("second") in a.value + b.value
+
+    return x
+si
+
+on_an_exception() -> int is
+    try
+        let x = let use r = RESOURCE("thrown past") in fail(r.value)
+
+        return x
+    catch e: System.Exception
+        write_line("caught: {e.message}")
+    yrt
+
+    return 0
+si
+
+expression_body() -> int => let use r = RESOURCE("expression body") in r.value
+
+void_expression_body() => let use r = RESOURCE("void body") in write_line("reading {r.value}")
+
+delay(n: int) -> Tasks.TASK[int] is
+    await Tasks.TASK.yield()
+
+    return n
+si
+
+asynchronous() -> Tasks.TASK[int] is
+    let x = let use r = RESOURCE("async") in await delay(r.value)
+
+    write_line("after the await")
+
+    return x
+si
+
+generator() -> Pipe[int] is
+    yield let use r = RESOURCE("before the first yield") in r.value
+    yield let use r = RESOURCE("after it") in r.value + 1
+si
+
+let top = let use r = RESOURCE("top level") in r.value
+
+write_line("top level: {top}")
+write_line("statement: {disposed_after_its_statement()}")
+write_line("argument: {in_an_argument()}")
+write_line("block: {in_a_parenthesised_block()}")
+write_line("several: {several()}")
+write_line("exception: {on_an_exception()}")
+write_line("expression body: {expression_body()}")
+void_expression_body()
+write_line("async: {asynchronous().result}")
+write_line("generator: {generator() |> join(", ")}")
+
+let literal = (n: int) => let use r = RESOURCE("literal") in r.value + n
+
+write_line("literal: {literal(1)}")
+
+let path = IO.Path.combine(IO.Path.get_temp_path(), "let-use-in-expression.txt")
+
+IO.File.write_all_lines(path, ["alpha", "beta"])
+
+let first_line = (let use lines = IO.File.read_lines(path).iterator in cursor(lines) |> map(line => line.to_upper()) |> first())
+
+write_line("first line: {first_line}")
+
+let exclusive = IO.File.open(path, IO.FileMode.OPEN, IO.FileAccess.WRITE, IO.FileShare.NONE)
+
+exclusive.dispose()
+
+write_line("the file is closed")

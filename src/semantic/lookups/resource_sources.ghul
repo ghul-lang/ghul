@@ -1,0 +1,102 @@
+namespace Semantic.Lookups is
+    use TYPE = System.Type
+    use System.Exception
+
+    use Types.Type
+
+    // The .NET calls whose result is a sequence that holds a resource
+    // until something disposes it, and so should not be read by a loop,
+    // a pipe chain or a terminal without a `let use` holding it. Every
+    // such call the compiler knows about is listed here: the file and
+    // directory enumerations by member, and anything returning a data
+    // reader or a PLINQ query by its result type.
+    class RESOURCE_SOURCES(
+        _type_mapper: DotNet.TYPE_MAPPER,
+        _type_source: DotNet.TypeSource
+    ) is
+        _member_cache: Collections.SET[Symbols.Symbol]?
+        _result_type_cache: Collections.List[Type]?
+
+        holds_resource(function: Symbols.Function) -> bool is
+            if _members.contains(function.root_specialized_from) then
+                return true
+            fi
+
+            if let return_type = function.return_type then
+                for t in _result_types do
+                    if t.is_assignable_from(return_type) then
+                        return true
+                    fi
+                od
+            fi
+
+            return false
+        si
+
+        _members: Collections.SET[Symbols.Symbol] is
+            if let members = _member_cache then
+                return members
+            fi
+
+            let result = Collections.SET[Symbols.Symbol]()
+
+            _add_members(result, "System.IO.File", ["read_lines"])
+            _add_members(result, "System.IO.Directory", [
+                "enumerate_files",
+                "enumerate_directories",
+                "enumerate_file_system_entries"
+            ])
+
+            _member_cache = result
+
+            return result
+        si
+
+        _result_types: Collections.List[Type] is
+            if let types = _result_type_cache then
+                return types
+            fi
+
+            let result = Collections.LIST[Type]()
+
+            for (assembly, name) in [
+                ("System.Data.Common", "System.Data.IDataReader"),
+                ("System.Linq.Parallel", "System.Linq.ParallelQuery")
+            ] do
+                if let type = _try_get_type(assembly, name) then
+                    result.add(type)
+                fi
+            od
+
+            _result_type_cache = result
+
+            return result
+        si
+
+        _add_members(result: Collections.SET[Symbols.Symbol], type_name: string, names: string[]) is
+            let type = _try_get_type("System.Runtime", type_name)
+
+            if !type? then
+                return
+            fi
+
+            for name in names do
+                if let group: Symbols.FUNCTION_GROUP = type.symbol.find_member(name) then
+                    for f in group.functions do
+                        result.add(f.root_specialized_from)
+                    od
+                fi
+            od
+        si
+
+        // A type in an assembly the compilation may not reference, which
+        // then has nothing in it to report.
+        _try_get_type(assembly: string, name: string) -> Type? is
+            try
+                return _type_mapper.get_type(_type_source.get_type(assembly, name))
+            catch e: Exception
+                return null
+            yrt
+        si
+    si
+si
