@@ -348,7 +348,17 @@ namespace Syntax.Process is
                 await_scanner.scan(function.body)
             fi
 
-            let body_has_await = await_scanner.found
+            // A literal whose body contains `yield` (again, not inside a
+            // nested literal) is a generator, classified as
+            // `*_GENERATOR_CLOSURE` so `state_machine_for` picks it up. A
+            // body with both is reported, and is a generator.
+            let body_has_yield = !function.body.is_null /\ YIELD_SCANNER().body_has_yield(function.body)
+
+            if body_has_yield /\ await_scanner.found then
+                _logger.error(function.location, "function cannot be both a generator and async")
+            fi
+
+            let body_has_await = await_scanner.found /\ !body_has_yield
             function.contains_let_await = body_has_await
             function.is_void_async = body_has_await /\ !await_scanner.found_value_return
 
@@ -367,7 +377,17 @@ namespace Syntax.Process is
 
             let closure_symbol: Semantic.Symbols.Symbol mut
 
-            if body_has_await then
+            if body_has_yield then
+                closure_symbol = current_function.declare_generator_closure(
+                    function.location,
+                    next_anon_name(),
+                    // FIXME:
+                    cast Semantic.Scope?(current_closure_context)!,
+                    current_scope,
+                    function.is_recursive,
+                    _symbol_definition_listener
+                )
+            elif body_has_await then
                 closure_symbol = current_function.declare_async_closure(
                     function.location,
                     next_anon_name(),

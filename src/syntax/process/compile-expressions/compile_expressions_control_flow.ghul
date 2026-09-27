@@ -107,6 +107,10 @@ namespace Syntax.Process is
                 return
             fi
 
+            if let yielded = `yield.expression.value?.type then
+                _settle_generator_literal_return(function, yielded)
+            fi
+
             // Verify the function's return type is actually an
             // Iterable[T] / Iterator[T]. The yield-presence test in
             // declare-symbols routes here without inspecting the
@@ -115,6 +119,12 @@ namespace Syntax.Process is
             let element_type = _yield_element_type_for(function)
 
             if !element_type? then
+                // A literal still waiting on a yield to settle its
+                // element type is reported once its walk ends.
+                if _is_unsettled_generator_literal(function) then
+                    return
+                fi
+
                 _logger.error(
                     `yield.location,
                     "generator must return Pipe[T]"
@@ -180,17 +190,6 @@ namespace Syntax.Process is
                 return
             fi
 
-            let element_type = _yield_element_type_for(function)
-
-            if !element_type? then
-                _logger.error(
-                    `yield.location,
-                    "generator must return Pipe[T]"
-                )
-
-                return
-            fi
-
             record_iterable_constraint(expression)
 
             let value = expression.value
@@ -206,6 +205,25 @@ namespace Syntax.Process is
             check_receiver_present(expression)
 
             let yielded_type = `yield.read_current!.return_type!
+
+            _settle_generator_literal_return(function, yielded_type)
+
+            let element_type = _yield_element_type_for(function)
+
+            if !element_type? then
+                // A literal still waiting on a yield to settle its
+                // element type is reported once its walk ends.
+                if _is_unsettled_generator_literal(function) then
+                    return
+                fi
+
+                _logger.error(
+                    `yield.location,
+                    "generator must return Pipe[T]"
+                )
+
+                return
+            fi
 
             if !element_type.is_assignable_from(yielded_type) then
                 let use qualified = IoC.CONTAINER.instance.name_display.qualifying_alike(yielded_type, element_type)
@@ -226,26 +244,29 @@ namespace Syntax.Process is
         // itself, where the assembly is not yet loadable) fall back to
         // the bare Iterable[T] / Iterator[T] forms.
         _yield_element_type_for(function: Semantic.Symbols.Function) -> Semantic.Types.Type? is
-            if !function.return_type? then
+            if let return_type = function.return_type /\ return_type.is_inferred then
                 return null
             fi
 
-            let return_type = function.return_type
+            return Semantic.Symbols.generator_element_type(function)
+        si
 
-            let pipe = _innate_symbol_lookup.get_unspecialized_pipe_type()
+        _is_unsettled_generator_literal(function: Semantic.Symbols.Function) -> bool =>
+            function.is_closure /\ (function.return_type?.is_inferred ?? false)
 
-            if pipe? then
-                return Semantic.Symbols.TYPE_ARGUMENT_EXTRACTOR.extract(return_type, pipe)
+        // A generator literal whose return is left to be inferred takes
+        // it from its first yield: Pipe[T] over the type that yield
+        // produces. The yields after it are checked against that T.
+        _settle_generator_literal_return(function: Semantic.Symbols.Function, yielded_type: Semantic.Types.Type) is
+            if !function.is_closure \/ !yielded_type.is_settled \/ yielded_type.is_error \/ isa Semantic.Types.NULL(yielded_type) then
+                return
             fi
 
-            let iterator = _innate_symbol_lookup.get_unspecialized_iterator_type()
-            let iterable = _innate_symbol_lookup.get_unspecialized_iterable_type()
-
-            let candidates = Collections.LIST[Semantic.Types.Type]()
-            candidates.add(iterator)
-            candidates.add(iterable)
-
-            return Semantic.Symbols.TYPE_ARGUMENT_EXTRACTOR.extract_from_any(return_type, candidates)
+            if let return_type = function.return_type /\ return_type.is_inferred then
+                if let pipe_type = Semantic.Symbols.generator_return_type(yielded_type) then
+                    function.set_return_type(pipe_type)
+                fi
+            fi
         si
 
         // `continue` keeps its label-only grammar; resolution goes

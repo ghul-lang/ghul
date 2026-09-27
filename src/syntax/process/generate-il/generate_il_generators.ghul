@@ -64,9 +64,35 @@ namespace Syntax.Process is
             // types on the for-each dispatch, locals init for the
             // iterator current, etc.) reach `!N` — MoveNext has no
             // type parameters of its own — rather than `!!N`.
+            _gen_generator_move_next(
+                function,
+                function.body,
+                state_machine,
+                frame,
+                () => _gen_destructured_formal_prologue(function)
+            )
+
+            // Skip the framework's default body walk + the framework's
+            // visit(function) close-out path. Our visit(function)
+            // sees the state-machine and returns early.
+            return true
+        si
+
+
+        // A generator's MoveNext: the body of a generator function or a
+        // generator literal, walked into a block of its own and queued
+        // with its state machine for emission once the enclosing class
+        // has closed. `prologue` unpacks any destructured parameters.
+        _gen_generator_move_next(
+            scope: Trees.ScopeCarrier,
+            body: Trees.Bodies.Body?,
+            state_machine: Semantic.Symbols.STATE_MACHINE,
+            frame: Semantic.Symbols.STATE_MACHINE_FRAME,
+            prologue: () -> void
+        ) is
             state_machine.install_body_emission_overrides()
 
-            enter_scope(function)
+            enter_scope(scope)
 
             let move_next_block = Values.BLOCK()
 
@@ -113,14 +139,14 @@ namespace Syntax.Process is
             // frame fields before the body reads them. The plain path's
             // AST walk does this from visit(Variables.VARIABLE); this
             // path drives its own walk and never reaches those nodes.
-            _gen_destructured_formal_prologue(function)
+            prologue()
 
             // Walk the body. Visitors fire pre/visit on every
             // node; visit(YIELD) is the interesting one — it
             // appends state-machine IL into current_block
             // (which IS move_next_block).
-            if function.body? then
-                function.body.walk(self)
+            if body? then
+                body.walk(self)
             fi
 
             // Fell-off-end trailer: mark done, return false. The next
@@ -147,7 +173,7 @@ namespace Syntax.Process is
             _pop_async_dispatch_holder(outer_dispatch_holder)
 
             leave_block()
-            leave_scope(function)
+            leave_scope(scope)
 
             // Uninstall — re-installed by _emit_state_machine_class
             // around move_next_block.gen() so deferred IR.Value.gen()
@@ -156,11 +182,36 @@ namespace Syntax.Process is
             state_machine.uninstall_body_emission_overrides()
 
             _pending_state_machines.add(PENDING_STATE_MACHINE(state_machine, move_next_block))
+        si
 
-            // Skip the framework's default body walk + the framework's
-            // visit(function) close-out path. Our visit(function)
-            // sees the state-machine and returns early.
-            return true
+        // A generator literal: its body is walked into MoveNext exactly as
+        // a generator function's is, and the literal's own method is the
+        // outer method, constructing the frame from the literal's receiver
+        // and arguments and returning it. A literal that never settled on
+        // an element type has been reported in compile-expressions and
+        // emits nothing here.
+        _emit_generator_closure(
+            function: Trees.Expressions.FUNCTION,
+            closure: Semantic.Symbols.Closure,
+            state_machine: Semantic.Symbols.STATE_MACHINE
+        ) is
+            let frame = state_machine.frame
+
+            if !frame? then
+                return
+            fi
+
+            frame.declare()
+
+            _gen_generator_move_next(
+                function,
+                function.body,
+                state_machine,
+                frame,
+                () => _gen_closure_destructure_prologue(function, closure)
+            )
+
+            _emit_generator_outer_method_srm(closure, frame, state_machine)
         si
 
         _visit_generator_function(function: Definitions.FUNCTION, symbol: Semantic.Symbols.Function, state_machine: Semantic.Symbols.STATE_MACHINE) is

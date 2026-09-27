@@ -1862,6 +1862,27 @@ si
 
 A bare `return` ends the stream early, exactly as falling off the end of the body does. It carries no value: the declared `Pipe[T]` describes the stream the generator produces, not something a `return` inside it hands back.
 
+A function literal whose body contains `yield` is a generator too. It captures the variables around it as any literal does, so a `let` is read as it stood when the literal was constructed and a `let mut` is shared, and a pipe it returns re-runs the body, reading them again, each time it rewinds. Its element type comes from its declared return type, or from the slot it is written into when that expects a `Pipe[T]`, `Iterable[T]` or `Iterator[T]`, or otherwise from its first `yield`; one that no `yield` settles is an error. A nested named function that yields is a generator literal as well, and reaches itself by name for `yield in`:
+
+```ghul
+let evens = (limit: int) is
+    let n mut = 0
+
+    while n < limit do
+        yield n
+        n = n + 2
+    od
+si
+
+walk(t: Tree) -> Pipe[int] is
+    if let (left, value, right): Tree.NODE = t then
+        yield in walk(left)
+        yield value
+        yield in walk(right)
+    fi
+si
+```
+
 A generator's return type has to be `Pipe[T]` — `yield` in a function declared otherwise is an error. A function cannot be both a generator and asynchronous. And as with `await`, `yield` is not yet supported inside a `catch` or `finally` handler.
 
 ## collections and pipes
