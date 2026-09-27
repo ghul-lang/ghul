@@ -1906,6 +1906,8 @@ let by_name = MAP(people |> map(p => (p.name, p)));
 let seen: SET[string] = _(names);
 ```
 
+A sequence closes off into text the same way. `string(p)` renders each element as `join` does and puts nothing between them, and `string(p, separator)` puts `separator` between each pair, so `word |> reverse() |> string()` is the word reversed, `[1, 2, 3] |> string()` is `123`, and `names |> string(", ")` is the names joined with commas. A sequence's own text, with its brackets, is still what `$` and interpolation give.
+
 The sequence combinators are global functions in `Ghul.Pipes`, each taking the sequence as its first argument, so the thread-first operator `|>` chains them. ghūl provides the usual set, in the manner of LINQ, and none of them mutate the source. They split into lazy stages that return a new sequence — `map`, `filter`, `flat_map`, `skip`, `take`, `cat`, `index`, `zip`, `sort` — and terminals that consume it and produce a value: `reduce`, `sum`, `product`, `collect` / `collect_mutable` / `collect_set` / `collect_map`, `count`, `find`, `find_map`, `first`, `only`, `any`, `all`, `each`, `join`, `append_to`. `collect` produces an array, and `collect_mutable` a `LIST` that can be changed.
 
 ```ghul

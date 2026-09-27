@@ -329,6 +329,40 @@ namespace Semantic.UnitTests is
             are_equal(0, logger.error_count, "picking the tie-break candidate should log nothing")
         si
 
+        // A constructor the runtime supplies for a type with no type
+        // parameters, such as string's from a sequence, has type parameters
+        // of its own, and constructing binds them from the arguments.
+        @Test()
+        Constructing_binds_a_generic_constructors_own_type_parameter_from_its_argument() is
+            let owner = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Owner", LIST[string](), Semantic.BLOCK_SCOPE())
+            let int_class = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "int", LIST[string](), Semantic.BLOCK_SCOPE())
+
+            let generic_init = INSTANCE_METHOD(loc(), loc(), owner, "init", Semantic.BLOCK_SCOPE())
+            let t = Semantic.Symbols.FUNCTION_GENERIC_ARGUMENT(loc(), generic_init, "T", 0)
+
+            generic_init.is_generic = true
+            generic_init.generic_argument_names = names_for(["T"])
+            generic_init.generic_arguments = LIST[Type]([t.type!])
+            generic_init.arguments = LIST[Type]([t.type!])
+            generic_init.argument_names = names_for(["value"])
+            generic_init.return_type = int_class.type!
+
+            let group = FUNCTION_GROUP(loc(), Semantic.BLOCK_SCOPE(), "init")
+            group.add(generic_init)
+
+            let logger = DIAGNOSTICS_STORE()
+
+            IoC.CONTAINER.instance.symbol_table = Semantic.SYMBOL_TABLE(logger)
+
+            let resolver = OVERLOAD_RESOLVER(logger)
+
+            let result = resolver.resolve(loc(), group, LIST[Type]([int_class.type!]), false, true, true)
+
+            assert result? else "construction found no init overload"
+            are_same(int_class.type!, result.function.arguments[0])
+            are_same(int_class.type!, result.function.generic_arguments[0])
+        si
+
         // A no-argument generic whose only mention of its type
         // parameter is the return type: nothing in the call can bind it,
         // so the type the call site expects is the only source.
