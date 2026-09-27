@@ -210,7 +210,11 @@ namespace InferenceStrip is
             let private_prefix = "{Path.get_file_name(directory)!.replace("-", "_")}__"
             let lines = LIST[string]()
 
-            for line in read(Path.combine(directory, "il.txt")).replace(private_prefix, "__").split(['\n']) do
+            // An assertion message carries its source path, which names the
+            // copy's directory too.
+            let copy_path = "/{Path.get_file_name(directory)!}/"
+
+            for line in read(Path.combine(directory, "il.txt")).replace(private_prefix, "__").replace(copy_path, "/__/").split(['\n']) do
                 let trimmed = line.trim()
 
                 if !trimmed.starts_with("//") /\ !trimmed.contains("MVID") then
@@ -265,8 +269,37 @@ namespace InferenceStrip is
             else
                 let together = variant(task, passing, "together")
 
-                task.verdict = if together.verdict =~ "=" then "P" else "J" fi
-                task.detail = together.detail
+                if together.verdict =~ "=" then
+                    task.verdict = "P"
+                else
+                    task.verdict = "J"
+                    task.detail = together.detail
+
+                    // The sites that strip alone but not all together: add
+                    // them one at a time, keeping each that leaves the
+                    // program unchanged, and mark the rest.
+                    let kept = LIST[string]()
+
+                    for site in passing do
+                        let trial = LIST[string](kept)
+
+                        trial.add(site)
+
+                        if variant(task, trial, "greedy").verdict =~ "=" then
+                            kept.add(site)
+                        fi
+                    od
+
+                    task.stripped = kept.count
+
+                    for i in 0..task.sites.count do
+                        let site = task.sites[i]
+
+                        if passing.contains(site) /\ !kept.contains(site) then
+                            task.cast_results[i] = describe(task, site, "J", "strips alone, not with the others")
+                        fi
+                    od
+                fi
             fi
         si
 
