@@ -665,6 +665,16 @@ namespace Syntax.Process is
             fi
 
             if consumer_kind =~ "join" then
+                // `join(chain)` is its own overload whose body passes a
+                // separator to the two-argument one, and a referenced
+                // runtime's bodies are not there to read it from. Writing
+                // the separator here instead would put the fused text at
+                // the mercy of the two agreeing, silently, so the form
+                // without one is left to the runtime.
+                if call.arguments.expressions.count < 2 then
+                    return _decline_consumer(call, recognizer, consumer_kind, "join-separator-not-given")
+                fi
+
                 if !_build_fused_join(fused, call, id, result_il_name, final_element_load, built.final_type) then
                     return _decline_consumer(call, recognizer, consumer_kind, "join-handler-unresolved")
                 fi
@@ -1242,19 +1252,17 @@ namespace Syntax.Process is
 
             let handler_load = cast IR.Values.Value(IR.Values.Load.TEMP(result_il_name, handler_type))
 
-            // `join(chain)` takes the runtime's own default separator, so
-            // the one-argument call reads it from there rather than
-            // repeating it here.
-            let separator =
-                if call.arguments.expressions.count > 1 then
-                    call.arguments.expressions[1].value
-                else
-                    null
-                fi
+            // The caller's own separator, which the recogniser has already
+            // required: the form that supplies none is declined there.
+            let separator = call.arguments.expressions[1].value
+
+            if !separator? then
+                return false
+            fi
 
             fused.join_separator_il_name = ".fc_separator.{id}"
             fused.join_separator_type = string_type
-            fused.join_separator_init = separator ?? IR.Values.Literal.STRING(", ", string_type)
+            fused.join_separator_init = separator
             fused.join_seen_il_name = ".fc_seen.{id}"
 
             let separator_arguments = Collections.LIST[IR.Values.Value]()
