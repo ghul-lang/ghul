@@ -1,6 +1,7 @@
 namespace IR.Emitter is
     use System.Reflection.Metadata.EntityHandle
     use System.Reflection.Metadata.TypeDefinitionHandle
+    use System.Reflection.Metadata.MethodDefinitionHandle
     use System.Reflection.Metadata.Ecma335.MetadataTokens
 
     use Semantic.Symbols.Scope
@@ -510,8 +511,9 @@ namespace IR.Emitter is
         // has to be numbered before bodies are encoded.
         _write_properties(parent: TypeDefinitionHandle, type: SRM_EMITTED_TYPE) is
             let properties = SRM_MEMBER_ORDER.properties(type)
+            let frame_current = _frame_current_accessor(type)
 
-            if properties.count == 0 then
+            if properties.count == 0 /\ !frame_current? then
                 return
             fi
 
@@ -569,7 +571,34 @@ namespace IR.Emitter is
                 fi
             od
 
+            // A generator's frame declares its element accessor as a property
+            // too, as any .NET iterator does, so reflection over the frame finds
+            // an ordinary enumerator.
+            if let accessor = frame_current then
+                let handle =
+                    _assembly.add_property(
+                        _assembly.get_or_add_string("Current"),
+                        _signatures.property_signature(_frame_element_type!, true))
+
+                _assembly.add_property_accessor(handle, accessor, true)
+                _mark_compiler_generated(cast EntityHandle(handle))
+            fi
+
             _assembly.add_property_map(parent, first)
+        si
+
+        // The getter a generator frame's Current property names, or null for
+        // any other type.
+        _frame_current_accessor(type: SRM_EMITTED_TYPE) -> MethodDefinitionHandle? is
+            if !isa Semantic.Symbols.STATE_MACHINE_FRAME(type.declared) then
+                return null
+            fi
+
+            if !_frame_enumerator_members.contains_key(FrameMember.GET_CURRENT) then
+                return null
+            fi
+
+            return cast MethodDefinitionHandle(_frame_enumerator_members[FrameMember.GET_CURRENT])
         si
 
         // The attributes that carry to another assembly what the source
