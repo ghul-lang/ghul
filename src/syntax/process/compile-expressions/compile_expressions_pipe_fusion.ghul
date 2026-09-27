@@ -511,6 +511,18 @@ namespace Syntax.Process is
                         func_type.arguments[func_type.arguments.count - 1]
                     fi
 
+                // sum_by totals what the selector returns, so the running
+                // total is of the selector's type rather than the element's,
+                // and it is that type whose addition has to be the `add`
+                // instruction.
+                if consumer_kind =~ "sum_by" then
+                    if !_is_add_instruction_type(result_type) then
+                        return _decline_consumer(call, recognizer, consumer_kind, "sum-element-not-add-instruction")
+                    fi
+
+                    fused.seed_init = IR.Values.DEFAULT(result_type)
+                fi
+
                 let call_arguments = Collections.LIST[IR.Values.Value]()
                 call_arguments.add(final_element_load)
 
@@ -538,6 +550,17 @@ namespace Syntax.Process is
                 fused.consumer_arg_init = accumulator
                 fused.consumer_apply = IR.Values.Call.CLOSURE(
                     IR.Values.Load.TEMP(arg_il_name, func_type), running_type, false, func_type, call_arguments)
+            elif consumer_kind =~ "sum" then
+                // The running total starts at the element type's zero and
+                // the loop adds each element with one instruction. A type
+                // whose `+` is an operator method - decimal, bigint, an
+                // INumber implementor of its own - cannot be added that
+                // way, and keeps the runtime's sum.
+                if !_is_add_instruction_type(built.final_type) then
+                    return _decline_consumer(call, recognizer, consumer_kind, "sum-element-not-add-instruction")
+                fi
+
+                fused.seed_init = IR.Values.DEFAULT(built.final_type)
             fi
 
             // find / first return a MAYBE: seed with the empty MAYBE, and
@@ -639,6 +662,22 @@ namespace Syntax.Process is
                     Collections.LIST[IR.Values.Value](0),
                     null,
                     _function_caller)
+            fi
+
+            if consumer_kind =~ "join" then
+                // `join(chain)` is its own overload whose body passes a
+                // separator to the two-argument one, and a referenced
+                // runtime's bodies are not there to read it from. Writing
+                // the separator here instead would put the fused text at
+                // the mercy of the two agreeing, silently, so the form
+                // without one is left to the runtime.
+                if call.arguments.expressions.count < 2 then
+                    return _decline_consumer(call, recognizer, consumer_kind, "join-separator-not-given")
+                fi
+
+                if !_build_fused_join(fused, call, id, result_il_name, final_element_load, built.final_type) then
+                    return _decline_consumer(call, recognizer, consumer_kind, "join-handler-unresolved")
+                fi
             fi
 
             if consumer_kind =~ "collect" \/ consumer_kind =~ "collect_array" then
@@ -766,8 +805,18 @@ namespace Syntax.Process is
         // Decline a consumer whose chain resolved but whose own shape did
         // not - an unresolved function argument, list constructor or
         // member - recording the site as declined for the study.
-        _decline_consumer(call: Trees.Expressions.CALL, recognizer: PIPE_FUSION_RECOGNIZER, consumer_kind: string) -> IR.Values.FUSED_CONSUMER? is
-            _chain_resolve_reason = "consumer-unresolved"
+        _decline_consumer(call: Trees.Expressions.CALL, recognizer: PIPE_FUSION_RECOGNIZER, consumer_kind: string) -> IR.Values.FUSED_CONSUMER? =>
+            _decline_consumer(call, recognizer, consumer_kind, "consumer-unresolved")
+
+        // `reason` is what the study records, so a decline the fuser could
+        // one day lift is told apart from one it cannot.
+        _decline_consumer(
+            call: Trees.Expressions.CALL,
+            recognizer: PIPE_FUSION_RECOGNIZER,
+            consumer_kind: string,
+            reason: string
+        ) -> IR.Values.FUSED_CONSUMER? is
+            _chain_resolve_reason = reason
 
             _note_fusion_site(call.location, _pipes_function_name(call) ?? consumer_kind, true, recognizer, false)
 
@@ -1155,6 +1204,147 @@ namespace Syntax.Process is
 
             stage.param_local = cast Semantic.Symbols.Variable(local)
             stage.inline_body = block
+        si
+
+        // Fill in what a fused `join` needs: the interpolation handler the
+        // elements are written into, the separator evaluated once, and the
+        // two calls the loop makes per element.
+        //
+        // The runtime's `append_to` writes each element as `"{element}"`
+        // into a StringBuilder, so what has to be reproduced is the
+        // interpolation rather than a `StringBuilder.append` overload -
+        // which for a char or a struct would not write the same text. One
+        // handler serves the whole join, since a run of literals and
+        // formatted values produces the same characters as a string per
+        // element appended in turn.
+        //
+        // Returns false where the handler's members do not resolve, which
+        // is the runtime being older than the handler shape this expects.
+        _build_fused_join(
+            fused: IR.Values.FUSED_CONSUMER,
+            call: Trees.Expressions.CALL,
+            id: int,
+            result_il_name: string,
+            element_load: IR.Values.Value,
+            element_type: Type
+        ) -> bool is
+            let handler_type = _innate_symbol_lookup.get_interpolated_string_handler_type()
+            let string_type = _innate_symbol_lookup.get_string_type()
+
+            let ctor = _resolve_ctor_by_arity(handler_type, 2)
+            let append_literal = _resolve_member_by_arity(handler_type, "append_literal", 1)
+            let to_string_and_clear = _resolve_member_by_arity(handler_type, "to_string_and_clear", 0)
+            let append_formatted = _resolve_generic_member_by_arity(handler_type, "append_formatted", 1)
+
+            if !ctor? \/ !append_literal? \/ !to_string_and_clear? \/ !append_formatted? then
+                return false
+            fi
+
+            // The two counts are the handler's own sizing hints, and
+            // neither is known before the loop runs.
+            let ctor_arguments = Collections.LIST[IR.Values.Value]()
+
+            ctor_arguments.add(cast IR.Values.Value(IR.Values.Literal.NUMBER(0, _innate_symbol_lookup.get_int_type())))
+            ctor_arguments.add(cast IR.Values.Value(IR.Values.Literal.NUMBER(0, _innate_symbol_lookup.get_int_type())))
+
+            fused.result_local_type = handler_type
+            fused.seed_init = IR.Values.NEW(handler_type, ctor, ctor_arguments)
+
+            let handler_load = cast IR.Values.Value(IR.Values.Load.TEMP(result_il_name, handler_type))
+
+            // The caller's own separator, which the recogniser has already
+            // required: the form that supplies none is declined there.
+            let separator = call.arguments.expressions[1].value
+
+            if !separator? then
+                return false
+            fi
+
+            fused.join_separator_il_name = ".fc_separator.{id}"
+            fused.join_separator_type = string_type
+            fused.join_separator_init = separator
+            fused.join_seen_il_name = ".fc_seen.{id}"
+
+            let separator_arguments = Collections.LIST[IR.Values.Value]()
+
+            separator_arguments.add(
+                cast IR.Values.Value(IR.Values.Load.TEMP(fused.join_separator_il_name!, string_type)))
+
+            fused.join_append_separator =
+                append_literal.call(call.location, handler_load, separator_arguments, null, _function_caller)
+
+            let element_arguments = Collections.LIST[IR.Values.Value]()
+
+            element_arguments.add(element_load)
+
+            fused.join_append_element =
+                append_formatted.specialize([element_type]:Type).call(
+                    call.location, handler_load, element_arguments, null, _function_caller)
+
+            fused.finish =
+                to_string_and_clear.call(
+                    call.location, handler_load, Collections.LIST[IR.Values.Value](0), null, _function_caller)
+
+            return true
+        si
+
+        // The one generic overload of `name` on `type` taking `arity`
+        // arguments, or null.
+        _resolve_generic_member_by_arity(type: Type, name: string, arity: int) -> Semantic.Symbols.Function? is
+            let member = type.find_member(name)
+
+            if !member? \/ !isa Semantic.Symbols.FUNCTION_GROUP(member) then
+                return null
+            fi
+
+            let found: Semantic.Symbols.Function? mut = null
+
+            for f in (cast Semantic.Symbols.FUNCTION_GROUP(member)).functions do
+                if f.is_generic /\ f.arguments.count == arity then
+                    if found? then
+                        return null
+                    fi
+
+                    found = f
+                fi
+            od
+
+            return found
+        si
+
+        // Whether `type`'s addition is the `add` instruction, which is what
+        // a fused sum emits. It is, for every integer width and both float
+        // widths: the compiler emits a bare `add` for each of them, narrow
+        // ones included. `decimal` and `bigint` are not here because their
+        // addition is a call to the type's own operator, and neither is a
+        // type parameter, whose instantiation is not known here.
+        _is_add_instruction_type(type: Type?) -> bool is
+            if !type? then
+                return false
+            fi
+
+            for addable in
+                [
+                    _innate_symbol_lookup.get_byte_type(),
+                    _innate_symbol_lookup.get_ubyte_type(),
+                    _innate_symbol_lookup.get_short_type(),
+                    _innate_symbol_lookup.get_ushort_type(),
+                    _innate_symbol_lookup.get_int_type(),
+                    _innate_symbol_lookup.get_uint_type(),
+                    _innate_symbol_lookup.get_long_type(),
+                    _innate_symbol_lookup.get_ulong_type(),
+                    _innate_symbol_lookup.get_word_type(),
+                    _innate_symbol_lookup.get_uword_type(),
+                    _innate_symbol_lookup.get_single_type(),
+                    _innate_symbol_lookup.get_double_type()
+                ]
+            do
+                if type.matches(addable) then
+                    return true
+                fi
+            od
+
+            return false
         si
 
         // Drop what the literals in a stage body captured, so the walk that

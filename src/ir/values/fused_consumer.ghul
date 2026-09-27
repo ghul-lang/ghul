@@ -102,6 +102,19 @@ namespace IR.Values is
         // Consumer specifics.
         consumer_kind: string public
 
+        // join. The result local holds the interpolation handler the
+        // elements are written into and `finish` reads it back as a
+        // string, so what is left is the separator, evaluated once
+        // before the loop, and whether anything has been written yet.
+        // A flag rather than the handler's own length, because an
+        // element whose text is empty still counts as written.
+        join_separator_il_name: string? public
+        join_separator_type: Semantic.Types.Type? public
+        join_separator_init: Value? public
+        join_seen_il_name: string? public
+        join_append_separator: Value? public
+        join_append_element: Value? public
+
         // The result local, named in compile-expressions so pre-built
         // values (a `reduce` accumulator) can reference it. It holds the
         // consumer's own type unless `result_local_type` says otherwise:
@@ -398,9 +411,20 @@ namespace IR.Values is
                 _ldc_i4(context, 0)
                 _stloc(context, presize_index_il_name!)
             elif let seed = seed_init then
-                // reduce (seed), find / first (empty MAYBE), collect (list).
+                // reduce (seed), find / first (empty MAYBE), collect (list),
+                // join (the interpolation handler).
                 gen(seed, context)
                 _stloc(context, result_il_name)
+            fi
+
+            if let separator = join_separator_init, name = join_separator_il_name then
+                _declare(context, name, join_separator_type!)
+                gen(separator, context)
+                _stloc(context, name)
+
+                _declare(context, join_seen_il_name!, IoC.CONTAINER.instance.innate_symbol_lookup.get_bool_type())
+                _ldc_i4(context, 0)
+                _stloc(context, join_seen_il_name!)
             fi
         si
 
@@ -436,6 +460,35 @@ namespace IR.Values is
                 gen(consumer_apply!, context)
             elif consumer_kind =~ "reduce" then
                 gen(consumer_apply!, context)
+                _stloc(context, result_il_name)
+            elif consumer_kind =~ "join" then
+                // The separator goes in ahead of every element but the
+                // first, then the element's own text, as the runtime's
+                // append_to writes it.
+                let next = IR.LABEL()
+
+                _ldloc(context, join_seen_il_name!)
+                _branch(context, "brfalse", System.Reflection.Metadata.ILOpCode.BRFALSE, next)
+                gen(join_append_separator!, context)
+                _mark(context, next)
+
+                gen(join_append_element!, context)
+
+                _ldc_i4(context, 1)
+                _stloc(context, join_seen_il_name!)
+            elif consumer_kind =~ "sum_by" then
+                // running = running + selector(element).
+                _ldloc(context, result_il_name)
+                gen(consumer_apply!, context)
+                _op(context, "add", System.Reflection.Metadata.ILOpCode.ADD)
+                _stloc(context, result_il_name)
+            elif consumer_kind =~ "sum" then
+                // running = running + element, as the one instruction the
+                // element type's own `+` is. A type whose addition is an
+                // operator method declines at recognition.
+                _ldloc(context, result_il_name)
+                gen(Load.TEMP(final_element_il_name, final_element_type), context)
+                _op(context, "add", System.Reflection.Metadata.ILOpCode.ADD)
                 _stloc(context, result_il_name)
             elif consumer_kind =~ "find" then
                 let next = IR.LABEL()
