@@ -96,6 +96,18 @@ namespace Syntax.Process is
                 return false
             fi
 
+            // A reference type that is both iterable and its own iterator, such
+            // as a pipe, is asked for an iterator rather than driven directly, so
+            // that each read starts from the beginning. A struct is driven
+            // directly: asking it would copy it, and box the copy.
+            if !recursing /\ !type.is_value_type then
+                if let read_iterator = get_zero_argument_function(type, "$get_iterator") then
+                    carrier.read_iterator = read_iterator
+
+                    return set_iterator_for(carrier, read_iterator.return_type!, true)
+                fi
+            fi
+
             let move_next = get_zero_argument_function(type, "move_next")
 
             if move_next? then
@@ -282,6 +294,8 @@ namespace Syntax.Process is
                 return false
             fi
 
+            let to_inline = Collections.LIST[PIPE_FUSION_STAGE]()
+
             for stage in fusion.stages_outermost_first do
                 if stage.is_countdown then
                     // take/skip carry an int count evaluated once into the
@@ -296,9 +310,9 @@ namespace Syntax.Process is
                     fi
                 elif stage.is_index then
                     // The INDEXED_VALUE the stage builds is the element
-                    // type of the `index` call's own `Pipe[INDEXED_VALUE[E]]`
-                    // return, so it is read off the call rather than
-                    // rebuilt from the element type flowing into the stage.
+                    // type of the `index` call's own return, so it is read
+                    // off the call rather than rebuilt from the element type
+                    // flowing into the stage.
                     if !_resolve_index_stage(stage) then
                         _chain_resolve_reason = "index-stage-unresolved"
 
@@ -328,9 +342,16 @@ namespace Syntax.Process is
                     fi
 
                     if inline_stages then
-                        _try_inline_stage(stage)
+                        to_inline.add(stage)
                     fi
                 fi
+            od
+
+            // Inlining takes a stage's body out of its literal, so it waits
+            // until every stage has resolved: a chain that declines part way
+            // runs the literals as they were written.
+            for stage in to_inline do
+                _try_inline_stage(stage)
             od
 
             return true
@@ -465,21 +486,6 @@ namespace Syntax.Process is
                 consumer_kind,
                 result_il_name
             )
-
-            if let plan.pipe_reset, pipe_type = plan.pipe_type then
-                let pipe_il_name = ".fc_pipe.{id}"
-
-                fused.pipe_il_name = pipe_il_name
-                fused.pipe_type = pipe_type
-                fused.pipe_cast = IR.Values.CAST(pipe_type, iterator_load, false)
-                fused.pipe_reset =
-                    pipe_reset.call(
-                        plan.source.location,
-                        IR.Values.Load.TEMP(pipe_il_name, pipe_type),
-                        Collections.LIST[IR.Values.Value](0),
-                        null,
-                        _function_caller)
-            fi
 
             let final_element_load = cast IR.Values.Value(IR.Values.Load.TEMP(built.final_il_name, built.final_type))
 
@@ -903,14 +909,11 @@ namespace Syntax.Process is
                 fi
             fi
 
-            let pipe = _innate_symbol_lookup.get_unspecialized_pipe_type()
-
-            if !pipe? \/ !stage.chain_type? then
+            if !stage.chain_type? then
                 return false
             fi
 
-            stage.indexed_value_type =
-                Semantic.Symbols.TYPE_ARGUMENT_EXTRACTOR.extract(stage.chain_type, pipe)
+            stage.indexed_value_type = Semantic.Symbols.sequence_element_type(stage.chain_type)
 
             if !stage.indexed_value_type? then
                 return false
@@ -1172,11 +1175,19 @@ namespace Syntax.Process is
         si
 
         // Fill the fusion plan's iterator slots for `type`, mirroring
-        // set_iterator_for: bind move_next / read_current directly when
-        // `type` is itself an iterator, else follow $get_iterator once
-        // and recurse. Returns false if no complete iterator surface is
+        // set_iterator_for: follow $get_iterator once and recurse when a
+        // reference type has one, else bind move_next / read_current
+        // directly when `type` is itself an iterator. Returns false if no complete iterator surface is
         // found (fall back to the normal loop).
         _resolve_fusion_source_iterator(fusion: PIPE_FUSION, type: Type, recursing: bool) -> bool is
+            if !recursing /\ !type.is_value_type then
+                if let read_iterator = get_zero_argument_function(type, "$get_iterator") then
+                    fusion.source_read_iterator = read_iterator
+
+                    return _resolve_fusion_source_iterator(fusion, read_iterator.return_type!, true)
+                fi
+            fi
+
             let move_next = get_zero_argument_function(type, "move_next")
 
             if move_next? then
@@ -1193,8 +1204,6 @@ namespace Syntax.Process is
                 fusion.source_move_next = move_next
                 fusion.source_read_current = read_current
 
-                _resolve_fusion_pipe_rewind(fusion, type, read_current)
-
                 return true
             elif !recursing then
                 let read_iterator = get_zero_argument_function(type, "$get_iterator")
@@ -1209,54 +1218,5 @@ namespace Syntax.Process is
             return false
         si
 
-        // Resolve the rewind a spent take owes the cursor `cursor_type`,
-        // as `Pipe[E].reset` over the element type the cursor yields. The
-        // loop tests the cursor for `Pipe[E]` before calling it, so a
-        // cursor that is one is reset wherever it came from and a cursor
-        // that is not is left alone - which is what rewinding a stage's
-        // own cursor does. A value-type cursor is the loop's own copy and
-        // is nobody else's to restore, so it gets none.
-        _resolve_fusion_pipe_rewind(
-            fusion: PIPE_FUSION,
-            cursor_type: Type,
-            read_current: Semantic.Symbols.Function
-        ) is
-            if cursor_type.is_value_type then
-                return
-            fi
-
-            let unspecialized = _innate_symbol_lookup.get_unspecialized_pipe_type()
-
-            if !unspecialized? then
-                return
-            fi
-
-            let element_type = read_current.return_type
-
-            if !element_type? then
-                return
-            fi
-
-            let classy = cast Semantic.Symbols.Classy?(unspecialized.symbol.unspecialized_symbol)
-
-            if !classy? then
-                return
-            fi
-
-            let arguments = Collections.LIST[Type]()
-            arguments.add(element_type)
-
-            let pipe_type = cast Type(
-                Semantic.Types.GENERIC(Source.LOCATION.internal, classy, arguments))
-
-            let reset = get_zero_argument_function(pipe_type, "reset")
-
-            if !reset? then
-                return
-            fi
-
-            fusion.pipe_type = pipe_type
-            fusion.pipe_reset = reset
-        si
     si
 si

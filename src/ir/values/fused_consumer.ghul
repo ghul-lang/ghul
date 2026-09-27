@@ -88,16 +88,6 @@ namespace IR.Values is
         move_next: Value public
         read_current: Value public
 
-        // The rewind a spent take owes the cursor. `pipe_cast` tests it
-        // for `Pipe[E]` into `pipe_il_name`, and `pipe_reset` resets that
-        // when it is one - exactly what a stage pipe rewinding its own
-        // cursor does. Unset when the cursor is a value type, which the
-        // loop holds a copy of and owes nothing.
-        pipe_cast: Value? public
-        pipe_reset: Value? public
-        pipe_il_name: string public
-        pipe_type: Type? public
-
         // The element local the innermost stage reads.
         element_il_name: string public
         element_type: Type public
@@ -190,7 +180,6 @@ namespace IR.Values is
             super.init()
 
             // Left empty unless a rewind is wired up; nothing else reads it.
-            pipe_il_name = ""
 
             self._result_type = result_type
             self.iterator_init = iterator_init
@@ -271,7 +260,7 @@ namespace IR.Values is
         _gen_fused_loop(context: IR.CONTEXT) is
             let loop_start = IR.LABEL()
             let loop_end = IR.LABEL()
-            let take_exit = if pipe_reset? then IR.LABEL() else loop_end fi
+            let take_exit = loop_end
 
             // A source read more than once - for its iterator and for its
             // count - is evaluated once, first, and everything below reads
@@ -367,25 +356,6 @@ namespace IR.Values is
             _gen_element_body(context, loop_start, loop_end)
 
             _branch(context, "br", System.Reflection.Metadata.ILOpCode.BR, loop_start)
-
-            // The rewind falls straight into the loop exit. Only a spent
-            // take reaches it: an exhausted source has already rewound
-            // itself, and a consumer that stops at its first hit abandons
-            // the chain exactly as the unfused lowering does. Whether the
-            // cursor is rewound at all is asked of it at run time, as a
-            // stage pipe rewinding its own cursor asks.
-            if let reset = pipe_reset, `cast = pipe_cast, cursor_type = pipe_type then
-                _mark(context, take_exit)
-
-                _declare(context, pipe_il_name, cursor_type)
-                gen(`cast, context)
-                _stloc(context, pipe_il_name)
-
-                _ldloc(context, pipe_il_name)
-                _branch(context, "brfalse", System.Reflection.Metadata.ILOpCode.BRFALSE, loop_end)
-
-                gen(reset, context)
-            fi
 
             _mark(context, loop_end)
 
