@@ -1,0 +1,61 @@
+namespace Analysis.Tests is
+    use Collections.LIST
+
+    use IO.File
+
+    use Analysis.Protocol.ANALYSER_PROCESS
+    use Analysis.Protocol.Response
+
+    use Microsoft.VisualStudio.TestTools.UnitTesting.Assert
+    use TestClass = Microsoft.VisualStudio.TestTools.UnitTesting.TestClassAttribute
+    use Test = Microsoft.VisualStudio.TestTools.UnitTesting.TestMethodAttribute
+    use Assertions
+
+    // HOVER over a scalar constructed from another scalar, `double(n)`:
+    // the callee reads as the type it names, as any constructor call's
+    // does, and the local it initializes as the constructed type.
+    @TestClass()
+    class SCALAR_CONSTRUCTOR_HOVER_TESTS is
+        init() is si
+
+        prime(analyser: ANALYSER_PROCESS) -> ANALYSER_PROCESS is
+            let path = fixture_path("scalar-constructor-hover/scalar-constructor-hover.ghul")
+
+            assert File.exists(path) else "fixture missing: {path}"
+
+            analyser.send_edit("scalar-constructor-hover.ghul", File.read_all_text(path))
+
+            let diagnostics = analyser.read_response()
+            assert isa Response.DIAGNOSTICS(diagnostics) else "expected DIAGNOSTICS response"
+
+            let user_diagnostics = LIST(user_diagnostics_of(diagnostics))
+            are_equal(0, user_diagnostics.count, diagnostics_summary("EDIT had unexpected diagnostics", user_diagnostics))
+
+            return analyser
+        si
+
+        hover_description(analyser: ANALYSER_PROCESS, line: int, column: int) -> string is
+            analyser.send_hover("scalar-constructor-hover.ghul", line, column)
+            let response = analyser.read_query_response()
+            assert isa Response.HOVER(response) else "expected HOVER response"
+
+            return response.signature ?? ""
+        si
+
+        @Test()
+        hover_on_the_scalar_callee__shows_the_type() is
+            let use analyser = ANALYSER_PROCESS()
+            let description = hover_description(prime(analyser), 3, 20)
+
+            is_true(description.contains("struct double"), "expected struct double, got '{description}'")
+        si
+
+        @Test()
+        hover_on_the_local__shows_the_constructed_type() is
+            let use analyser = ANALYSER_PROCESS()
+            let description = hover_description(prime(analyser), 3, 13)
+
+            is_true(description.contains("wide: double"), "expected wide: double, got '{description}'")
+        si
+    si
+si
