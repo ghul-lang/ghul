@@ -11,9 +11,14 @@ namespace Syntax.Process is
     // not yet consumed by an enclosing operation would be lost on
     // re-entry (CLR locals reset; only frame fields persist).
     //
+    // A protected region has the same requirement: a `try`, or the
+    // region a disposing `let` or a `use` opens, can only be entered
+    // with an empty stack. Outside an async body there is no suspend
+    // to survive, so a spilled value goes to a local instead.
+    //
     // Rule (applied bottom-up at every composite node): if any
-    // later-evaluated child contains an `await`, wrap every prior
-    // child in `SPILL`. The operand-position contract (one stack
+    // later-evaluated child contains an `await` or a protected
+    // region, wrap every prior child in `SPILL`. The operand-position contract (one stack
     // value per operand) makes the rule uniform — no purity
     // analysis needed.
     class SPILL_AWAITS: Visitor is
@@ -26,8 +31,12 @@ namespace Syntax.Process is
         si
 
         visit(b: Expressions.BINARY) is
-            if _contains_await(b.right) then
+            if _needs_empty_stack(b.right) then
                 _wrap_unless_await(b, b.left)
+
+                if _contains_protected_region(b.right) then
+                    _wrap_unless_await(b, b.right)
+                fi
             fi
         si
 
@@ -39,16 +48,11 @@ namespace Syntax.Process is
                 return
             fi
 
-            let elements = call.arguments.expressions
+            let latest = _spill_elements(
+                call.arguments.expressions,
+                (i: int, e: Expressions.Expression) is call.arguments.replace_element(i, e) si)
 
-            let latest_await_index mut = -1
-            for i in 0..elements.count do
-                if _contains_await(elements[i]) then
-                    latest_await_index = i
-                fi
-            od
-
-            if latest_await_index < 0 then
+            if latest < 0 then
                 return
             fi
 
@@ -61,25 +65,39 @@ namespace Syntax.Process is
                     )
                 fi
             fi
+        si
 
-            for i in 0..latest_await_index do
-                let e = elements[i]
-                if !_is_await_node(e) then
-                    call.arguments.replace_element(
-                        i,
-                        Expressions.SPILL(e.location, e)
-                    )
-                fi
-            od
+        // A store pushes its target's receiver, and an index its index,
+        // before the value it stores, so all of them are evaluated ahead
+        // of a value holding a protected region.
+        visit(assign: Statements.ASSIGNMENT) is
+            if !_contains_protected_region(assign.right) then
+                return
+            fi
+
+            if let member: Expressions.MEMBER = assign.left then
+                _wrap_unless_await(member, member.left)
+            elif let idx: Expressions.INDEX = assign.left then
+                _wrap_unless_await(idx, idx.left)
+                _wrap_unless_await(idx, idx.index)
+            fi
+
+            if !_is_spill_node(assign.right) then
+                assign.replace_right(Expressions.SPILL(assign.right.location, assign.right))
+            fi
         si
 
         visit(idx: Expressions.INDEX) is
-            if _contains_await(idx.index) then
+            if _needs_empty_stack(idx.index) then
                 if !_is_await_node(idx.left) /\ !_is_spill_node(idx.left) then
                     idx.replace_child(
                         idx.left,
                         Expressions.SPILL(idx.left.location, idx.left)
                     )
+                fi
+
+                if _contains_protected_region(idx.index) then
+                    _wrap_unless_await(idx, idx.index)
                 fi
             fi
         si
@@ -89,28 +107,9 @@ namespace Syntax.Process is
                 return
             fi
 
-            let elements = construct.arguments.expressions
-
-            let latest_await_index mut = -1
-            for i in 0..elements.count do
-                if _contains_await(elements[i]) then
-                    latest_await_index = i
-                fi
-            od
-
-            if latest_await_index < 0 then
-                return
-            fi
-
-            for i in 0..latest_await_index do
-                let e = elements[i]
-                if !_is_await_node(e) then
-                    construct.arguments.replace_element(
-                        i,
-                        Expressions.SPILL(e.location, e)
-                    )
-                fi
-            od
+            _spill_elements(
+                construct.arguments.expressions,
+                (i: int, e: Expressions.Expression) is construct.arguments.replace_element(i, e) si)
         si
 
         visit(t: Expressions.TUPLE) is
@@ -118,28 +117,62 @@ namespace Syntax.Process is
                 return
             fi
 
-            let elements = t.elements.expressions
+            _spill_elements(
+                t.elements.expressions,
+                (i: int, e: Expressions.Expression) is t.elements.replace_element(i, e) si)
+        si
 
-            let latest_await_index mut = -1
-            for i in 0..elements.count do
-                if _contains_await(elements[i]) then
-                    latest_await_index = i
+        // An interpolated string keeps the text it is building on the
+        // stack while each hole is evaluated.
+        visit(s: Expressions.STRING_INTERPOLATION) is
+            let holes = Collections.LIST[Expressions.Expression]()
+            let positions = Collections.LIST[int]()
+
+            for index in 0..s.values.count do
+                let fragment = s.values[index]
+
+                if fragment.is_expression then
+                    holes.add(fragment.expression)
+                    positions.add(index)
                 fi
             od
 
-            if latest_await_index < 0 then
-                return
+            _spill_elements(holes, (i: int, e: Expressions.Expression) is s.replace_expression(positions[i], e) si)
+        si
+
+        // Wraps every element evaluated before the last one that needs an
+        // empty stack. An await leaves that stack empty itself when it is
+        // emitted, but a protected region is emitted where its value is
+        // used, so an element holding one is spilled too: it is then
+        // evaluated ahead of the operation, in source order, with nothing
+        // beneath it. Answers the index of that last element, or -1.
+        _spill_elements(
+            elements: Collections.List[Expressions.Expression],
+            replace: (int, Expressions.Expression) -> void
+        ) -> int is
+            let latest mut = -1
+
+            for i in 0..elements.count do
+                if _needs_empty_stack(elements[i]) then
+                    latest = i
+                fi
+            od
+
+            if latest < 0 then
+                return latest
             fi
 
-            for i in 0..latest_await_index do
+            let last = if _contains_protected_region(elements[latest]) then latest + 1 else latest fi
+
+            for i in 0..last do
                 let e = elements[i]
-                if !_is_await_node(e) then
-                    t.elements.replace_element(
-                        i,
-                        Expressions.SPILL(e.location, e)
-                    )
+
+                if !_is_await_node(e) /\ !_is_spill_node(e) then
+                    replace(i, Expressions.SPILL(e.location, e))
                 fi
             od
+
+            return latest
         si
 
         _wrap_unless_await(parent: Expressions.Expression, child: Expressions.Expression) is
@@ -155,9 +188,17 @@ namespace Syntax.Process is
         _is_spill_node(e: Expressions.Expression) -> bool =>
             isa Expressions.SPILL(e)
 
-        _contains_await(e: Expressions.Expression) -> bool is
+        _needs_empty_stack(e: Expressions.Expression) -> bool is
             let scanner = CONTAINS_AWAIT_SCANNER()
             e.walk(scanner)
+
+            return scanner.found \/ _contains_protected_region(e)
+        si
+
+        _contains_protected_region(e: Expressions.Expression) -> bool is
+            let scanner = CONTAINS_PROTECTED_REGION_SCANNER()
+            e.walk(scanner)
+
             return scanner.found
         si
     si
@@ -173,6 +214,45 @@ namespace Syntax.Process is
         si
 
         pre(a: Expressions.AWAIT) -> bool is
+            found = true
+            return true
+        si
+
+        pre(f: Expressions.FUNCTION) -> bool => true
+    si
+
+    // Scans for anything that opens a protected region: a `try`, a
+    // `let use` or `let use ... in`, or a `use`. Stops at function-literal
+    // boundaries, since a nested lambda's regions are in its own body.
+    class CONTAINS_PROTECTED_REGION_SCANNER: Visitor is
+        found: bool public
+
+        init() is
+            super.init()
+        si
+
+        pre(t: Statements.TRY) -> bool is
+            found = true
+            return true
+        si
+
+        pre(l: Statements.LET) -> bool is
+            if l.want_dispose then
+                found = true
+            fi
+
+            return found
+        si
+
+        pre(l: Expressions.LET_IN) -> bool is
+            if l.want_dispose then
+                found = true
+            fi
+
+            return found
+        si
+
+        pre(u: Expressions.USE) -> bool is
             found = true
             return true
         si
