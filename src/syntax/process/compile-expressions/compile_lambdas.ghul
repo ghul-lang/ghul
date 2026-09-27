@@ -795,6 +795,12 @@ namespace Syntax.Process is
 
             _resolve_argument_attributes(function, closure)
 
+            // A recursive literal calls itself before its body has said what
+            // it returns, so its return stands as its own origin until a walk
+            // settles it. The self-call reads that origin; the return the
+            // walk arrives at bounds it; the walk after takes the settled type.
+            let recursive_return: Semantic.Types.INFERRED_VARIABLE_TYPE? mut = null
+
             if arguments_resolved then
                 let return_type: Type mut
 
@@ -924,6 +930,17 @@ namespace Syntax.Process is
                     // before a void one is ever considered.
                     return_type = slot_return_type
                     closure.return_type_was_inferred = false
+                fi
+
+                if closure.is_recursive /\ isa Semantic.Types.INFERRED_RETURN_TYPE(return_type) then
+                    if let settled = _settled_return(function) then
+                        return_type = settled
+                    elif let origin = _return_origin(function) then
+                        let placeholder = Semantic.Types.INFERRED_VARIABLE_TYPE(origin)
+
+                        recursive_return = placeholder
+                        return_type = placeholder
+                    fi
                 fi
 
                 closure.set_return_type(return_type)
@@ -1062,19 +1079,6 @@ namespace Syntax.Process is
 
             let reported_inference_failure = false
 
-            if closure.is_recursive then
-                let use retry_site = RETRY_SITE_STATS.enter("lambdas.recursive_rewalk")
-                _logger.roll_back()
-                _logger.speculate()
-
-                _symbol_use_locations.roll_back()
-                _symbol_use_locations.speculate()
-
-                _flow.restore()
-
-                _walk_literal_body(function, closure)
-            fi
-
             if _build_flags.want_assembler /\ arguments_resolved /\ closure.could_be_delegate then
                 // The roll_back below is for the re-walk's diagnostics,
                 // which stand in for the first walk's: converting to a
@@ -1171,30 +1175,18 @@ namespace Syntax.Process is
                     _await_return(function, closure, Semantic.OBLIGATIONS.LITERAL_RETURN)
                 else
                     closure.set_return_type(_innate_symbol_lookup.get_void_type())
-
-                    // A recursive literal's self-call was compiled during
-                    // the body walks above, against a `$recurse` field
-                    // typed with the then-unresolved function type, and
-                    // the frozen call value keeps that stale composite —
-                    // set_return_type refreshes the field, not the IR
-                    // already recorded against it. With no value-producing
-                    // arm to settle the return mid-walk, this is the only
-                    // point the closure's type becomes final, so walk the
-                    // body once more to re-record the self-call at the
-                    // settled type.
-                    if closure.is_recursive then
-                        let use retry_site = RETRY_SITE_STATS.enter("lambdas.return_defaulted_recursive_rewalk")
-                        _logger.roll_back()
-                        _logger.speculate()
-
-                        _symbol_use_locations.roll_back()
-                        _symbol_use_locations.speculate()
-
-                        _flow.restore()
-
-                        _walk_literal_body(function, closure)
-                    fi
                 fi
+            fi
+
+            // The return this walk arrived at bounds the origin the self-call
+            // read, and the obligation walks the body again for the self-call
+            // to be typed at it.
+            if let waiting = recursive_return then
+                if let arrived = closure.return_type /\ arrived.is_settled then
+                    let _ = Semantic.INFERENCE_TRACE.add_lower_bound("recursive_return", waiting.origin, arrived)
+                fi
+
+                Semantic.OBLIGATIONS.defer(Semantic.OBLIGATIONS.RECURSIVE_RETURN, waiting, function.location)
             fi
 
             closure.unmap_type_arguments()
