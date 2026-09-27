@@ -1,0 +1,50 @@
+namespace Syntax.Process is
+    use Logging.Logger
+
+    // Reports each use of a symbol whose declaration carries
+    // System.ObsoleteAttribute: a warning, or an error where the attribute
+    // says so. Runs over the uses compile-expressions recorded, once every
+    // file's attributes are resolved, so a deprecation declared in one file
+    // is seen at a use in any other. The declaration itself is not a use.
+    class CHECK_DEPRECATED_USES(
+        _logger: Logger,
+        _symbol_use_locations: Semantic.SYMBOL_USE_LOCATIONS
+    ) is
+        // A constructor call reads as the type it constructs, so a
+        // constructor with no deprecation of its own reports its type's.
+        _reported(symbol: Semantic.Symbols.Symbol) -> Semantic.Symbols.Symbol is
+            if !symbol.deprecation? /\ symbol.is_constructor then
+                if let owner: Semantic.Symbols.Symbol = symbol.owner then
+                    return owner
+                fi
+            fi
+
+            return symbol
+        si
+
+        check(file_name: string) is
+            for found in _symbol_use_locations.symbol_uses_in_file(file_name) do
+                if found.location =~ found.value.location then
+                    continue
+                fi
+
+                let symbol = _reported(found.value)
+
+                if let deprecation = symbol.deprecation then
+                    let message =
+                        if let text = deprecation.message then
+                            "{symbol.name} is deprecated: {text}"
+                        else
+                            "{symbol.name} is deprecated"
+                        fi
+
+                    if deprecation.is_error then
+                        _logger.error(found.location, message)
+                    else
+                        _logger.warn(found.location, "deprecated", message)
+                    fi
+                fi
+            od
+        si
+    si
+si
