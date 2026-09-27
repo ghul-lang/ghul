@@ -3029,7 +3029,7 @@ namespace Syntax.Process is
                 call.compile_expressions_state.value = DUMMY(Semantic.Types.ERROR(), call.location)
                 return
             elif isa Semantic.Types.INFERRED_VARIABLE_TYPE(function_type) then
-                _propagate_to_unresolved_callee(function_type, argument_types)
+                _propagate_to_unresolved_callee(call, function_type, argument_types)
                 call.compile_expressions_state.value = DUMMY(Semantic.Types.ERROR(), call.location)
                 return
             elif !isa Semantic.Types.NAMED(function_type) then
@@ -3312,7 +3312,22 @@ namespace Syntax.Process is
         //      filter candidate types to those that actually accept
         //      this call shape. Its discharge defers conservatively
         //      when the captured args still contain placeholders.
+        // What a call through a callee whose type is not yet known returns:
+        // the call's own result origin, or the anonymous sentinel outside
+        // any body.
+        _unresolved_callee_return(call: Trees.Expressions.CALL) -> Semantic.Types.Type is
+            if let function = _symbol_table.current_function,
+                    origin = Semantic.RESULT_ORIGINS.origin_for(call, call.location, cast Semantic.Scope(function), "$call@{call.location.start_line}:{call.location.start_column}") then
+                origin.description = "the result of this call"
+
+                return Semantic.Types.INFERRED_VARIABLE_TYPE(origin)
+            fi
+
+            return Semantic.Types.INFERRED_RETURN_TYPE()
+        si
+
         _propagate_to_unresolved_callee(
+            call: Trees.Expressions.CALL,
             placeholder: Semantic.Types.INFERRED_VARIABLE_TYPE,
             argument_types: Collections.List[Semantic.Types.Type]
         ) is
@@ -3329,7 +3344,7 @@ namespace Syntax.Process is
             if !placeholder.origin.has_lub_candidate /\ argument_types |> all(a => a.is_settled) /\
                     argument_types.count <= Semantic.Lookups.INNATE_TYPE_LIMITS.MAX_FUNCTION_PARAMETERS then
                 let function_type_components = Collections.LIST[Semantic.Types.Type](argument_types)
-                function_type_components.add(Semantic.Types.INFERRED_RETURN_TYPE())
+                function_type_components.add(_unresolved_callee_return(call))
                 let synthesized = _innate_symbol_lookup.get_function_type(function_type_components)
                 _logger.mark_consumed_any_if(Semantic.INFERENCE_TRACE.add_lower_bound("calls.unresolved_callee_shape", placeholder.origin, synthesized))
             fi
