@@ -964,6 +964,23 @@ namespace Syntax.Process is
         // A second, restoring walk of the whole lambda puts the
         // closure-context IR back on the shared AST nodes so the (now
         // unused) closure method body still emits valid IL.
+        // Drop what the literals in a stage body captured, so the walk that
+        // follows records what the body reads under the rule now in force.
+        // A capture is keyed on the symbol while the frame field it declares
+        // is keyed on the name, so a walk that resolves the same name to a
+        // different symbol than the last one adds a second value under a
+        // name the frame already has one field for, and the frame's
+        // constructor is then called with one argument too many. Neither
+        // walk's captures are part of what the logger rolls back, so each
+        // walk over the body is preceded by this.
+        _reset_nested_captures(body: Trees.Bodies.EXPRESSION) is
+            for nested in NESTED_LITERAL_COLLECTOR().collect(body) do
+                if let nested_closure = cast Semantic.Symbols.Closure?(_symbol_table.scope_for(nested)) then
+                    nested_closure.reset_captures()
+                fi
+            od
+        si
+
         _try_inline_stage(stage: PIPE_FUSION_STAGE) is
             // A body whose statements become a state machine keeps its
             // loops as pipe objects, so the stage's delegate is still
@@ -1088,14 +1105,7 @@ namespace Syntax.Process is
             // is what makes those names load as the method's locals.
             closure.inlined_into = (_symbol_table.current_function!, param_symbol, cast Semantic.Symbols.Variable(local))
 
-            // A literal written inside the body captured the parameter
-            // this walk reads as a method local, so what it recorded
-            // names a symbol the body no longer reads.
-            for nested in NESTED_LITERAL_COLLECTOR().collect(body) do
-                if let nested_closure = cast Semantic.Symbols.Closure?(_symbol_table.scope_for(nested)) then
-                    nested_closure.reset_captures()
-                fi
-            od
+            _reset_nested_captures(body)
 
             let harvest_site = RETRY_SITE_STATS.enter("fusion.harvest", RetrySiteKind.ALTERNATIVE)
 
@@ -1129,6 +1139,8 @@ namespace Syntax.Process is
                 fi
 
                 let restore_site = RETRY_SITE_STATS.enter("fusion.restore", RetrySiteKind.ALTERNATIVE)
+
+                _reset_nested_captures(body)
 
                 _logger.speculate()
                 _symbol_use_locations.speculate()
