@@ -177,11 +177,13 @@ namespace Syntax.Process is
         // decided, with the reason the recogniser or the resolver gave.
         // Inert unless the study is enabled.
         //
-        // A site that peeled no stage is recorded only when the peel
-        // stopped at a Ghul.Pipes function - a combinator fusion has no
-        // stage for, which is what teaching the fuser a new stage would
-        // recover. Stopping anywhere else means the expression was never
-        // a chain, which every ordinary `for` loop does.
+        // A site that fused is always recorded, stages or none: a bare
+        // source is a chain of no stages and fuses like any other. A site
+        // that peeled no stage and did not fuse is recorded only when the
+        // peel stopped at a Ghul.Pipes function - a combinator fusion has
+        // no stage for, which is what teaching the fuser a new stage would
+        // recover. Stopping anywhere else leaves nothing fusion could have
+        // reached, which every ordinary `for` loop does.
         _note_fusion_site(
             location: Source.LOCATION,
             consumer: string,
@@ -195,7 +197,7 @@ namespace Syntax.Process is
 
             let roles = recognizer.peeled_roles ?? ""
 
-            if roles.length == 0 /\ !_is_pipes_function(recognizer.boundary_function) then
+            if !fused /\ roles.length == 0 /\ !_is_pipes_function(recognizer.boundary_function) then
                 return
             fi
 
@@ -437,6 +439,15 @@ namespace Syntax.Process is
             fi
 
             let plan = fusion!
+
+            // `count` over a bare source is the one consumer a fused loop
+            // makes slower: the runtime's own `count` returns `source.count`
+            // for a sized source, so fusing turns an O(1) read into a walk
+            // of every element. A chain with stages has nothing sized to
+            // ask - the stages are never materialised - so it keeps fusing.
+            if plan.stages_outermost_first.count == 0 /\ consumer_kind =~ "count" then
+                return _decline_consumer(call, recognizer, consumer_kind, "bare-count-has-a-sized-fast-path")
+            fi
 
             let id = _next_fused_local_id()
 

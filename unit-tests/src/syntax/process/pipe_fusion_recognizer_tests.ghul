@@ -164,26 +164,37 @@ namespace Syntax.Process.UnitTests is
 
         // `zip` is a real Ghul.Pipes function but not one the free-function
         // recognizer covers (a two-source stage) - the peel loop must stop
-        // and decline rather than misclassify it, leaving the call to fall
-        // back to its ordinary, unfused lowering.
+        // there rather than misclassify it, which leaves the `zip` call
+        // itself as the chain's source and the chain carrying no stage.
+        // The consumer then drives `zip`'s own result, exactly as an
+        // ordinary `for` over it would.
         @Test()
-        Calling__recognize_free_function_chain__with_uncovered_pipes_function__returns_null() is
+        Calling__recognize_free_function_chain__with_uncovered_pipes_function__stops_at_that_call() is
             let source = source_expression()
             let call = pipes_call("zip", [source, placeholder()])
 
-            is_null(recognizer().recognize_free_function_chain(call))
+            let fusion = recognizer().recognize_free_function_chain(call)
+
+            is_true(fusion?)
+            are_equal(0, fusion!.stages_outermost_first.count)
+            are_same(call, fusion!.source)
         si
 
         // A call whose resolved value isn't a global-function call at all
-        // (e.g. an instance method call) must never be mistaken for a
-        // fusible stage.
+        // (e.g. an instance method call) is never a fusible stage, so it
+        // ends the peel and becomes the chain's source rather than one of
+        // its stages.
         @Test()
-        Calling__recognize_free_function_chain__with_non_global_call__returns_null() is
+        Calling__recognize_free_function_chain__with_non_global_call__stops_at_that_call() is
             let call = CALL(loc(), placeholder(), ExpressionList(loc(), [placeholder()]))
 
             call.compile_expressions_state.value = TempLoad("not-a-call", int_class().type!)
 
-            is_null(recognizer().recognize_free_function_chain(call))
+            let fusion = recognizer().recognize_free_function_chain(call)
+
+            is_true(fusion?)
+            are_equal(0, fusion!.stages_outermost_first.count)
+            are_same(call, fusion!.source)
         si
     si
 
