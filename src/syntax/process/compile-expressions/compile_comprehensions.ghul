@@ -17,7 +17,11 @@ namespace Syntax.Process is
             super.pre(comprehension)
 
             try
-                _compile_comprehension(comprehension)
+                if comprehension.is_lazy then
+                    _compile_lazy_comprehension(comprehension)
+                else
+                    _compile_comprehension(comprehension)
+                fi
             catch ex: Exception
                 comprehension.compile_expressions_state.value = IR.Values.DUMMY(Semantic.Types.ERROR(), comprehension.location)
                 _logger.exception(comprehension.location, ex, "exception compiling list comprehension")
@@ -27,6 +31,112 @@ namespace Syntax.Process is
         si
 
         visit(comprehension: Trees.Expressions.COMPREHENSION) is
+            super.visit(comprehension)
+        si
+
+        // `{element for p in source ...}`: the clauses are compiled exactly
+        // as an array comprehension's are, but inside the generator literal
+        // the comprehension owns, so its iterators and loop variables become
+        // fields of that literal's frame and survive between elements. The
+        // literal returns Pipe[T] for the element's type T, and the
+        // comprehension's value is a call to it: each evaluation makes a new
+        // pipe, which rewinds and re-runs the clauses as any pipe does.
+        _compile_lazy_comprehension(comprehension: Trees.Expressions.COMPREHENSION) is
+            let generator = cast Semantic.Symbols.Closure?(comprehension.scope)!
+            let state_machine = Semantic.Symbols.state_machine_for(generator)!
+
+            generator.map_type_arguments()
+
+            if let dropped = state_machine.reset() then
+                _composite_spill_state.drop_owned_by(dropped)
+            fi
+
+            // The literal takes no arguments; declaring that is what lets its
+            // function type be built once its return type is known.
+            generator.set_arguments(Collections.LIST[string](), Collections.LIST[Type]())
+
+            generator.set_return_type(Semantic.Types.INFERRED_RETURN_TYPE())
+
+            _symbol_table.current_closure_context.add_closure(generator)
+
+            let element_constraint = Semantic.Symbols.sequence_element_type(comprehension.expected_type)
+
+            if let constraint = element_constraint then
+                comprehension.element.set_expected_type(
+                    constraint,
+                    "element type {0} not compatible with comprehension type {1}"
+                )
+            else
+                comprehension.element.clear_expected_type()
+            fi
+
+            let outside = _flow.current_env.copy()
+
+            _flow.push_literal_frame()
+
+            generator.enter_literal_body()
+            _compile_clause(comprehension, comprehension.first)
+            generator.leave_literal_body()
+
+            generator.literal_body_impure = _flow.pop_literal_frame()
+
+            _flow.set_env(outside)
+
+            COMPREHENSION_RESTRICTIONS(_logger).check(comprehension, loop_value_frames.count > 0)
+
+            let value_type = comprehension.element.value?.type
+
+            let element_types = COMPREHENSION_ELEMENT_TYPE()
+
+            let element_type: Type =
+                if let resolved = element_types.element_type(element_constraint, value_type) then
+                    resolved
+                else
+                    _logger.error(comprehension.element.location, "cannot infer the element type of this comprehension")
+                    Semantic.Types.ERROR()
+                fi
+
+            if !element_types.fits(element_constraint, value_type) then
+                _logger.error(
+                    comprehension.element.location,
+                    "element type {value_type} not compatible with comprehension type {element_type}"
+                )
+            fi
+
+            comprehension.element_type = element_type
+
+            let pipe_type = if !element_type.is_error then Semantic.Symbols.generator_return_type(element_type) else null fi
+
+            if !pipe_type? then
+                generator.set_return_type(Semantic.Types.ERROR())
+                generator.unmap_type_arguments()
+                comprehension.compile_expressions_state.value = IR.Values.DUMMY(Semantic.Types.ERROR(), comprehension.location)
+
+                return
+            fi
+
+            generator.set_return_type(pipe_type)
+
+            generator.unmap_type_arguments()
+
+            let delegate = generator.load(comprehension.location, _symbol_loader)
+
+            // Loading the literal is what gives it a captures frame when it
+            // needs one, and the generator frame's reference to that is
+            // settled when the frame is declared, so the frame is declared
+            // after the load, as a generator literal's is.
+            if let frame = state_machine.frame then
+                frame.declare()
+            fi
+
+            comprehension.compile_expressions_state.value =
+                IR.Values.Call.CLOSURE(
+                    delegate,
+                    pipe_type,
+                    false,
+                    delegate.type!,
+                    Collections.LIST[Value]()
+                )
         si
 
         pre(clause: Trees.Expressions.COMPREHENSION_FOR) -> bool => true
@@ -166,7 +276,7 @@ namespace Syntax.Process is
                     if let sv = source.value, sv_type = sv.type /\ set_iterator_for(clause, sv_type, false) then
                         check_receiver_present(source)
 
-                        if _never_ends(sv) then
+                        if _never_ends(sv) /\ !comprehension.is_lazy then
                             _logger.warn(
                                 source.location,
                                 "unbounded-comprehension-source",
@@ -243,7 +353,7 @@ namespace Syntax.Process is
 
             if Value.check_is_consumable(_logger, condition.location, condition.value) then
                 if !condition.value!.type!.matches(_innate_symbol_lookup.get_bool_type()) then
-                    _logger.error(condition.location, "list comprehension condition must be bool")
+                    _logger.error(condition.location, "{comprehension.description} condition must be bool")
                 fi
             fi
 
