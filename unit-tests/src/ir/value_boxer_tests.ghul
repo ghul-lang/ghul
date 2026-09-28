@@ -9,6 +9,7 @@ namespace IR.UnitTests is
     use Semantic.Symbols.CLASS
     use Semantic.Symbols.STRUCT
     use Semantic.Types.NAMED
+    use Semantic.Types.NULLABLE
     use Semantic.Types.Type
 
     use IR.UnitTests.Support.STUB_VALUE
@@ -132,6 +133,45 @@ namespace IR.UnitTests is
             let result = boxer(false).wrap_if_needed(v, bare)
 
             are_same(v, result)
+        si
+
+        nullable_over(inner: Type) -> NULLABLE is
+            let symbol = STRUCT(loc(), loc(), Semantic.BLOCK_SCOPE(), "Nullable", LIST[string](["T"]), Semantic.BLOCK_SCOPE())
+            return NULLABLE(loc(), symbol, LIST[Type]([inner]))
+        si
+
+        @Test()
+        wrap_if_needed__null_literal_into_value_optional__returns_default() is
+            let target = nullable_over(val_type())
+
+            let result = boxer(false).wrap_if_needed(IR.Values.NULL(Semantic.Types.NULL()), target)
+
+            is_true(isa IR.Values.DEFAULT(result))
+        si
+
+        @Test()
+        wrap_if_needed__null_typed_value_into_value_optional__evaluates_value_then_returns_default() is
+            // A null-typed value that is not the bare literal, such as a
+            // function body whose tail is `null`, has work in it that
+            // has to run: it is kept, its null popped, and the empty
+            // optional loaded after it.
+            let target = nullable_over(val_type())
+            let v = STUB_VALUE(Semantic.Types.NULL())
+
+            let result = boxer(false).wrap_if_needed(v, target)
+
+            is_true(isa IR.Values.BLOCK(result))
+
+            let values = (cast IR.Values.BLOCK(result)).values
+
+            are_equal(3, values.count)
+            are_same(v, values[0])
+
+            let pop = cast IR.Values.INSTRUCTION?(values[1])
+
+            is_true(pop?)
+            are_equal(System.Reflection.Metadata.ILOpCode.POP, pop!.op_code)
+            is_true(isa IR.Values.DEFAULT(values[2]))
         si
 
         @Test()
