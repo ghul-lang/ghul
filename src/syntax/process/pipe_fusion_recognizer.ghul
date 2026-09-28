@@ -176,13 +176,19 @@ namespace Syntax.Process is
         // a stage worth teaching the fuser.
         boundary_function: Semantic.Symbols.Function?
 
+        // A `for` needs a stage to fuse. Its expression is whatever the
+        // loop iterates, so accepting a chain of no stages here would take
+        // every `for` in every program through the fused loop rather than
+        // the ordinary one - a change to how all iteration is emitted,
+        // which is not this path's to make.
         recognize(`for: Trees.Statements.FOR) -> PIPE_FUSION? =>
-            recognize_any(`for.expression)
+            recognize_free_function_chain(`for.expression, false)
 
-        // Peel a chain of `Ghul.Pipes` free functions off `expression`.
-        // Used both by the `for`-loop path and by consumer fusion.
+        // Peel a chain of `Ghul.Pipes` free functions off `expression`, for
+        // a consumer, which fuses over a chain of no stages as well: a bare
+        // `xs |> sum()` has nothing between the consumer and its source.
         recognize_any(expression: Trees.Expressions.Expression?) -> PIPE_FUSION? =>
-            recognize_free_function_chain(expression)
+            recognize_free_function_chain(expression, true)
 
         // Peel a `... |> map(f) |> filter(p)` chain of `Ghul.Pipes` free
         // functions off an arbitrary expression. `|>` is desugared entirely
@@ -202,7 +208,10 @@ namespace Syntax.Process is
         // thread-first chain is routinely written straight off a
         // generator or a `stream`. The loop reads it through a fresh
         // iterator, as a plain `for` does.
-        recognize_free_function_chain(expression: Trees.Expressions.Expression?) -> PIPE_FUSION? is
+        recognize_free_function_chain(expression: Trees.Expressions.Expression?) -> PIPE_FUSION? =>
+            recognize_free_function_chain(expression, true)
+
+        recognize_free_function_chain(expression: Trees.Expressions.Expression?, allow_no_stages: bool) -> PIPE_FUSION? is
             if !expression? then
                 decline_reason = "no-expression"
 
@@ -236,13 +245,20 @@ namespace Syntax.Process is
                 current = call.arguments.expressions[0]
             od
 
-            // An expression that peeled no stage at all is still a chain of
-            // no stages, and the consumer fuses over it directly: the loop
-            // reads the source and applies the consumer, which is what the
-            // stage-free path already did for a chain whose only stage was
-            // a memo. Whatever the source turns out to be - a local, a call,
-            // a generator - the loop reads it through one fresh iterator,
-            // exactly as the unfused consumer would.
+            // An expression that peeled no stage is still a chain of no
+            // stages, which a consumer fuses over directly: the loop reads
+            // the source and applies the consumer, as the stage-free path
+            // already did for a chain whose only stage was a memo. Whatever
+            // the source turns out to be - a local, a call, a generator -
+            // the loop reads it through one fresh iterator, exactly as the
+            // unfused consumer would. A `for` declines it instead, keeping
+            // ordinary iteration on the lowering it has always had.
+            if !allow_no_stages /\ calls == 0 then
+                decline_reason = "not-a-chain"
+
+                return null
+            fi
+
             let joined = System.Text.StringBuilder()
 
             for role in roles do
@@ -281,7 +297,6 @@ namespace Syntax.Process is
             let value = call.value
 
             if !isa IR.Values.Call.GLOBAL(value) then
-
                 return null
             fi
 
@@ -301,7 +316,6 @@ namespace Syntax.Process is
 
             if role =~ "memo" then
                 if arguments.count != 1 then
-
                     return null
                 fi
 
@@ -326,7 +340,6 @@ namespace Syntax.Process is
             fi
 
             if arguments.count != 2 then
-
                 return null
             fi
 
