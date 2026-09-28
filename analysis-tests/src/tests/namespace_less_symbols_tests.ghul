@@ -1,0 +1,47 @@
+namespace Analysis.Tests is
+    use Analysis.Protocol.ANALYSER_PROCESS
+    use Analysis.Protocol.EDIT_FILE
+    use Analysis.Protocol.Response
+    use Ghul.Pipes
+
+    use TestClass = Microsoft.VisualStudio.TestTools.UnitTesting.TestClassAttribute
+    use Test = Microsoft.VisualStudio.TestTools.UnitTesting.TestMethodAttribute
+    use Assertions
+
+    // A file that declares no namespace puts its definitions in one the
+    // compiler makes for it. Every kind of type declared there is a symbol
+    // of the file, so the outline lists it alongside its members.
+    @TestClass()
+    class NAMESPACE_LESS_SYMBOLS_TESTS is
+        init() is si
+
+        described(source: string) -> Collections.List[string] is
+            let use analyser = ANALYSER_PROCESS()
+
+            analyser.send_edit_files([EDIT_FILE("script.ghul", source)])
+
+            let _ = analyser.read_response()
+
+            analyser.send_symbols("script.ghul")
+
+            if let symbols: Response.SYMBOLS = analyser.read_query_response() then
+                return symbols.files |> flat_map(f => f.symbols) |> map(s => s.search_description) |> collect()
+            fi
+
+            return []
+        si
+
+        @Test()
+        types_of_every_kind_in_a_file_with_no_namespace_are_listed() is
+            let descriptions =
+                described(
+                    "class POINT(x: int, y: int) is\n    sum() -> int => x + y\nsi\n\nunion List[T] is NIL; CONS(head: T, tail: List[T]); si\n\nstruct PAIR(a: int, b: int);\n\ntrait Shape is area() -> int; si\n\nenum Suit is HEARTS, SPADES si\n")
+
+            let listed = descriptions |> join(", ")
+
+            for name in ["POINT", "List", "PAIR", "Shape", "Suit"] do
+                is_true(descriptions |> any(d => d.starts_with(name)), "{name} should be listed among: {listed}")
+            od
+        si
+    si
+si

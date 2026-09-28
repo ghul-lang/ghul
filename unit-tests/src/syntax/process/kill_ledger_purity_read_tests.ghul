@@ -1,0 +1,91 @@
+namespace Syntax.Process.UnitTests is
+    use Source.LOCATION
+
+    use Semantic.Symbols.GLOBAL_FUNCTION
+    use TestClass = Microsoft.VisualStudio.TestTools.UnitTesting.TestClassAttribute
+    use Test = Microsoft.VisualStudio.TestTools.UnitTesting.TestMethodAttribute
+    use Assertions
+
+    // A body walked before the effects solve reads a named function's
+    // store-free proof as it then stood, and infers types from the
+    // answer. The ledger marks that body inexact once the solve answers
+    // differently, so the combined solve rounds walk it again.
+    @TestClass()
+    class KILL_LEDGER_PURITY_READ_TESTS is
+        init() is
+            KILL_LEDGER.clear_all()
+            KILL_LEDGER.current_file = "test.ghul"
+            KILL_LEDGER.current_function = null
+        si
+
+        loc() -> LOCATION => LOCATION("test.ghul", 1, 1, 1, 1)
+
+        callee(name: string) -> GLOBAL_FUNCTION =>
+            GLOBAL_FUNCTION(loc(), loc(), Semantic.BLOCK_SCOPE(), name, Semantic.BLOCK_SCOPE())
+
+        body(name: string) -> Trees.Definitions.FUNCTION =>
+            Trees.Definitions.FUNCTION(
+                loc(),
+                Trees.Identifiers.Identifier(loc(), name),
+                Trees.TypeExpressions.LIST(loc(), Collections.LIST[Trees.TypeExpressions.TypeExpression]()),
+                Trees.Variables.LIST(loc(), Collections.LIST[Trees.Variables.VARIABLE]()),
+                Trees.TypeExpressions.INFER(loc()),
+                Trees.Modifiers.LIST(loc(), null, null),
+                Trees.Bodies.NULL(loc())
+            )
+
+        read_in(walked: Trees.Definitions.FUNCTION, function: GLOBAL_FUNCTION) is
+            KILL_LEDGER.current_function = walked
+            KILL_LEDGER.record_purity_read(function, function.is_proven_store_free)
+            KILL_LEDGER.current_function = null
+        si
+
+        @Test()
+        Calling__take_inexact__where_the_solve_proved_a_function_read_as_unproven__should_name_the_body() is
+            let walked = body("entry")
+            let weigh = callee("weigh")
+
+            read_in(walked, weigh)
+            weigh.set_proven_store_free(true)
+
+            let inexact = KILL_LEDGER.take_inexact()
+
+            is_true(inexact.bodies.contains(walked))
+            are_equal(0, inexact.files.count)
+        si
+
+        @Test()
+        Calling__take_inexact__where_the_solve_agreed_with_the_read__should_find_nothing() is
+            let weigh = callee("weigh")
+
+            read_in(body("entry"), weigh)
+            weigh.set_proven_store_free(false)
+
+            is_true(KILL_LEDGER.take_inexact().is_empty)
+        si
+
+        // No inferred type depends on a read made outside a definition's
+        // walk, so nothing is recorded and no walk is redone.
+        @Test()
+        Calling__record_purity_read__outside_a_definition__should_record_nothing() is
+            let weigh = callee("weigh")
+
+            KILL_LEDGER.record_purity_read(weigh, false)
+            weigh.set_proven_store_free(true)
+
+            is_true(KILL_LEDGER.take_inexact().is_empty)
+        si
+
+        @Test()
+        Calling__clear_for__on_the_body__should_drop_its_reads() is
+            let walked = body("entry")
+            let weigh = callee("weigh")
+
+            read_in(walked, weigh)
+            KILL_LEDGER.clear_for(walked)
+            weigh.set_proven_store_free(true)
+
+            is_true(KILL_LEDGER.take_inexact().is_empty)
+        si
+    si
+si
