@@ -148,7 +148,7 @@ namespace Syntax.Process is
                     continue
                 fi
 
-                let type = argument.type_expression.type
+                let type = if argument.type_ran_on then null else argument.type_expression.type fi
 
                 types.add(if type? then type else Semantic.Types.ERROR() fi)
 
@@ -170,7 +170,16 @@ namespace Syntax.Process is
                 spread_locations.add(argument.location)
             od
 
-            if !isa Trees.TypeExpressions.INFER(function.type_expression) then
+            // Where the last argument's type ran on into the rest of the
+            // header, any `->` went with it, so the body and callers are not
+            // held to void.
+            if
+                isa Trees.TypeExpressions.INFER(function.type_expression) /\
+                function.arguments.count > 0 /\
+                function.arguments.variables[function.arguments.count - 1].type_ran_on
+            then
+                symbol.return_type = Semantic.Types.ERROR()
+            elif !isa Trees.TypeExpressions.INFER(function.type_expression) then
                 let resolved = function.type_expression.type
                 symbol.return_type = if resolved? then resolved else Semantic.Types.ERROR() fi
 
@@ -225,7 +234,9 @@ namespace Syntax.Process is
 
             let type_expression = property.type_expression
 
-            if !isa Trees.TypeExpressions.INFER(type_expression) then
+            if property.is_poisoned then
+                symbol.set_type(Semantic.Types.ERROR())
+            elif !isa Trees.TypeExpressions.INFER(type_expression) then
                 if f.is_field then
                     type_expression.check_is_not_reference(_logger, "field cannot be a ref type")
                 else
@@ -332,7 +343,9 @@ namespace Syntax.Process is
                         return
                     fi
 
-                    if !isa Trees.TypeExpressions.INFER(variable.type_expression) then
+                    if variable.type_ran_on then
+                        typed_symbol.set_type(Semantic.Types.ERROR())
+                    elif !isa Trees.TypeExpressions.INFER(variable.type_expression) then
                         let type = variable.type_expression.type
 
                         if type? then
