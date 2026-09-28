@@ -8,14 +8,20 @@ namespace Source is
     // re-recorded fresh by the re-walk, so reconciliation discards it
     // rather than translating it.
     //
-    // Function bodies neither nest nor overlap, so the spans sort by start
-    // position and a binary search answers `contains`.
+    // Spans can nest: the entry synthesised from a file's top-level
+    // statements spans from the first statement to the last, which
+    // encloses the body of any function written between them. So the
+    // spans sort by start position, and `contains` asks whether any span
+    // starting at or before the position reaches it, which the furthest
+    // end among them answers.
     class BODY_SPANS is
         _spans: LIST[LOCATION]
+        _furthest_end: LIST[int]
         _prepared: bool
 
         init() is
             _spans = LIST[LOCATION]()
+            _furthest_end = LIST[int]()
         si
 
         // Internal locations are synthesised — their packed position is
@@ -34,7 +40,7 @@ namespace Source is
         contains(position: int) -> bool is
             _prepare()
 
-            // last span starting at or before `position`
+            // the spans starting at or before `position`
             let lo mut = 0
             let hi mut = _spans.count
 
@@ -48,7 +54,8 @@ namespace Source is
                 fi
             od
 
-            return lo > 0 /\ _spans[lo - 1].contains(position)
+            // the same test LOCATION.contains makes of one span
+            return lo > 0 /\ _furthest_end[lo - 1] >= position - 1
         si
 
         _prepare() is
@@ -57,6 +64,18 @@ namespace Source is
             fi
 
             _spans = LIST[LOCATION](_spans |> sort((a, b) => a.start - b.start))
+            _furthest_end = LIST[int]()
+
+            let furthest mut = 0
+
+            for span in _spans do
+                if span.end > furthest then
+                    furthest = span.end
+                fi
+
+                _furthest_end.add(furthest)
+            od
+
             _prepared = true
         si
     si
