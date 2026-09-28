@@ -1164,6 +1164,8 @@ si
 ⊗(a: N, b: N) -> N => N(a.v * b.v);
 ```
 
+An operator is resolved among those taking as many operands as it is written with. A prefix `-` is the operator of one operand, so a member `-` of two operands, which takes the left operand as `self`, never answers it, and inside the type declaring that member a prefix `-` still reaches the unary operator declared as a static member or at namespace scope.
+
 Precedence comes from the operator's first character rather than from anything written on the declaration, so an operator that reads as arithmetic binds as arithmetic. From tightest to loosest:
 
 | level | characters |
