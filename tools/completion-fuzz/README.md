@@ -13,11 +13,12 @@ Each site is asked about in three states:
 | state | the text | models |
 | --- | --- | --- |
 | `control` | the finished file | completion in code that compiles |
+| `name-cut` | the name removed, the rest of its line kept | going back to fill in a name |
 | `line-cut` | the name and the rest of its line removed | typing a line in the middle of a file |
 | `file-cut` | everything after the dot removed | typing at the end of a file |
 
 A site where the control does not offer the name is a gap in completion
-itself, whatever the file's state. The other two are judged only where the
+itself, whatever the file's state. The other three are judged only where the
 control offers the name, so what they count is completion lost to the file
 being incomplete.
 
@@ -39,6 +40,8 @@ each hold one `.ghul` file. Files using the raster library are skipped, since
 the analyser is given only the runtime's references, and so are examples
 marked `// expect: error`. `--per-file` caps the sites taken from one file,
 `--limit` caps the sites in the run, and `--seed` fixes which ones are taken.
+`--verbose` names each site and state on standard error before asking about
+it, so a run that stops answering says where.
 
 To fuzz a published compiler rather than the current source, build with
 `-p:SkipCompilerProjectRef=true` and set `ANALYSIS_TESTS_COMPILER_DLL` to

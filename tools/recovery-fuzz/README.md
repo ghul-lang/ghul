@@ -33,6 +33,13 @@ almost nothing to resynchronise on, and `large` carries five sibling
 definitions and four levels of `if`, `while`, `for`, `case`, `elif` and `try`
 around the damage.
 
+Half the innermost statements are plain assignments. The rest use the newer
+syntax, whose brackets, clause keywords and nested bodies give recovery
+different things to resynchronise on: a list comprehension and a lazy `{}`
+one, a `T{}` local built with the collection constructors, `use` and
+`let use ... in`, a generator literal, an argument-pack call and a call with
+named arguments, and `cast(v)` with a scalar constructor.
+
 One to three damage sites per program, since a half-written line rarely waits
 for the previous one to be finished. Where several are applied, the oracle
 expects only what all of them leave reachable.
@@ -48,7 +55,7 @@ The damage itself:
 | `swap-closer` | a closer belonging to another construct |
 | `duplicate-closer` | a closer left behind by an edit |
 | `drop-opener-keyword` | `if c` with no `then`, a header with no `is` |
-| `drop-open-bracket` / `drop-close-bracket` | an unbalanced bracket |
+| `drop-open-bracket` / `drop-close-bracket` | an unbalanced `(`, `[` or `{` |
 | `insert-stray` | a token left where a statement should be |
 | `delete-token` | one token gone, as a stray backspace leaves it |
 | `replace-with-keyword` | a keyword where a name belongs |

@@ -99,6 +99,11 @@ namespace RecoveryFuzz is
                 _plain(0, "")
             od
 
+            _plain(0, "pack_call[T.., U](f: T.. -> U, v: T..) -> U => f(v)")
+            _plain(0, "")
+            _plain(0, "scaled(value: int, by: int) -> int => value * by")
+            _plain(0, "")
+
             case context
             when "top-level" then _top_level()
             when "global-block" then _global_block()
@@ -382,15 +387,49 @@ namespace RecoveryFuzz is
         // The innermost statements, and where a damage site lands most
         // often: an assignment with a value, which is the shape a
         // half-written line takes.
+        //
+        // Half the leaves are that plain shape; the rest are written in
+        // the newer syntax, whose brackets, clause keywords and nested
+        // bodies give recovery different things to resynchronise on.
         _leaf(indent: int) is
             let a = _name()
             let b = _name()
+            let k = rng.next(5) + 2
 
-            _statement(indent, "let {a} = total + {rng.next(20)}")
-            _statement(indent, "total = {a} * {rng.next(5) + 1}")
-            _statement(indent, "let {b} =")
-            _statement(indent + 4, "{a} + total * {rng.next(7) + 1}")
-            _statement(indent, "write_line(\"{{{b}}} and {{{a}}}\")")
+            case if rng.coin() then 0 else rng.next(7) + 1 fi
+            when 1 then
+                _statement(indent, "let {a} = [x * 2 for x in 1::{k} if x > total]")
+                _statement(indent, "total = total + {a}.count")
+            when 2 then
+                _statement(indent, "let {a} = {{x + total for x in from(1) if x % 2 == 0}}")
+                _statement(indent, "total = total + ({a} |> take({k}) |> sum())")
+            when 3 then
+                _statement(indent, "let {a}: int{{}} = LIST(from(total) |> take({k}))")
+                _statement(indent, "let {b} = string({a}, \", \")")
+                _statement(indent, "total = total + ARRAY({a}).count + {b}.length")
+            when 4 then
+                _statement(indent, "let {a} = use IO.StringReader(\"abc\")")
+                _statement(indent, "total = total + {a}.peek()")
+                _statement(indent, "total = total + (let use {b} = IO.StringReader(\"de\") in {b}.peek())")
+            when 5 then
+                _opener(indent, "let {a} = (limit: int) is")
+                _statement(indent + 4, "yield limit")
+                _statement(indent + 4, "yield limit + {k}")
+                _closer(indent, "si")
+                _statement(indent, "total = total + ({a}({k}) |> sum())")
+            when 6 then
+                _statement(indent, "total = total + pack_call((p, q) => p + q, total, {k})")
+                _statement(indent, "total = total + scaled(by = {k}, value = total)")
+            when 7 then
+                _statement(indent, "let {a}: double = cast(total)")
+                _statement(indent, "total = total + int({a} / 2.0)")
+            else
+                _statement(indent, "let {a} = total + {rng.next(20)}")
+                _statement(indent, "total = {a} * {rng.next(5) + 1}")
+                _statement(indent, "let {b} =")
+                _statement(indent + 4, "{a} + total * {rng.next(7) + 1}")
+                _statement(indent, "write_line(\"{{{b}}} and {{{a}}}\")")
+            esac
         si
 
         // Lines
