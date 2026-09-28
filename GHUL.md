@@ -2548,6 +2548,14 @@ doubled(x: int) -> int => x * 2;
 tripled(x: int) -> int => x * 3;
 ```
 
+`System.Runtime.CompilerServices.MethodImpl` says how the runtime is to treat the method it is written on. The options it names become the method's implementation flags rather than an attribute the method carries, which is where the runtime reads them from, so `NO_INLINING` keeps the method out of the inliner and `SYNCHRONIZED` takes the lock. Reflection reads the flags back through `get_method_implementation_flags`, and finds no `MethodImplAttribute` among the method's custom attributes:
+
+```ghul
+@System.Runtime.CompilerServices.MethodImpl(
+    System.Runtime.CompilerServices.MethodImplOptions.NO_INLINING)
+measured(x: int) -> int => x + 1;
+```
+
 `System.Runtime.InteropServices.DllImport` on a static method with no body declares a call into a shared library. The method is emitted as the call itself rather than as a method carrying an attribute, so it needs no body and cannot have one:
 
 ```ghul
