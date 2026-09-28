@@ -294,7 +294,7 @@ namespace Semantic.UnitTests is
             let logger = DIAGNOSTICS_STORE()
             let registry = build_registry()
 
-            registry.report_unresolved(logger)
+            registry.report_unresolved(logger, 0)
 
             is_false(logger.any_errors)
         si
@@ -311,7 +311,7 @@ namespace Semantic.UnitTests is
 
             registry.get_or_create(key, loc(), pair)
 
-            registry.report_unresolved(logger)
+            registry.report_unresolved(logger, 0)
 
             are_equal(1, logger.error_count)
         si
@@ -329,8 +329,8 @@ namespace Semantic.UnitTests is
 
             registry.get_or_create(key, loc(), box)
 
-            registry.report_unresolved(logger)
-            registry.report_unresolved(logger)
+            registry.report_unresolved(logger, 0)
+            registry.report_unresolved(logger, 0)
 
             are_equal(1, logger.error_count)
         si
@@ -348,9 +348,70 @@ namespace Semantic.UnitTests is
             let origins = registry.get_or_create(key, loc(), box)
             origins[0].add_lower_bound(int_class.type!)
 
-            registry.report_unresolved(logger)
+            registry.report_unresolved(logger, 0)
 
             is_false(logger.any_errors)
+        si
+
+        // === walk scoping ===
+
+        // A construction the final walk of its body did not ask for again
+        // resolved without its phantoms there: they belong to an earlier,
+        // superseded resolution, and a failure elsewhere in the body is
+        // no reason to report them.
+        @Test()
+        Calling__report_unresolved__skips_a_construction_the_final_walk_did_not_use() is
+            let logger = DIAGNOSTICS_STORE()
+            let registry = build_registry()
+            let box = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Box", names_for(["T"]), Semantic.BLOCK_SCOPE())
+
+            registry.begin_body()
+            registry.begin_walk()
+            registry.get_or_create(Syntax.Trees.Identifiers.Identifier(loc(), "earlier"), loc(), box)
+
+            let final_walk = registry.begin_walk()
+            registry.report_unresolved(logger, final_walk)
+
+            is_false(logger.any_errors)
+        si
+
+        // A construction that ended in an error is reported whichever walk
+        // last asked for its phantoms: they are what it could not settle.
+        @Test()
+        Calling__report_unresolved__reports_a_failed_construction_the_final_walk_did_not_use() is
+            let logger = DIAGNOSTICS_STORE()
+            let registry = build_registry()
+            let box = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Box", names_for(["T"]), Semantic.BLOCK_SCOPE())
+            let failed = Syntax.Trees.Expressions.IDENTIFIER(loc(), Syntax.Trees.Identifiers.Identifier(loc(), "failed"))
+
+            failed.compile_expressions_state.value = IR.Values.DUMMY(Semantic.Types.ERROR(), loc())
+
+            registry.begin_body()
+            registry.begin_walk()
+            registry.get_or_create(failed, loc(), box)
+
+            let final_walk = registry.begin_walk()
+            registry.report_unresolved(logger, final_walk)
+
+            are_equal(1, logger.error_count)
+        si
+
+        @Test()
+        Calling__report_unresolved__reports_a_construction_the_final_walk_used() is
+            let logger = DIAGNOSTICS_STORE()
+            let registry = build_registry()
+            let box = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Box", names_for(["T"]), Semantic.BLOCK_SCOPE())
+            let key = Syntax.Trees.Identifiers.Identifier(loc(), "both")
+
+            registry.begin_body()
+            registry.begin_walk()
+            registry.get_or_create(key, loc(), box)
+
+            let final_walk = registry.begin_walk()
+            registry.get_or_create(key, loc(), box)
+            registry.report_unresolved(logger, final_walk)
+
+            are_equal(1, logger.error_count)
         si
 
         // === body scoping ===
@@ -368,7 +429,7 @@ namespace Semantic.UnitTests is
             registry.get_or_create(Syntax.Trees.Identifiers.Identifier(loc(), "earlier"), loc(), box)
 
             registry.begin_body()
-            registry.report_unresolved(logger)
+            registry.report_unresolved(logger, 0)
 
             is_false(logger.any_errors)
         si
@@ -384,7 +445,7 @@ namespace Semantic.UnitTests is
 
             registry.begin_body()
             registry.get_or_create(Syntax.Trees.Identifiers.Identifier(loc(), "current"), loc(), box)
-            registry.report_unresolved(logger)
+            registry.report_unresolved(logger, 0)
 
             are_equal(1, logger.error_count)
         si
@@ -403,7 +464,7 @@ namespace Semantic.UnitTests is
 
             registry.begin_body()
             registry.get_or_create(key, loc(), box)
-            registry.report_unresolved(logger)
+            registry.report_unresolved(logger, 0)
 
             is_false(logger.any_errors)
         si
@@ -423,7 +484,7 @@ namespace Semantic.UnitTests is
 
             registry.begin_body()
             registry.get_or_create(key, loc(), pair)
-            registry.report_unresolved(logger)
+            registry.report_unresolved(logger, 0)
 
             is_false(logger.any_errors)
         si
@@ -443,7 +504,7 @@ namespace Semantic.UnitTests is
             registry.begin_body()
             registry.clear()
             registry.get_or_create(key, loc(), box)
-            registry.report_unresolved(logger)
+            registry.report_unresolved(logger, 0)
 
             are_equal(1, logger.error_count)
         si
