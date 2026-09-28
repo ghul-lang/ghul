@@ -34,6 +34,7 @@ namespace Syntax.Process is
             _innate_symbol_lookup = innate_symbol_lookup
             _overload_resolver = overload_resolver
             _visitor = visitor
+            _unsettled_offsets = Collections.MAP[Semantic.Symbols.Field, Source.LOCATION]()
         si
 
         // A built-in pragma is handled by the compiler itself; anything
@@ -394,6 +395,8 @@ namespace Syntax.Process is
 
             type.layout = layout
 
+            _settle_offsets(type, layout.is_explicit)
+
             if layout.is_explicit then
                 let missing = Collections.LIST[string]()
 
@@ -435,6 +438,54 @@ namespace Syntax.Process is
             fi
 
             `field.layout_offset = _number_argument(positional, 0)
+
+            _unsettled_offsets[`field] = pragma.name.location
+        si
+
+        // Offsets whose type has not yet said whether it is laid out
+        // explicitly. A type's own pragmas are resolved after its members',
+        // so its StructLayout settles them, and any left when the type's file
+        // has been walked belong to a type that never asked for explicit
+        // layout.
+        _unsettled_offsets: Collections.MAP[Semantic.Symbols.Field, Source.LOCATION]
+
+        _settle_offsets(type: Semantic.Symbols.Classy, explicit: bool) is
+            let settled = Collections.LIST[Semantic.Symbols.Field]()
+
+            for (`field, location) in _unsettled_offsets do
+                if `field.owner == type then
+                    settled.add(`field)
+
+                    if !explicit then
+                        _report_offset_without_explicit_layout(location)
+                    fi
+                fi
+            od
+
+            for `field in settled do
+                _unsettled_offsets.remove(`field)
+            od
+        si
+
+        // Reports the offsets still unsettled on types declared in
+        // `file_name`, whose pragmas have all been resolved by now.
+        report_unsettled_offsets(file_name: string) is
+            let reported = Collections.LIST[Semantic.Symbols.Field]()
+
+            for (`field, location) in _unsettled_offsets do
+                if let owner: Semantic.Symbols.Symbol = `field.owner /\ owner.location.file_name =~ file_name then
+                    reported.add(`field)
+                    _report_offset_without_explicit_layout(location)
+                fi
+            od
+
+            for `field in reported do
+                _unsettled_offsets.remove(`field)
+            od
+        si
+
+        _report_offset_without_explicit_layout(location: Source.LOCATION) is
+            _logger.error(location, "a field with a FieldOffset needs a type with explicit layout")
         si
 
         // Reads a `DllImport` into the import the method is emitted
