@@ -49,24 +49,41 @@ namespace Semantic is
         _origin_bodies: Collections.MAP[Syntax.Trees.Node, int]
         _body: int
 
+        // The walk each construction's phantoms were last asked for in, and
+        // a count of walks across every body. A construction the final walk
+        // of its body resolved without its phantoms is not reported: its
+        // phantoms belong to an earlier, superseded resolution.
+        _last_walks: Collections.MAP[Syntax.Trees.Node, int]
+        _walk: int
+
         super()
 
         init(..) is
             _origins = Collections.MAP[Syntax.Trees.Node, Collections.MAP[Symbols.Symbol, Collections.LIST[Symbols.Variable]]]()
             _reported = Collections.SET[Syntax.Trees.Node]()
             _origin_bodies = Collections.MAP[Syntax.Trees.Node, int]()
+            _last_walks = Collections.MAP[Syntax.Trees.Node, int]()
         si
 
         clear() is
             _origins.clear()
             _reported.clear()
             _origin_bodies.clear()
+            _last_walks.clear()
         si
 
         // Starts a function body's retry loop: phantoms created from here
         // until the next call belong to it.
         begin_body() is
             _body = _body + 1
+        si
+
+        // Starts a walk of the current body, and returns the number that
+        // walk carries, for `report_unresolved` to compare against.
+        begin_walk() -> int is
+            _walk = _walk + 1
+
+            return _walk
         si
 
         // Returns the phantom origin list for `cache_key`. On cache
@@ -121,6 +138,8 @@ namespace Semantic is
             argument_names: Collections.List[string]
         ) -> Collections.LIST[Symbols.Variable] is
             let inner: Collections.MAP[Symbols.Symbol, Collections.LIST[Symbols.Variable]] mut
+
+            _last_walks[cache_key] = _walk
 
             if _origins.contains_key(cache_key) then
                 inner = _origins[cache_key]
@@ -232,7 +251,7 @@ namespace Semantic is
         // the end of its own function's walk stays unresolved - a
         // repeat report from a later function's sweep would be
         // noise.
-        report_unresolved(logger: Logging.Logger) is
+        report_unresolved(logger: Logging.Logger, final_walk: int) is
             for kv in _origins do
                 if _reported.contains(kv.key) then
                     continue
@@ -241,6 +260,12 @@ namespace Semantic is
                 let body mut = 0
 
                 if !_origin_bodies.try_get_value(kv.key, body ref) \/ body != _body then
+                    continue
+                fi
+
+                let last_walk mut = 0
+
+                if !_last_walks.try_get_value(kv.key, last_walk ref) \/ last_walk < final_walk then
                     continue
                 fi
 
