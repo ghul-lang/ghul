@@ -1,5 +1,5 @@
 namespace Syntax.Process is
-    // Collects the names of variables written within a walked
+    // Collects the variables written within a walked
     // subtree — by assignment (`=`, including destructuring) or by
     // being passed `ref`. Two consumers, each dropping a narrow on
     // a variable the walked subtree writes: the loop kill-set, where
@@ -13,12 +13,37 @@ namespace Syntax.Process is
     class LOOP_ASSIGNMENT_COLLECTOR: Visitor is
         names: Collections.SET[string] public
 
+        // Targets of assignments that have already been compiled, by the
+        // symbol they store to. Only filled when asked for: before a
+        // walk, or between walks, an assignment holds no value or a stale
+        // one.
+        symbols: Collections.SET[Semantic.Symbols.Symbol] public
+        _use_resolved_targets: bool
+
         init() is
-            super.init()
-            names = Collections.SET[string]()
+            init(false)
         si
 
+        init(use_resolved_targets: bool) is
+            super.init()
+            names = Collections.SET[string]()
+            symbols = Collections.SET[Semantic.Symbols.Symbol]()
+            _use_resolved_targets = use_resolved_targets
+        si
+
+        // Whether the walk wrote the variable, by symbol where the store
+        // was resolved and by name where it was not.
+        wrote(variable: Semantic.Symbols.Symbol) -> bool =>
+            symbols.contains(variable) \/ (variable.name? /\ names.contains(variable.name))
+
         visit(assignment: Trees.Statements.ASSIGNMENT) is
+            if _use_resolved_targets then
+                if let store: IR.Values.Store.SYMBOL = assignment.value then
+                    symbols.add(store.symbol)
+                    return
+                fi
+            fi
+
             let targets = Collections.LIST[Trees.Expressions.Expression]()
             assignment.left.get_names_into(targets)
 

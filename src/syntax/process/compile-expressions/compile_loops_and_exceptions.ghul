@@ -131,6 +131,7 @@ namespace Syntax.Process is
             // pre-try definite-assignment facts, exactly as a catch
             // handler does.
             `try.body.walk(_visitor)
+            _visitor.end_try_body(`try)
 
             if !frame.body_seen then
                 frame.body_seen = true
@@ -153,7 +154,7 @@ namespace Syntax.Process is
                 // on. The finally's own writes are not collected: they
                 // invalidate from the write onward, which the ordinary
                 // walk does, rather than at entry.
-                let written = LOOP_ASSIGNMENT_COLLECTOR()
+                let written = LOOP_ASSIGNMENT_COLLECTOR(true)
 
                 `try.body.walk(written)
 
@@ -161,20 +162,15 @@ namespace Syntax.Process is
                     c.walk(written)
                 od
 
-                // Keyed by the written name: an assignment target has
-                // no resolved symbol on it at this point, so there is
-                // no identity here to ask instead. Two locals sharing
-                // a name conflate, which costs a narrow that could
-                // have been kept and never keeps one that should have
-                // been dropped.
+                // The body and catches have been compiled, so a plain
+                // assignment names the symbol it stores to, and a local
+                // of the same name declared inside the try is not
+                // mistaken for the one the fact is about. A target with
+                // no store to read falls back to its name, which can
+                // only cost a narrow, never keep a stale one.
                 _flow.set_env(
                     frame.entry.with_only_assigned_and_kept_locals(
-                        v =>
-                            if let name = v.name then
-                                !written.names.contains(name)
-                            else
-                                false
-                            fi))
+                        v => v.name? /\ !written.wrote(v)))
 
                 finally_body.walk(_visitor)
 
