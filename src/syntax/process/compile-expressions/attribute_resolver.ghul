@@ -107,6 +107,15 @@ namespace Syntax.Process is
                 return
             fi
 
+            // `MethodImpl` is a pseudo-attribute too: the runtime reads
+            // the options it names from the method row's implementation
+            // flags, so carrying it as a custom attribute leaves the JIT
+            // seeing nothing.
+            if attribute_type == _method_impl_attribute() then
+                _resolve_method_impl(pragma, target, completed)
+                return
+            fi
+
             if !target.custom_attributes? then
                 target.custom_attributes = Collections.LIST[Semantic.CUSTOM_ATTRIBUTE]()
             fi
@@ -235,6 +244,74 @@ namespace Syntax.Process is
             return _dll_import
         si
 
+        _method_impl: Semantic.Symbols.Symbol?
+        _method_impl_resolved: bool
+
+        _method_impl_attribute() -> Semantic.Symbols.Symbol? is
+            if _method_impl_resolved then
+                return _method_impl
+            fi
+
+            _method_impl_resolved = true
+
+            let system = _visitor.find("System")
+
+            if !system? then
+                return null
+            fi
+
+            let runtime = system.find_member("Runtime")
+
+            if !runtime? then
+                return null
+            fi
+
+            let compiler_services = runtime.find_member("CompilerServices")
+
+            if !compiler_services? then
+                return null
+            fi
+
+            _method_impl = compiler_services.find_member("MethodImplAttribute")
+
+            return _method_impl
+        si
+
+        // Reads a `MethodImpl` into the flags the method row carries.
+        // `MethodImplOptions` and `MethodImplAttributes` number the same
+        // bits, so the value the attribute names is the value the row
+        // takes.
+        _resolve_method_impl(
+            pragma: Trees.Pragmas.PRAGMA,
+            target: Semantic.Symbols.Symbol,
+            positional: Collections.List[IR.Values.Value]
+        ) is
+            let function = cast Semantic.Symbols.Function?(target)
+
+            if !function? then
+                _logger.error(pragma.name.location, "only a method can carry MethodImpl")
+                return
+            fi
+
+            // Written with no options at all, the attribute asks for
+            // nothing and the row keeps its defaults. Written with one
+            // this cannot read, saying so beats leaving the method with
+            // the flags it would have had anyway.
+            if positional.count == 0 then
+                return
+            fi
+
+            let options = _number_argument(positional, 0)
+
+            if !options? then
+                _logger.error(pragma.name.location, "cannot read the options this MethodImpl names")
+                return
+            fi
+
+            function.method_impl_attributes =
+                cast System.Reflection.MethodImplAttributes(options)
+        si
+
         // Reads a `DllImport` into the import the method is emitted
         // from, and reports the declarations it cannot be written on.
         // Reported here rather than at emission, so a program that
@@ -331,6 +408,20 @@ namespace Syntax.Process is
 
             if let literal: IR.Values.Literal.STRING = values[index] then
                 return literal.value
+            fi
+
+            null
+        si
+
+        _number_argument(values: Collections.List[IR.Values.Value], index: int) -> int? is
+            if index >= values.count then
+                return null
+            fi
+
+            if let literal: IR.Values.Literal.NUMBER = values[index] then
+                if let i4: IR.Values.Literal.CONSTANT.I4 = literal.constant then
+                    return i4.value
+                fi
             fi
 
             null
