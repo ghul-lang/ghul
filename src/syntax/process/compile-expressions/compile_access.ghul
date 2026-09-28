@@ -1199,6 +1199,11 @@ namespace Syntax.Process is
                 _logger.poison(reference.left.location, "reference expression has no value")
                 reference.compile_expressions_state.value = DUMMY(Semantic.Types.ERROR(), reference.location)
                 return
+            elif let element_address = _array_element_address(reference, left_value) then
+                left_value.check_is_consumable(_logger, reference.left.location)
+
+                reference.compile_expressions_state.value = element_address
+                return
             elif !left_value.has_address then
                 _logger.warn(reference.left.location, "reference-to-expression", "reference to an expression")
             fi
@@ -1206,6 +1211,19 @@ namespace Syntax.Process is
             left_value.check_is_consumable(_logger, reference.left.location)
 
             reference.compile_expressions_state.value = ADDRESS(left_value, _innate_symbol_lookup.get_reference_type(left_value.type!))
+        si
+
+        // An element of an array is addressable, though reading it goes
+        // through the indexer and yields a copy, so a `ref` to one takes
+        // the element's address directly.
+        _array_element_address(reference: Trees.Expressions.REFERENCE, element: Value) -> Value? is
+            if let index: Trees.Expressions.INDEX = reference.left, array = index.left.value, position = index.index.value, position_type = position.type then
+                if isa Semantic.Types.ARRAY(array.type) /\ position_type.is_settled /\ _innate_symbol_lookup.get_int_type().compare(position_type) == Semantic.Types.MATCH.SAME then
+                    return ARRAY_ELEMENT_ADDRESS(array, position, element.type!, _innate_symbol_lookup.get_reference_type(element.type!))
+                fi
+            fi
+
+            return null
         si
 
         get_reference_has_value(
