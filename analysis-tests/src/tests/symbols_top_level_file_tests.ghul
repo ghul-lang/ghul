@@ -1,0 +1,52 @@
+namespace Analysis.Tests is
+    use Analysis.Protocol.ANALYSER_PROCESS
+    use Analysis.Protocol.Response
+    use Ghul.Pipes
+
+    use TestClass = Microsoft.VisualStudio.TestTools.UnitTesting.TestClassAttribute
+    use Test = Microsoft.VisualStudio.TestTools.UnitTesting.TestMethodAttribute
+    use Assertions
+
+    // A file with no namespace declares its definitions in a namespace
+    // private to the file, whose qualified names carry no qualifier. The
+    // file's symbols still list each definition, with an empty qualifier.
+    @TestClass()
+    class SYMBOLS_TOP_LEVEL_FILE_TESTS is
+        init() is si
+
+        @Test()
+        definitions_in_a_file_with_no_namespace_are_listed() is
+            let use analyser = ANALYSER_PROCESS()
+
+            analyser.send_edit("top.ghul", "let total = 1\n\ndoubled(x: int) -> int => x * 2\n\nclass COUNTER is\n    init() is si\nsi\n\nlet shown = doubled(total)\n")
+
+            let _ = analyser.read_response()
+
+            analyser.send_symbols("top.ghul")
+
+            let names = Collections.LIST[string]()
+            let qualifiers = Collections.LIST[string]()
+
+            if let symbols: Response.SYMBOLS = analyser.read_query_response() then
+                for file in symbols.files do
+                    for symbol in file.symbols do
+                        names.add(symbol.search_description)
+                        qualifiers.add(symbol.qualifier)
+                    od
+                od
+            fi
+
+            let listed = names |> join(", ")
+
+            is_true(names |> any(n => n.starts_with("doubled")), "global function missing from {listed}")
+            is_true(names |> any(n => n.starts_with("COUNTER")), "class missing from {listed}")
+            is_true(names |> any(n => n.starts_with("total")), "top-level variable missing from {listed}")
+
+            let doubled_at = names |> index() |> find((_, n) => n.starts_with("doubled"))
+
+            if let (index, _) = doubled_at then
+                are_equal("", qualifiers[index])
+            fi
+        si
+    si
+si
