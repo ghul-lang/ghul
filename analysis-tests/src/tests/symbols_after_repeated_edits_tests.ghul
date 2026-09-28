@@ -1,0 +1,56 @@
+namespace Analysis.Tests is
+    use Analysis.Protocol.ANALYSER_PROCESS
+    use Analysis.Protocol.Response
+    use Ghul.Pipes
+
+    use TestClass = Microsoft.VisualStudio.TestTools.UnitTesting.TestClassAttribute
+    use Test = Microsoft.VisualStudio.TestTools.UnitTesting.TestMethodAttribute
+    use Assertions
+
+    // An edit that keeps every signature is applied by re-walking the edited
+    // file's bodies, and each body's locals are recorded again as it is
+    // re-walked. The ones recorded before the edit have to be dropped first,
+    // or each edit adds another copy of every local to the file's symbols.
+    @TestClass()
+    class SYMBOLS_AFTER_REPEATED_EDITS_TESTS is
+        init() is si
+
+        definitions_after_edits(source: string, name: string) -> int is
+            let use analyser = ANALYSER_PROCESS()
+
+            for i in 0..4 do
+                analyser.send_edit("edited.ghul", source.replace("EDITED", "EDITED{i}"))
+
+                let _ = analyser.read_response()
+            od
+
+            analyser.send_symbols("edited.ghul")
+
+            if let symbols: Response.SYMBOLS = analyser.read_query_response() then
+                symbols.files
+                    |> flat_map(f => f.symbols)
+                    |> count(s => s.search_description =~ name)
+            else
+                -1
+            fi
+        si
+
+        @Test()
+        function_literal_parameter_in_a_thread_first_expression_body() is
+            are_equal(
+                1,
+                definitions_after_edits(
+                    "namespace P is\n    use Ghul.Pipes\n\n    count_long(words: string[]) -> int =>\n        words |> filter(word => word.length > 3) |> count()\n\n    label() -> string => \"EDITED\"\nsi\n",
+                    "word"))
+        si
+
+        @Test()
+        top_level_local_after_a_function_between_the_statements() is
+            are_equal(
+                1,
+                definitions_after_edits(
+                    "let first = \"EDITED\"\n\nlength_of(text: string) -> int is\n    let measured = text.length\n    return measured\nsi\n\nfor item in [first] do\n    let shown = length_of(item)\nod\n",
+                    "shown"))
+        si
+    si
+si
