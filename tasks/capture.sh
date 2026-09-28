@@ -50,9 +50,36 @@ is_library() {
     return 1
 }
 
+# The runner compares text output ignoring whitespace, so a test whose output
+# changed only in spacing passes and leaves no failed marker. A produced file
+# that differs from its expectation byte for byte is still worth promoting.
+differs() {
+    local produced=$1 expectation=$2
+
+    if [ ! -f "$produced" ] ; then
+        return 1
+    fi
+
+    if [ ! -f "$expectation" ] ; then
+        [ -s "$produced" ]
+        return
+    fi
+
+    ! cmp -s "$produced" "$expectation"
+}
+
+any_differs() {
+    differs $CASE/err.sort $CASE/err.expected ||
+    differs $CASE/warn.sort $CASE/warn.expected ||
+    differs $CASE/il.out $CASE/il.expected ||
+    differs $CASE/format.out $CASE/format.expected ||
+    differs $CASE/run.out $CASE/run.expected
+}
+
 if [ -d $CASE ] ; then
-    if [ ! -f $CASE/failed ] ; then
-        echo "expected to find failed marker in $CASE"
+    if [ ! -f $CASE/failed ] && ! any_differs ; then
+        echo "nothing to capture in $CASE: no failed marker, and no produced output that differs from its expectations"
+        echo "a passing run deletes its output; run it with GHUL_TEST_KEEP_ARTIFACTS=1 to keep it for capture"
         exit 1
     fi
 
