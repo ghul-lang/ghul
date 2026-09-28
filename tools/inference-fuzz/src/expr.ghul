@@ -56,13 +56,30 @@ namespace InferenceFuzz is
 
             if let p: PRIM = target then
                 prim_leaf(p, into)
+
+                scalar_constructor(p, into)
             elif let a: ARRAY = target then
                 if let elements = literal_elements(scope, a.element, rng.between(1, 3), 0) then
                     into.add((item = EXPR("[{elements.text}]", ARRAY(elements.type)), weight = 10))
+
+                    // The same elements read back out of a comprehension and
+                    // out of the constructor that closes a chain, both of
+                    // which settle their element type from the source rather
+                    // than from an annotation.
+                    let c = names.fresh()
+
+                    into.add((item = EXPR("[{c} for {c} in [{elements.text}]]", ARRAY(elements.type)), weight = 6))
+                    into.add((item = EXPR("ARRAY([{elements.text}] |> filter({c} => true))", ARRAY(elements.type)), weight = 4))
+
+                    // The lazy form of the same comprehension, read back
+                    // through a consumer: a generator literal whose element
+                    // type nothing states.
+                    into.add((item = EXPR("(\{{c} for {c} in [{elements.text}]\} |> collect())", ARRAY(elements.type)), weight = 4))
                 fi
             elif let l: LIST_OF = target then
                 if let elements = list_elements(scope, l.element, 0) then
                     into.add((item = EXPR("[{elements.text}] |> collect_mutable()", LIST_OF(elements.type)), weight = 10))
+                    into.add((item = EXPR("LIST([{elements.text}])", LIST_OF(elements.type)), weight = 5))
                 fi
             elif let f: FUNC = target then
                 if let literal = lambda(scope, f, 0, typed) then
@@ -110,6 +127,26 @@ namespace InferenceFuzz is
             else
                 EXPR("{n.name}()", n)
             fi
+        si
+
+        // A scalar named as a constructor over another scalar, and the same
+        // conversion written as a targetless cast, which takes its target
+        // from the position rather than from anything written.
+        // The source is written as a literal rather than drawn from `gen`:
+        // int converts from double and double from int, so asking `gen` for
+        // the other scalar re-enters this and recurses without bound.
+        scalar_constructor(p: PRIM, into: LIST[(item: EXPR, weight: int)]) is
+            let source =
+                if p.name =~ "int" then
+                    "{rng.next(20)}.5"
+                elif p.name =~ "double" then
+                    "{rng.next(20)}"
+                else
+                    return
+                fi
+
+            into.add((item = EXPR("{p.name}({source})", p), weight = 6))
+            into.add((item = EXPR("cast {p.name}({source})", p), weight = 4))
         si
 
         prim_leaf(p: PRIM, into: LIST[(item: EXPR, weight: int)]) is
@@ -267,6 +304,15 @@ namespace InferenceFuzz is
 
                 if condition? /\ value? then
                     into.add((item = EXPR("(if {condition} then {value} fi)", optional_of(value.type)), weight = 8))
+
+                    // A loop as an expression: the valued break gives the
+                    // loop's type, exhaustion gives absence, so the whole
+                    // thing is an optional of the break's type with nothing
+                    // written to say so.
+                    let i = names.fresh()
+
+                    into.add((item = EXPR("(for {i} in 0..3 do if {condition} then break {value} fi od)", optional_of(value.type)), weight = 6))
+                    into.add((item = EXPR("(while {condition} do break {value} od)", optional_of(value.type)), weight = 4))
                 fi
             elif let n: NAMED = target then
                 join(scope, n, depth, into)
