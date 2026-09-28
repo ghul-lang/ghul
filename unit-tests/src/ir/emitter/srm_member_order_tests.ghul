@@ -6,6 +6,7 @@ namespace IR.Emitter.UnitTests is
     use Semantic.Symbols.CLASS
     use Semantic.Symbols.INSTANCE_FIELD
     use Semantic.Symbols.STATIC_FIELD
+    use Semantic.Symbols.INSTANCE_PROPERTY
 
     use IR.Emitter.SRM_EMITTED_TYPE
     use IR.Emitter.SRM_MEMBER_ORDER
@@ -21,7 +22,11 @@ namespace IR.Emitter.UnitTests is
     // order nor stable against unrelated edits.
     @TestClass()
     class SRM_MEMBER_ORDER_TESTS is
-        init() is si
+        init() is
+            if !LOCATION.internal? then
+                LOCATION.init_static()
+            fi
+        si
 
         at(line: int) -> LOCATION => LOCATION("test.ghul", line, 1, line, 8)
 
@@ -49,6 +54,31 @@ namespace IR.Emitter.UnitTests is
             are_equal(2, fields.count)
             are_equal("zulu", fields[0].name)
             are_equal("alpha", fields[1].name)
+        si
+
+        // An auto-property's backing field is declared at the internal
+        // location, which every such field shares, so on position alone
+        // they tie and fall back to name order. Each takes its property's
+        // position instead, which is what a sequential struct layout
+        // follows.
+        @Test()
+        Fields__backing_auto_properties__come_back_in_property_declaration_order() is
+            let owner = CLASS(at(1), at(1), Semantic.BLOCK_SCOPE(), "OWNER", Collections.LIST[string](), Semantic.BLOCK_SCOPE())
+
+            for (name, line) in [("kind", 10), ("length", 20), ("checksum", 30)] do
+                let property = INSTANCE_PROPERTY(at(line), at(line), owner, name, false, false)
+                let backing = INSTANCE_FIELD(LOCATION.internal, owner, "${name}")
+
+                owner.declare(property.location, property, null)
+                owner.declare(backing.location, backing, null)
+            od
+
+            let fields = SRM_MEMBER_ORDER.fields(SRM_EMITTED_TYPE(owner))
+
+            are_equal(3, fields.count)
+            are_equal("$kind", fields[0].name)
+            are_equal("$length", fields[1].name)
+            are_equal("$checksum", fields[2].name)
         si
 
         // A struct's sequential layout is this order, so the answer has

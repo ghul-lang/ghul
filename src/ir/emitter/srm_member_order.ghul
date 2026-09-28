@@ -250,7 +250,7 @@ namespace IR.Emitter is
             // written.
             _collect_delegate_caches(type, result)
 
-            _sort_by_declaration(result)
+            _sort_by_declaration(result, `field => _declared_at(type, `field))
 
             return result
         si
@@ -461,20 +461,40 @@ namespace IR.Emitter is
                 null
             fi
 
+        // Where a field was declared. An auto-property's backing field is
+        // declared at the internal location, which every such field shares,
+        // so it takes its property's position: a struct's sequential layout
+        // follows the order the properties are written in.
+        _declared_at(type: SRM_EMITTED_TYPE, `field: Field) -> Source.LOCATION static is
+            if `field.location.is_internal /\ `field.name.starts_with("$") then
+                if let property: Property = type.scope.find_direct(`field.name.substring(1)) then
+                    return property.location
+                fi
+            fi
+
+            return `field.location
+        si
+
+        _sort_by_declaration[T: Symbol](symbols: Collections.LIST[T]) static =>
+            _sort_by_declaration(symbols, symbol => symbol.location)
+
         // Overloads declared on one line, and synthesised members that
         // share the internal location, would otherwise order
         // arbitrarily; name and then description break the tie so the
         // sequence is reproducible.
-        _sort_by_declaration[T: Symbol](symbols: Collections.LIST[T]) static is
+        _sort_by_declaration[T: Symbol](symbols: Collections.LIST[T], location_of: (T) -> Source.LOCATION) static is
             symbols.sort(
                 (left: T, right: T) -> int is
-                    let by_file = left.location.file_name <> right.location.file_name
+                    let left_location = location_of(left)
+                    let right_location = location_of(right)
+
+                    let by_file = left_location.file_name <> right_location.file_name
 
                     if by_file != 0 then
                         return by_file
                     fi
 
-                    let by_position = left.location.start - right.location.start
+                    let by_position = left_location.start - right_location.start
 
                     if by_position != 0 then
                         return by_position
