@@ -2573,3 +2573,18 @@ si
 The name looked up in the library is the method's own, spelled as written, unless `entry_point` gives another: a native symbol is matched exactly, so none of the case conversion that applies to a .NET name applies here. `char_set`, `set_last_error`, `exact_spelling` and `calling_convention` are carried through as written.
 
 What can cross the boundary is what the machine lays out the same way on both sides: the scalar types, a pointer, a `ref` to a scalar, and a `string` argument, which is marshalled to a null-terminated buffer for the duration of the call. A returned `string` is not accepted, since freeing the buffer the library returned is the library's business rather than the runtime's. Anything else, such as a class, a tuple, an array or a function, is reported at the declaration rather than emitted.
+
+`System.Runtime.InteropServices.StructLayout` on a class or struct sets how its fields are laid out, which is what a native structure the type stands for has to match. Its kind, `pack`, `size` and `char_set` become the type's own layout rather than an attribute it carries. A struct is laid out sequentially without it, in the order its members are declared; a class is laid out as the runtime chooses unless it asks for `SEQUENTIAL`. `EXPLICIT` places each field where a `System.Runtime.InteropServices.FieldOffset` on it says, so two fields can share bytes, and every instance field of such a type has to carry one, which rules out auto-properties there:
+
+```ghul
+@System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.EXPLICIT)
+struct WORD_BYTES is
+    @System.Runtime.InteropServices.FieldOffset(0)
+    word: ushort field
+
+    @System.Runtime.InteropServices.FieldOffset(0)
+    low: ubyte field
+
+    init() is si
+si
+```
