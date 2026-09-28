@@ -34,6 +34,7 @@ namespace Syntax.Process is
             _innate_symbol_lookup = innate_symbol_lookup
             _overload_resolver = overload_resolver
             _visitor = visitor
+            _unsettled_offsets = Collections.MAP[Semantic.Symbols.Field, Source.LOCATION]()
         si
 
         // A built-in pragma is handled by the compiler itself; anything
@@ -113,6 +114,19 @@ namespace Syntax.Process is
             // seeing nothing.
             if attribute_type == _method_impl_attribute() then
                 _resolve_method_impl(pragma, target, completed)
+                return
+            fi
+
+            // `StructLayout` and `FieldOffset` are pseudo-attributes as well:
+            // the runtime lays a type out from its flags and its ClassLayout
+            // and FieldLayout rows, and reads neither as a custom attribute.
+            if attribute_type == _struct_layout_attribute() then
+                _resolve_struct_layout(pragma, target, completed, named)
+                return
+            fi
+
+            if attribute_type == _field_offset_attribute() then
+                _resolve_field_offset(pragma, target, completed)
                 return
             fi
 
@@ -310,6 +324,168 @@ namespace Syntax.Process is
 
             function.method_impl_attributes =
                 cast System.Reflection.MethodImplAttributes(options)
+        si
+
+        _interop_services: Semantic.Symbols.Symbol?
+        _interop_services_resolved: bool
+
+        _interop_services_namespace() -> Semantic.Symbols.Symbol? is
+            if !_interop_services_resolved then
+                _interop_services_resolved = true
+                _interop_services = _visitor.find("System")?.find_member("Runtime")?.find_member("InteropServices")
+            fi
+
+            return _interop_services
+        si
+
+        _struct_layout: Semantic.Symbols.Symbol?
+        _struct_layout_resolved: bool
+
+        _struct_layout_attribute() -> Semantic.Symbols.Symbol? is
+            if !_struct_layout_resolved then
+                _struct_layout_resolved = true
+                _struct_layout = _interop_services_namespace()?.find_member("StructLayoutAttribute")
+            fi
+
+            return _struct_layout
+        si
+
+        _field_offset: Semantic.Symbols.Symbol?
+        _field_offset_resolved: bool
+
+        _field_offset_attribute() -> Semantic.Symbols.Symbol? is
+            if !_field_offset_resolved then
+                _field_offset_resolved = true
+                _field_offset = _interop_services_namespace()?.find_member("FieldOffsetAttribute")
+            fi
+
+            return _field_offset
+        si
+
+        // Reads a `StructLayout` into the layout the type is emitted with.
+        // A type's own pragmas are resolved after its members', so every
+        // `FieldOffset` in it is already recorded, and an explicit layout
+        // that leaves a field without one - which the runtime refuses to
+        // load - is reported here.
+        _resolve_struct_layout(
+            pragma: Trees.Pragmas.PRAGMA,
+            target: Semantic.Symbols.Symbol,
+            positional: Collections.List[IR.Values.Value],
+            named: Collections.List[Semantic.NAMED_ATTRIBUTE_ARGUMENT]
+        ) is
+            let type = cast Semantic.Symbols.Classy?(target)
+
+            if
+                !type? \/
+                type.is_trait \/
+                isa Semantic.Symbols.UNION(type) \/
+                isa Semantic.Symbols.VARIANT(type) \/
+                isa Semantic.Symbols.ENUM_STRUCT(type)
+            then
+                _logger.error(pragma.name.location, "only a class or a struct can carry StructLayout")
+                return
+            fi
+
+            let layout =
+                Semantic.TYPE_LAYOUT(
+                    cast System.Runtime.InteropServices.LayoutKind(_number_argument(positional, 0) ?? 0),
+                    System.Math.max(_named_number(named, "Pack"), 0),
+                    System.Math.max(_named_number(named, "Size"), 0),
+                    System.Math.max(_named_number(named, "CharSet"), 0))
+
+            type.layout = layout
+
+            _settle_offsets(type, layout.is_explicit)
+
+            if layout.is_explicit then
+                let missing = Collections.LIST[string]()
+
+                for symbol in type.symbols do
+                    if let `field = _instance_field(symbol) /\ `field.owner == type /\ !`field.layout_offset? then
+                        missing.add(if `field.name.starts_with("$") then `field.name.substring(1) else `field.name fi)
+                    fi
+                od
+
+                if missing.count > 0 then
+                    missing.sort()
+
+                    _logger.error(
+                        pragma.name.location,
+                        "explicit layout needs a FieldOffset on {missing |> Ghul.Pipes.join(", ")}")
+                fi
+            fi
+        si
+
+        // A field each instance holds its own copy of, in a class or in a
+        // struct: the only kind a layout places.
+        _instance_field(symbol: Semantic.Symbols.Symbol) -> Semantic.Symbols.Field? =>
+            if isa Semantic.Symbols.INSTANCE_FIELD(symbol) \/ isa Semantic.Symbols.STRUCT_FIELD(symbol) then
+                cast Semantic.Symbols.Field(symbol)
+            else
+                null
+            fi
+
+        _resolve_field_offset(
+            pragma: Trees.Pragmas.PRAGMA,
+            target: Semantic.Symbols.Symbol,
+            positional: Collections.List[IR.Values.Value]
+        ) is
+            let `field = _instance_field(target)
+
+            if !`field? then
+                _logger.error(pragma.name.location, "only an instance field can carry FieldOffset")
+                return
+            fi
+
+            `field.layout_offset = _number_argument(positional, 0)
+
+            _unsettled_offsets[`field] = pragma.name.location
+        si
+
+        // Offsets whose type has not yet said whether it is laid out
+        // explicitly. A type's own pragmas are resolved after its members',
+        // so its StructLayout settles them, and any left when the type's file
+        // has been walked belong to a type that never asked for explicit
+        // layout.
+        _unsettled_offsets: Collections.MAP[Semantic.Symbols.Field, Source.LOCATION]
+
+        _settle_offsets(type: Semantic.Symbols.Classy, explicit: bool) is
+            let settled = Collections.LIST[Semantic.Symbols.Field]()
+
+            for (`field, location) in _unsettled_offsets do
+                if `field.owner == type then
+                    settled.add(`field)
+
+                    if !explicit then
+                        _report_offset_without_explicit_layout(location)
+                    fi
+                fi
+            od
+
+            for `field in settled do
+                _unsettled_offsets.remove(`field)
+            od
+        si
+
+        // Reports the offsets still unsettled on types declared in
+        // `file_name`, whose pragmas have all been resolved by now.
+        report_unsettled_offsets(file_name: string) is
+            let reported = Collections.LIST[Semantic.Symbols.Field]()
+
+            for (`field, location) in _unsettled_offsets do
+                if let owner: Semantic.Symbols.Symbol = `field.owner /\ owner.location.file_name =~ file_name then
+                    reported.add(`field)
+                    _report_offset_without_explicit_layout(location)
+                fi
+            od
+
+            for `field in reported do
+                _unsettled_offsets.remove(`field)
+            od
+        si
+
+        _report_offset_without_explicit_layout(location: Source.LOCATION) is
+            _logger.error(location, "a field with a FieldOffset needs a type with explicit layout")
         si
 
         // Reads a `DllImport` into the import the method is emitted
