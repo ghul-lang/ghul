@@ -1,0 +1,41 @@
+namespace Syntax.Parsers.Definitions is
+    // Recovery for a type header that has no `is` where its body should
+    // start: looks for the `is` further along the header's line, or at the
+    // start of the next line, and consumes it if found, so the body that
+    // follows is parsed as this type's rather than as definitions of its own.
+    //
+    // At the end of the file the tokenizer keeps returning the end-of-input
+    // token at the same location, so the scan has to stop there explicitly
+    // or it never leaves the header's line.
+    class BODY_LOOKAHEAD is
+        find_is(context: CONTEXT) -> bool static is
+            let line = context.current.location.start_line
+
+            let use diagnostics_snapshot = context.diagnostics_speculate_then_backtrack()
+
+            while
+                context.current.token != Lexical.TOKEN.END_OF_INPUT /\
+                context.current.location.start_line == line /\
+                context.current.location.start_column >= context.global_indent
+            do
+                if context.current.token == Lexical.TOKEN.IS then
+                    diagnostics_snapshot.commit()
+                    context.next_token()
+
+                    return true
+                fi
+
+                context.next_token()
+            od
+
+            if context.current_token == Lexical.TOKEN.IS /\ context.current.location.start_column >= context.global_indent then
+                diagnostics_snapshot.commit()
+                context.next_token()
+
+                return true
+            fi
+
+            return false
+        si
+    si
+si

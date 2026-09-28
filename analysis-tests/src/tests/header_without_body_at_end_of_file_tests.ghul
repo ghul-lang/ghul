@@ -1,0 +1,67 @@
+namespace Analysis.Tests is
+    use Collections.LIST;
+    use Ghul.Pipes;
+
+    use Analysis.Protocol.ANALYSER_PROCESS;
+    use Analysis.Protocol.Response;
+    use Analysis.Protocol.DIAGNOSTIC;
+    use Analysis.Protocol.user_diagnostics_of;
+
+    use TestClass = Microsoft.VisualStudio.TestTools.UnitTesting.TestClassAttribute;
+    use Test = Microsoft.VisualStudio.TestTools.UnitTesting.TestMethodAttribute;
+    use Assertions;
+
+    // A type header with no `is`, as the last line of a file, is what a file
+    // looks like while a new class is being typed. The analyser has to answer
+    // the edit and the requests after it. The edit runs on a task with a
+    // bound on the wait, so an analyser that never answers fails the test
+    // rather than stalling the run, and dispose() kills it.
+    @TestClass()
+    class HEADER_WITHOUT_BODY_AT_END_OF_FILE_TESTS is
+        init() is si
+
+        _answers_edit_then_hover(header: string) is
+            let analyser = ANALYSER_PROCESS();
+
+            try
+                let text = "before() -> int => 1\n\n{header}\n";
+
+                let edit = Tasks.TASK.run(() -> Response is
+                    analyser.send_edit("header.ghul", text);
+
+                    return analyser.read_response();
+                si);
+
+                is_true(edit.wait(30000), "the analyser did not answer an edit ending in '{header}' within 30 seconds");
+
+                let diagnostics = edit.result;
+                assert isa Response.DIAGNOSTICS(diagnostics) else "expected DIAGNOSTICS response";
+
+                let reported = LIST[DIAGNOSTIC](user_diagnostics_of(diagnostics));
+
+                is_true(
+                    reported |> any(d => d.message.contains("expected is but found end of input")),
+                    "expected the missing 'is' to be reported");
+
+                analyser.send_hover("header.ghul", 1, 2);
+
+                let hover = analyser.read_query_response();
+                assert isa Response.HOVER(hover) else "expected HOVER response";
+
+                is_true(hover.signature.contains("before"), "expected the hover to describe before; got: {hover.signature}");
+            finally
+                analyser.dispose();
+            yrt
+        si
+
+        @Test()
+        a_class_header_with_no_body_last_in_the_file_is_answered() is
+            _answers_edit_then_hover("class A");
+        si
+
+        @Test()
+        a_union_header_with_no_body_last_in_the_file_is_answered() is
+            _answers_edit_then_hover("union U: X");
+        si
+    si
+si
