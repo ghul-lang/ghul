@@ -167,13 +167,6 @@ namespace Syntax.Process is
         decline_reason: string?
         peeled_roles: string?
 
-        // Why the peel loop stopped, which is the reason a chain of no
-        // calls at all was not a chain. Not a decline in itself: a chain
-        // of one or more calls stops at its source, and the reason the
-        // expression below it was not another stage is what that source
-        // is.
-        _boundary_reason: string?
-
         // The role the last successful classification named.
         _last_role: string?
 
@@ -183,13 +176,19 @@ namespace Syntax.Process is
         // a stage worth teaching the fuser.
         boundary_function: Semantic.Symbols.Function?
 
+        // A `for` needs a stage to fuse. Its expression is whatever the
+        // loop iterates, so accepting a chain of no stages here would take
+        // every `for` in every program through the fused loop rather than
+        // the ordinary one - a change to how all iteration is emitted,
+        // which is not this path's to make.
         recognize(`for: Trees.Statements.FOR) -> PIPE_FUSION? =>
-            recognize_any(`for.expression)
+            recognize_free_function_chain(`for.expression, false)
 
-        // Peel a chain of `Ghul.Pipes` free functions off `expression`.
-        // Used both by the `for`-loop path and by consumer fusion.
+        // Peel a chain of `Ghul.Pipes` free functions off `expression`, for
+        // a consumer, which fuses over a chain of no stages as well: a bare
+        // `xs |> sum()` has nothing between the consumer and its source.
         recognize_any(expression: Trees.Expressions.Expression?) -> PIPE_FUSION? =>
-            recognize_free_function_chain(expression)
+            recognize_free_function_chain(expression, true)
 
         // Peel a `... |> map(f) |> filter(p)` chain of `Ghul.Pipes` free
         // functions off an arbitrary expression. `|>` is desugared entirely
@@ -209,7 +208,10 @@ namespace Syntax.Process is
         // thread-first chain is routinely written straight off a
         // generator or a `stream`. The loop reads it through a fresh
         // iterator, as a plain `for` does.
-        recognize_free_function_chain(expression: Trees.Expressions.Expression?) -> PIPE_FUSION? is
+        recognize_free_function_chain(expression: Trees.Expressions.Expression?) -> PIPE_FUSION? =>
+            recognize_free_function_chain(expression, true)
+
+        recognize_free_function_chain(expression: Trees.Expressions.Expression?, allow_no_stages: bool) -> PIPE_FUSION? is
             if !expression? then
                 decline_reason = "no-expression"
 
@@ -243,11 +245,16 @@ namespace Syntax.Process is
                 current = call.arguments.expressions[0]
             od
 
-            // A chain whose only call was a memo still fuses - it iterates
-            // the memo's source directly - but an expression that peeled
-            // nothing at all is not a chain.
-            if calls == 0 then
-                decline_reason = _boundary_reason ?? "not-a-chain"
+            // An expression that peeled no stage is still a chain of no
+            // stages, which a consumer fuses over directly: the loop reads
+            // the source and applies the consumer, as the stage-free path
+            // already did for a chain whose only stage was a memo. Whatever
+            // the source turns out to be - a local, a call, a generator -
+            // the loop reads it through one fresh iterator, exactly as the
+            // unfused consumer would. A `for` declines it instead, keeping
+            // ordinary iteration on the lowering it has always had.
+            if !allow_no_stages /\ calls == 0 then
+                decline_reason = "not-a-chain"
 
                 return null
             fi
@@ -290,8 +297,6 @@ namespace Syntax.Process is
             let value = call.value
 
             if !isa IR.Values.Call.GLOBAL(value) then
-                _boundary_reason = "not-a-global-call"
-
                 return null
             fi
 
@@ -299,22 +304,18 @@ namespace Syntax.Process is
             let role: string mut
 
             if !fusion_functions.try_get_value(global_call.function.root_specialized_from, role ref) then
-                _boundary_reason = "not-a-fusible-stage:{global_call.function.name}"
                 boundary_function = global_call.function
 
                 return null
             fi
 
             _last_role = role
-            _boundary_reason = null
             boundary_function = null
 
             let arguments = call.arguments.expressions
 
             if role =~ "memo" then
                 if arguments.count != 1 then
-                    _boundary_reason = "memo-arity"
-
                     return null
                 fi
 
@@ -334,14 +335,11 @@ namespace Syntax.Process is
                     return PIPE_FUSION_STAGE(chain_type, arguments[1])
                 fi
 
-                _boundary_reason = "index-arity"
 
                 return null
             fi
 
             if arguments.count != 2 then
-                _boundary_reason = "stage-arity:{role}"
-
                 return null
             fi
 
@@ -355,7 +353,6 @@ namespace Syntax.Process is
 
             // A consumer role - the peel loop's source boundary, which is
             // where a chain ends rather than where one fails.
-            _boundary_reason = "consumer:{role}"
 
             return null
         si
