@@ -52,8 +52,15 @@ namespace Syntax.Process is
     class KILL_LEDGER is
         _kills: Collections.LIST[KILL] static
 
+        // Each read of a function's store-free proof made by a walk
+        // before the solve that settles it: the pure shape of a named
+        // function's type is read that way, and a literal returning the
+        // function infers its own type from the answer.
+        _purity_reads: Collections.LIST[PURITY_READ] static
+
         init() static is
             _kills = Collections.LIST[KILL]()
+            _purity_reads = Collections.LIST[PURITY_READ]()
             _restart_bodies = Collections.SET[Trees.Definitions.FUNCTION]()
         si
 
@@ -102,6 +109,15 @@ namespace Syntax.Process is
             _kills.add(kill)
         si
 
+        // A definition's walk read whether `function` is proven store-free,
+        // and was told `answer`. Reads made anywhere else record nothing:
+        // no inferred type depends on them.
+        record_purity_read(function: Semantic.Symbols.Function, answer: bool) static is
+            if let walked = current_function then
+                _purity_reads.add(PURITY_READ(walked.location.file_name, walked, function, answer))
+            fi
+        si
+
         // Hand over the bodies a restart has to re-walk and start
         // afresh: those whose walk killed outside a descent.
         take_restart_bodies() -> Collections.SET[Trees.Definitions.FUNCTION] static is
@@ -131,24 +147,34 @@ namespace Syntax.Process is
         // The file's walk is being redone from its source: whatever it
         // recorded is superseded by the walk to come.
         clear_for(file_name: string) static is
-            _drop_where(kill => kill.file_name =~ file_name)
+            _drop_where((file, _) => file =~ file_name)
         si
 
         // One definition's body walk is being redone.
         clear_for(function: Trees.Definitions.FUNCTION) static is
-            _drop_where(kill => kill.function == function)
+            _drop_where((_, walked: Trees.Definitions.FUNCTION?) => walked == function)
         si
 
-        _drop_where(condition: (KILL) -> bool) static is
+        _drop_where(condition: (string, Trees.Definitions.FUNCTION?) -> bool) static is
             let kept = Collections.LIST[KILL]()
 
             for kill in _kills do
-                if !condition(kill) then
+                if !condition(kill.file_name, kill.function) then
                     kept.add(kill)
                 fi
             od
 
             _kills = kept
+
+            let kept_reads = Collections.LIST[PURITY_READ]()
+
+            for read in _purity_reads do
+                if !condition(read.file_name, read.walked) then
+                    kept_reads.add(read)
+                fi
+            od
+
+            _purity_reads = kept_reads
         si
 
         // One line per record, for comparing what walks recorded.
@@ -162,6 +188,7 @@ namespace Syntax.Process is
 
         clear_all() static is
             _kills.clear()
+            _purity_reads.clear()
         si
 
         // The call that dropped a fact about this target nearest above
@@ -248,6 +275,18 @@ namespace Syntax.Process is
                 fi
             od
 
+            // A body that read a proof the solve has since settled the
+            // other way inferred its types from the wrong answer.
+            for read in _purity_reads do
+                if read.function.is_proven_store_free != read.answer then
+                    if let walked = read.walked then
+                        result.bodies.add(walked)
+                    else
+                        result.files.add(read.file_name)
+                    fi
+                fi
+            od
+
             if System.Environment.get_environment_variable("GHUL_EFFECTS_TIMING")? then
                 IO.Std.error.write_line("ledger: {_kills.count} records ({killed} killed), {asked} re-asked in {stopwatch.elapsed_milliseconds} ms, {result.bodies.count} body(ies) and {result.files.count} file(s) inexact")
             fi
@@ -255,6 +294,15 @@ namespace Syntax.Process is
             return result
         si
     si
+
+    // One read of a function's store-free proof by the walk of
+    // `walked`, or of the file where no definition was being walked.
+    class PURITY_READ(
+        file_name: string,
+        walked: Trees.Definitions.FUNCTION?,
+        function: Semantic.Symbols.Function,
+        answer: bool
+    )
 
     // What a solve found inexact: the definitions whose body walks
     // disagree with the relations, and the files of records that were
