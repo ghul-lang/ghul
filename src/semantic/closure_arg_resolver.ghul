@@ -266,7 +266,7 @@ namespace Semantic is
                 // callable, spuriously falls back and captures it.
                 symbol.is_defined = true
 
-                let argument_type = _resolve_one(a, argument, symbol, index, implied_argument_types, closure)
+                let argument_type = _resolve_one(a, argument, symbol, index, implied_argument_types, implied_argument_types? /\ implied_argument_types.count == arguments.count, closure)
 
                 argument_types.add(argument_type)
 
@@ -387,8 +387,28 @@ namespace Semantic is
             symbol: Symbols.Variable,
             index: int,
             implied_argument_types: Collections.List[Type]?,
+            slot_matches_arity: bool,
             closure: Symbols.Closure
         ) -> Type is
+            // An untyped parameter takes the type of the slot the literal goes
+            // into, even where an earlier walk settled it from how the body
+            // uses it: the slot says what the literal will be called with. A
+            // slot of another arity, as a pack literal has, says nothing
+            // parameter by parameter.
+            if
+                slot_matches_arity /\
+                isa Syntax.Trees.TypeExpressions.INFER(argument.type_expression) /\
+                implied_argument_types? /\ index < implied_argument_types.count /\
+                implied_argument_types[index].is_settled /\
+                _is_implied_type_usable(implied_argument_types[index], closure)
+            then
+                let implied_argument_type = implied_argument_types[index]
+
+                symbol.set_type(implied_argument_type)
+                _record_method_level_type_arguments(implied_argument_type, symbol)
+                return implied_argument_type
+            fi
+
             if symbol.type? /\ symbol.type.is_settled then
                 return symbol.type!
             fi
