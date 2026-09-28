@@ -11,6 +11,15 @@ namespace Test is
     // assembly can tell it from anything a user wrote, without guessing
     // from names. Nothing authored carries the marker.
     class MARKER_TESTS is
+        // Synthesised members are emitted assembly-visible, so the
+        // default lookup, which reads the public surface, does not find
+        // them.
+        ANY_MEMBER: System.Reflection.BindingFlags static =>
+            System.Reflection.BindingFlags.PUBLIC |
+            System.Reflection.BindingFlags.NON_PUBLIC |
+            System.Reflection.BindingFlags.INSTANCE |
+            System.Reflection.BindingFlags.STATIC;
+
         marked(member: System.Reflection.MemberInfo) -> bool static is
             for a in member.get_custom_attributes(false) do
                 if let cg: System.Runtime.CompilerServices.CompilerGeneratedAttribute = a then
@@ -41,6 +50,24 @@ namespace Test is
             return null;
         si
 
+        check_field_visibility(what: string, `field: System.Reflection.FieldInfo?) static is
+            if !`field? then
+                write_line("{what}: MISSING");
+                return;
+            fi
+
+            write_line("{what}: public {`field.is_public}");
+        si
+
+        check_type_visibility(what: string, ty: System.Type?) static is
+            if !ty? then
+                write_line("{what}: MISSING");
+                return;
+            fi
+
+            write_line("{what}: public {ty.is_public \/ ty.is_nested_public}");
+        si
+
         check(what: string, member: System.Reflection.MemberInfo?, expect_marked: bool) static is
             if !member? then
                 write_line("{what}: MISSING");
@@ -66,7 +93,7 @@ namespace Test is
 
             check("widget.get", widget.get_method("$get_label"), true);
             check("widget.set", widget.get_method("$set_label"), true);
-            check("widget.field", widget.get_field("$label"), true);
+            check("widget.field", widget.get_field("$label", ANY_MEMBER), true);
             check("widget.describe", widget.get_method("describe"), false);
 
             let types = widget.assembly.get_types();
@@ -87,8 +114,14 @@ namespace Test is
             let carrier = widget.assembly.get_type("GeneratedMarkers.$globals");
 
             check("carrier.type", carrier, true);
-            check("carrier.field", carrier?.get_field("$total"), true);
+            check("carrier.field", carrier?.get_field("$total", ANY_MEMBER), true);
             check("carrier.bump", carrier?.get_method("bump"), false);
+
+            check_type_visibility("widget.type visibility", widget);
+            check_type_visibility("carrier.type visibility", carrier);
+            check_type_visibility("frame.type visibility", frame);
+            check_field_visibility("widget.field visibility", widget.get_field("$label", ANY_MEMBER));
+            check_field_visibility("carrier.field visibility", carrier?.get_field("$total", ANY_MEMBER));
 
             return;
         si

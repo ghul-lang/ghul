@@ -26,7 +26,15 @@ namespace IR.Emitter is
         type_attributes(type: Classy) -> TypeAttributes static is
             let flags mut = _PUBLIC_TYPE
 
-            if !type.is_public_readable then
+            // A closure frame or a state machine is reached only by the
+            // code the compiler generated alongside it, and no source
+            // can name it. Emitted public it sits in every other
+            // language's view of the assembly and in anything that
+            // enumerates the public surface. The globals carrier is not
+            // one of these: it takes its flags from
+            // globals_carrier_type_attributes, since a consumer's call
+            // to a global function goes through it.
+            if !type.is_public_readable \/ type.is_internal then
                 flags = 0
             fi
 
@@ -247,8 +255,16 @@ namespace IR.Emitter is
             cast FieldAttributes(_PUBLIC_FIELD | _SPECIAL_NAME_FIELD | _RT_SPECIAL_NAME_FIELD)
 
         field_attributes(`field: Field) -> FieldAttributes static is
+            // An auto-property's backing field, a cached delegate and a
+            // state machine's state are all read through something else
+            // that is public in its own right, so nothing outside the
+            // assembly has any business reaching them.
             let flags mut =
-                if `field.is_public_readable then _PUBLIC_FIELD else _ASSEMBLY_FIELD fi
+                if `field.is_public_readable /\ !`field.is_internal then
+                    _PUBLIC_FIELD
+                else
+                    _ASSEMBLY_FIELD
+                fi
 
             if isa Semantic.Symbols.STATIC_FIELD(`field) \/
                isa Semantic.Symbols.GLOBAL_VARIABLE(`field)
