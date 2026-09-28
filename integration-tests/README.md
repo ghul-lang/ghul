@@ -241,7 +241,7 @@ To run a specific test, run `dotnet ghul-test integration-tests/<test-folder>`.
 
 To capture a test's expected results, run `./tasks/capture.sh integration-tests/<test-folder>`.
 
-**Note** a test must have previously been run and left a `failed` marker before its output can be captured as the expected result.
+**Note** a test must have been run first. Capture promotes its output when the run left a `failed` marker, or when some produced file differs from its expectation byte for byte. The second case is a change that moves only whitespace, which the runner's comparison ignores, so such a test passes. A passing run deletes its output, so run it with `GHUL_TEST_KEEP_ARTIFACTS=1` to capture one.
 
 **Note** the current working directory must be the repository root when running these scripts.
 
