@@ -1988,6 +1988,8 @@ A pipe is built over the held iterator with `cursor`, which reads the iterator i
 return cursor(use IO.File.read_lines(path).iterator) |> skip(wanted - 1) |> first()
 ```
 
+An iterator can also be read one element at a time with `next`, which advances it and returns the element it reaches, or absent at its end. An element that is itself absent comes back present, so only the end reads as absent, which makes `next` the condition of a `while let` loop: `while let cat: CAT = animals |> next() do ... od` runs until the iterator ends or yields something that is not a `CAT`.
+
 The `undisposed-source` warning reports a read that can stop before the end of one of these sources with nothing holding it: an early-exit terminal or stage such as `first`, `find`, `any`, `all`, `only` or `take`, or a `for` loop whose body can `break` out of it or `return`. The call to the source has to be the read's source, or be reached from it through other pipe stages. A read to the end lets the source close itself and draws nothing, and so does a stage that reads all of its source before passing anything on, such as `sort` or `reverse`. A sequence held in a local variable, a field or anywhere else first is not followed.
 
 A pipe can also be started from nothing. `repeat(value)` yields `value` without end and `repeat(value, count)` yields it `count` times; `from(start)` counts upwards from `start` without end, and `from(start, step)` counts in steps of `step`. Collected, a bounded `repeat` is how a list of a given size is made:
