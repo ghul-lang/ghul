@@ -144,6 +144,42 @@ namespace Syntax.Parsers.Expressions is
             return null
         si
 
+        // A comprehension written without its element: `{for i in xs}`,
+        // `[for i in xs if p(i)]`. Entered with `for` current where the
+        // element belongs. A loop is a valid element, so the text is read
+        // speculatively as the comprehension's clauses alone, and that
+        // reading is kept only if it reaches the closing bracket without
+        // complaint; a loop element never does, since its `do` ends the
+        // clauses short of the bracket. Otherwise nothing is consumed and
+        // the element is parsed as it would be anyway.
+        _parse_comprehension_without_element(context: CONTEXT, start: LOCATION, is_lazy: bool) -> Trees.Expressions.Expression? is
+            let for_location = context.location
+
+            let use diagnostics_snapshot = context.diagnostics_speculate_then_backtrack()
+            let use snapshot = context.tokenizer_speculate_then_backtrack_bounded()
+
+            let errors_before = context.logger.error_count
+
+            let element = Trees.Expressions.Literals.NONE(for_location)
+            element.poison()
+
+            let result = _parse_comprehension(context, start, element, is_lazy)
+
+            if context.logger.error_count == errors_before then
+                snapshot.commit()
+                diagnostics_snapshot.commit()
+
+                context.error(for_location, "expected an element expression before for in comprehension")
+
+                return result
+            fi
+
+            snapshot.backtrack()
+            diagnostics_snapshot.backtrack()
+
+            return null
+        si
+
         // `[element for p in source if condition ...]`, or the same in
         // braces for a lazy comprehension, entered with the element parsed
         // and `for` current. Clauses need no separator: each starts with
@@ -394,6 +430,12 @@ namespace Syntax.Parsers.Expressions is
                     // its element type comes from the surrounding context.
                     // Otherwise the token after the first element decides:
                     // `for` makes it a comprehension, anything else a list.
+                    if context.current.token == Lexical.TOKEN.FOR then
+                        if let recovered = _parse_comprehension_without_element(context, start, false) then
+                            return recovered
+                        fi
+                    fi
+
                     let elements_start = context.location
                     let first =
                         if context.current.token == Lexical.TOKEN.SQUARE_CLOSE then
@@ -437,6 +479,12 @@ namespace Syntax.Parsers.Expressions is
                 (context) is
                     let start = context.location
                     context.next_token()
+
+                    if context.current.token == Lexical.TOKEN.FOR then
+                        if let recovered = _parse_comprehension_without_element(context, start, true) then
+                            return recovered
+                        fi
+                    fi
 
                     let element = expression_parser.parse(context)!
 
