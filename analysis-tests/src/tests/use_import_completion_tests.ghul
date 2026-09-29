@@ -1,0 +1,90 @@
+namespace Analysis.Tests is
+    use Ghul.Pipes
+    use IO.File;
+
+    use Analysis.Protocol.ANALYSER_PROCESS;
+    use Analysis.Protocol.Response;
+
+    use TestClass = Microsoft.VisualStudio.TestTools.UnitTesting.TestClassAttribute;
+    use Test = Microsoft.VisualStudio.TestTools.UnitTesting.TestMethodAttribute;
+    use Assertions;
+
+    // A name a `use` brings into scope unqualified is a candidate wherever
+    // the unqualified name would resolve, whatever kind of name it is and
+    // whichever form of import brought it in. A namespace import carries
+    // its global functions as well as its types, and a class import
+    // carries its statics.
+    @TestClass()
+    class USE_IMPORT_COMPLETION_TESTS is
+        init() is si
+
+        load() -> string is
+            let path = fixture_path("use-import-completion/use-import-completion.ghul");
+            assert File.exists(path) else "fixture not copied to test output: {path}";
+            return File.read_all_text(path);
+        si
+
+        complete(analyser: ANALYSER_PROCESS, line: int, column: int) -> Collections.SET[string] is
+            analyser.send_completion("use-import-completion.ghul", line, column);
+
+            let response = analyser.read_query_response();
+
+            assert isa Response.COMPLETION(response) else "expected COMPLETION response";
+
+            let names = Collections.SET[string]();
+
+            for item in response.items do
+                names.add(item.name);
+            od
+
+            return names;
+        si
+
+        opened() -> ANALYSER_PROCESS is
+            let analyser = ANALYSER_PROCESS();
+
+            analyser.send_edit("use-import-completion.ghul", load());
+
+            let diagnostics = analyser.read_response();
+            assert isa Response.DIAGNOSTICS(diagnostics) else "expected DIAGNOSTICS response";
+
+            return analyser;
+        si
+
+        @Test()
+        a_namespace_import_offers_its_global_functions() is
+            let use analyser = opened();
+
+            let names = complete(analyser, 13, 16)
+
+            is_true(names.contains("count"), "expected `count`, a global function of the used namespace Ghul.Pipes")
+        si
+
+        @Test()
+        a_class_import_offers_its_statics() is
+            let use analyser = opened();
+
+            let names = complete(analyser, 14, 20)
+
+            is_true(names.contains("write_line"), "expected `write_line`, a static of the used class IO.Std")
+        si
+
+        @Test()
+        a_namespace_import_offers_its_types() is
+            let use analyser = opened();
+
+            let names = complete(analyser, 15, 16)
+
+            is_true(names.contains("LIST"), "expected `LIST`, a type of the used namespace Collections")
+        si
+
+        @Test()
+        a_namespace_import_offers_its_global_functions_after_thread_first() is
+            let use analyser = opened();
+
+            let names = complete(analyser, 16, 22)
+
+            is_true(names.contains("count"), "expected `count`, which takes an int[] first")
+        si
+    si
+si
