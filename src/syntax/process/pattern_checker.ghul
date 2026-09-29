@@ -151,6 +151,8 @@ namespace Syntax.Process is
                 )
             fi
 
+            let unwrapped_through_value mut = false
+
             if effective_type? /\ effective_type.is_value_type then
                 let value_member = effective_type.find_member("value")
 
@@ -160,12 +162,15 @@ namespace Syntax.Process is
                     // Option-shape value type: the bound names take the
                     // unwrapped `.value` type, not the optional itself.
                     _visitor.set_symbol_type(left, value_member_type)
+
+                    unwrapped_through_value = true
                 fi
             fi
 
-            // The bound names hold a value throughout the then-arm —
-            // that is what `if let` establishes — so a dereference of
-            // one is not flagged.
+            if !binds_present_source(left.is_simple_name, unwrapped_through_value) then
+                return
+            fi
+
             for name in left.names! do
                 let symbol = _visitor.find(name)
 
@@ -174,6 +179,17 @@ namespace Syntax.Process is
                 fi
             od
         si
+
+        // Whether the names a pattern binds are known to hold a value
+        // throughout the then-arm. The test establishes that the source
+        // is present, so a simple name bound to the source itself is.
+        // It says nothing about what the source carries: a name bound to
+        // a value-type carrier's `.value`, or to one element of a
+        // destructure, holds exactly the type that value has, which is
+        // itself optional where the source is `string??` or
+        // `(string?, int)?`.
+        binds_present_source(is_simple_name: bool, unwrapped_through_value: bool) -> bool static =>
+            is_simple_name /\ !unwrapped_through_value
 
         // Gating for the "cannot narrow {T}" error. An ascription onto a
         // value type that isn't option-shaped is a real test only when
