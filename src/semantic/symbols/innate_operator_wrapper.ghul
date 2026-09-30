@@ -18,10 +18,21 @@ namespace Semantic.Symbols is
         short_description: string => operator.short_description
         to_string() -> string => operator.to_string()
 
+        // One static field for each delegate type the operator is built
+        // as, holding the delegate once the first use has built it. The
+        // wrapper captures nothing, so one delegate serves every use.
+        delegate_caches: Collections.List[GLOBAL_VARIABLE] => _delegate_caches
+
+        _delegate_caches: Collections.LIST[GLOBAL_VARIABLE]
+        _home: NAMESPACE
+
         init(owner: NAMESPACE, operator: INNATE_FUNCTION) is
             super.init(LOCATION.internal, LOCATION.internal, owner, "$operator{operator.name}", owner)
 
             self.operator = operator
+
+            _home = owner
+            _delegate_caches = Collections.LIST[GLOBAL_VARIABLE]()
 
             emit_assembly = true
 
@@ -32,6 +43,22 @@ namespace Semantic.Symbols is
             if operator.is_declared_pure then
                 mark_declared_pure()
             fi
+        si
+
+        delegate_cache_for(delegate_type: Type) -> GLOBAL_VARIABLE is
+            for cache in _delegate_caches do
+                if let cached_type = cache.type /\ cached_type.is_equivalent_to(delegate_type) then
+                    return cache
+                fi
+            od
+
+            let result = GLOBAL_VARIABLE(LOCATION.internal, _home, "{name}$cache{_delegate_caches.count}")
+
+            result.set_type(delegate_type)
+
+            _delegate_caches.add(result)
+
+            return result
         si
 
         // Whether this wrapper already stands in for `candidate`: the
