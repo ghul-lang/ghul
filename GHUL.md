@@ -1211,12 +1211,20 @@ si
 let total = vectors |> reduce(V(0), V.`+);
 ```
 
-The built-in operators on the scalar types are the exception. They are
-instructions rather than methods, so there is no function to take the value of,
-and naming one is an error: `cannot take the value of built-in operator '+'`.
-An instance member is not a value either, operator or not, since it needs a
-receiver. What that rules out is ``int.`+`` and ``string.`=~``; a function literal
-says the same thing and is what to write instead.
+The built-in operators on the scalar types are values too, although they are
+instructions rather than methods. Naming one as a value gives a function that
+applies the operator to its arguments:
+
+```ghul
+let total = numbers |> reduce(0, int.`+);
+let order: (int, int) -> int = `<>;
+```
+
+A built-in operator whose operand types are still a type parameter, such as `==`
+named as a `(T, T) -> bool` inside a generic function, has no value: the error is
+`cannot take the value of built-in operator '=='`, and a function literal is what
+to write instead. An instance member is not a value either, operator or not,
+since it needs a receiver, which rules out ``string.`=~``.
 
 ## equality
 
@@ -2420,7 +2428,7 @@ a. =~(b)
 a.`=~(b)
 ```
 
-Both are the same call, and both are a plain method call rather than another spelling of the operator. Where the two differ, they differ quietly. The null handling around `a =~ b` is written around the *operator*, so the member call receives an absent operand instead of being answered before it is reached. And an operator that lowers to an IL instruction has no .NET method behind it: on the scalar types the arithmetic operators are instructions, declared as static members of the type, so `a. +(b)` on an `int` finds no overload taking one operand, and `int.`+(a, b)` is the call — while `=~` and `<>` on those types, and on `string`, do reach the .NET method the name maps to, which is not the same thing the operator does. Member syntax is fine to use on a type whose operators you wrote; it is not a general substitute for writing the operator. Naming one of those instruction-backed operators as a *value* rather than calling it - `int.`+`` passed where a function is expected - is rejected, since there is no method to take the address of; an operator you declared yourself is an ordinary static or global function and is named as a value like any other. An instance member named through its type, `BOX.plus` or `int.`<>``, is rejected too: a member reached through a receiver needs one.
+Both are the same call, and both are a plain method call rather than another spelling of the operator. Where the two differ, they differ quietly. The null handling around `a =~ b` is written around the *operator*, so the member call receives an absent operand instead of being answered before it is reached. And an operator that lowers to an IL instruction has no .NET method behind it: on the scalar types the arithmetic operators are instructions, declared as static members of the type, so `a. +(b)` on an `int` finds no overload taking one operand, and `int.`+(a, b)` is the call — while `=~` and `<>` on those types, and on `string`, do reach the .NET method the name maps to, which is not the same thing the operator does. Member syntax is fine to use on a type whose operators you wrote; it is not a general substitute for writing the operator. Naming one of those instruction-backed operators as a *value* rather than calling it - `int.`+`` passed where a function is expected - gives a function that applies the operator, as an operator you declared yourself does (see [operators](#operators)). An instance member named through its type, `BOX.plus` or `int.`<>``, is rejected: a member reached through a receiver needs one.
 
 A static property or field takes `snake_case` however constant-like it reads, since only enum members become `MACRO_CASE` — `CancellationToken.None` is `System.Threading.CancellationToken.none`.
 

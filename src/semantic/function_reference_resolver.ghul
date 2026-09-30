@@ -100,19 +100,49 @@ namespace Semantic is
                 single = specialized
             fi
 
-            // An innate operator is an IL instruction declared as a
-            // static member, with no method behind it, so a reference
-            // to one emits a call to a method the runtime cannot find.
-            // Calling it is what it is for.
+            // An innate operator is an IL instruction sequence with no
+            // method behind it to point at, so the value is built from a
+            // wrapper method that applies the operator to its arguments.
             if single.is_innate then
-                _logger.error(
-                    location,
-                    "cannot take the value of built-in operator '{single.name}'")
+                let wrapper = _try_get_innate_operator_wrapper(single)
 
-                return DUMMY(Types.ERROR(), location)
+                if !wrapper? then
+                    _logger.error(
+                        location,
+                        "cannot take the value of built-in operator '{single.name}'")
+
+                    return DUMMY(Types.ERROR(), location)
+                fi
+
+                let value = _build_value(location, wrapper, from, expected_type)
+
+                if let delegate: Load.DELEGATE = value then
+                    return MEMOIZED_DELEGATE(delegate, wrapper.delegate_cache_for(delegate.type), delegate.type)
+                fi
+
+                return value
             fi
 
             return _build_value(location, single, from, expected_type)
+        si
+
+        // Null for an innate that no non-generic static method can
+        // stand in for: an instance innate, which needs a receiver, or
+        // one whose signature still mentions a type parameter.
+        _try_get_innate_operator_wrapper(function: Symbols.Function) -> Symbols.INNATE_OPERATOR_WRAPPER? is
+            let operator = cast Symbols.INNATE_FUNCTION?(function)
+
+            if !operator? \/ !Symbols.INNATE_OPERATOR_WRAPPER.can_wrap(operator) then
+                return null
+            fi
+
+            let home = _symbol_table.current_namespace_symbol
+
+            if !home? then
+                return null
+            fi
+
+            return home.innate_operator_wrapper_for(operator)
         si
 
         // A slot that cannot instantiate an open generic function:
