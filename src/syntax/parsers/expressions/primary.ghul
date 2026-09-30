@@ -49,6 +49,33 @@ namespace Syntax.Parsers.Expressions is
             return super.parse(context)
         si
 
+        // A compound statement in element position settles the element: it
+        // is never a lambda's formal parameter. The flag has to be cleared
+        // before the body is parsed, not merely when the element is
+        // complete - inside the body, `name = e` is an assignment
+        // statement, while the flag says to read it as a named element,
+        // which declares a local shadowing the one being assigned.
+        //
+        // A statement parser that reports an error and returns nothing is
+        // stood in for by a poisoned value, as for any other unexpected
+        // token.
+        _parse_statement(context: CONTEXT) -> Trees.Expressions.Expression is
+            context.allow_tuple_element = false
+
+            let start = context.location
+            let statement = statement_parser.parse(context)
+
+            if !statement? then
+                let result = Trees.Expressions.Literals.NONE(start)
+
+                result.poison()
+
+                return result
+            fi
+
+            return Trees.Expressions.STATEMENT(statement.location, statement)
+        si
+
         _parse_pragma_variable(context: CONTEXT) -> Trees.Expressions.Expression is
             let start = context.location
 
@@ -762,66 +789,19 @@ namespace Syntax.Parsers.Expressions is
                 si, Lexical.TOKEN.REC
             )
 
+            // Loops in expression position are delegated in the same way as
+            // `if` and `case`. The wrapped statement produces a value only
+            // when a valued `break` targets it; compile-expressions reports
+            // the value-less forms.
             add_parser(
-                (context) -> Trees.Expressions.Expression is
-                    // A compound statement in element position settles
-                    // the element: it is never a lambda's formal
-                    // parameter. The flag has to be cleared before the
-                    // body is parsed, not merely when the element is
-                    // complete - inside the body, `name = e` is an
-                    // assignment statement, while the flag says to read
-                    // it as a named element, which declares a local
-                    // shadowing the one being assigned.
-                    context.allow_tuple_element = false
-
-                    let statement = statement_parser.parse(context)!
-
-                    return Trees.Expressions.STATEMENT(statement.location, statement)
-                si, Lexical.TOKEN.IF
-            )
-
-            add_parser(
-                (context) -> Trees.Expressions.Expression is
-                    context.allow_tuple_element = false
-
-                    let statement = statement_parser.parse(context)!
-
-                    return Trees.Expressions.STATEMENT(statement.location, statement)
-                si, Lexical.TOKEN.CASE
-            )
-
-            // Loops in expression position: same delegation as `if` /
-            // `case`. The wrapped statement produces a value only when a
-            // valued `break` targets it; compile-expressions reports the
-            // value-less forms.
-            add_parser(
-                (context) -> Trees.Expressions.Expression is
-                    context.allow_tuple_element = false
-
-                    let statement = statement_parser.parse(context)!
-
-                    return Trees.Expressions.STATEMENT(statement.location, statement)
-                si, Lexical.TOKEN.DO
-            )
-
-            add_parser(
-                (context) -> Trees.Expressions.Expression is
-                    context.allow_tuple_element = false
-
-                    let statement = statement_parser.parse(context)!
-
-                    return Trees.Expressions.STATEMENT(statement.location, statement)
-                si, Lexical.TOKEN.FOR
-            )
-
-            add_parser(
-                (context) -> Trees.Expressions.Expression is
-                    context.allow_tuple_element = false
-
-                    let statement = statement_parser.parse(context)!
-
-                    return Trees.Expressions.STATEMENT(statement.location, statement)
-                si, Lexical.TOKEN.WHILE
+                (context) => _parse_statement(context),
+                [
+                    Lexical.TOKEN.IF,
+                    Lexical.TOKEN.CASE,
+                    Lexical.TOKEN.DO,
+                    Lexical.TOKEN.FOR,
+                    Lexical.TOKEN.WHILE
+                ]
             )
 
             // `val ... lav` — a value-producing block. The block's
