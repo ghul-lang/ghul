@@ -139,28 +139,23 @@ namespace Semantic is
                     return DUMMY(Types.ERROR(), location)
                 fi
 
-                // No receiver: the type in `int.`+`` names which operator is
-                // meant and is not a value the stand-in reads. Passing it
-                // on would leave the type expression in the tree for
-                // emission to trip over.
-                let value = _build_value(location, wrapper, null, expected_type)
-
-                // Built once and reused. The cache is the closure's own
-                // field, which the emitter already collects for every
-                // capture-free literal, so hosting needs nothing new. The
-                // memoizable-delegate predicate is not consulted: it asks
-                // whether a walked literal's body closes over anything,
-                // and this one has no walked body - it closes over nothing
-                // by construction.
-                if let delegate: Load.DELEGATE = value then
-                    return
-                        MEMOIZED_DELEGATE(
-                            delegate,
-                            wrapper.delegate_cache_field,
-                            wrapper.constructed_delegate_type)
+                // Loaded through the closure's own path, which builds the
+                // delegate once and keeps it, the same as for any literal
+                // that captures nothing: one evaluation of a site yields
+                // one delegate however often it runs. A named delegate -
+                // System.Comparison[int] and the like - is not what that
+                // path builds, so those go the ordinary way and are built
+                // per evaluation, as a literal written there would be.
+                //
+                // No receiver either way: the type in `int.`+`` names which
+                // operator is meant rather than supplying a value, and
+                // passing it on leaves a type expression for emission to
+                // trip over.
+                if expected_type? /\ !expected_type.is_function then
+                    return _build_value(location, wrapper, null, expected_type)
                 fi
 
-                return value
+                return wrapper.load_closure(location, _symbol_loader)
             fi
 
             return _build_value(location, single, from, expected_type)
@@ -237,9 +232,15 @@ namespace Semantic is
 
             signature.add(operator.return_type!)
 
-            closure.type = _innate_symbol_lookup.get_function_type(signature, true)
+            closure.type = _innate_symbol_lookup.get_function_type(signature)
 
             closure.innate_operator = operator
+
+            // The state a literal gets when compile-lambdas settles it as
+            // a delegate over nothing. A synthesised closure never goes
+            // through that, and the delegate caching reads what it sets,
+            // so without this the stand-in is rebuilt at every evaluation.
+            closure.convert_to_delegate()
 
             // The body is the operator's own instructions and a return, so
             // it stores nothing whatever the operator is. Marked rather
