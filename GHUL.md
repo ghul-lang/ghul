@@ -1220,9 +1220,10 @@ let total = numbers |> reduce(0, int.`+);
 let order: (int, int) -> int = `<>;
 ```
 
-`==` is the exception, since a comparison of identity is only ever written as
-the operator itself: naming it as a value is an error, `cannot take the value of
-built-in operator '=='`, and a function literal is what to write instead. An instance member is not a value either, operator or not,
+A built-in operator whose operand types are still a type parameter, such as `==`
+named as a `(T, T) -> bool` inside a generic function, has no value: the error is
+`cannot take the value of built-in operator '=='`, and a function literal is what
+to write instead. An instance member is not a value either, operator or not,
 since it needs a receiver, which rules out ``string.`=~``.
 
 ## equality
