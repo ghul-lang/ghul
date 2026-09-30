@@ -1,0 +1,91 @@
+namespace Semantic.UnitTests is
+    use Collections.LIST
+
+    use Source.LOCATION
+
+    use Semantic.Lookups.InnateSymbolLookup
+    use Semantic.Symbols.CLASS
+    use Semantic.Symbols.CLASSY_GENERIC_ARGUMENT
+    use Semantic.Symbols.TypeParameterConstraintKind
+    use Semantic.Types.Type
+    use TestClass = Microsoft.VisualStudio.TestTools.UnitTesting.TestClassAttribute
+    use Test = Microsoft.VisualStudio.TestTools.UnitTesting.TestMethodAttribute
+    use Assertions
+    use NSubstitute.SubstituteExtensions.returns_for_any_args
+
+    // TYPE_VARIABLE_OPTIONAL lowers `T?` over a type parameter by the
+    // parameter's declared kind. The lookup answers each maker with a
+    // distinct marker type, so every test asserts which maker fired.
+    @TestClass()
+    class TYPE_VARIABLE_OPTIONAL_TESTS is
+        _nullable: Type
+        _maybe: Type
+
+        init() is
+            _nullable = marker("$nullable")
+            _maybe = marker("$maybe")
+        si
+
+        loc() -> LOCATION => LOCATION("test.ghul", 1, 1, 1, 1)
+
+        marker(name: string) -> Type =>
+            CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), name, LIST[string](), Semantic.BLOCK_SCOPE()).type!
+
+        type_variable_of_kind(kind: TypeParameterConstraintKind) -> Type is
+            let symbol = CLASSY_GENERIC_ARGUMENT(loc(), Semantic.BLOCK_SCOPE(), "T", 0)
+
+            symbol.set_constraint_kind(kind)
+
+            return symbol.type!
+        si
+
+        a_lookup(maybe: Type?) -> InnateSymbolLookup is
+            let lookup = NSubstitute.Substitute.`for`[InnateSymbolLookup](System.Array.empty`[object]())
+            let any = marker("Any")
+
+            lookup.get_optional_type(any) |> returns_for_any_args(_nullable, null)
+            lookup.get_maybe_type(any) |> returns_for_any_args(maybe, null)
+
+            return lookup
+        si
+
+        @Test()
+        of__unconstrained__is_maybe() is
+            let t = type_variable_of_kind(TypeParameterConstraintKind.NONE)
+
+            are_same(_maybe, TYPE_VARIABLE_OPTIONAL.of(t, a_lookup(_maybe)))
+        si
+
+        @Test()
+        of__unconstrained_without_maybe__is_null() is
+            let t = type_variable_of_kind(TypeParameterConstraintKind.NONE)
+
+            is_null(TYPE_VARIABLE_OPTIONAL.of(t, a_lookup(null)))
+        si
+
+        @Test()
+        of__struct__is_nullable() is
+            let t = type_variable_of_kind(TypeParameterConstraintKind.VALUE)
+
+            are_same(_nullable, TYPE_VARIABLE_OPTIONAL.of(t, a_lookup(_maybe)))
+        si
+
+        @Test()
+        of__class__is_the_flagged_parameter() is
+            let t = type_variable_of_kind(TypeParameterConstraintKind.REFERENCE)
+
+            let result = TYPE_VARIABLE_OPTIONAL.of(t, a_lookup(_maybe))!
+
+            is_true(result.is_optional)
+            is_true(result.is_type_variable)
+            are_same(t.symbol, result.symbol)
+        si
+
+        @Test()
+        of__optional__is_the_parameter_itself() is
+            let t = type_variable_of_kind(TypeParameterConstraintKind.OPTIONAL)
+
+            are_same(t, TYPE_VARIABLE_OPTIONAL.of(t, a_lookup(_maybe)))
+        si
+    si
+si
