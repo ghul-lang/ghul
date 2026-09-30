@@ -1,0 +1,83 @@
+namespace Semantic.Symbols is
+    use Source.LOCATION
+
+    use Types.Type
+
+    // A built-in operator is a run of instructions expanded at each call
+    // site, with no method behind it for a function value to point at.
+    // Where one is used as a value, this global function stands in for
+    // it: it takes the operator's operands and applies the operator to
+    // them. It is declared into no scope, so nothing can name it, and it
+    // is emitted onto the globals carrier of the namespace that uses it.
+    class INNATE_OPERATOR_WRAPPER: GLOBAL_FUNCTION is
+        operator: INNATE_FUNCTION
+
+        // Anything that shows this function to a reader shows the
+        // operator written in the source rather than the stand-in.
+        describe(context: DESCRIBE_CONTEXT) -> SignaturePart => operator.describe(context)
+        short_description: string => operator.short_description
+        to_string() -> string => operator.to_string()
+
+        init(owner: NAMESPACE, operator: INNATE_FUNCTION) is
+            super.init(LOCATION.internal, LOCATION.internal, owner, "$operator{operator.name}", owner)
+
+            self.operator = operator
+
+            emit_assembly = true
+
+            set_arguments(operator.argument_names, operator.arguments)
+
+            return_type = operator.return_type
+
+            if operator.is_declared_pure then
+                mark_declared_pure()
+            fi
+        si
+
+        // Whether this wrapper already stands in for `candidate`: the
+        // same operation over the same operand and result types. Two
+        // references to one operator can arrive as distinct symbols -
+        // separate specializations of a generic operator, or a body
+        // compiled more than once - and share a single wrapper.
+        wraps(candidate: INNATE_FUNCTION) -> bool is
+            if
+                candidate.name !~ operator.name \/
+                candidate.innate_name !~ operator.innate_name \/
+                candidate.arguments.count != arguments.count
+            then
+                return false
+            fi
+
+            for i in 0..arguments.count do
+                if !candidate.arguments[i].is_equivalent_to(arguments[i]) then
+                    return false
+                fi
+            od
+
+            let candidate_return = candidate.return_type
+            let own_return = return_type
+
+            return candidate_return? /\ own_return? /\ candidate_return.is_equivalent_to(own_return)
+        si
+
+        // Whether a wrapper can stand in for `operator` at all. The
+        // wrapper is an ordinary non-generic static method, so every
+        // operand and result type has to be known here: one that
+        // mentions a type parameter would need the wrapper to be
+        // generic over it. A generic operator qualifies once it is
+        // specialized to concrete types, whatever its own is_generic
+        // says.
+        can_wrap(operator: INNATE_FUNCTION) -> bool static is
+            let return_type = operator.return_type
+
+            if !return_type? \/ !_is_concrete(return_type) then
+                return false
+            fi
+
+            return operator.arguments |> Ghul.Pipes.all(a => _is_concrete(a))
+        si
+
+        _is_concrete(type: Type) -> bool static =>
+            type.is_settled /\ !type.is_wild /\ type.get_type_arguments().count == 0
+    si
+si
