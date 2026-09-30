@@ -1,0 +1,49 @@
+namespace Syntax.Process is
+    use IR
+    use IR.Values
+
+    // A built-in operator used as a value has no literal behind it, so
+    // the closure standing in for it has its body generated from the
+    // operator on it rather than walked: its own arguments, in order,
+    // through the operator's lowering, and the result returned.
+    partial GENERATE_IL is
+        _gen_innate_operator_closure(closure: Semantic.Symbols.Closure) is
+            let operator = closure.innate_operator
+
+            if !operator? then
+                return
+            fi
+
+            let assembly_emitter = _context.srm_assembly_emitter
+            let enclosing = _context.current_srm_body_emitter
+            let enclosing_member = assembly_emitter.current_emission_member
+            let body_emitter = IR.Emitter.SRM_METHOD_BODY_EMITTER()
+
+            _context.current_srm_body_emitter = body_emitter
+            assembly_emitter.current_emission_member = closure
+
+            enter_block()
+
+            let names = closure.argument_names
+            let operands = Collections.LIST[Value]()
+
+            for i in 0..closure.arguments.count do
+                operands.add(Load.ARGUMENT_SLOT(i, names[i], closure.arguments[i]))
+            od
+
+            add(Values.Call.INNATE(operator, null, operands, closure.return_type!))
+
+            add(Values.RET())
+
+            current_block.gen(_context)
+
+            leave_block()
+
+            assembly_emitter.handles.set_body_offset(closure, body_emitter.flush(assembly_emitter))
+            assembly_emitter.handles.set_il_outputs(closure, body_emitter.il_outputs)
+
+            _context.current_srm_body_emitter = enclosing
+            assembly_emitter.current_emission_member = enclosing_member
+        si
+    si
+si

@@ -20,10 +20,35 @@ namespace Semantic is
     ) is
         _delegate_shape: DELEGATE_SHAPE
 
+        // The stand-in closure already made for an operator in a member,
+        // so a second reference to the same operator there reuses it and
+        // an overload resolution that is rolled back and walked again
+        // leaves nothing registered to emit. Keyed on the closure context
+        // and then the specialized innate symbol, both by reference: the
+        // specialized symbol is per operand types, so two operators that
+        // spell the same are different keys.
+        _operator_closures:
+            Collections.MAP[
+                ClosureContext,
+                Collections.MAP[Symbols.Function, Symbols.Closure]
+            ]
+
+        // Counts the stand-ins made, so each gets a name of its own. Two
+        // operators can spell the same and differ in their operands -
+        // int's `+` and long's, a binary minus and a unary one - so the
+        // spelling cannot name the method, and nothing reads the name back.
+        _operator_closure_count: int
+
         super()
 
         init(..) is
             _delegate_shape = DELEGATE_SHAPE()
+
+            _operator_closures =
+                Collections.MAP[
+                    ClosureContext,
+                    Collections.MAP[Symbols.Function, Symbols.Closure]
+                ]()
         si
 
         // Returns null when `symbol` isn't a function reference in
@@ -104,7 +129,7 @@ namespace Semantic is
             // method behind it to point at, so the value is built from a
             // wrapper method that applies the operator to its arguments.
             if single.is_innate then
-                let wrapper = _try_get_innate_operator_wrapper(single)
+                let wrapper = _try_get_innate_operator_closure(location, single)
 
                 if !wrapper? then
                     _logger.error(
@@ -114,10 +139,25 @@ namespace Semantic is
                     return DUMMY(Types.ERROR(), location)
                 fi
 
-                let value = _build_value(location, wrapper, from, expected_type)
+                // No receiver: the type in `int.`+`` names which operator is
+                // meant and is not a value the stand-in reads. Passing it
+                // on would leave the type expression in the tree for
+                // emission to trip over.
+                let value = _build_value(location, wrapper, null, expected_type)
 
+                // Built once and reused. The cache is the closure's own
+                // field, which the emitter already collects for every
+                // capture-free literal, so hosting needs nothing new. The
+                // memoizable-delegate predicate is not consulted: it asks
+                // whether a walked literal's body closes over anything,
+                // and this one has no walked body - it closes over nothing
+                // by construction.
                 if let delegate: Load.DELEGATE = value then
-                    return MEMOIZED_DELEGATE(delegate, wrapper.delegate_cache_for(delegate.type), delegate.type)
+                    return
+                        MEMOIZED_DELEGATE(
+                            delegate,
+                            wrapper.delegate_cache_field,
+                            wrapper.constructed_delegate_type)
                 fi
 
                 return value
@@ -126,24 +166,117 @@ namespace Semantic is
             return _build_value(location, single, from, expected_type)
         si
 
-        // Null for an innate that no non-generic static method can
-        // stand in for: an instance innate, which needs a receiver, or
-        // one whose signature still mentions a type parameter.
-        _try_get_innate_operator_wrapper(function: Symbols.Function) -> Symbols.INNATE_OPERATOR_WRAPPER? is
+        // The stand-in closure for an operator used as a value, which is
+        // what a hand-written `(a, b) => a + b` would have been: a
+        // closure capturing nothing, declared and registered the way any
+        // other synthesised one is, so emission, delegate caching and
+        // member ordering reach it without knowing what it stands for.
+        //
+        // Null for an innate no such closure can stand in for: an
+        // instance innate, which needs a receiver, or one whose
+        // signature still mentions a type parameter.
+        _try_get_innate_operator_closure(location: LOCATION, function: Symbols.Function) -> Symbols.Closure? is
             let operator = cast Symbols.INNATE_FUNCTION?(function)
 
-            if !operator? \/ !Symbols.INNATE_OPERATOR_WRAPPER.can_wrap(operator) then
+            if !operator? \/ !_can_stand_in_for(operator) then
                 return null
             fi
 
-            let home = _symbol_table.current_namespace_symbol
+            let context = _symbol_table.current_closure_context
 
-            if !home? then
+            let in_context: Collections.MAP[Symbols.Function, Symbols.Closure] mut
+
+            if !_operator_closures.try_get_value(context, in_context ref) then
+                in_context = Collections.MAP[Symbols.Function, Symbols.Closure]()
+                _operator_closures[context] = in_context
+            fi
+
+            let existing: Symbols.Closure mut
+
+            if in_context.try_get_value(operator, existing ref) then
+                return existing
+            fi
+
+            // Declared on the enclosing function rather than the scope the
+            // reference sits in: a block scope refuses a closure, since a
+            // closure belongs to the function whose frame it would share.
+            let enclosing = _symbol_table.current_function
+
+            if !enclosing? then
                 return null
             fi
 
-            return home.innate_operator_wrapper_for(operator)
+            let closure =
+                cast Symbols.Closure?(
+                    enclosing.declare_closure(
+                        location,
+                        "$operator{operator.name}_{_operator_closure_count}",
+                        cast Scope?(context)!,
+                        _symbol_table.current_scope,
+                        false,
+                        null
+                    )
+                )
+
+            _operator_closure_count = _operator_closure_count + 1
+
+            if !closure? then
+                return null
+            fi
+
+            closure.mark_synthesized()
+
+            closure.arguments = operator.arguments
+            closure.argument_names = operator.argument_names
+
+            closure.set_return_type(operator.return_type!)
+
+            // Its own function type, which the delegate caching reads to
+            // decide the stand-in closes over nothing worth rebuilding.
+            let signature = Collections.LIST[Type](operator.arguments)
+
+            signature.add(operator.return_type!)
+
+            closure.type = _innate_symbol_lookup.get_function_type(signature, true)
+
+            closure.innate_operator = operator
+
+            // The body is the operator's own instructions and a return, so
+            // it stores nothing whatever the operator is. Marked rather
+            // than proven because the purity pass reads bodies that have
+            // been walked, and this one is deposited at emission.
+            closure.mark_declared_pure()
+
+            context.add_closure(closure)
+
+            in_context[operator] = closure
+
+            return closure
         si
+
+        // An operator a closure can stand in for: one whose operands and
+        // result are all it needs, so the body is the operator applied to
+        // the closure's own arguments. An instance innate reads a
+        // receiver the closure has no way to supply, and a signature
+        // still written in type variables has no single shape to emit.
+        _can_stand_in_for(operator: Symbols.INNATE_FUNCTION) -> bool is
+            if operator.is_instance then
+                return false
+            fi
+
+            if let return_type = operator.return_type then
+                if !_is_concrete(return_type) then
+                    return false
+                fi
+            else
+                return false
+            fi
+
+            return operator.arguments |> all(a => _is_concrete(a))
+        si
+
+        _is_concrete(type: Type) -> bool =>
+            type.is_settled /\ !type.is_wild /\ type.get_type_arguments().count == 0
 
         // A slot that cannot instantiate an open generic function:
         // absent, still carrying an inference placeholder, or written
