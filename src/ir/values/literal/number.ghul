@@ -1,5 +1,4 @@
 namespace IR.Values.Literal is
-    use System.Reflection.Metadata.ILOpCode
     use TypeTyped = Semantic.Types.Typed
     use Semantic.Types.Type
 
@@ -25,9 +24,9 @@ namespace IR.Values.Literal is
         constant: CONSTANT
         type: Type
 
-        // Narrows the loaded constant to the literal's declared type,
-        // where the width it is loaded at is wider than that type.
-        conv: ILOpCode?
+        // The scalar the loaded constant is converted to, where the
+        // width it is loaded at is not the literal's declared type.
+        narrowing: IR.Scalar?
 
         is_lightweight_pure: bool => true
 
@@ -48,12 +47,12 @@ namespace IR.Values.Literal is
             when r8: CONSTANT.R8 then "{r8.value}"
             esac
 
-        init(constant: CONSTANT, type: Type, conv: ILOpCode?) is
+        init(constant: CONSTANT, type: Type, narrowing: IR.Scalar?) is
             super.init()
 
             self.constant = constant
             self.type = type
-            self.conv = conv
+            self.narrowing = narrowing
         si
 
         init(constant: CONSTANT, type: Type) is
@@ -86,8 +85,18 @@ namespace IR.Values.Literal is
             when r8: CONSTANT.R8 then body.ldc_r8(r8.value)
             esac
 
-            if let narrowing = conv then
-                body.op(narrowing)
+            if let to = narrowing then
+                let from =
+                    case constant
+                    when _: CONSTANT.I4 then IR.Scalar.INT32
+                    when _: CONSTANT.I8 then IR.Scalar.INT64
+                    when _: CONSTANT.R4 then IR.Scalar.FLOAT32
+                    when _: CONSTANT.R8 then IR.Scalar.FLOAT64
+                    esac
+
+                for op_code in IR.Emitter.CIL_OPERATIONS.conversion(from, to) do
+                    body.op(op_code)
+                od
             fi
         si
 

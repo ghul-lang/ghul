@@ -1,0 +1,90 @@
+namespace IR.Emitter.UnitTests is
+    use System.Reflection.Metadata.ILOpCode
+
+    use IR.Emitter.CIL_OPERATIONS
+    use IR.Comparison
+    use IR.Scalar
+
+    use TestClass = Microsoft.VisualStudio.TestTools.UnitTesting.TestClassAttribute
+    use Test = Microsoft.VisualStudio.TestTools.UnitTesting.TestMethodAttribute
+    use Assertions
+
+    @TestClass()
+    class CIL_OPERATIONS_TESTS is
+        init() is si
+
+        assert_comparison(comparison: Comparison, is_unsigned: bool, op_code: ILOpCode, negates: bool) is
+            let (actual_op_code, actual_negates) = CIL_OPERATIONS.comparison(comparison, is_unsigned)
+
+            are_equal(op_code, actual_op_code)
+            are_equal(negates, actual_negates)
+        si
+
+        @Test()
+        comparison__should_encode_greater_and_less_directly() is
+            assert_comparison(Comparison.GREATER, false, ILOpCode.CGT, false)
+            assert_comparison(Comparison.LESS, false, ILOpCode.CLT, false)
+            assert_comparison(Comparison.EQUAL, false, ILOpCode.CEQ, false)
+        si
+
+        @Test()
+        comparison__should_encode_the_others_as_a_negation() is
+            // x >= y is !(x < y), x <= y is !(x > y), x != y is !(x == y)
+            assert_comparison(Comparison.GREATER_OR_EQUAL, false, ILOpCode.CLT, true)
+            assert_comparison(Comparison.LESS_OR_EQUAL, false, ILOpCode.CGT, true)
+            assert_comparison(Comparison.NOT_EQUAL, false, ILOpCode.CEQ, true)
+        si
+
+        @Test()
+        comparison__should_use_the_unsigned_forms_for_an_unsigned_comparison() is
+            assert_comparison(Comparison.GREATER, true, ILOpCode.CGT_UN, false)
+            assert_comparison(Comparison.LESS, true, ILOpCode.CLT_UN, false)
+            assert_comparison(Comparison.GREATER_OR_EQUAL, true, ILOpCode.CLT_UN, true)
+            assert_comparison(Comparison.LESS_OR_EQUAL, true, ILOpCode.CGT_UN, true)
+        si
+
+        @Test()
+        arithmetic__should_encode_each_shift_by_its_signedness() is
+            are_equal(ILOpCode.SHR, CIL_OPERATIONS.arithmetic(IR.ArithmeticOperation.SHIFT_RIGHT))
+            are_equal(ILOpCode.SHR_UN, CIL_OPERATIONS.arithmetic(IR.ArithmeticOperation.SHIFT_RIGHT_UNSIGNED))
+            are_equal(ILOpCode.SHL, CIL_OPERATIONS.arithmetic(IR.ArithmeticOperation.SHIFT_LEFT))
+        si
+
+        @Test()
+        conversion__should_depend_only_on_the_target_for_a_signed_source() is
+            let codes = CIL_OPERATIONS.conversion(Scalar.INT32, Scalar.INT64)
+
+            are_equal(1, codes.count)
+            are_equal(ILOpCode.CONV_I8, codes[0])
+        si
+
+        @Test()
+        conversion__should_convert_from_a_non_scalar_source_as_signed() is
+            let codes = CIL_OPERATIONS.conversion(null, Scalar.FLOAT64)
+
+            are_equal(1, codes.count)
+            are_equal(ILOpCode.CONV_R8, codes[0])
+        si
+
+        @Test()
+        conversion__should_widen_a_full_width_unsigned_source_as_unsigned() is
+            let to_long = CIL_OPERATIONS.conversion(Scalar.UINT32, Scalar.INT64)
+            let to_word = CIL_OPERATIONS.conversion(Scalar.UINT64, Scalar.INT_NATIVE)
+            let to_single = CIL_OPERATIONS.conversion(Scalar.UINT_NATIVE, Scalar.FLOAT32)
+
+            are_equal(ILOpCode.CONV_U8, to_long[0])
+            are_equal(ILOpCode.CONV_U, to_word[0])
+
+            are_equal(2, to_single.count)
+            are_equal(ILOpCode.CONV_R_UN, to_single[0])
+            are_equal(ILOpCode.CONV_R4, to_single[1])
+        si
+
+        @Test()
+        conversion__should_treat_a_narrower_unsigned_source_as_already_zero_extended() is
+            let codes = CIL_OPERATIONS.conversion(Scalar.UINT16, Scalar.INT64)
+
+            are_equal(ILOpCode.CONV_I8, codes[0])
+        si
+    si
+si

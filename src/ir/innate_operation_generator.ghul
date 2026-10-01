@@ -1,5 +1,4 @@
 namespace IR is
-    use System.Reflection.Metadata.ILOpCode
     use System.Exception
 
     use Values.Call
@@ -82,40 +81,34 @@ namespace IR is
         si
 
         gen_arithmetic(value: INNATE, block: BLOCK) is
-            gen_arguments(value, block)
-
-            // FIXME: do we need to convert the inputs or outputs?
-            block.add(Values.INSTRUCTION(_arithmetic_op_code(value.op_name)))
+            block.add(Values.ARITHMETIC(_arithmetic_operation(value.op_name), value.arguments, value.type))
         si
 
         // The operation half of the intrinsic's declared name, which is
         // what the declaring assembly writes in its INTRINSIC_ATTRIBUTE.
-        _arithmetic_op_code(operation: string) -> ILOpCode static =>
-            if operation =~ "add" then ILOpCode.ADD
-            elif operation =~ "sub" then ILOpCode.SUB
-            elif operation =~ "mul" then ILOpCode.MUL
-            elif operation =~ "div" then ILOpCode.DIV
-            elif operation =~ "div_un" then ILOpCode.DIV_UN
-            elif operation =~ "rem" then ILOpCode.REM
-            elif operation =~ "rem_un" then ILOpCode.REM_UN
-            elif operation =~ "neg" then ILOpCode.NEG
-            elif operation =~ "not" then ILOpCode.NOT
-            elif operation =~ "and" then ILOpCode.AND
-            elif operation =~ "or" then ILOpCode.OR
-            elif operation =~ "xor" then ILOpCode.XOR
-            elif operation =~ "shl" then ILOpCode.SHL
-            elif operation =~ "shr" then ILOpCode.SHR
-            elif operation =~ "ushr" then ILOpCode.SHR_UN
+        _arithmetic_operation(operation: string) -> ArithmeticOperation static =>
+            if operation =~ "add" then ArithmeticOperation.ADD
+            elif operation =~ "sub" then ArithmeticOperation.SUBTRACT
+            elif operation =~ "mul" then ArithmeticOperation.MULTIPLY
+            elif operation =~ "div" then ArithmeticOperation.DIVIDE
+            elif operation =~ "div_un" then ArithmeticOperation.DIVIDE_UNSIGNED
+            elif operation =~ "rem" then ArithmeticOperation.REMAINDER
+            elif operation =~ "rem_un" then ArithmeticOperation.REMAINDER_UNSIGNED
+            elif operation =~ "neg" then ArithmeticOperation.NEGATE
+            elif operation =~ "not" then ArithmeticOperation.COMPLEMENT
+            elif operation =~ "and" then ArithmeticOperation.AND
+            elif operation =~ "or" then ArithmeticOperation.OR
+            elif operation =~ "xor" then ArithmeticOperation.XOR
+            elif operation =~ "shl" then ArithmeticOperation.SHIFT_LEFT
+            elif operation =~ "shr" then ArithmeticOperation.SHIFT_RIGHT
+            elif operation =~ "ushr" then ArithmeticOperation.SHIFT_RIGHT_UNSIGNED
             else throw System.Exception("unexpected arithmetic operation: {operation}")
             fi
 
         gen_bool_not(value: INNATE, block: BLOCK) is
             assert value.arguments.count == 1 else "not bool missing arguments"
 
-            gen_arguments(value, block)
-
-            block.add(Values.INSTRUCTION(ILOpCode.LDC_I4_0))
-            block.add(Values.INSTRUCTION(ILOpCode.CEQ))
+            block.add(Values.NOT.operator(value.arguments[0]))
         si
 
         // The left argument is the result unless it settles the
@@ -162,62 +155,41 @@ namespace IR is
                 return
             fi
 
-            gen_arguments(value, block)
-
-            let needs_not mut = false
-            let is_greater_than mut = false
-
-            if actual_operation =~ ">" then
-                is_greater_than = true
-            elif actual_operation =~ ">=" then
-                needs_not = true
-            elif actual_operation =~ "<" then
-                // less than: the default of both flags
-            elif actual_operation =~ "<=" then
-                is_greater_than = true
-                needs_not = true
-            else
-                throw System.Exception("unexpected compare order operation: {actual_operation}")
-            fi
-
-            let op_code =
-                if is_greater_than then
-                    if is_unsigned then ILOpCode.CGT_UN else ILOpCode.CGT fi
+            let comparison =
+                if actual_operation =~ ">" then
+                    Comparison.GREATER
+                elif actual_operation =~ ">=" then
+                    Comparison.GREATER_OR_EQUAL
+                elif actual_operation =~ "<" then
+                    Comparison.LESS
+                elif actual_operation =~ "<=" then
+                    Comparison.LESS_OR_EQUAL
                 else
-                    if is_unsigned then ILOpCode.CLT_UN else ILOpCode.CLT fi
+                    throw System.Exception("unexpected compare order operation: {actual_operation}")
                 fi
 
-            block.add(Values.INSTRUCTION(op_code))
-
-            if needs_not then
-                block.add(Values.INSTRUCTION(ILOpCode.LDC_I4_0))
-                block.add(Values.INSTRUCTION(ILOpCode.CEQ))
-            fi
+            block.add(Values.COMPARE(comparison, value.arguments[0], value.arguments[1], is_unsigned, value.type))
         si
 
         // `a <> b` as the operator itself: the ordering value, composed
-        // from the two comparison instructions so it agrees with them at
-        // every operand width and in both signednesses — `a - b` would
-        // wrap to the wrong sign at the type's extremes. The operands
-        // are spilled to temps so their side effects happen once.
+        // from the two comparisons so it agrees with them at every
+        // operand width and in both signednesses - `a - b` would wrap to
+        // the wrong sign at the type's extremes. The operands are
+        // spilled to temps so their side effects happen once.
         gen_order(value: INNATE, is_unsigned: bool, block: BLOCK) is
-            let less_op = if is_unsigned then ILOpCode.CLT_UN else ILOpCode.CLT fi
-            let greater_op = if is_unsigned then ILOpCode.CGT_UN else ILOpCode.CGT fi
-
             let left = TEMP(block, "order", value.arguments[0])
             let right = TEMP(block, "order", value.arguments[1])
 
+            let bool_type = IoC.CONTAINER.instance.innate_symbol_lookup.get_bool_type()
+
             // greater - less: negative when a < b, positive when a > b,
             // zero when neither
-            block.add(left.load())
-            block.add(right.load())
-            block.add(Values.INSTRUCTION(greater_op))
-
-            block.add(left.load())
-            block.add(right.load())
-            block.add(Values.INSTRUCTION(less_op))
-
-            block.add(Values.INSTRUCTION(ILOpCode.SUB))
+            block.add(
+                Values.ARITHMETIC(
+                    ArithmeticOperation.SUBTRACT,
+                    Values.COMPARE(Comparison.GREATER, left.load(), right.load(), is_unsigned, bool_type),
+                    Values.COMPARE(Comparison.LESS, left.load(), right.load(), is_unsigned, bool_type),
+                    value.type))
         si
 
         gen_string(value: INNATE, block: BLOCK) is
@@ -226,11 +198,10 @@ namespace IR is
             if innate_name =~ "string.equals" then
                 gen_arguments(value, block)
 
-                block.add(Values.CALL_STRING_EQUALITY())
-
                 if value.actual_operation =~ "!~" then
-                    block.add(Values.INSTRUCTION(ILOpCode.LDC_I4_0))
-                    block.add(Values.INSTRUCTION(ILOpCode.CEQ))
+                    block.add(Values.NOT.operator(Values.CALL_STRING_EQUALITY()))
+                else
+                    block.add(Values.CALL_STRING_EQUALITY())
                 fi
             else
                 throw System.Exception("unexpected string innate operation: {innate_name}")
@@ -262,31 +233,29 @@ namespace IR is
                 right = _boxer.box_if_value(right)
             fi
 
-            block.add(left)
-            block.add(right)
-
-            block.add(Values.INSTRUCTION(ILOpCode.CEQ))
-
-            if value.actual_operation =~ "!=" then
-                block.add(Values.INSTRUCTION(ILOpCode.LDC_I4_0))
-                block.add(Values.INSTRUCTION(ILOpCode.CEQ))
-            fi
+            block.add(
+                Values.COMPARE(
+                    if value.actual_operation =~ "!=" then Comparison.NOT_EQUAL else Comparison.EQUAL fi,
+                    left,
+                    right,
+                    false,
+                    value.type))
         si
 
         gen_compare_value(value: INNATE, block: BLOCK) is
             assert value.arguments.count == 2 else "compare value missing arguments"
 
-            gen_arguments(value, block)
-
-            block.add(Values.INSTRUCTION(ILOpCode.CEQ))
-
             // `!=` is the negation of `==`; `!~` is the negation of `=~`.
             // An enum's `=~` reaches this innate (see ENUM_EQUALITY_OPERATOR),
-            // so both spellings of inequality negate the `ceq` here.
-            if value.actual_operation =~ "!=" \/ value.actual_operation =~ "!~" then
-                block.add(Values.INSTRUCTION(ILOpCode.LDC_I4_0))
-                block.add(Values.INSTRUCTION(ILOpCode.CEQ))
-            fi
+            // so both spellings of inequality are NOT_EQUAL here.
+            let comparison =
+                if value.actual_operation =~ "!=" \/ value.actual_operation =~ "!~" then
+                    Comparison.NOT_EQUAL
+                else
+                    Comparison.EQUAL
+                fi
+
+            block.add(Values.COMPARE(comparison, value.arguments[0], value.arguments[1], false, value.type))
         si
 
         _is_pointer(value: Value) -> bool static =>
@@ -299,12 +268,7 @@ namespace IR is
         // compared against so the block it goes into agrees about what
         // is on the stack.
         _native_zero(pointer_type: Semantic.Types.Type) -> Value static is
-            let block = BLOCK(pointer_type)
-
-            block.add(Values.INSTRUCTION(ILOpCode.LDC_I4_0))
-            block.add(Values.INSTRUCTION(ILOpCode.CONV_U))
-
-            return block
+            Values.Literal.NUMBER(Values.Literal.CONSTANT.I4(0), pointer_type, Scalar.UINT_NATIVE)
         si
 
         gen_range(value: INNATE, block: BLOCK) is
@@ -387,11 +351,12 @@ namespace IR is
             let op = value.op_name
 
             if op =~ "equality" then
-                block.add(Values.DECIMAL_CALL(bool_type, "op_Equality", operands))
+                let equality = Values.DECIMAL_CALL(bool_type, "op_Equality", operands)
 
                 if value.actual_operation =~ "!=" then
-                    block.add(Values.INSTRUCTION(ILOpCode.LDC_I4_0))
-                    block.add(Values.INSTRUCTION(ILOpCode.CEQ))
+                    block.add(Values.NOT.operator(equality))
+                else
+                    block.add(equality)
                 fi
 
                 return
