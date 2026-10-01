@@ -1,0 +1,321 @@
+namespace IR.UnitTests is
+    use System.Reflection.Metadata.ILOpCode
+
+    use Collections.LIST
+
+    use IR.UnitTests.Support.STUB_VALUE
+    use IR.Values.BLOCK
+    use IR.Values.BRANCH_TO
+    use IR.Values.BREAK
+    use IR.Values.CATCH
+    use IR.Values.HANDLER_END
+    use IR.Values.HANDLER_START
+    use IR.Values.INSTRUCTION
+    use IR.Values.CONTINUE
+    use IR.Values.LOOP
+    use IR.Values.MARK_LABEL
+    use IR.Values.REGION
+    use IR.Values.TRY
+    use IR.Values.TRY_END
+    use IR.Values.TRY_START
+    use IR.Values.Value
+
+    use TestClass = Microsoft.VisualStudio.TestTools.UnitTesting.TestClassAttribute
+    use Test = Microsoft.VisualStudio.TestTools.UnitTesting.TestMethodAttribute
+    use Assertions
+
+    @TestClass()
+    class STRUCTURED_LOWERING_TESTS is
+        init() is si
+
+        new_loop() -> LOOP =>
+            LOOP(LABEL(), LABEL(), Semantic.Types.ERROR())
+
+        closed(loop: LOOP) -> LOOP is
+            loop.close()
+
+            return loop
+        si
+
+        assert_label(expected: LABEL, value: Value) is
+            if let mark: MARK_LABEL = value then
+                are_same(expected, mark.label)
+            else
+                fail("expected a label, got {value}")
+            fi
+        si
+
+        assert_branch(op_code: ILOpCode, target: LABEL, value: Value) is
+            if let branch: BRANCH_TO = value then
+                are_equal(op_code, branch.op_code)
+                are_same(target, branch.label)
+            else
+                fail("expected a branch, got {value}")
+            fi
+        si
+
+        @Test()
+        loop__should_lower_to_its_body_between_its_start_label_and_a_branch_back() is
+            let loop = new_loop()
+            let first = STUB_VALUE()
+            let second = STUB_VALUE()
+
+            loop.body.add(first)
+            loop.body.add(second)
+
+            let flat = STRUCTURED_LOWERING.linearise(closed(loop))
+
+            are_equal(5, flat.count)
+            assert_label(loop.start, flat[0])
+            are_same(first, flat[1])
+            are_same(second, flat[2])
+            assert_branch(ILOpCode.BR, loop.start, flat[3])
+            assert_label(loop.end, flat[4])
+        si
+
+        @Test()
+        loop__should_leave_a_nested_loop_whole() is
+            let outer = new_loop()
+            let inner = closed(new_loop())
+
+            outer.body.add(inner)
+
+            let flat = STRUCTURED_LOWERING.linearise(closed(outer))
+
+            are_same(inner, flat[1])
+        si
+
+        @Test()
+        region__should_lower_to_its_body_followed_by_its_end_label() is
+            let region = REGION(LABEL(), Semantic.Types.ERROR())
+            let value = STUB_VALUE()
+
+            region.body.add(value)
+            region.close()
+
+            let flat = STRUCTURED_LOWERING.linearise(region)
+
+            are_equal(2, flat.count)
+            are_same(value, flat[0])
+            assert_label(region.end, flat[1])
+        si
+
+        @Test()
+        break_from_a_region__should_branch_to_its_end() is
+            let region = REGION(LABEL(), Semantic.Types.ERROR())
+            let condition = STUB_VALUE()
+
+            let flat = STRUCTURED_LOWERING.linearise(BREAK(region, BRANCH.NZ, condition))
+
+            are_same(condition, flat[0])
+            assert_branch(ILOpCode.BRTRUE, region.end, flat[1])
+        si
+
+        @Test()
+        generating_a_region__should_encode_an_exit_from_an_enclosing_region() is
+            let outer = REGION(LABEL(), Semantic.Types.ERROR())
+            let inner = REGION(LABEL(), Semantic.Types.ERROR())
+
+            inner.body.add(BREAK(outer, false))
+            inner.close()
+
+            outer.body.add(inner)
+            outer.close()
+
+            let encoded = EMITTED_IL.encoded(outer)
+
+            is_true(encoded.count > 0)
+        si
+
+        @Test()
+        try_with_a_catch__should_lower_to_a_protected_body_then_a_handler() is
+            let `try = TRY(LABEL(), Semantic.Types.ERROR())
+            let guarded = STUB_VALUE()
+            let handled = STUB_VALUE()
+
+            `try.body.add(guarded)
+            `try.body.add(BREAK(`try, true))
+
+            let handler = CATCH(Semantic.Types.ERROR(), Semantic.Types.ERROR())
+
+            handler.body.add(handled)
+            `try.catches.add(handler)
+            `try.close()
+
+            let flat = STRUCTURED_LOWERING.linearise(`try)
+
+            are_equal(8, flat.count)
+            is_true(isa TRY_START(flat[0]))
+            are_same(guarded, flat[1])
+            is_true(isa BREAK(flat[2]))
+            is_true(isa TRY_END(flat[3]))
+            is_true(isa HANDLER_START(flat[4]))
+            are_same(handled, flat[5])
+            is_true(isa HANDLER_END(flat[6]))
+            assert_label(`try.end, flat[7])
+        si
+
+        @Test()
+        try_with_a_finally__should_end_its_handler_with_endfinally() is
+            let `try = TRY(LABEL(), Semantic.Types.ERROR())
+
+            `try.body.add(BREAK(`try, true))
+
+            let `finally = REGION(LABEL(), Semantic.Types.ERROR())
+
+            `finally.close()
+            `try.finally_region = `finally
+            `try.close()
+
+            let flat = STRUCTURED_LOWERING.linearise(`try)
+
+            is_true(isa HANDLER_START(flat[3]))
+            are_same(`finally, flat[4])
+
+            if let endfinally: INSTRUCTION = flat[5] then
+                are_equal(ILOpCode.ENDFINALLY, endfinally.op_code)
+            else
+                fail("expected endfinally, got {flat[5]}")
+            fi
+
+            is_true(isa HANDLER_END(flat[6]))
+        si
+
+        @Test()
+        try_that_nothing_leaves__should_not_mark_its_end() is
+            let `try = TRY(LABEL(), Semantic.Types.ERROR())
+
+            `try.catches.add(CATCH(Semantic.Types.ERROR(), Semantic.Types.ERROR()))
+            `try.close()
+
+            let flat = STRUCTURED_LOWERING.linearise(`try)
+
+            is_false(isa MARK_LABEL(flat[flat.count - 1]))
+        si
+
+        @Test()
+        break__should_branch_to_the_loop_end() is
+            let loop = new_loop()
+
+            let flat = STRUCTURED_LOWERING.linearise(BREAK(loop, false))
+
+            are_equal(1, flat.count)
+            assert_branch(ILOpCode.BR, loop.end, flat[0])
+        si
+
+        @Test()
+        break__should_leave_from_within_a_protected_region() is
+            let loop = new_loop()
+
+            let flat = STRUCTURED_LOWERING.linearise(BREAK(loop, true))
+
+            assert_branch(ILOpCode.LEAVE, loop.end, flat[0])
+        si
+
+        @Test()
+        continue__should_branch_to_the_loop_start() is
+            let loop = new_loop()
+
+            let flat = STRUCTURED_LOWERING.linearise(CONTINUE(loop, false))
+
+            are_equal(1, flat.count)
+            assert_branch(ILOpCode.BR, loop.start, flat[0])
+        si
+
+        @Test()
+        continue__should_leave_from_within_a_protected_region() is
+            let loop = new_loop()
+
+            let flat = STRUCTURED_LOWERING.linearise(CONTINUE(loop, true))
+
+            assert_branch(ILOpCode.LEAVE, loop.start, flat[0])
+        si
+
+        @Test()
+        conditional_break__should_test_its_operand_then_branch_conditionally() is
+            let loop = new_loop()
+            let condition = STUB_VALUE()
+
+            let flat = STRUCTURED_LOWERING.linearise(BREAK(loop, BRANCH.Z, condition))
+
+            are_equal(2, flat.count)
+            are_same(condition, flat[0])
+            assert_branch(ILOpCode.BRFALSE, loop.end, flat[1])
+        si
+
+        @Test()
+        conditional_continue__should_compare_its_operands_in_order() is
+            let loop = new_loop()
+            let left = STUB_VALUE()
+            let right = STUB_VALUE()
+
+            let flat = STRUCTURED_LOWERING.linearise(CONTINUE(loop, BRANCH.GE, left, right))
+
+            are_equal(3, flat.count)
+            are_same(left, flat[0])
+            are_same(right, flat[1])
+            assert_branch(ILOpCode.BGE, loop.start, flat[2])
+        si
+
+        @Test()
+        branch_instruction__should_use_the_unsigned_forms_for_unsigned_conditions() is
+            are_equal(ILOpCode.BGE_UN, STRUCTURED_LOWERING.branch_instruction(BRANCH.GEU))
+            are_equal(ILOpCode.BGT_UN, STRUCTURED_LOWERING.branch_instruction(BRANCH.GTU))
+            are_equal(ILOpCode.BLE_UN, STRUCTURED_LOWERING.branch_instruction(BRANCH.LEU))
+            are_equal(ILOpCode.BLT_UN, STRUCTURED_LOWERING.branch_instruction(BRANCH.LTU))
+            are_equal(ILOpCode.BNE_UN, STRUCTURED_LOWERING.branch_instruction(BRANCH.NE))
+        si
+
+        @Test()
+        generating_an_exit__should_fail_outside_the_loop_it_leaves() is
+            let loop = new_loop()
+            let failed mut = false
+
+            try
+                EMITTED_IL.encoded(BREAK(loop, false))
+            catch e: System.Exception
+                failed = true
+            yrt
+
+            is_true(failed, "a break generated outside its loop should not encode")
+        si
+
+        @Test()
+        generating_a_loop__should_encode_an_exit_inside_it() is
+            let loop = new_loop()
+
+            loop.body.add(BREAK(loop, false))
+
+            let encoded = EMITTED_IL.encoded(closed(loop))
+
+            is_true(encoded.count > 0)
+        si
+
+        @Test()
+        block__should_add_to_an_open_body_instead_of_itself() is
+            let block = BLOCK()
+            let body = BLOCK()
+            let value = STUB_VALUE()
+
+            block.open_body(body)
+            block.add(value)
+
+            are_equal(0, block.values.count)
+            are_same(value, body.values[0])
+        si
+
+        @Test()
+        block__should_add_to_itself_again_once_the_body_is_closed() is
+            let block = BLOCK()
+            let body = BLOCK()
+            let value = STUB_VALUE()
+
+            block.open_body(body)
+            block.close_body(body)
+            block.add(value)
+
+            are_same(value, block.values[0])
+            are_equal(0, body.values.count)
+        si
+    si
+si

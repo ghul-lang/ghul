@@ -88,6 +88,7 @@ namespace Syntax.Process is
                     value_block
                 )
                 frame_il.spill_field = spiller.spill_field
+                frame_il.region = _open_region(end_label)
 
                 // Eagerly allocate the capture-mode cross-try TEMP
                 // so its declaration is encoded at the head of
@@ -102,7 +103,7 @@ namespace Syntax.Process is
                 // frame field handles cross-try directly.
                 if !is_void /\ !spiller.is_spilling then
                     frame_il.cross_try_temp = IR.TEMP(value_block, "val_cross_try", value_block.type)
-                    frame_il.cross_try_join_label = LABEL()
+                    frame_il.cross_try_join_region = _open_region(LABEL())
                 fi
 
                 _val_block_il_stack.add(frame_il)
@@ -172,22 +173,27 @@ namespace Syntax.Process is
                 fi
 
                 // Capture-mode cross-try paths stashed their value
-                // into cross_try_temp and `leave`d to cross_try_
-                // join_label. Skip over the join block on the
-                // natural path (tail value already on the stack)
-                // and emit it before end_label so the join paths
-                // ldloc the value back on and fall through. Only
+                // into cross_try_temp and left cross_try_join_region.
+                // Skip over the join on the natural path (tail value
+                // already on the stack) so the join paths ldloc the
+                // value back on and fall through to the end. Only
                 // emit when the join was actually targeted —
                 // otherwise the unconditional ldloc would push an
-                // uninitialised value onto end_label's stack on
+                // uninitialised value onto the end's stack on
                 // divergent natural paths.
-                if frame_il.cross_try_used then
-                    get_brancher_for_block().branch(end_label)
-                    get_brancher_for_block().label(frame_il.cross_try_join_label!)
-                    add(frame_il.cross_try_temp!.load())
+                if let join = frame_il.cross_try_join_region then
+                    if frame_il.cross_try_used then
+                        add(Values.BREAK(frame_il.region!, false))
+                    fi
+
+                    _close_structured(join)
+
+                    if frame_il.cross_try_used then
+                        add(frame_il.cross_try_temp!.load())
+                    fi
                 fi
 
-                get_brancher_for_block().label(end_label)
+                _close_structured(frame_il.region!)
             finally
                 spiller.leave()
             yrt
@@ -201,7 +207,7 @@ namespace Syntax.Process is
 
         // Emit the conditional-throw IL shared between statement-form
         // `assert` and the expression-form `assert ... in expr`. Condition
-        // value is loaded by `brancher.branch`; on the failure path the
+        // value is tested by a conditional exit; on the failure path the
         // message (or default condition-printout) is loaded, optionally
         // wrapped in an AssertFailedException, and thrown. Falls through
         // at the success label.
@@ -211,11 +217,9 @@ namespace Syntax.Process is
             message: Trees.Expressions.Expression?,
             default_message_source: object
         ) is
-            let brancher = get_brancher_for_block()
+            let passed = _open_region(LABEL())
 
-            let end = LABEL()
-
-            brancher.branch(BRANCH.NZ, condition_value, end)
+            add(Values.BREAK(passed, BRANCH.NZ, condition_value))
 
             let need_exception_wrapper mut = true
 
@@ -251,7 +255,7 @@ namespace Syntax.Process is
 
             add(Values.INSTRUCTION(ILOpCode.THROW))
 
-            brancher.label(end)
+            _close_structured(passed)
         si
 
         visit(`assert: Statements.ASSERT) is
@@ -435,11 +439,13 @@ namespace Syntax.Process is
             od
 
             let label = _loops.enter_try(return_needed, return_value)
-            let extent = Values.TRY_EXTENT()
+            let `try = Values.TRY(label.start, _innate_symbol_lookup.get_void_type())
 
-            add(Values.TRY_START(extent))
+            label.structured_try = `try
 
-            return DISPOSAL_REGION(outer_try, return_value, label, extent, _maybe_push_dispatch_holder())
+            _open_structured(`try)
+
+            return DISPOSAL_REGION(outer_try, return_value, label, `try, _maybe_push_dispatch_holder())
         si
 
         // Closes a region opened by _open_disposal_region, disposing its
@@ -451,7 +457,6 @@ namespace Syntax.Process is
             variables: Collections.List[Semantic.Symbols.Variable],
             location: Source.LOCATION
         ) is
-            let brancher = get_brancher_for_block()
             let try_label = region.label
 
             _maybe_pop_dispatch_holder(region.dispatch_holder)
@@ -460,24 +465,23 @@ namespace Syntax.Process is
 
             try_label.is_in_finally = true
 
-            brancher.leave(try_label.start)
+            add(Values.BREAK(region.`try, true))
 
-            let handler = Values.PROTECTED_REGION(region.extent, null)
+            _close_try_body(region.`try)
 
-            add(Values.TRY_END(region.extent))
-            add(Values.HANDLER_START(handler))
+            let finally_region = _open_finally_region(region.`try, try_label)
 
-            let skip_dispose_label = _open_finally_state_guard()
+            let skip_dispose = _open_finally_state_guard()
 
             let i mut = variables.count - 1
 
             while i >= 0 do
                 let v = variables[i]
 
-                let skip_label: LABEL? mut = null
+                let skip: Values.REGION? mut = null
 
                 if !v.type!.is_value_type then
-                    skip_label = LABEL()
+                    skip = _open_region(LABEL())
 
                     // v.load rather than load_local_variable: a top-level
                     // `let use` promotes the variable to a field on the
@@ -487,7 +491,7 @@ namespace Syntax.Process is
                     // the variable's own location rather than the list's:
                     // the list starts before the declaration, which a
                     // top-level variable reads as use-before-declaration.
-                    brancher.branch(BRANCH.Z, v.load(v.location, null, _symbol_loader), skip_label)
+                    add(Values.BREAK(skip, BRANCH.Z, v.load(v.location, null, _symbol_loader)))
                 fi
 
                 let variable_value = v.load(v.location, null, _symbol_loader)
@@ -495,21 +499,20 @@ namespace Syntax.Process is
 
                 add(dispose_call)
 
-                if skip_label? then
-                    brancher.label(skip_label)
+                if skip? then
+                    _close_structured(skip)
                 fi
 
                 i = i - 1
             od
 
-            _close_finally_state_guard(skip_dispose_label)
+            _close_finally_state_guard(skip_dispose)
 
-            brancher.label(try_label.middle)
-
-            add(Values.INSTRUCTION(ILOpCode.ENDFINALLY))
-            add(Values.HANDLER_END(handler))
+            _close_finally_region(finally_region)
 
             _loops.leave_loop()
+
+            region.`try.close()
 
             gen_exception_handler_exit(region.outer_try, try_label, region.return_value)
         si
@@ -556,7 +559,6 @@ namespace Syntax.Process is
                 return
             fi
 
-            let brancher = get_brancher_for_block()
             let expression = `break.expression
 
             // A valued break delivers its value to the loop's
@@ -581,22 +583,17 @@ namespace Syntax.Process is
 
                 if let spill_field = target.spill_field then
                     add(_build_frame_field_store(_current_state_machine_frame()!, spill_field, v))
-
-                    if _loops.open_try_count > target.enclosing_try_count then
-                        brancher.leave(target.result_label!)
-                    else
-                        brancher.branch(target.result_label!)
-                    fi
+                    add(Values.BREAK(target.result_region!, _loops.open_try_count > target.enclosing_try_count))
                 elif _loops.open_try_count <= target.enclosing_try_count then
                     add(v)
-                    brancher.branch(target.result_label!)
+                    add(Values.BREAK(target.result_region!, false))
                 else
                     assert target.cross_try_temp? else "value-carrying loop missing cross-try TEMP"
-                    assert target.cross_try_join? else "value-carrying loop missing cross-try join"
+                    assert target.cross_try_join_region? else "value-carrying loop missing cross-try join"
 
                     target.cross_try_used = true
                     target.cross_try_temp!.store(v)
-                    brancher.leave(target.cross_try_join!)
+                    add(Values.BREAK(target.cross_try_join_region!, true))
                 fi
 
                 return
@@ -605,11 +602,7 @@ namespace Syntax.Process is
             // Bare break — including a valued one under a loop that
             // consumes nothing, which compile-expressions has already
             // reported. The natural-exit path yields absence.
-            if _loops.is_in_try then
-                brancher.leave(target.end)
-            else
-                brancher.branch(target.end)
-            fi
+            add(Values.BREAK(target.structured!, _loops.is_in_try))
         si
 
         visit(`continue: Statements.CONTINUE) is
@@ -626,13 +619,7 @@ namespace Syntax.Process is
                 return
             fi
 
-            let brancher = get_brancher_for_block()
-
-            if _loops.is_in_try then
-                brancher.leave(target.start)
-            else
-                brancher.branch(target.start)
-            fi
+            add(Values.CONTINUE(target.structured!, _loops.is_in_try))
         si
 
     si
@@ -643,7 +630,7 @@ namespace Syntax.Process is
         outer_try: LOOP_LABELS?,
         return_value: TEMP?,
         label: LOOP_LABELS,
-        extent: IR.Values.TRY_EXTENT,
+        `try: IR.Values.TRY,
         dispatch_holder: ASYNC_DISPATCH_HOLDER?
     )
 si

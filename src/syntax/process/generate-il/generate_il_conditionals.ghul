@@ -17,16 +17,14 @@ namespace Syntax.Process is
     // Conditional IL: if-let clause tests and binds, if statements, case and match arms, and null tests.
     partial GENERATE_IL is
         // Emit the scrutinee evaluation, optional isinst cast, the
-        // presence test, and the branch-to-fail for one `if let`
+        // presence test, and the exit from `fail` for one `if let`
         // clause. Returns the temp holding the (possibly cast)
         // scrutinee value so the caller can bind the clause's
         // pattern from it; returns null when there is nothing to
         // bind (a missing scrutinee value, defensive).
         _emit_if_let_clause_test(
             c: Statements.REFUTABLE_BINDING_CLAUSE,
-            fail: LABEL,
-            is_first: bool,
-            brancher: BLOCK_BRANCHER
+            fail: Values.Breakable
         ) -> TEMP? is
             c.scrutinee.walk(self)
 
@@ -88,11 +86,7 @@ namespace Syntax.Process is
             fi
 
             if presence? then
-                if is_first then
-                    brancher.branch(BRANCH.Z, presence, fail, "if")
-                else
-                    brancher.branch(BRANCH.Z, presence, fail, "elif")
-                fi
+                add(Values.BREAK(fail, BRANCH.Z, presence))
             fi
 
             return temp
@@ -104,7 +98,7 @@ namespace Syntax.Process is
         _emit_if_let_clause_bind(
             c: Statements.REFUTABLE_BINDING_CLAUSE,
             temp: TEMP,
-            fail: LABEL
+            fail: Values.Breakable
         ) is
             let init_type = temp.load().type
 
@@ -139,10 +133,7 @@ namespace Syntax.Process is
         si
 
         visit(`if: Statements.IF) is
-            let is_first mut = true
             let seen_else mut = false
-
-            let end = LABEL()
 
             // Spill the IF's value through a frame field when the
             // body contains a suspend; otherwise capture as usual.
@@ -161,10 +152,10 @@ namespace Syntax.Process is
 
             spiller.enter()
 
-            let brancher = get_brancher_for_block()
+            let if_region = _open_region(LABEL())
 
             for b in `if.branches do
-                let next = LABEL()
+                let arm = _open_region(LABEL())
                 let first_clause_temp: TEMP? mut = null
 
                 if let b.condition? /\ !b.binding? then
@@ -177,11 +168,7 @@ namespace Syntax.Process is
 
                     condition.walk(self)
 
-                    if is_first then
-                        brancher.branch(BRANCH.Z, condition.value!, next, "if")
-                    else
-                        brancher.branch(BRANCH.Z, condition.value!, next, "elif")
-                    fi
+                    add(Values.BREAK(arm, BRANCH.Z, condition.value!))
                 elif let b.binding? then
                     // `if let` branch: for each clause, evaluate its
                     // scrutinee into a temp, emit an isinst for the
@@ -199,7 +186,7 @@ namespace Syntax.Process is
                     // `if let x = a, y = x.b` chain values through.
                     self.pre(b)
 
-                    first_clause_temp = _emit_if_let_clause_test(binding.clauses[0], next, is_first, brancher)
+                    first_clause_temp = _emit_if_let_clause_test(binding.clauses[0], arm)
                 else
                     seen_else = true
 
@@ -214,27 +201,27 @@ namespace Syntax.Process is
                     self.pre(binding)
 
                     if first_clause_temp? then
-                        _emit_if_let_clause_bind(binding.clauses[0], first_clause_temp, next)
+                        _emit_if_let_clause_bind(binding.clauses[0], first_clause_temp, arm)
                     fi
 
                     if binding.clauses[0].guard? then
                         binding.clauses[0].guard!.walk(self)
-                        brancher.branch(BRANCH.Z, binding.clauses[0].guard!.value!, next, "if-let-guard")
+                        add(Values.BREAK(arm, BRANCH.Z, binding.clauses[0].guard!.value!))
                     fi
 
                     let i mut = 1
                     while i < binding.clauses.count do
                         let clause = binding.clauses[i]
 
-                        let temp = _emit_if_let_clause_test(clause, next, false, brancher)
+                        let temp = _emit_if_let_clause_test(clause, arm)
 
                         if temp? then
-                            _emit_if_let_clause_bind(clause, temp, next)
+                            _emit_if_let_clause_bind(clause, temp, arm)
                         fi
 
                         if clause.guard? then
                             clause.guard.walk(self)
-                            brancher.branch(BRANCH.Z, clause.guard!.value!, next, "if-let-guard")
+                            add(Values.BREAK(arm, BRANCH.Z, clause.guard!.value!))
                         fi
 
                         i = i + 1
@@ -279,10 +266,8 @@ namespace Syntax.Process is
                     fi
                 fi
 
-                brancher.branch(end)
-                brancher.label(next)
-
-                is_first = false
+                add(Values.BREAK(if_region, false))
+                _close_structured(arm)
             od
 
             // A missing-else if yields absence on its fall-through edge -
@@ -291,7 +276,7 @@ namespace Syntax.Process is
                 spiller.emit_value(IR.Values.DEFAULT(`if.value!.type!))
             fi
 
-            brancher.label(end)
+            _close_structured(if_region)
 
             super.visit(`if)
 
@@ -335,17 +320,15 @@ namespace Syntax.Process is
 
             let scrutinee_load = `case.scrutinee_load!
 
-            let brancher = get_brancher_for_block()
-
-            // The case's own exit, as a plain label rather than an entry
-            // on the loop stack: an arm branches here to skip the arms
-            // below it. A case is not a loop, and with no fall-through
-            // between arms there is nothing in one to break out of, so
-            // putting it on that stack only hid the enclosing loop: a
-            // `break` in an arm left the case rather than the loop, and a
-            // `continue` targeted a `start` the case never marks. The `if`
-            // statement above uses a plain label for the same job.
-            let case_end = LABEL()
+            // The case's own exit, as a region rather than an entry on
+            // the loop stack: an arm leaves it to skip the arms below.
+            // A case is not a loop, and with no fall-through between
+            // arms there is nothing in one to break out of, so putting it
+            // on that stack only hid the enclosing loop: a `break` in an
+            // arm left the case rather than the loop, and a `continue`
+            // targeted a `start` the case never marks. The `if` statement
+            // above uses a region for the same job.
+            let case_region = _open_region(LABEL())
 
             let has_else mut = false
             for m in `case.matches do
@@ -355,7 +338,7 @@ namespace Syntax.Process is
             od
 
             for m in `case.matches do
-                let next = LABEL()
+                let arm = _open_region(LABEL())
 
                 if m.expressions? then
                     // Per-label value-equality test Values, built in
@@ -370,7 +353,7 @@ namespace Syntax.Process is
                         let test: IR.Values.Value? = if tests? then tests[0] else null fi
 
                         if test? then
-                            brancher.branch(BRANCH.Z, test, next)
+                            add(Values.BREAK(arm, BRANCH.Z, test))
                         else
                             m.expressions.expressions[0].walk(self)
 
@@ -380,19 +363,19 @@ namespace Syntax.Process is
                                 // `when null` is a presence test, not a
                                 // value compare: match absence. Branch
                                 // to `next` when the scrutinee is present.
-                                gen_case_null_test(scrutinee_load, `case.expression.value!.type!, next, false)
+                                gen_case_null_test(scrutinee_load, `case.expression.value!.type!, arm, false)
                             else
-                                brancher.branch(BRANCH.NE, scrutinee_load, label_value, next)
+                                add(Values.BREAK(arm, BRANCH.NE, scrutinee_load, label_value))
                             fi
                         fi
                     elif m.expressions.expressions.count > 1 then
-                        let match = LABEL()
+                        let match = _open_region(LABEL())
 
                         for i in 0..m.expressions!.expressions.count do
                             let test: IR.Values.Value? = if tests? then tests[i] else null fi
 
                             if test? then
-                                brancher.branch(BRANCH.NZ, test, match)
+                                add(Values.BREAK(match, BRANCH.NZ, test))
                             else
                                 let e = m.expressions!.expressions[i]
                                 e.walk(self)
@@ -404,14 +387,14 @@ namespace Syntax.Process is
                                     // branch to `match` when absent.
                                     gen_case_null_test(scrutinee_load, `case.expression.value!.type!, match, true)
                                 else
-                                    brancher.branch(BRANCH.EQ, scrutinee_load, label_value, match)
+                                    add(Values.BREAK(match, BRANCH.EQ, scrutinee_load, label_value))
                                 fi
                             fi
                         od
 
-                        brancher.branch(next)
+                        add(Values.BREAK(arm, false))
 
-                        brancher.label(match)
+                        _close_structured(match)
                     fi
 
                     m.walk(self)
@@ -467,7 +450,7 @@ namespace Syntax.Process is
                     fi
 
                     if presence? then
-                        brancher.branch(BRANCH.Z, presence, next, "case-let")
+                        add(Values.BREAK(arm, BRANCH.Z, presence))
                     fi
 
                     self.pre(pattern)
@@ -478,15 +461,15 @@ namespace Syntax.Process is
                         gen_destructuring_initialize(
                             pattern.left,
                             value_member.load(LOCATION.internal, arm_temp.load(), _symbol_loader),
-                            next
+                            arm
                         )
                     else
-                        gen_destructuring_initialize(pattern.left, arm_temp.load(), next)
+                        gen_destructuring_initialize(pattern.left, arm_temp.load(), arm)
                     fi
 
                     if m.guard? then
                         m.guard.walk(self)
-                        brancher.branch(BRANCH.Z, m.guard!.value!, next, "case-when-guard")
+                        add(Values.BREAK(arm, BRANCH.Z, m.guard!.value!))
                     fi
 
                     self.visit(m)
@@ -521,9 +504,9 @@ namespace Syntax.Process is
                     fi
                 fi
 
-                brancher.branch(case_end)
+                add(Values.BREAK(case_region, false))
 
-                brancher.label(next)
+                _close_structured(arm)
             od
 
             // The no-match path. For a case-expression it is
@@ -553,7 +536,7 @@ namespace Syntax.Process is
                 add(IR.Values.DEFAULT(`case.expected_type!))
             fi
 
-            brancher.label(case_end)
+            _close_structured(case_region)
 
             super.visit(`case)
 
@@ -564,13 +547,14 @@ namespace Syntax.Process is
         // test, not a value compare. For a value-type optional
         // (`Nullable[T]`, `MAYBE[T]`) read `has_value`; for a reference
         // optional the receiver itself is the presence. `branch_on_absent`
-        // selects which edge branches to `target`: a single-label `when
-        // null` arm skips to `next` when the scrutinee is present; a null
-        // label in a multi-label arm jumps to `match` when it is absent.
+        // selects which edge leaves `target`: a single-label `when null`
+        // arm leaves the arm when the scrutinee is present; a null label
+        // in a multi-label arm leaves the label tests, to the arm body,
+        // when it is absent.
         gen_case_null_test(
             scrutinee_load: Values.Value,
             scrutinee_type: Semantic.Types.Type,
-            target: IR.LABEL,
+            target: Values.Breakable,
             branch_on_absent: bool
         ) is
             let presence: Values.Value? mut =
@@ -588,17 +572,17 @@ namespace Syntax.Process is
 
             if presence? then
                 if branch_on_absent then
-                    get_brancher_for_block().branch(BRANCH.Z, presence, target)
+                    add(Values.BREAK(target, BRANCH.Z, presence))
                 else
-                    get_brancher_for_block().branch(BRANCH.NZ, presence, target)
+                    add(Values.BREAK(target, BRANCH.NZ, presence))
                 fi
             else
                 let null_value = IR.Values.NULL(scrutinee_type)
 
                 if branch_on_absent then
-                    get_brancher_for_block().branch(BRANCH.EQ, scrutinee_load, null_value, target)
+                    add(Values.BREAK(target, BRANCH.EQ, scrutinee_load, null_value))
                 else
-                    get_brancher_for_block().branch(BRANCH.NE, scrutinee_load, null_value, target)
+                    add(Values.BREAK(target, BRANCH.NE, scrutinee_load, null_value))
                 fi
             fi
         si

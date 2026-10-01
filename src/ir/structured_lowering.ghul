@@ -1,0 +1,212 @@
+namespace IR is
+    use System.Reflection.Metadata.ILOpCode
+
+    use Ghul.Pipes
+
+    use Values
+
+    // Lowers structured control flow to the flat form the CIL emitter
+    // consumes: labels, branches and the values between them, in the
+    // order they are encoded.
+    //
+    // Lowering is one level deep. A structured node in another's body
+    // stays a value in the flat sequence and lowers itself when it is
+    // generated, so the nodes open at any point are exactly those
+    // being generated.
+    class STRUCTURED_LOWERING is
+        linearise(value: Value) -> Collections.List[Value] static =>
+            _linearise(value) |> map(f => f.value) |> collect()
+
+        // Encode a structured node by encoding its flat form. A value
+        // from the node's body marks its own position, as it would in a
+        // block; a label or branch the lowering adds marks the position
+        // of the node it was added for.
+        gen(value: Value, context: IR.CONTEXT) static is
+            let breakable = if isa Breakable(value) then cast Breakable(value) else null fi
+
+            if breakable? then
+                context.enter_structured(breakable)
+            elif isa Exit(value) then
+                let exit = cast Exit(value)
+
+                assert context.is_structured_open(exit.target) else "exit outside the node it leaves: {exit}"
+            fi
+
+            for flat in _linearise(value) do
+                if flat.position? then
+                    context.mark_location(flat.position)
+                fi
+
+                flat.value.gen(context)
+            od
+
+            if breakable? then
+                context.leave_structured(breakable)
+            fi
+        si
+
+        branch_instruction(condition: BRANCH) -> ILOpCode static =>
+            case condition
+            when BRANCH.EQ then ILOpCode.BEQ
+            when BRANCH.GE then ILOpCode.BGE
+            when BRANCH.GEU then ILOpCode.BGE_UN
+            when BRANCH.GT then ILOpCode.BGT
+            when BRANCH.GTU then ILOpCode.BGT_UN
+            when BRANCH.LE then ILOpCode.BLE
+            when BRANCH.LEU then ILOpCode.BLE_UN
+            when BRANCH.LT then ILOpCode.BLT
+            when BRANCH.LTU then ILOpCode.BLT_UN
+            when BRANCH.NE then ILOpCode.BNE_UN
+            when BRANCH.Z then ILOpCode.BRFALSE
+            when BRANCH.NZ then ILOpCode.BRTRUE
+            when BRANCH.ALWAYS then ILOpCode.BR
+            else throw System.InvalidOperationException("no branch instruction for {condition}")
+            esac
+
+        _linearise(value: Value) -> Collections.List[FLAT_VALUE] static is
+            let result = Collections.LIST[FLAT_VALUE]()
+
+            if isa LOOP(value) then
+                _linearise_loop(cast LOOP(value), result)
+            elif isa TRY(value) then
+                _linearise_try(cast TRY(value), result)
+            elif isa RESUMABLE(value) then
+                _linearise_resumable(cast RESUMABLE(value), result)
+            elif isa DISPATCH(value) then
+                _linearise_dispatch(cast DISPATCH(value), result)
+            elif isa RESUME_POINT(value) then
+                let resume = cast RESUME_POINT(value)
+
+                result.add(FLAT_VALUE(MARK_LABEL(resume.label), resume.position))
+            elif isa REGION(value) then
+                _linearise_region(cast REGION(value), result)
+            elif isa Exit(value) then
+                _linearise_exit(cast Exit(value), result)
+            else
+                result.add(FLAT_VALUE.of(value))
+            fi
+
+            return result
+        si
+
+        _linearise_loop(loop: LOOP, into: Collections.MutableList[FLAT_VALUE]) static is
+            into.add(FLAT_VALUE(MARK_LABEL(loop.start), loop.position))
+
+            _linearise_body(loop, into)
+
+            into.add(FLAT_VALUE(BRANCH_TO(ILOpCode.BR, loop.start), loop.position))
+            into.add(FLAT_VALUE(MARK_LABEL(loop.end), loop.position))
+        si
+
+        _linearise_region(region: REGION, into: Collections.MutableList[FLAT_VALUE]) static is
+            _linearise_body(region, into)
+
+            into.add(FLAT_VALUE(MARK_LABEL(region.end), region.position))
+        si
+
+        _linearise_try(`try: TRY, into: Collections.MutableList[FLAT_VALUE]) static is
+            let extent = TRY_EXTENT()
+
+            into.add(FLAT_VALUE(TRY_START(extent), `try.position))
+
+            _linearise_body(`try, into)
+
+            into.add(FLAT_VALUE(TRY_END(extent), `try.position))
+
+            for `catch in `try.catches do
+                let region =
+                    if let type = `catch.type then
+                        PROTECTED_REGION(extent, type)
+                    else
+                        let name = `catch.type_name!
+
+                        PROTECTED_REGION(extent, name.assembly, name.`namespace, name.name)
+                    fi
+
+                into.add(FLAT_VALUE(HANDLER_START(region), `catch.position))
+
+                for value in `catch.body.values do
+                    into.add(FLAT_VALUE.of(value))
+                od
+
+                into.add(FLAT_VALUE(HANDLER_END(region), `catch.position))
+            od
+
+            if let `finally = `try.finally_region then
+                let region = PROTECTED_REGION(extent, null)
+
+                into.add(FLAT_VALUE(HANDLER_START(region), `finally.position))
+                into.add(FLAT_VALUE(`finally, null))
+                into.add(FLAT_VALUE(INSTRUCTION(ILOpCode.ENDFINALLY), `finally.position))
+                into.add(FLAT_VALUE(HANDLER_END(region), `finally.position))
+            fi
+
+            if `try.is_targeted then
+                into.add(FLAT_VALUE(MARK_LABEL(`try.end), `try.position))
+            fi
+        si
+
+        _linearise_resumable(resumable: RESUMABLE, into: Collections.MutableList[FLAT_VALUE]) static is
+            _linearise_body(resumable, into)
+
+            if resumable.is_targeted then
+                into.add(FLAT_VALUE(MARK_LABEL(resumable.end), resumable.position))
+            fi
+        si
+
+        _linearise_dispatch(dispatch: DISPATCH, into: Collections.MutableList[FLAT_VALUE]) static is
+            into.add(FLAT_VALUE(MARK_LABEL(dispatch.top), dispatch.position))
+
+            let position = dispatch.position
+
+            for entry in dispatch.entries do
+                into.add(FLAT_VALUE.of(Load.TEMP(dispatch.state_local, dispatch.state_type)))
+                into.add(FLAT_VALUE(Literal.NUMBER(entry.state, dispatch.state_type), position))
+                into.add(FLAT_VALUE(BRANCH_TO(ILOpCode.BEQ, entry.target), position))
+            od
+        si
+
+        _linearise_body(node: Breakable, into: Collections.MutableList[FLAT_VALUE]) static is
+            for value in node.body.values do
+                into.add(FLAT_VALUE.of(value))
+            od
+        si
+
+        _linearise_exit(exit: Exit, into: Collections.MutableList[FLAT_VALUE]) static is
+            let target =
+                if let `continue: CONTINUE = exit then
+                    `continue.loop.start
+                else
+                    exit.target.end
+                fi
+
+            if exit.condition == BRANCH.ALWAYS then
+                let op_code =
+                    if exit.via_leave then
+                        ILOpCode.LEAVE
+                    else
+                        ILOpCode.BR
+                    fi
+
+                into.add(FLAT_VALUE(BRANCH_TO(op_code, target), exit.position))
+
+                return
+            fi
+
+            for operand in exit.operands do
+                into.add(FLAT_VALUE.of(operand))
+            od
+
+            into.add(FLAT_VALUE(BRANCH_TO(branch_instruction(exit.condition), target), exit.position))
+        si
+    si
+
+    // A value in a lowered sequence, with the source position to mark
+    // before it is encoded.
+    class FLAT_VALUE(value: Values.Value, position: Source.LOCATION?) is
+        of(value: Values.Value) -> FLAT_VALUE static =>
+            FLAT_VALUE(
+                value,
+                if value.has_location then value.location else null fi)
+    si
+si

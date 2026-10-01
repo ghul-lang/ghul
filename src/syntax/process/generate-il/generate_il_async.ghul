@@ -275,11 +275,9 @@ namespace Syntax.Process is
             add(_build_frame_field_load(frame, state_field))
             add(Values.STORE_TEMP(state_local_il, _innate_symbol_lookup.get_int_type()))
 
-            let block = Values.BLOCK()
-            let top_label = IR.LABEL()
-            block.add(Values.MARK_LABEL(top_label))
-            add(block)
-            let holder = ASYNC_DISPATCH_HOLDER(block, state_local_il, top_label, true)
+            let dispatch = Values.DISPATCH(state_local_il, _innate_symbol_lookup.get_int_type())
+            add(dispatch)
+            let holder = ASYNC_DISPATCH_HOLDER(dispatch, true)
             _async_dispatch_stack.add(holder)
             return holder
         si
@@ -428,29 +426,30 @@ namespace Syntax.Process is
         // end of the guarded code via `_close_finally_state_guard`.
         // Returns null when not inside a state machine — caller
         // emits the finally body unguarded.
-        _open_finally_state_guard() -> LABEL? is
+        _open_finally_state_guard() -> Values.REGION? is
             let state_local_il = _current_state_local_il()
 
             if !state_local_il? then
                 return null
             fi
 
-            let skip = LABEL()
+            let skip = _open_region(LABEL())
 
             let int_type = _innate_symbol_lookup.get_int_type()
 
-            get_brancher_for_block().branch(
-                BRANCH.GE,
-                Values.Load.TEMP(state_local_il, int_type),
-                Values.Literal.NUMBER(1, int_type),
-                skip)
+            add(
+                Values.BREAK(
+                    skip,
+                    BRANCH.GE,
+                    Values.Load.TEMP(state_local_il, int_type),
+                    Values.Literal.NUMBER(1, int_type)))
 
             return skip
         si
 
-        _close_finally_state_guard(skip: LABEL?) is
+        _close_finally_state_guard(skip: Values.REGION?) is
             if skip? then
-                get_brancher_for_block().label(skip)
+                _close_structured(skip)
             fi
         si
 
@@ -469,11 +468,9 @@ namespace Syntax.Process is
         _push_async_dispatch_holder() -> ASYNC_DISPATCH_HOLDER is
             assert _async_dispatch_stack.count > 0 else "no outer dispatch holder to inherit state-local name from"
             let outer = _async_dispatch_stack[_async_dispatch_stack.count - 1]
-            let block = Values.BLOCK()
-            let top_label = IR.LABEL()
-            block.add(Values.MARK_LABEL(top_label))
-            add(block)
-            let holder = ASYNC_DISPATCH_HOLDER(block, outer.state_local_il, top_label, false)
+            let dispatch = Values.DISPATCH(outer.state_local_il, _innate_symbol_lookup.get_int_type())
+            add(dispatch)
+            let holder = ASYNC_DISPATCH_HOLDER(dispatch, false)
             _async_dispatch_stack.add(holder)
             return holder
         si
@@ -509,20 +506,13 @@ namespace Syntax.Process is
             fi
         si
 
-        // Fill the holder's placeholder block with one
-        // `ldloc V_state; ldc.i4 N; beq cold_resume_N` entry per
-        // registered await. The placeholder was inserted into the
-        // surrounding emission stream when the holder was pushed —
-        // these instructions now sit at the top of the protected
-        // region's body, before any user code.
+        // Give the holder's dispatch one entry per registered await
+        // or yield. The dispatch was added to the surrounding emission
+        // stream when the holder was pushed, so it sits at the top of
+        // the protected region's body, before any user code.
         _populate_async_dispatch(holder: ASYNC_DISPATCH_HOLDER) is
             for entry in holder.entries do
-                holder.block.add(
-                    Values.Load.TEMP(holder.state_local_il, _innate_symbol_lookup.get_int_type()))
-                holder.block.add(
-                    Values.Literal.NUMBER(entry.state, _innate_symbol_lookup.get_int_type()))
-                holder.block.add(
-                    Values.BRANCH_TO(ILOpCode.BEQ, entry.cold_resume_label))
+                holder.dispatch.add_entry(entry.state, entry.cold_resume_label)
             od
         si
 

@@ -45,11 +45,13 @@ namespace Syntax.Process is
             return (outer_try, return_needed, return_value)
         si
 
+        // After the structured try for `label` has closed: when a
+        // return inside it is pending, carry it on out through any
+        // enclosing try, or return.
         gen_exception_handler_exit(outer_try: LOOP_LABELS?, label: LOOP_LABELS, return_value: TEMP?) is
-            let brancher = get_brancher_for_block()
+            let no_return = _open_region(label.end)
 
-            brancher.label(label.start)
-            brancher.branch(BRANCH.Z, label.return_needed!.load(), label.end)
+            add(Values.BREAK(no_return, BRANCH.Z, label.return_needed!.load()))
 
             if outer_try? then
                 if return_value? then
@@ -59,9 +61,9 @@ namespace Syntax.Process is
 
                 if outer_try.is_in_finally then
                     outer_try.return_needed!.store(Literal.NUMBER(1, _innate_symbol_lookup.get_bool_type()))
-                    brancher.branch(outer_try.middle)
+                    add(Values.BREAK(outer_try.finally_region!, false))
                 else
-                    brancher.leave(outer_try.start)
+                    add(Values.BREAK(outer_try.structured_try!, true))
                 fi
             elif
                 _current_async_state_machine? /\
@@ -93,7 +95,7 @@ namespace Syntax.Process is
                 add(Values.RET())
             fi
 
-            brancher.label(label.end)
+            _close_structured(no_return)
         si
 
         visit(`try: Statements.TRY) is
@@ -109,62 +111,58 @@ namespace Syntax.Process is
                 return
             fi
 
-            let brancher = get_brancher_for_block()
-
-            let return_type = current_function!.return_type
-
             let (outer_try, return_needed, return_value) = get_exception_handler_temps()
 
             let label = _loops.enter_try(return_needed, return_value)
 
             let need_double_try = `try.catches.count > 0 /\ `try.`finally?
 
-            // The extent each handler is attached to. With both
-            // catches and a finally the two `.try` blocks are separate
-            // extents, the finally's covering the catches; with only
-            // one kind of handler there is a single block and both
-            // names stand for it.
-            let body_extent = Values.TRY_EXTENT()
+            // With both catches and a finally the finally's try encloses
+            // the catches' try, as CIL nests the two `.try` blocks; with
+            // only one kind of handler there is a single try. Leaving
+            // the outermost one leaves the whole statement.
+            let void_type = _innate_symbol_lookup.get_void_type()
 
-            let finally_extent =
-                if need_double_try then
-                    Values.TRY_EXTENT()
-                else
-                    body_extent
-                fi
-
+            let outer: Values.TRY? = if need_double_try then Values.TRY(label.start, void_type) else null fi
             let outer_dispatch_holder: ASYNC_DISPATCH_HOLDER? mut = null
-            let body_dispatch_holder: ASYNC_DISPATCH_HOLDER? mut = null
 
-            if need_double_try then
-                add(Values.TRY_START(finally_extent))
+            if outer? then
+                _open_structured(outer)
                 outer_dispatch_holder = _maybe_push_dispatch_holder()
             fi
 
-            add(Values.TRY_START(body_extent))
+            let inner = Values.TRY(if outer? then LABEL() else label.start fi, void_type)
+            let whole = outer ?? inner
 
-            body_dispatch_holder = _maybe_push_dispatch_holder()
+            label.structured_try = whole
+
+            _open_structured(inner)
+
+            let body_dispatch_holder = _maybe_push_dispatch_holder()
 
             `try.body.walk(self)
             end_try_body(`try)
 
             _maybe_pop_dispatch_holder(body_dispatch_holder)
 
-            brancher.leave(label.start)
+            add(Values.BREAK(whole, true))
 
-            add(Values.TRY_END(body_extent))
+            _close_try_body(inner)
 
-            _try_extents.push(body_extent)
+            _catching_trys.push(inner)
 
             for c in `try.catches do
                 c.walk(self)
             od
 
-            _try_extents.pop()
+            _catching_trys.pop()
 
-            if need_double_try then
+            if outer? then
                 _maybe_pop_dispatch_holder(outer_dispatch_holder)
-                add(Values.TRY_END(finally_extent))
+
+                inner.close()
+
+                _close_try_body(outer)
             fi
 
             let `finally = `try.`finally
@@ -172,25 +170,21 @@ namespace Syntax.Process is
             if `finally? then
                 label.is_in_finally = true
 
-                let region = Values.PROTECTED_REGION(finally_extent, null)
+                let finally_region = _open_finally_region(whole, label)
 
-                add(Values.HANDLER_START(region))
-
-                let skip_finally_label = _open_finally_state_guard()
+                let skip_finally = _open_finally_state_guard()
 
                 `finally.walk(self)
 
-                _close_finally_state_guard(skip_finally_label)
+                _close_finally_state_guard(skip_finally)
 
-                brancher.label(label.middle)
-
-                add(Values.INSTRUCTION(ILOpCode.ENDFINALLY))
-                add(Values.HANDLER_END(region))
+                _close_finally_region(finally_region)
             fi
 
             _loops.leave_loop()
 
-            // let outer_try = _loops.get_current_try();
+            whole.close()
+
             gen_exception_handler_exit(outer_try, label, return_value)
 
             super.visit(`try)
@@ -205,14 +199,11 @@ namespace Syntax.Process is
         visit(`catch: Statements.CATCH) is
             let variable = `catch.variable!
 
-            let region =
-                Values.PROTECTED_REGION(
-                    _try_extents.peek(),
-                    variable.type_expression.type!)
+            let handler = Values.CATCH(variable.type_expression.type!, _innate_symbol_lookup.get_void_type())
 
-            add(Values.HANDLER_START(region))
+            _catching_trys.peek().catches.add(handler)
 
-            let brancher = get_brancher_for_block()
+            _open_part(handler.body)
 
             // Catch handler enters with the exception on the stack
             // and immediately stores it into the catch variable. The
@@ -250,9 +241,9 @@ namespace Syntax.Process is
 
             `catch.body.walk(self)
 
-            brancher.leave(_loops.get_current_try()!.start)
+            add(Values.BREAK(_loops.get_current_try()!.structured_try!, true))
 
-            add(Values.HANDLER_END(region))
+            _close_part(handler.body)
 
             super.visit(`catch)
         si
@@ -284,60 +275,54 @@ namespace Syntax.Process is
 
             spiller.enter()
 
-            // The brancher binds to the block current NOW — after the
-            // capture switch, so the loop's labels and branches land in
-            // the same stream as its body.
-            let brancher = get_brancher_for_block()
-
             // Breaks emit during the body walk, so every label and
             // slot they reach is allocated before it - mirroring how
             // VAL_BLOCK pre-allocates its cross-try TEMP at block head.
             if let vb = value_block, rt = loop.result_type then
+                loop.result_region = _open_region(LABEL())
+
                 if spiller.is_spilling then
                     loop.spill_field = spiller.spill_field
                 else
                     loop.cross_try_temp = TEMP(vb, "loop_cross_try", rt)
-                    loop.cross_try_join = LABEL()
+                    loop.cross_try_join_region = _open_region(LABEL())
                 fi
-
-                loop.result_label = LABEL()
             fi
 
-            brancher.label(loop.start)
+            let structured = _open_structured_loop(loop)
 
             if let `do.binding? then
                 // `while let` clauses: emit the same per-clause
-                // test / bind sequence as `if let`, but branch
-                // failures to `loop.end` (loop exit) instead of an
-                // arm-`next` label. Each iteration re-evaluates
+                // test / bind sequence as `if let`, but a failure
+                // leaves the loop instead of the arm. Each iteration re-evaluates
                 // every clause's scrutinee and re-binds — the
                 // bound names are freshly stored on each pass.
-                let first = _emit_if_let_clause_test(binding.clauses[0], loop.end, true, brancher)
+                let first = _emit_if_let_clause_test(binding.clauses[0], structured)
 
                 self.pre(binding)
 
                 if first? then
-                    _emit_if_let_clause_bind(binding.clauses[0], first, loop.end)
+                    _emit_if_let_clause_bind(binding.clauses[0], first, structured)
                 fi
 
                 if binding.clauses[0].guard? then
                     binding.clauses[0].guard!.walk(self)
-                    brancher.branch(BRANCH.Z, binding.clauses[0].guard!.value!, loop.end, "while-let-guard")
+                    add(Values.BREAK(structured, BRANCH.Z, binding.clauses[0].guard!.value!))
                 fi
 
                 let i mut = 1
                 while i < binding.clauses.count do
                     let clause = binding.clauses[i]
 
-                    let temp = _emit_if_let_clause_test(clause, loop.end, false, brancher)
+                    let temp = _emit_if_let_clause_test(clause, structured)
 
                     if temp? then
-                        _emit_if_let_clause_bind(clause, temp, loop.end)
+                        _emit_if_let_clause_bind(clause, temp, structured)
                     fi
 
                     if clause.guard? then
                         clause.guard.walk(self)
-                        brancher.branch(BRANCH.Z, clause.guard!.value!, loop.end, "while-let-guard")
+                        add(Values.BREAK(structured, BRANCH.Z, clause.guard!.value!))
                     fi
 
                     i = i + 1
@@ -345,14 +330,12 @@ namespace Syntax.Process is
             elif `do.condition? then
                 `do.condition.walk(self)
 
-                brancher.branch(BRANCH.Z, `do.condition!.value!, loop.end, "while")
+                add(Values.BREAK(structured, BRANCH.Z, `do.condition!.value!))
             fi
 
             `do.body.walk(self)
 
-            brancher.branch(loop.start)
-
-            brancher.label(loop.end)
+            _close_structured_loop(structured)
 
             if let vb = value_block, rt = loop.result_type then
                 _gen_loop_result(loop, rt, spiller)
@@ -407,22 +390,17 @@ namespace Syntax.Process is
 
             spiller.enter()
 
-            // The brancher binds to the block current NOW — after the
-            // capture switch, so the loop's labels and branches land in
-            // the same stream as its body.
-            let brancher = get_brancher_for_block()
-
             // Breaks emit during the body walk, so every label and
             // slot they reach is allocated before it.
             if let vb = value_block, rt = loop.result_type then
+                loop.result_region = _open_region(LABEL())
+
                 if spiller.is_spilling then
                     loop.spill_field = spiller.spill_field
                 else
                     loop.cross_try_temp = TEMP(vb, "loop_cross_try", rt)
-                    loop.cross_try_join = LABEL()
+                    loop.cross_try_join_region = _open_region(LABEL())
                 fi
-
-                loop.result_label = LABEL()
             fi
 
             let expression = `for.expression!
@@ -457,7 +435,7 @@ namespace Syntax.Process is
                 temp = TEMP(current_block, "iterator", iterator)
             fi
 
-            brancher.label(loop.start)
+            let structured = _open_structured_loop(loop)
 
             let load_iter_a =
                 if iterator_field? then
@@ -471,7 +449,7 @@ namespace Syntax.Process is
 
             let has_next = `for.move_next!.call(expression.location, load_iter_a, Collections.LIST[Value](0), null, _function_caller)
 
-            brancher.branch(BRANCH.Z, has_next, loop.end)
+            add(Values.BREAK(structured, BRANCH.Z, has_next))
 
             let load_iter_b =
                 if iterator_field? then
@@ -493,9 +471,7 @@ namespace Syntax.Process is
 
             body.walk(self)
 
-            brancher.branch(loop.start)
-
-            brancher.label(loop.end)
+            _close_structured_loop(structured)
 
             if let vb = value_block, rt = loop.result_type then
                 _gen_loop_result(loop, rt, spiller)
@@ -553,21 +529,20 @@ namespace Syntax.Process is
             od
         si
 
-        // Before the loop pulls an element, leave via `take_exit` when any
+        // Before the loop pulls an element, leave it when any
         // take stage has spent its count: a fused take then pulls exactly
         // the elements it yields, as the TAKE_PIPE it replaces does, and
         // never advances the source past them.
         _gen_fused_take_guards(
             fusion: Syntax.Process.PIPE_FUSION,
             stage_counters: Collections.List[TEMP?],
-            brancher: BLOCK_BRANCHER,
-            take_exit: LABEL
+            loop: Values.LOOP
         ) is
             let int_type = _innate_symbol_lookup.get_int_type()
 
             for index in 0..fusion.stages_outermost_first.count do
                 if fusion.stages_outermost_first[index].is_take then
-                    brancher.branch(BRANCH.LE, stage_counters[index]!.load(), cast Value(Literal.NUMBER(0, int_type)), take_exit)
+                    add(Values.BREAK(loop, BRANCH.LE, stage_counters[index]!.load(), Literal.NUMBER(0, int_type)))
                 fi
             od
         si
@@ -575,20 +550,15 @@ namespace Syntax.Process is
         // Apply a fused chain's stages to `element` innermost-first,
         // returning the fully-transformed value. A map result and an index
         // result each land in a fresh temp so a downstream stage can reload
-        // them; a filter reject branches to `loop_start` (the next pull); a
-        // take spends one of its count, checked before the next pull, which
-        // leaves via `take_exit` - `loop_end` unless the caller has a source
-        // to reset first; an index stage builds
-        // INDEXED_VALUE(counter++, current) directly.
+        // them; a filter reject continues `loop` (the next pull); a
+        // take spends one of its count, checked before the next pull; an
+        // index stage builds INDEXED_VALUE(counter++, current) directly.
         _apply_fused_stages(
             fusion: Syntax.Process.PIPE_FUSION,
             element: Value,
             stage_delegates: Collections.List[TEMP?],
             stage_counters: Collections.List[TEMP?],
-            brancher: BLOCK_BRANCHER,
-            loop_start: LABEL,
-            loop_end: LABEL,
-            take_exit: LABEL
+            loop: Values.LOOP
         ) -> Value is
             let int_type = _innate_symbol_lookup.get_int_type()
 
@@ -608,7 +578,7 @@ namespace Syntax.Process is
                 elif stage.is_skip then
                     // Decrement the counter; while it stays non-negative this
                     // is a leading element to drop, so pull the next one.
-                    brancher.branch(BRANCH.GE, cast Value(IR.Values.PRE_DECREMENT(stage_counters[index]!.il_name, int_type)), cast Value(Literal.NUMBER(0, int_type)), loop_start)
+                    add(Values.CONTINUE(loop, BRANCH.GE, IR.Values.PRE_DECREMENT(stage_counters[index]!.il_name, int_type), Literal.NUMBER(0, int_type)))
                 else
                     let stage_result: Value mut
 
@@ -648,7 +618,7 @@ namespace Syntax.Process is
 
                     if stage.is_filter then
                         // Rejected elements skip straight to the next pull.
-                        brancher.branch(BRANCH.Z, stage_result, loop_start)
+                        add(Values.CONTINUE(loop, BRANCH.Z, stage_result))
                     else
                         current_value = TEMP(current_block, "fused_mapped", stage_result).load()
                     fi
@@ -670,22 +640,97 @@ namespace Syntax.Process is
         // LABELS): the natural exit yields absence; valued breaks
         // arrive having pushed or stored their value; a cross-try
         // join reloads the stashed temp. One result-typed value is
-        // available to the consumer afterwards. The result label was
-        // allocated at loop entry — breaks target it from inside the
-        // body walk.
+        // available to the consumer afterwards. The result region was
+        // opened at loop entry — breaks leave it from inside the body
+        // walk.
         _gen_loop_result(loop: LOOP_LABELS, result_type: Semantic.Types.Type, spiller: COMPOSITE_VALUE_SPILLER) is
-            let brancher = get_brancher_for_block()
-            let result = loop.result_label!
+            let result = loop.result_region!
 
             spiller.emit_value(IR.Values.DEFAULT(result_type))
-            brancher.branch(result)
+            add(Values.BREAK(result, false))
 
-            if loop.cross_try_used then
-                brancher.label(loop.cross_try_join!)
-                add(loop.cross_try_temp!.load())
+            if let join = loop.cross_try_join_region then
+                _close_structured(join)
+
+                if loop.cross_try_used then
+                    add(loop.cross_try_temp!.load())
+                fi
             fi
 
-            brancher.label(result)
+            _close_structured(result)
+        si
+
+        // Opens the structured loop `loop`'s body is generated into.
+        _open_structured_loop(loop: LOOP_LABELS) -> Values.LOOP is
+            let result = Values.LOOP(loop.start, loop.end, _innate_symbol_lookup.get_void_type())
+
+            loop.structured = result
+
+            _open_structured(result)
+
+            return result
+        si
+
+        _close_structured_loop(loop: Values.LOOP) is
+            _close_structured(loop)
+        si
+
+        // Opens a region whose end is `end`.
+        _open_region(end: LABEL) -> Values.REGION is
+            let result = Values.REGION(end, _innate_symbol_lookup.get_void_type())
+
+            _open_structured(result)
+
+            return result
+        si
+
+        // Adds `node` and opens its body: values added from here until
+        // _close_structured land in it.
+        _open_structured(node: Values.Breakable) is
+            add(node)
+            _open_part(node.body)
+        si
+
+        _close_structured(node: Values.Breakable) is
+            _close_part(node.body)
+
+            node.close()
+        si
+
+        // Ends the protected body of `try`, so its handlers can follow.
+        _close_try_body(`try: Values.TRY) is
+            _close_part(`try.body)
+        si
+
+        // Opens the region the finally body of `try`, whose loop stack
+        // entry is `label`, is generated into.
+        _open_finally_region(`try: Values.TRY, label: LOOP_LABELS) -> Values.REGION is
+            let result = Values.REGION(label.middle, _innate_symbol_lookup.get_void_type())
+
+            `try.finally_region = result
+            label.finally_region = result
+
+            _open_part(result.body)
+
+            return result
+        si
+
+        _close_finally_region(region: Values.REGION) is
+            _close_part(region.body)
+
+            region.close()
+        si
+
+        // Values added from here until _close_part land in `body`, a
+        // part of a structured node in the current block.
+        _open_part(body: Values.BLOCK) is
+            current_block.open_body(body)
+            enter_block(body)
+        si
+
+        _close_part(body: Values.BLOCK) is
+            leave_block()
+            current_block.close_body(body)
         si
 
         _visit_fused_for(`for: Statements.FOR) is
@@ -694,7 +739,6 @@ namespace Syntax.Process is
             let variable = `for.variable!
             let body = `for.body!
 
-            let brancher = get_brancher_for_block()
             let loop = _loops.enter_loop(`for)
 
             // Iterate the source directly - the wrapping pipe objects are
@@ -722,19 +766,17 @@ namespace Syntax.Process is
 
             _setup_fused_stages(fusion, stage_delegates, stage_counters)
 
-            let take_exit = loop.end
+            let structured = _open_structured_loop(loop)
 
-            brancher.label(loop.start)
-
-            _gen_fused_take_guards(fusion, stage_counters, brancher, take_exit)
+            _gen_fused_take_guards(fusion, stage_counters, structured)
 
             let has_next = fusion.source_move_next!.call(source.location, temp.load(), Collections.LIST[Value](0), null, _function_caller)
 
-            brancher.branch(BRANCH.Z, has_next, loop.end)
+            add(Values.BREAK(structured, BRANCH.Z, has_next))
 
             let element = fusion.source_read_current!.call(source.location, temp.load(), Collections.LIST[Value](0), null, _function_caller)
 
-            let current_value = _apply_fused_stages(fusion, element, stage_delegates, stage_counters, brancher, loop.start, loop.end, take_exit)
+            let current_value = _apply_fused_stages(fusion, element, stage_delegates, stage_counters, structured)
 
             gen_destructuring_initialize(variable.left, current_value)
 
@@ -752,9 +794,7 @@ namespace Syntax.Process is
 
             body.walk(self)
 
-            brancher.branch(loop.start)
-
-            brancher.label(loop.end)
+            _close_structured_loop(structured)
 
             super.visit(`for)
 

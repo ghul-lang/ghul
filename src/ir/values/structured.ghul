@@ -1,0 +1,310 @@
+namespace IR.Values is
+    use Ghul.Pipes
+
+    use Semantic.Types.Type
+
+    // Structured control flow that a BREAK can leave: a body of values
+    // followed by an end.
+    //
+    // The labels belong to the CIL lowering. `position` is the source
+    // position current where the node begins: the lowering marks it
+    // against the labels and branches it adds.
+    class Breakable: Value abstract is
+        end: IR.LABEL
+        body: BLOCK
+
+        position: Source.LOCATION?
+
+        is_closed: bool
+
+        // Whether any exit leaves this node.
+        is_targeted: bool
+
+        // A position is marked by the lowering, against the values it
+        // adds, so the node itself has none to mark.
+        has_location: bool => false
+
+        init(end: IR.LABEL, void_type: Type) is
+            super.init()
+
+            self.end = end
+
+            position = IoC.CONTAINER.instance.location_stack.current
+
+            body = BLOCK(void_type)
+        si
+
+        mark_targeted() is
+            is_targeted = true
+        si
+
+        // Records that the body is complete.
+        close() is
+            assert !is_closed else "structured node is already closed"
+
+            is_closed = true
+        si
+
+        gen(context: IR.CONTEXT) is
+            assert is_closed else "structured node generated before it was closed"
+
+            IR.STRUCTURED_LOWERING.gen(self, context)
+        si
+    si
+
+    // A sequence of values that a BREAK can leave early, continuing
+    // after its end.
+    class REGION: Breakable is
+        init(end: IR.LABEL, void_type: Type) is
+            super.init(end, void_type)
+        si
+
+        to_string() -> string => "region {end}:[{body}]"
+    si
+
+    // A loop: the body repeats until a BREAK leaves it. A CONTINUE,
+    // and reaching the end of the body, both go round again. The CIL
+    // lowering places `start` before the body and `end` after the
+    // branch back to `start`.
+    class LOOP: Breakable is
+        start: IR.LABEL
+
+        init(start: IR.LABEL, end: IR.LABEL, void_type: Type) is
+            super.init(end, void_type)
+
+            self.start = start
+        si
+
+        to_string() -> string => "loop {start}:[{body}]"
+    si
+
+    // The body of a state machine's resumable method. A suspend made
+    // inside a protected region cannot return directly, so it leaves
+    // this node instead, continuing after the body where the method
+    // returns. An end that no exit targets is not marked.
+    class RESUMABLE: Breakable is
+        init(end: IR.LABEL, void_type: Type) is
+            super.init(end, void_type)
+        si
+
+        to_string() -> string => "resumable {end}:[{body}]"
+    si
+
+    // A point a state machine resumes at, which a DISPATCH reaches by
+    // its label.
+    class RESUME_POINT: Value is
+        label: IR.LABEL
+        position: Source.LOCATION?
+
+        has_location: bool => false
+
+        init(label: IR.LABEL) is
+            super.init()
+
+            self.label = label
+            position = IoC.CONTAINER.instance.location_stack.current
+        si
+
+        gen(context: IR.CONTEXT) is
+            IR.STRUCTURED_LOWERING.gen(self, context)
+        si
+
+        to_string() -> string => "resume {label}"
+    si
+
+    // Where a resumed state machine finds its place: compares the state
+    // held in the local `state_local` with each entry's state, and
+    // jumps to the matching entry's resume point. A dispatch opens a
+    // resumable body and each protected region inside one, so a jump
+    // never enters a region from outside it: a dispatch reaches a
+    // resume point in an inner region by jumping to that region's own
+    // dispatch, whose `top` is a resume point too.
+    class DISPATCH: Value is
+        state_local: string
+        state_type: Type
+        top: IR.LABEL
+        entries: Collections.LIST[(state: int, target: IR.LABEL)]
+
+        position: Source.LOCATION?
+
+        has_location: bool => false
+
+        init(state_local: string, state_type: Type) is
+            super.init()
+
+            self.state_local = state_local
+            self.state_type = state_type
+
+            top = IR.LABEL()
+            entries = Collections.LIST[(state: int, target: IR.LABEL)]()
+
+            position = IoC.CONTAINER.instance.location_stack.current
+        si
+
+        add_entry(state: int, target: IR.LABEL) is
+            entries.add((state, target))
+        si
+
+        gen(context: IR.CONTEXT) is
+            IR.STRUCTURED_LOWERING.gen(self, context)
+        si
+
+        to_string() -> string => "dispatch {top} {state_local}:[{entries |> map(e => "{e.state} -> {e.target}") |> join(", ")}]"
+    si
+
+    // A protected body with catch handlers or a finally, never both: a
+    // try with both is a TRY with a finally whose body is a TRY with
+    // the catches. Leaving the TRY continues after the whole construct.
+    // An end that no exit targets is not marked.
+    class TRY: Breakable is
+        catches: Collections.LIST[CATCH]
+        finally_region: REGION? public
+
+        init(end: IR.LABEL, void_type: Type) is
+            super.init(end, void_type)
+
+            catches = Collections.LIST[CATCH]()
+        si
+
+        to_string() -> string =>
+            "try {end}:[{body}] {catches |> join(" ")} finally {finally_region}"
+    si
+
+    // A catch handler of a TRY. It handles an exception of `type`, or,
+    // where that is null, of the framework type `type_name` names. The
+    // exception is on the CIL evaluation stack where `body` starts.
+    class CATCH is
+        type: Type?
+        type_name: (assembly: string, `namespace: string, name: string)?
+        body: BLOCK
+
+        position: Source.LOCATION?
+
+        init(type: Type, void_type: Type) is
+            self.type = type
+            self.type_name = null
+
+            position = IoC.CONTAINER.instance.location_stack.current
+            body = BLOCK(void_type)
+        si
+
+        init(assembly: string, `namespace: string, name: string, void_type: Type) is
+            self.type = null
+            self.type_name = (assembly = assembly, `namespace = `namespace, name = name)
+
+            position = IoC.CONTAINER.instance.location_stack.current
+            body = BLOCK(void_type)
+        si
+
+        to_string() -> string => "catch:[{body}]"
+    si
+
+    // An exit from an enclosing structured node, taken when
+    // `condition` holds of `operands`, or always where the condition
+    // is ALWAYS.
+    //
+    // `via_leave` says an unconditional exit is lowered to CIL as
+    // `leave` rather than `br`, because it is made inside a try, catch
+    // or finally. Try regions are not structured nodes, so the lowering
+    // cannot see them, and generate-il decides this where it makes the
+    // exit.
+    class Exit: Value abstract is
+        target: Breakable
+        condition: IR.BRANCH
+        operands: Collections.List[Value]
+        via_leave: bool
+
+        position: Source.LOCATION?
+
+        has_location: bool => false
+
+        init(target: Breakable, condition: IR.BRANCH, operands: Collections.List[Value], via_leave: bool) is
+            super.init()
+
+            assert (condition == IR.BRANCH.ALWAYS) == (operands.count == 0) else "an exit takes operands exactly when it is conditional"
+            assert operands.count <= 2 else "an exit compares at most two operands"
+
+            self.target = target
+            self.condition = condition
+            self.operands = operands
+            self.via_leave = via_leave
+
+            target.mark_targeted()
+
+            position = IoC.CONTAINER.instance.location_stack.current
+        si
+
+        gen(context: IR.CONTEXT) is
+            IR.STRUCTURED_LOWERING.gen(self, context)
+        si
+
+        operands_of(operand: Value) -> Collections.List[Value] static is
+            let result = Collections.LIST[Value]()
+
+            result.add(operand)
+
+            return result
+        si
+
+        operands_of(left: Value, right: Value) -> Collections.List[Value] static is
+            let result = Collections.LIST[Value]()
+
+            result.add(left)
+            result.add(right)
+
+            return result
+        si
+    si
+
+    // Leaves `target`, continuing after its end.
+    class BREAK: Exit is
+        init(target: Breakable, via_leave: bool) is
+            super.init(target, IR.BRANCH.ALWAYS, Collections.LIST[Value](), via_leave)
+        si
+
+        init(target: Breakable, condition: IR.BRANCH, operands: Collections.List[Value]) is
+            super.init(target, condition, operands, false)
+        si
+
+        init(target: Breakable, condition: IR.BRANCH, operand: Value) is
+            super.init(target, condition, operands_of(operand), false)
+        si
+
+        init(target: Breakable, condition: IR.BRANCH, left: Value, right: Value) is
+            super.init(target, condition, operands_of(left, right), false)
+        si
+
+        to_string() -> string => "break {target.end} {condition}({operands |> join(", ")})"
+    si
+
+    // Starts `loop`'s next iteration.
+    class CONTINUE: Exit is
+        loop: LOOP
+
+        init(loop: LOOP, via_leave: bool) is
+            super.init(loop, IR.BRANCH.ALWAYS, Collections.LIST[Value](), via_leave)
+
+            self.loop = loop
+        si
+
+        init(loop: LOOP, condition: IR.BRANCH, operands: Collections.List[Value]) is
+            super.init(loop, condition, operands, false)
+
+            self.loop = loop
+        si
+
+        init(loop: LOOP, condition: IR.BRANCH, operand: Value) is
+            super.init(loop, condition, operands_of(operand), false)
+
+            self.loop = loop
+        si
+
+        init(loop: LOOP, condition: IR.BRANCH, left: Value, right: Value) is
+            super.init(loop, condition, operands_of(left, right), false)
+
+            self.loop = loop
+        si
+
+        to_string() -> string => "continue {loop.start} {condition}({operands |> join(", ")})"
+    si
+si

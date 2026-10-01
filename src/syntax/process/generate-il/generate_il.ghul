@@ -112,8 +112,8 @@ namespace Syntax.Process is
         // `br end_label` (invalid IL across a protected region)
         // and can't carry its value across `leave` (empty-stack
         // precondition). Mirrors the function-return-from-try
-        // pattern: stash the value into `cross_try_temp`, `leave
-        // cross_try_join_label`, and at the join `ldloc` the temp
+        // pattern: stash the value into `cross_try_temp`, leave
+        // `cross_try_join_region`, and at the join `ldloc` the temp
         // back onto the stack so it falls through into end_label.
         // `cross_try_used` flags whether the join block needs to
         // be emitted at all — otherwise the unconditional `br
@@ -121,8 +121,12 @@ namespace Syntax.Process is
         // uninitialised data onto the stack on the natural path's
         // divergent variants.
         cross_try_temp: IR.TEMP? public
-        cross_try_join_label: IR.LABEL? public
+        cross_try_join_region: Values.REGION? public
         cross_try_used: bool public
+
+        // The region the val-block's body is generated into; a
+        // val-targeted return leaves it.
+        region: Values.REGION? public
 
         init(
             block: Trees.Expressions.VAL_BLOCK,
@@ -254,21 +258,18 @@ namespace Syntax.Process is
     // `'.gen_state'` for generators. Both nest under the same
     // dispatch-holder machinery; only the local name differs.
     class ASYNC_DISPATCH_HOLDER is
-        block: IR.Values.BLOCK
+        dispatch: IR.Values.DISPATCH
         state_local_il: string
-        top_label: IR.LABEL
+        top_label: IR.LABEL => dispatch.top
         is_state_machine_entry: bool
         _entries: Collections.LIST[ASYNC_DISPATCH_ENTRY]
 
         init(
-            block: IR.Values.BLOCK,
-            state_local_il: string,
-            top_label: IR.LABEL,
+            dispatch: IR.Values.DISPATCH,
             is_state_machine_entry: bool
         ) is
-            self.block = block
-            self.state_local_il = state_local_il
-            self.top_label = top_label
+            self.dispatch = dispatch
+            self.state_local_il = dispatch.state_local
             self.is_state_machine_entry = is_state_machine_entry
             _entries = Collections.LIST[ASYNC_DISPATCH_ENTRY]()
         si
@@ -314,7 +315,8 @@ namespace Syntax.Process is
         // attached to. A catch is visited on its own, after the block
         // it guards has closed, so it has no other route to the extent
         // its region needs.
-        _try_extents: Collections.STACK[Values.TRY_EXTENT]
+        // The structured trys whose catch handlers are being generated.
+        _catching_trys: Collections.STACK[Values.TRY]
 
         _il_output_depth: int
 
@@ -361,11 +363,10 @@ namespace Syntax.Process is
 
         // Leave target for yields inside a `.try` body. CIL forbids
         // `ret` from inside a protected region; yields that suspend
-        // from within an enclosing `.try` `leave` to this label, which
-        // sits outside any try and just emits `ldc.i4.1; ret`.
-        // Lazy: yield's emission sets this on first use; the generator
-        // trailer emits the label + ret only if it was actually used.
-        _current_generator_yield_return_label: IR.LABEL?
+        // from within an enclosing `.try` leave this node, after which,
+        // outside any try, MoveNext returns true. The generator trailer
+        // emits that return only if a yield left the node.
+        _current_generator_resumable: Values.RESUMABLE?
 
         // Stack of dispatch placeholders for the currently-open
         // protected regions (outermost is the MoveNext body itself).
@@ -446,7 +447,7 @@ namespace Syntax.Process is
             _variable_left_state = variable_left_state
 
             _loops = LOOP_LABEL_STACK()
-            _try_extents = Collections.STACK[Values.TRY_EXTENT]()
+            _catching_trys = Collections.STACK[Values.TRY]()
             _pending_state_machines = Collections.LIST[PENDING_STATE_MACHINE]()
             _pending_async_state_machines = Collections.LIST[PENDING_ASYNC_STATE_MACHINE]()
             _async_dispatch_stack = Collections.LIST[ASYNC_DISPATCH_HOLDER]()
@@ -576,6 +577,14 @@ namespace Syntax.Process is
         middle: LABEL
         end: LABEL
 
+        // The structured loop a loop entry's body is generated into.
+        structured: Values.LOOP? public
+
+        // A try entry's structured try, which a return leaves, and the
+        // region its finally body is generated into.
+        structured_try: Values.TRY? public
+        finally_region: Values.REGION? public
+
         return_needed: TEMP?
         return_value: TEMP?
 
@@ -585,14 +594,14 @@ namespace Syntax.Process is
         // The rest mirror the val-block's cross-try handling: a
         // value-carrying exit from inside a `.try` cannot `br` with a
         // value on the stack (`leave` requires it empty), so it stashes
-        // into cross_try_temp and `leave`s to cross_try_join, which
-        // reloads before result_label.
+        // into cross_try_temp and leaves cross_try_join_region, after
+        // which the value is reloaded before result_region ends.
         node: Trees.Statements.Statement? public
         wants_value: bool public
         result_type: Semantic.Types.Type? public
-        result_label: LABEL? public
+        result_region: Values.REGION? public
         cross_try_temp: TEMP? public
-        cross_try_join: LABEL? public
+        cross_try_join_region: Values.REGION? public
         cross_try_used: bool public
         spill_field: Semantic.Symbols.Field? public
         enclosing_try_count: int public
