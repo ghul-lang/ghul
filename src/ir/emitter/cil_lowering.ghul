@@ -1,6 +1,11 @@
 namespace IR.Emitter is
     // Lowers IR values to CIL, through the method body emitter of the
     // function being generated.
+    //
+    // A cast of a value's symbol to the kind the value was built for is
+    // a checked construction invariant: a throw means the value was
+    // built with the wrong kind of symbol.
+    @suppress("cast-may-throw")
     class CIL_LOWERING: Values.Visitor is
         _context: IR.CONTEXT
 
@@ -23,6 +28,13 @@ namespace IR.Emitter is
         visit_address_of_value(value: Values.Value) is
             _fall_back(value, true)
         si
+
+        _lower(value: Values.Value?) is
+            Values.Value.gen(value, _context)
+        si
+
+        _field(symbol: Semantic.Symbols.Symbol) -> System.Reflection.Metadata.EntityHandle =>
+            _context.resolve_field_target(cast Semantic.Symbols.Field(symbol))
 
         _fall_back(value: Values.Value, is_address: bool) is
             if _falling_back == value then
@@ -95,6 +107,200 @@ namespace IR.Emitter is
                 body.ldstr(_context.srm_assembly_emitter, bigint.value)
                 body.call(_context.resolve_bigint_parse(bigint.type))
             fi
+        si
+
+        visit(load: Values.Load.TEMP) is
+            _body.ldloc(load.local)
+        si
+
+        visit_address(load: Values.Load.TEMP) is
+            _body.ldloca(load.local)
+        si
+
+        visit(load: Values.Load.STATIC_FIELD) is
+            _body.ldsfld(_field(load.symbol))
+        si
+
+        visit_address(load: Values.Load.STATIC_FIELD) is
+            _body.ldsflda(_field(load.symbol))
+        si
+
+        visit(load: Values.Load.GLOBAL_FIELD) is
+            _body.ldsfld(_field(load.symbol))
+        si
+
+        visit_address(load: Values.Load.GLOBAL_FIELD) is
+            _body.ldsflda(_field(load.symbol))
+        si
+
+        // A generator's arguments live in fields of its state-machine
+        // frame, and an argument spread out of a pack in a local of its
+        // own.
+        visit(load: Values.Load.LOCAL_ARGUMENT) is
+            let symbol = load.symbol
+
+            if let state_machine_field = Values.state_machine_field_for(symbol) then
+                _body.ldarg(0)
+                _body.ldfld(_context.resolve_field_target(state_machine_field))
+            elif let packed_local = Values.packed_parameter_local_for(symbol) then
+                _body.ldloc(packed_local)
+            else
+                _body.ldarg(_context.resolve_argument_index(symbol))
+            fi
+
+            load.guard_complement_narrow(_context)
+        si
+
+        visit_address(load: Values.Load.LOCAL_ARGUMENT) is
+            let symbol = load.symbol
+
+            if let state_machine_field = Values.state_machine_field_for(symbol) then
+                _body.ldarg(0)
+                _body.ldflda(_context.resolve_field_target(state_machine_field))
+            elif let packed_local = Values.packed_parameter_local_for(symbol) then
+                _body.ldloca(packed_local)
+            else
+                _body.ldarga(_context.resolve_argument_index(symbol))
+            fi
+        si
+
+        // A generator's locals live in fields of its state-machine frame.
+        visit(load: Values.Load.LOCAL_VARIABLE) is
+            if let state_machine_field = Values.state_machine_field_for(load.symbol) then
+                _body.ldarg(0)
+                _body.ldfld(_context.resolve_field_target(state_machine_field))
+            else
+                _body.ldloc((cast Semantic.Symbols.Variable(load.symbol)).ir_local)
+            fi
+
+            load.guard_complement_narrow(_context)
+        si
+
+        visit_address(load: Values.Load.LOCAL_VARIABLE) is
+            if let state_machine_field = Values.state_machine_field_for(load.symbol) then
+                _body.ldarg(0)
+                _body.ldflda(_context.resolve_field_target(state_machine_field))
+            else
+                _body.ldloca((cast Semantic.Symbols.Variable(load.symbol)).ir_local)
+            fi
+        si
+
+        visit(load: Values.Load.ARGUMENT_SLOT) is
+            _body.ldarg(load.index)
+        si
+
+        visit(store: Values.Store.LOCAL_VARIABLE) is
+            if let state_machine_field = Values.state_machine_field_for(store.symbol) then
+                _body.ldarg(0)
+                _lower(store.value)
+                _body.stfld(_context.resolve_field_target(state_machine_field))
+            else
+                _lower(store.value)
+                _body.stloc((cast Semantic.Symbols.Variable(store.symbol)).ir_local)
+            fi
+        si
+
+        visit(store: Values.Store.LOCAL_ARGUMENT) is
+            let symbol = store.symbol
+
+            if let state_machine_field = Values.state_machine_field_for(symbol) then
+                _body.ldarg(0)
+                _lower(store.value)
+                _body.stfld(_context.resolve_field_target(state_machine_field))
+            elif let packed_local = Values.packed_parameter_local_for(symbol) then
+                _lower(store.value)
+                _body.stloc(packed_local)
+            else
+                _lower(store.value)
+                _body.starg(_context.resolve_argument_index(symbol))
+            fi
+        si
+
+        visit(store: Values.Store.STATIC_FIELD) is
+            _lower(store.value)
+            _body.stsfld(_field(store.symbol))
+        si
+
+        visit(store: Values.Store.GLOBAL_FIELD) is
+            _lower(store.value)
+            _body.stsfld(_field(store.symbol))
+        si
+
+        visit(store: Values.Store.INSTANCE_FIELD) is
+            _lower(store.from)
+            _lower(store.value)
+            _body.stfld(_field(store.symbol))
+        si
+
+        // A load of a symbol with no lowering of its own.
+        visit(load: Values.Load.SYMBOL) is
+            _lower(load.from)
+            _context.fixme("load member {load.symbol.qualified_name}")
+        si
+
+        visit_address(load: Values.Load.SYMBOL) is
+            _lower(load.from)
+            _context.fixme("load member address {load.symbol.qualified_name}")
+        si
+
+        visit(load: Values.Load.INSTANCE_FIELD) is
+            _lower(load.from)
+            _body.ldfld(_field(load.symbol))
+        si
+
+        // `ldflda` takes the containing instance: the reference for a
+        // reference-type receiver, a managed pointer for a value-type
+        // one. Taking a reference receiver's address would compute the
+        // field's offset from the local holding the reference.
+        visit_address(load: Values.Load.INSTANCE_FIELD) is
+            let from = load.from!
+
+            if from.is_value_type then
+                from.gen_address(_context)
+            else
+                _lower(from)
+            fi
+
+            _body.ldflda(_field(load.symbol))
+        si
+
+        visit(load: Values.Load.STATIC_ANONYMOUS_FUNCTION) is
+            _body.ldnull()
+            _load_delegate(load.symbol, load.func_type)
+        si
+
+        visit(load: Values.Load.GLOBAL_ANONYMOUS_FUNCTION) is
+            _body.ldnull()
+            _load_delegate(load.symbol, load.func_type)
+        si
+
+        visit(load: Values.Load.INSTANCE_ANONYMOUS_FUNCTION) is
+            _body.ldarg(0)
+            _load_delegate(load.symbol, load.func_type)
+        si
+
+        _load_delegate(function: Semantic.Symbols.Symbol, delegate_type: Semantic.Types.Type) is
+            _body.load_function_pointer(_context.resolve_call_target(cast Semantic.Symbols.Function(function)))
+            _body.new_object(_context.resolve_delegate_constructor(delegate_type))
+        si
+
+        visit(load: Values.Load.FUNCTION_POINTER) is
+            let target = _context.resolve_call_target(cast Semantic.Symbols.Function(load.symbol))
+
+            if load.is_virtual then
+                _body.load_virtual_function_pointer(target)
+            else
+                _body.load_function_pointer(target)
+            fi
+        si
+
+        // A store to a symbol with no lowering of its own.
+        visit(store: Values.Store.SYMBOL) is
+            _lower(store.from)
+            _lower(store.value)
+
+            throw System.NotImplementedException(
+                "the binary back end has no emission for storing to '{store.symbol}' yet")
         si
     si
 si

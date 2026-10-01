@@ -2,29 +2,13 @@ namespace IR.Values.UnitTests is
     use System.Reflection.Metadata.ILOpCode
 
     use IR.UnitTests.EMITTED_IL
-    use IR.UnitTests.Support.STUB_VALUE
 
     use TestClass = Microsoft.VisualStudio.TestTools.UnitTesting.TestClassAttribute
     use Test = Microsoft.VisualStudio.TestTools.UnitTesting.TestMethodAttribute
     use Assertions
 
-    // Records which visit each value reached.
-    class RECORDING_VISITOR: Visitor is
-        visited: Collections.LIST[string]
-
-        init() is
-            visited = Collections.LIST[string]()
-        si
-
-        visit_value(value: Value) is visited.add("value"); si
-        visit_address_of_value(value: Value) is visited.add("address"); si
-
-        visit(number: Literal.NUMBER) is visited.add("number"); si
-        visit(string: Literal.STRING) is visited.add("string"); si
-        visit(decimal: Literal.DECIMAL) is visited.add("decimal"); si
-        visit(bigint: Literal.BIGINT) is visited.add("bigint"); si
-    si
-
+    // Generating a value lowers it through the CIL lowering, whether it
+    // has a visit of its own or still lowers itself.
     @TestClass()
     class VISITOR_TESTS is
         init() is si
@@ -32,33 +16,35 @@ namespace IR.Values.UnitTests is
         type_int() -> Semantic.Types.Type =>
             Semantic.Symbols.CLASSY_GENERIC_ARGUMENT(Source.LOCATION.internal, Semantic.BLOCK_SCOPE(), "int", 0).type!
 
-        @Test()
-        accept__should_reach_the_visit_for_a_value_that_has_one() is
-            let visitor = RECORDING_VISITOR()
-
-            Literal.NUMBER(1, type_int()).accept(visitor)
-
-            are_equal(1, visitor.visited.count)
-            are_equal("number", visitor.visited[0])
-        si
-
-        @Test()
-        accept__should_fall_back_for_a_value_without_a_visit() is
-            let visitor = RECORDING_VISITOR()
-
-            STUB_VALUE(type_int()).accept(visitor)
-            STUB_VALUE(type_int()).accept_address(visitor)
-
-            are_equal("value", visitor.visited[0])
-            are_equal("address", visitor.visited[1])
-        si
-
-        @Test()
-        generating__should_lower_a_moved_value_through_the_cil_lowering() is
-            let encoded = EMITTED_IL.encoded(Literal.NUMBER(0, type_int()))
+        assert_encodes_one(op_code: ILOpCode, value: Value) is
+            let encoded = EMITTED_IL.encoded(value)
 
             are_equal(1, encoded.count)
-            are_equal(cast ubyte(cast int(ILOpCode.LDC_I4_0)), encoded[0])
+            are_equal(cast ubyte(cast int(op_code)), encoded[0])
+        si
+
+        @Test()
+        generating__should_lower_a_value_with_a_visit_through_the_cil_lowering() is
+            assert_encodes_one(ILOpCode.LDC_I4_0, Literal.NUMBER(0, type_int()))
+        si
+
+        @Test()
+        generating__should_lower_a_value_without_a_visit_through_its_own_gen() is
+            assert_encodes_one(ILOpCode.LDNULL, NULL(type_int()))
+        si
+
+        @Test()
+        generating_an_address__should_lower_through_the_cil_lowering() is
+            let local = IR.LOCAL("local", type_int())
+
+            let encoded =
+                EMITTED_IL.encoded_by(
+                    (context: IR.CONTEXT) -> void is
+                        context.current_srm_body_emitter!.declare_local(local)
+                        Load.TEMP(local).gen_address(context)
+                    si)
+
+            are_equal(cast ubyte(cast int(ILOpCode.LDLOCA_S)), encoded[0])
         si
     si
 si
