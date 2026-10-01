@@ -10,6 +10,7 @@ namespace IR.UnitTests is
     use IR.Values.CONTINUE
     use IR.Values.LOOP
     use IR.Values.MARK_LABEL
+    use IR.Values.REGION
     use IR.Values.Value
 
     use TestClass = Microsoft.VisualStudio.TestTools.UnitTesting.TestClassAttribute
@@ -75,6 +76,48 @@ namespace IR.UnitTests is
             let flat = STRUCTURED_LOWERING.linearise(closed(outer))
 
             are_same(inner, flat[1])
+        si
+
+        @Test()
+        region__should_lower_to_its_body_followed_by_its_end_label() is
+            let region = REGION(LABEL(), Semantic.Types.ERROR())
+            let value = STUB_VALUE()
+
+            region.body.add(value)
+            region.close()
+
+            let flat = STRUCTURED_LOWERING.linearise(region)
+
+            are_equal(2, flat.count)
+            are_same(value, flat[0])
+            assert_label(region.end, flat[1])
+        si
+
+        @Test()
+        break_from_a_region__should_branch_to_its_end() is
+            let region = REGION(LABEL(), Semantic.Types.ERROR())
+            let condition = STUB_VALUE()
+
+            let flat = STRUCTURED_LOWERING.linearise(BREAK(region, BRANCH.NZ, condition))
+
+            are_same(condition, flat[0])
+            assert_branch(ILOpCode.BRTRUE, region.end, flat[1])
+        si
+
+        @Test()
+        generating_a_region__should_encode_an_exit_from_an_enclosing_region() is
+            let outer = REGION(LABEL(), Semantic.Types.ERROR())
+            let inner = REGION(LABEL(), Semantic.Types.ERROR())
+
+            inner.body.add(BREAK(outer, false))
+            inner.close()
+
+            outer.body.add(inner)
+            outer.close()
+
+            let encoded = EMITTED_IL.encoded(outer)
+
+            is_true(encoded.count > 0)
         si
 
         @Test()

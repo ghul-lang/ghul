@@ -4,7 +4,7 @@ This folder defines a small set of classes that model instructions close to .NET
 
 The `generate_il` compiler pass produces these IR nodes, and the emitter under `emitter/` encodes them into a `.dll` or `.exe`.
 
-Loops are structured nodes, which say what the control flow is rather than how CIL encodes it: a `LOOP` holds its body, and `BREAK` and `CONTINUE` name the loop they exit. A structured node is lowered to labels and branches only when it is encoded. Other control flow is built from labels and branches directly.
+Loops, `if` and `case` are built from structured nodes, which say what the control flow is rather than how CIL encodes it: a `LOOP` or a `REGION` holds its body, `BREAK` names the node it leaves, and `CONTINUE` the loop it restarts. A structured node is lowered to labels and branches only when it is encoded. Other control flow is built from labels and branches directly.
 
 Useful files:
 

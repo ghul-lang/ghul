@@ -300,23 +300,18 @@ namespace Syntax.Process is
 
             let structured = _open_structured_loop(loop)
 
-            // Binds to the loop's body, so the clause tests below land
-            // in it.
-            let brancher = get_brancher_for_block()
-
             if let `do.binding? then
                 // `while let` clauses: emit the same per-clause
-                // test / bind sequence as `if let`, but branch
-                // failures to `loop.end` (loop exit) instead of an
-                // arm-`next` label. Each iteration re-evaluates
+                // test / bind sequence as `if let`, but a failure
+                // leaves the loop instead of the arm. Each iteration re-evaluates
                 // every clause's scrutinee and re-binds — the
                 // bound names are freshly stored on each pass.
-                let first = _emit_if_let_clause_test(binding.clauses[0], loop.end, true, brancher)
+                let first = _emit_if_let_clause_test(binding.clauses[0], structured)
 
                 self.pre(binding)
 
                 if first? then
-                    _emit_if_let_clause_bind(binding.clauses[0], first, loop.end)
+                    _emit_if_let_clause_bind(binding.clauses[0], first, structured)
                 fi
 
                 if binding.clauses[0].guard? then
@@ -328,10 +323,10 @@ namespace Syntax.Process is
                 while i < binding.clauses.count do
                     let clause = binding.clauses[i]
 
-                    let temp = _emit_if_let_clause_test(clause, loop.end, false, brancher)
+                    let temp = _emit_if_let_clause_test(clause, structured)
 
                     if temp? then
-                        _emit_if_let_clause_bind(clause, temp, loop.end)
+                        _emit_if_let_clause_bind(clause, temp, structured)
                     fi
 
                     if clause.guard? then
@@ -672,26 +667,43 @@ namespace Syntax.Process is
             brancher.label(result)
         si
 
-        // Opens the structured loop `loop`'s body is generated into:
-        // values added from here until _close_structured_loop land in
-        // it.
+        // Opens the structured loop `loop`'s body is generated into.
         _open_structured_loop(loop: LOOP_LABELS) -> Values.LOOP is
             let result = Values.LOOP(loop.start, loop.end, _innate_symbol_lookup.get_void_type())
 
             loop.structured = result
 
-            add(result)
-            current_block.open_body(result.body)
-            enter_block(result.body)
+            _open_structured(result)
 
             return result
         si
 
         _close_structured_loop(loop: Values.LOOP) is
-            leave_block()
-            current_block.close_body(loop.body)
+            _close_structured(loop)
+        si
 
-            loop.close()
+        // Opens a region whose end is `end`.
+        _open_region(end: LABEL) -> Values.REGION is
+            let result = Values.REGION(end, _innate_symbol_lookup.get_void_type())
+
+            _open_structured(result)
+
+            return result
+        si
+
+        // Adds `node` and opens its body: values added from here until
+        // _close_structured land in it.
+        _open_structured(node: Values.Breakable) is
+            add(node)
+            current_block.open_body(node.body)
+            enter_block(node.body)
+        si
+
+        _close_structured(node: Values.Breakable) is
+            leave_block()
+            current_block.close_body(node.body)
+
+            node.close()
         si
 
         _visit_fused_for(`for: Statements.FOR) is

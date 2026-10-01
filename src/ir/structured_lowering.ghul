@@ -11,7 +11,7 @@ namespace IR is
     //
     // Lowering is one level deep. A structured node in another's body
     // stays a value in the flat sequence and lowers itself when it is
-    // generated, so the loops open at any point are exactly those
+    // generated, so the nodes open at any point are exactly those
     // being generated.
     class STRUCTURED_LOWERING is
         linearise(value: Value) -> Collections.List[Value] static =>
@@ -22,14 +22,14 @@ namespace IR is
         // block; a label or branch the lowering adds marks the position
         // of the node it was added for.
         gen(value: Value, context: IR.CONTEXT) static is
-            let loop = if isa LOOP(value) then cast LOOP(value) else null fi
+            let breakable = if isa Breakable(value) then cast Breakable(value) else null fi
 
-            if loop? then
-                context.enter_structured_loop(loop)
-            elif isa LoopExit(value) then
-                let exit = cast LoopExit(value)
+            if breakable? then
+                context.enter_structured(breakable)
+            elif isa Exit(value) then
+                let exit = cast Exit(value)
 
-                assert context.is_structured_loop_open(exit.loop) else "loop exit outside the loop it leaves: {exit}"
+                assert context.is_structured_open(exit.target) else "exit outside the node it leaves: {exit}"
             fi
 
             for flat in _linearise(value) do
@@ -40,8 +40,8 @@ namespace IR is
                 flat.value.gen(context)
             od
 
-            if loop? then
-                context.leave_structured_loop(loop)
+            if breakable? then
+                context.leave_structured(breakable)
             fi
         si
 
@@ -68,8 +68,10 @@ namespace IR is
 
             if isa LOOP(value) then
                 _linearise_loop(cast LOOP(value), result)
-            elif isa LoopExit(value) then
-                _linearise_exit(cast LoopExit(value), result)
+            elif isa REGION(value) then
+                _linearise_region(cast REGION(value), result)
+            elif isa Exit(value) then
+                _linearise_exit(cast Exit(value), result)
             else
                 result.add(FLAT_VALUE.of(value))
             fi
@@ -80,20 +82,30 @@ namespace IR is
         _linearise_loop(loop: LOOP, into: Collections.MutableList[FLAT_VALUE]) static is
             into.add(FLAT_VALUE(MARK_LABEL(loop.start), loop.position))
 
-            for value in loop.body.values do
-                into.add(FLAT_VALUE.of(value))
-            od
+            _linearise_body(loop, into)
 
             into.add(FLAT_VALUE(BRANCH_TO(ILOpCode.BR, loop.start), loop.end_position))
             into.add(FLAT_VALUE(MARK_LABEL(loop.end), loop.end_position))
         si
 
-        _linearise_exit(exit: LoopExit, into: Collections.MutableList[FLAT_VALUE]) static is
+        _linearise_region(region: REGION, into: Collections.MutableList[FLAT_VALUE]) static is
+            _linearise_body(region, into)
+
+            into.add(FLAT_VALUE(MARK_LABEL(region.end), region.end_position))
+        si
+
+        _linearise_body(node: Breakable, into: Collections.MutableList[FLAT_VALUE]) static is
+            for value in node.body.values do
+                into.add(FLAT_VALUE.of(value))
+            od
+        si
+
+        _linearise_exit(exit: Exit, into: Collections.MutableList[FLAT_VALUE]) static is
             let target =
-                if isa BREAK(exit) then
-                    exit.loop.end
+                if let `continue: CONTINUE = exit then
+                    `continue.loop.start
                 else
-                    exit.loop.start
+                    exit.target.end
                 fi
 
             if exit.condition == BRANCH.ALWAYS then

@@ -233,28 +233,28 @@ namespace Syntax.Process is
             gen_destructuring_initialize(left, value, null)
         si
 
-        // Per-element narrowing: when `narrow_branch_label` is set
-        // (the `if let` path), an element carrying a `type_expression`
-        // emits `isinst T; brfalse next` before binding. The cast
-        // result is what gets stored / recursively destructured, so
-        // the bound slot is typed T. Plain `let` and `for` pass null
-        // for the label and just store the raw value (the declared
+        // Per-element narrowing: when `narrow_fail` is set (the `if
+        // let` path), an element carrying a `type_expression` emits
+        // `isinst T` and leaves `narrow_fail` on a mismatch before
+        // binding. The cast result is what gets stored / recursively
+        // destructured, so the bound slot is typed T. Plain `let` and
+        // `for` pass null and just store the raw value (the declared
         // element type is a compile-time assertion only, not a runtime
         // test).
         gen_destructuring_initialize(
             left: Variables.VariableLeft,
             value: Value,
-            narrow_branch_label: LABEL?
+            narrow_fail: Values.Breakable?
         ) is
             // Literal-leaf inside a destructure pattern — runtime
             // value-equality test against the source position. Only
             // valid in refutable contexts (`if let` / `case`-when);
             // a plain `let` with a literal leaf is rejected during
             // semantic analysis, so by the time we get here a literal
-            // leaf without a narrow_branch_label is a no-op (the
+            // leaf without a narrow_fail is a no-op (the
             // emit-nothing path).
             if isa Variables.LITERAL_VARIABLE_LEFT(left) then
-                if narrow_branch_label? then
+                if narrow_fail? then
                     let literal_leaf = cast Variables.LITERAL_VARIABLE_LEFT(left)
                     let leaf_state = _variable_left_state.get(literal_leaf)
 
@@ -277,12 +277,7 @@ namespace Syntax.Process is
                                 TEMP(current_block, "literal-leaf", value).load()
                             fi
 
-                        get_brancher_for_block().branch(
-                            BRANCH.Z,
-                            test,
-                            narrow_branch_label,
-                            "literal-leaf"
-                        )
+                        add(Values.BREAK(narrow_fail, BRANCH.Z, test))
 
                         return
                     fi
@@ -294,13 +289,7 @@ namespace Syntax.Process is
 
                     let leaf_value = literal_leaf.expression.value
                     if leaf_value? then
-                        get_brancher_for_block().branch(
-                            BRANCH.NE,
-                            value,
-                            leaf_value,
-                            narrow_branch_label,
-                            "literal-leaf"
-                        )
+                        add(Values.BREAK(narrow_fail, BRANCH.NE, value, leaf_value))
                     fi
                 fi
 
@@ -313,12 +302,12 @@ namespace Syntax.Process is
             if
                 type_expression? /\
                 type_expression.type? /\
-                narrow_branch_label?
+                narrow_fail?
             then
                 let cast_value = IR.Values.CAST(type_expression.type, value, false)
                 let temp = TEMP(current_block, "narrow", cast_value)
 
-                get_brancher_for_block().branch(BRANCH.Z, temp.load(), narrow_branch_label, "narrow")
+                add(Values.BREAK(narrow_fail, BRANCH.Z, temp.load()))
 
                 narrowed = temp.load()
             fi
@@ -393,7 +382,7 @@ namespace Syntax.Process is
                     add(call_value)
 
                     for (i, e) in elements |> index() do
-                        gen_destructuring_initialize(e, arg_temps[i].load(), narrow_branch_label)
+                        gen_destructuring_initialize(e, arg_temps[i].load(), narrow_fail)
                     od
                 else
                     let members = strategy.members
@@ -404,7 +393,7 @@ namespace Syntax.Process is
                         if member? then
                             let member_value = member.load(LOCATION.internal, get_from(), _symbol_loader)
 
-                            gen_destructuring_initialize(e, member_value, narrow_branch_label)
+                            gen_destructuring_initialize(e, member_value, narrow_fail)
                         fi
                     od
                 fi

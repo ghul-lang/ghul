@@ -3,17 +3,14 @@ namespace IR.Values is
 
     use Semantic.Types.Type
 
-    // A loop as structured control flow: the body repeats until a
-    // BREAK leaves it. A CONTINUE, and reaching the end of the body,
-    // both go round again.
+    // Structured control flow that a BREAK can leave: a body of values
+    // followed by an end.
     //
-    // The labels belong to the CIL lowering, which places `start`
-    // before the body and `end` after the branch back to `start`.
-    // `position` is the source position current where the loop begins
-    // and `end_position` the one current where it is closed: the
-    // lowering marks them against the labels and branch it adds.
-    class LOOP: Value is
-        start: IR.LABEL
+    // The labels belong to the CIL lowering. `position` is the source
+    // position current where the node begins and `end_position` the
+    // one current where it is closed: the lowering marks them against
+    // the labels and branches it adds.
+    class Breakable: Value abstract is
         end: IR.LABEL
         body: BLOCK
 
@@ -23,13 +20,12 @@ namespace IR.Values is
         is_closed: bool
 
         // A position is marked by the lowering, against the values it
-        // adds, so the loop itself has none to mark.
+        // adds, so the node itself has none to mark.
         has_location: bool => false
 
-        init(start: IR.LABEL, end: IR.LABEL, void_type: Type) is
+        init(end: IR.LABEL, void_type: Type) is
             super.init()
 
-            self.start = start
             self.end = end
 
             position = IoC.CONTAINER.instance.location_stack.current
@@ -39,31 +35,56 @@ namespace IR.Values is
 
         // Records that the body is complete.
         close() is
-            assert !is_closed else "loop is already closed"
+            assert !is_closed else "structured node is already closed"
 
             is_closed = true
             end_position = IoC.CONTAINER.instance.location_stack.current
         si
 
         gen(context: IR.CONTEXT) is
-            assert is_closed else "loop generated before it was closed"
+            assert is_closed else "structured node generated before it was closed"
 
             IR.STRUCTURED_LOWERING.gen(self, context)
+        si
+    si
+
+    // A sequence of values that a BREAK can leave early, continuing
+    // after its end.
+    class REGION: Breakable is
+        init(end: IR.LABEL, void_type: Type) is
+            super.init(end, void_type)
+        si
+
+        to_string() -> string => "region {end}:[{body}]"
+    si
+
+    // A loop: the body repeats until a BREAK leaves it. A CONTINUE,
+    // and reaching the end of the body, both go round again. The CIL
+    // lowering places `start` before the body and `end` after the
+    // branch back to `start`.
+    class LOOP: Breakable is
+        start: IR.LABEL
+
+        init(start: IR.LABEL, end: IR.LABEL, void_type: Type) is
+            super.init(end, void_type)
+
+            self.start = start
         si
 
         to_string() -> string => "loop {start}:[{body}]"
     si
 
-    // An exit from an enclosing LOOP, taken when `condition` holds of
-    // `operands`, or always where the condition is ALWAYS.
+    // An exit from an enclosing structured node, taken when
+    // `condition` holds of `operands`, or always where the condition
+    // is ALWAYS.
     //
     // `within_protected_region` says the exit is written somewhere
     // inside a try, catch or finally, where an unconditional exit is
     // lowered to CIL as `leave` rather than `br`. Try regions are not
     // structured nodes, so the lowering cannot see them, and the exit
     // records this itself.
-    class LoopExit: Value abstract is
-        loop: LOOP
+    class Exit: Value abstract is
+        target: Breakable
         condition: IR.BRANCH
         operands: Collections.List[Value]
         within_protected_region: bool
@@ -72,13 +93,13 @@ namespace IR.Values is
 
         has_location: bool => false
 
-        init(loop: LOOP, condition: IR.BRANCH, operands: Collections.List[Value], within_protected_region: bool) is
+        init(target: Breakable, condition: IR.BRANCH, operands: Collections.List[Value], within_protected_region: bool) is
             super.init()
 
-            assert (condition == IR.BRANCH.ALWAYS) == (operands.count == 0) else "a loop exit takes operands exactly when it is conditional"
-            assert operands.count <= 2 else "a loop exit compares at most two operands"
+            assert (condition == IR.BRANCH.ALWAYS) == (operands.count == 0) else "an exit takes operands exactly when it is conditional"
+            assert operands.count <= 2 else "an exit compares at most two operands"
 
-            self.loop = loop
+            self.target = target
             self.condition = condition
             self.operands = operands
             self.within_protected_region = within_protected_region
@@ -108,43 +129,53 @@ namespace IR.Values is
         si
     si
 
-    // Leaves `loop`.
-    class BREAK: LoopExit is
-        init(loop: LOOP, within_protected_region: bool) is
-            super.init(loop, IR.BRANCH.ALWAYS, Collections.LIST[Value](), within_protected_region)
+    // Leaves `target`, continuing after its end.
+    class BREAK: Exit is
+        init(target: Breakable, within_protected_region: bool) is
+            super.init(target, IR.BRANCH.ALWAYS, Collections.LIST[Value](), within_protected_region)
         si
 
-        init(loop: LOOP, condition: IR.BRANCH, operands: Collections.List[Value]) is
-            super.init(loop, condition, operands, false)
+        init(target: Breakable, condition: IR.BRANCH, operands: Collections.List[Value]) is
+            super.init(target, condition, operands, false)
         si
 
-        init(loop: LOOP, condition: IR.BRANCH, operand: Value) is
-            super.init(loop, condition, operands_of(operand), false)
+        init(target: Breakable, condition: IR.BRANCH, operand: Value) is
+            super.init(target, condition, operands_of(operand), false)
         si
 
-        init(loop: LOOP, condition: IR.BRANCH, left: Value, right: Value) is
-            super.init(loop, condition, operands_of(left, right), false)
+        init(target: Breakable, condition: IR.BRANCH, left: Value, right: Value) is
+            super.init(target, condition, operands_of(left, right), false)
         si
 
-        to_string() -> string => "break {loop.start} {condition}({operands |> join(", ")})"
+        to_string() -> string => "break {target.end} {condition}({operands |> join(", ")})"
     si
 
     // Starts `loop`'s next iteration.
-    class CONTINUE: LoopExit is
+    class CONTINUE: Exit is
+        loop: LOOP
+
         init(loop: LOOP, within_protected_region: bool) is
             super.init(loop, IR.BRANCH.ALWAYS, Collections.LIST[Value](), within_protected_region)
+
+            self.loop = loop
         si
 
         init(loop: LOOP, condition: IR.BRANCH, operands: Collections.List[Value]) is
             super.init(loop, condition, operands, false)
+
+            self.loop = loop
         si
 
         init(loop: LOOP, condition: IR.BRANCH, operand: Value) is
             super.init(loop, condition, operands_of(operand), false)
+
+            self.loop = loop
         si
 
         init(loop: LOOP, condition: IR.BRANCH, left: Value, right: Value) is
             super.init(loop, condition, operands_of(left, right), false)
+
+            self.loop = loop
         si
 
         to_string() -> string => "continue {loop.start} {condition}({operands |> join(", ")})"
