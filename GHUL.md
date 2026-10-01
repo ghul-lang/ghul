@@ -1132,6 +1132,8 @@ Inside the block, the target's own members, inherited members, and type paramete
 
 A property is a name and a type, optionally with getter and setter bodies; a property with no bodies is backed by a hidden field. A property is public to read but only assignable within its defining type — prefixing the name with `_` makes it non-public for reading too, to whatever extent the `--underscore-access` policy in [naming conventions](#naming-conventions) sets.
 
+A member written as an assignment, `x = y`, is not a property and is reported as one. It reads as a property with a written assign accessor and no type, but no assignment is a member form, so where a member belongs it is an assignment statement and nothing else.
+
 The storage and visibility modifiers available on a primary-constructor parameter apply to a body declaration too: `x: int public` for public read and write, `x: int field` for a plain field rather than an auto-property, and `x: int static` for a static member. The `field` distinction matters most on value types — see [structs](#structs). `private` is the exception: it renames the member it captures, which only makes sense on a primary-constructor parameter. A plain body declaration has no separate name to rename from, so writing `private` on one without an accessor body is rejected; name the member `_x` directly instead.
 
 ```ghul
