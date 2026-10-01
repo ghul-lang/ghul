@@ -1,0 +1,128 @@
+namespace IR.Emitter is
+    use Ghul.Pipes
+
+    use Semantic.Symbols.Function
+    use Semantic.Symbols.FUNCTION_GROUP
+
+    use Values.Value
+
+    // The string builder runtime operations, as calls on .NET's
+    // DefaultInterpolatedStringHandler.
+    class CIL_STRING_BUILDER is
+        _handler: Semantic.Types.Type?
+
+        _constructor: Function?
+        _append_literal: Function?
+        _append_formatted: Function?
+        _append_formatted_alignment: Function?
+        _append_formatted_format: Function?
+        _append_formatted_alignment_format: Function?
+        _to_string_and_clear: Function?
+
+        init() is
+        si
+
+        // The call `runtime` stands for. It is built where the
+        // operation was, as far as the positions its values mark go.
+        lowered(runtime: Values.RUNTIME) -> Value is
+            _materialize()
+
+            let locations = IoC.CONTAINER.instance.location_stack
+
+            locations.push(runtime.operator_location)
+
+            try
+                return _call(runtime)
+            finally
+                locations.pop()
+            yrt
+        si
+
+        _call(runtime: Values.RUNTIME) -> Value is
+            let operands = runtime.operands
+            let builder = operands[0]
+
+            case runtime.operation
+            when IR.RuntimeOperation.NEW_STRING_BUILDER then
+                return Values.NEW(_handler!, _constructor!, [operands[0], operands[1]]:Value)
+
+            when IR.RuntimeOperation.APPEND_TEXT then
+                return _on_builder(_append_literal!, builder, [operands[1]]:Value)
+
+            when IR.RuntimeOperation.APPEND_VALUE then
+                return _on_builder(_specialized(_append_formatted!, runtime), builder, [operands[1]]:Value)
+
+            when IR.RuntimeOperation.APPEND_ALIGNED_VALUE then
+                return _on_builder(_specialized(_append_formatted_alignment!, runtime), builder, [operands[1], operands[2]]:Value)
+
+            when IR.RuntimeOperation.APPEND_FORMATTED_VALUE then
+                return _on_builder(_specialized(_append_formatted_format!, runtime), builder, [operands[1], operands[2]]:Value)
+
+            when IR.RuntimeOperation.APPEND_ALIGNED_FORMATTED_VALUE then
+                return _on_builder(_specialized(_append_formatted_alignment_format!, runtime), builder, [operands[1], operands[2], operands[3]]:Value)
+
+            when IR.RuntimeOperation.BUILD_STRING then
+                return _on_builder(_to_string_and_clear!, builder, Collections.LIST[Value]())
+
+            else
+                throw System.InvalidOperationException("not a string builder operation: {runtime.operation}")
+            esac
+        si
+
+        _specialized(function: Function, runtime: Values.RUNTIME) -> Semantic.Symbols.Symbol =>
+            function.specialize([runtime.type_argument!])
+
+        _on_builder(member: Semantic.Symbols.Symbol, builder: Value, arguments: Collections.List[Value]) -> Value =>
+            member.call(Source.LOCATION.internal, builder, arguments, null, IoC.CONTAINER.instance.function_caller)
+
+        _materialize() is
+            if _handler? then
+                return
+            fi
+
+            let lookup = IoC.CONTAINER.instance.innate_symbol_lookup
+            let string_type = lookup.get_string_type()
+            let int_type = lookup.get_int_type()
+
+            let handler = lookup.get_interpolated_string_handler_type()
+
+            _handler = handler
+
+            let append_formatted = _group(handler, "append_formatted").functions
+
+            // the constructor overload wanted is the only one with 2 arguments:
+            _constructor = _group(handler, "init").functions |> filter(f => f.arguments.count == 2) |> only()
+
+            // there is only one overload of append_literal:
+            _append_literal = _group(handler, "append_literal").functions[0]
+
+            // the only overload of append_formatted that is both generic and
+            // takes 1 argument:
+            _append_formatted = append_formatted |> filter(f => f.is_generic /\ f.arguments.count == 1) |> only()
+
+            // there are two overloads of append_formatted with 2 arguments;
+            // this is the one whose second argument is an int:
+            _append_formatted_alignment =
+                append_formatted |>
+                filter(f => f.is_generic /\ f.arguments.count == 2 /\ f.arguments[1].type!.compare(int_type) == Semantic.Types.MATCH.SAME) |>
+                only()
+
+            // and this the one whose second argument is a string (the BCL
+            // declares the format parameter as string?, so a match is
+            // anything not DIFFERENT):
+            _append_formatted_format =
+                append_formatted |>
+                filter(f => f.is_generic /\ f.arguments.count == 2 /\ f.arguments[1].type!.compare(string_type) != Semantic.Types.MATCH.DIFFERENT) |>
+                only()
+
+            // there is only one overload of append_formatted with 3 arguments:
+            _append_formatted_alignment_format = append_formatted |> filter(f => f.is_generic /\ f.arguments.count == 3) |> only()
+
+            // there is only one overload of to_string_and_clear:
+            _to_string_and_clear = _group(handler, "to_string_and_clear").functions[0]
+        si
+
+        _group(type: Semantic.Types.Type, name: string) -> FUNCTION_GROUP =>
+            cast FUNCTION_GROUP?(type.find_member(name))!
+    si
+si

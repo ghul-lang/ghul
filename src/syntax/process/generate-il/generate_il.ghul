@@ -336,16 +336,9 @@ namespace Syntax.Process is
         _run_on: bool
         _indent_needed: bool
 
-        _interpolation_handler: Semantic.Types.Type?
-        _constructor: Semantic.Symbols.Function
-        _append_literal: Semantic.Symbols.Function
-        _append_formatted_generic: Semantic.Symbols.Function
+        _are_runtime_symbols_materialized: bool
         _interpolated_value_classifier: Semantic.INTERPOLATED_VALUE_CLASSIFIER
         _display_function: Semantic.Symbols.Function?
-        _append_formatted_generic_alignment: Semantic.Symbols.Function
-        _append_formatted_generic_format: Semantic.Symbols.Function
-        _append_formatted_generic_alignment_format: Semantic.Symbols.Function
-        _to_string_and_clear: Semantic.Symbols.Function
         _dispose: Semantic.Symbols.Function
 
         // Generators whose state-machine class IL emission has been
@@ -460,13 +453,11 @@ namespace Syntax.Process is
         si
 
         ensure_runtime_symbols_are_materialized() is
-            if _interpolation_handler? then
+            if _are_runtime_symbols_materialized then
                 return
             fi
 
-            let string_type = _innate_symbol_lookup.get_string_type()
-            let int_type = _innate_symbol_lookup.get_int_type()
-
+            _are_runtime_symbols_materialized = true
 
             // Materialize IDisposable.Dispose()
             let idisposable_type = _innate_symbol_lookup.get_idisposable_type()
@@ -476,47 +467,6 @@ namespace Syntax.Process is
 
             _interpolated_value_classifier = Semantic.INTERPOLATED_VALUE_CLASSIFIER(_innate_symbol_lookup)
             _display_function = _interpolated_value_classifier.display_function
-
-            // Materialize the various methods of the string interpolation handler:
-            let interpolation_handler = _innate_symbol_lookup.get_interpolated_string_handler_type()
-            _interpolation_handler = interpolation_handler
-
-            // the constructor overload we want is the only one with 2 arguments:
-            _constructor = cast Semantic.Symbols.FUNCTION_GROUP?(interpolation_handler.find_member("init"))!.functions |>
-                filter(f => f.arguments.count == 2) |>
-                only()
-
-            // there is only one overload of append_literal:
-            _append_literal = cast Semantic.Symbols.FUNCTION_GROUP?(interpolation_handler.find_member("append_literal"))!.functions[0]
-
-            // the first overload of append_formatted we want is the only one that is both generic and with 1 argument:
-            _append_formatted_generic = cast Semantic.Symbols.FUNCTION_GROUP?(interpolation_handler.find_member("append_formatted"))!.functions |>
-                filter(f => f.is_generic /\ f.arguments.count == 1) |>
-                only()
-
-            // there are two overloads of append_formatted with 2
-            // arguments, we want the one where the second argument is
-            // an int:
-            _append_formatted_generic_alignment = cast Semantic.Symbols.FUNCTION_GROUP?(interpolation_handler.find_member("append_formatted"))!.functions |>
-                filter(f => f.is_generic /\ f.arguments.count == 2 /\ f.arguments[1].type!.compare(int_type) == Semantic.Types.MATCH.SAME) |>
-                only()
-
-            // there are two overloads of append_formatted with 2
-            // arguments, we want the one where the second argument is
-            // a string:
-            // (BCL declares the `format` parameter as `string?`, so SAME no longer matches under directional compare;
-            // != DIFFERENT accepts both `string` and `string?` shapes.)
-            _append_formatted_generic_format = cast Semantic.Symbols.FUNCTION_GROUP?(interpolation_handler.find_member("append_formatted"))!.functions |>
-                filter(f => f.is_generic /\ f.arguments.count == 2 /\ f.arguments[1].type!.compare(string_type) != Semantic.Types.MATCH.DIFFERENT) |>
-                only()
-
-            // there is only one overload of append_formatted with 3 arguments:
-            _append_formatted_generic_alignment_format = cast Semantic.Symbols.FUNCTION_GROUP?(interpolation_handler.find_member("append_formatted"))!.functions |>
-                filter(f => f.is_generic /\ f.arguments.count == 3) |>
-                only()
-
-            // there is only one overload of to_string_and_clear:
-            _to_string_and_clear = cast Semantic.Symbols.FUNCTION_GROUP?(interpolation_handler.find_member("to_string_and_clear"))!.functions[0]
         si
 
         apply(root: Trees.Node) is
