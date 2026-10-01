@@ -12,7 +12,6 @@ namespace Semantic is
     use IR.BRANCH
 
     class TYPE_CASTER(
-        _brancher: IR.BRANCHER,
         _block_context: IR.BlockContext,
         _value_boxer: IR.VALUE_BOXER,
         _value_converter: IR.VALUE_CONVERTER,
@@ -330,31 +329,35 @@ namespace Semantic is
         // exception is a bug and propagates.
         _guard_against_conversion_failure(call: Value, target_type: Type) -> Value is
             let block = _block_context.enter_block(target_type)
-            let brancher = _brancher.get_for(block)
+            let void_type = _innate_symbol_lookup.get_void_type()
 
             let result = TEMP(block, "user_convert", target_type)
 
-            let done = IR.LABEL()
+            let `try = IR.Values.TRY(IR.LABEL(), void_type)
 
-            let extent = IR.Values.TRY_EXTENT()
+            block.add(`try)
 
-            block.add(IR.Values.TRY_START(extent))
+            block.open_body(`try.body)
             result.store(_value_boxer.box_if_needed(call, target_type))
-            brancher.leave(done)
-            block.add(IR.Values.TRY_END(extent))
+            block.add(IR.Values.BREAK(`try, true))
+            block.close_body(`try.body)
+            `try.close_body()
 
             for name in ["InvalidCastException", "OverflowException"] do
-                let region =
-                    IR.Values.PROTECTED_REGION(extent, "System.Runtime", "System", name)
+                let handler = IR.Values.CATCH("System.Runtime", "System", name, void_type)
 
-                block.add(IR.Values.HANDLER_START(region))
+                `try.catches.add(handler)
+
+                block.open_body(handler.body)
                 block.add(IR.Values.INSTRUCTION(ILOpCode.POP))
                 result.store(IR.Values.DEFAULT(target_type))
-                brancher.leave(done)
-                block.add(IR.Values.HANDLER_END(region))
+                block.add(IR.Values.BREAK(`try, true))
+                block.close_body(handler.body)
+                handler.close()
             od
 
-            brancher.label(done)
+            `try.close()
+
             block.add(result.load())
 
             _block_context.leave_block()
@@ -372,15 +375,20 @@ namespace Semantic is
             // if the result is null, we return the value type's default value instead
 
             let block = _block_context.enter_block(target_type)
-            let brancher = _brancher.get_for(block)
+            let void_type = _innate_symbol_lookup.get_void_type()
 
             let temp = TYPE_WRAPPER(_innate_symbol_lookup.get_object_type(), value).get_temp_copier(block, "cast")
 
-            let want_default_value = IR.LABEL()
-            let done = IR.LABEL()
+            let done = IR.Values.REGION(IR.LABEL(), void_type)
+            let present = IR.Values.REGION(IR.LABEL(), void_type)
+
+            block.add(done)
+            block.open_body(done.body)
+            block.add(present)
+            done.body.open_body(present.body)
 
             // is the `isinst` result null?
-            brancher.branch(BRANCH.Z, temp(), want_default_value)
+            block.add(IR.Values.BREAK(present, BRANCH.Z, temp()))
 
             // `isinst` result is not null, so safe to unbox:
             block.add(
@@ -389,15 +397,17 @@ namespace Semantic is
                 )
             )
 
-            brancher.branch(done)
+            block.add(IR.Values.BREAK(done, false))
 
-            brancher.label(want_default_value)
+            done.body.close_body(present.body)
+            present.close()
 
             // 'isinst' result is null, so attempting unbox would throw
             // NullReferenceException. return default value instead:
             block.add(IR.Values.DEFAULT(target_type))
 
-            brancher.label(done)
+            block.close_body(done.body)
+            done.close()
 
             _block_context.leave_block()
 
