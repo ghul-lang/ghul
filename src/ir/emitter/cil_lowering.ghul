@@ -527,5 +527,148 @@ namespace IR.Emitter is
                 _body.op(op_code)
             od
         si
+
+        visit(declaration: Values.DECLARE_LOCAL) is
+            _body.declare_local(declaration.local)
+        si
+
+        visit(store: Values.STORE_TEMP) is
+            _body.stloc(store.local)
+        si
+
+        visit(tee: Values.TEE_TEMP) is
+            Values.Value.gen_marked(tee.value, _context)
+            tee.mark_operator(_context)
+
+            _body.op(System.Reflection.Metadata.ILOpCode.DUP)
+            _body.stloc(tee.local)
+        si
+
+        visit(discard: Values.DISCARD) is
+            if let value = discard.value then
+                Values.Value.gen_marked(value, _context)
+            fi
+
+            discard.mark_operator(_context)
+
+            _body.op(System.Reflection.Metadata.ILOpCode.POP)
+        si
+
+        visit(thrown: Values.THROW) is
+            if let exception = thrown.exception then
+                Values.Value.gen_marked(exception, _context)
+            fi
+
+            thrown.mark_operator(_context)
+
+            _body.op(System.Reflection.Metadata.ILOpCode.THROW)
+        si
+
+        visit(ret: Values.RET) is
+            _body.ret()
+        si
+
+        // A fresh local of the return type, never assigned.
+        visit(default_return: Values.DEFAULT_RETURN) is
+            let local = IR.LOCAL(".default", default_return.type)
+
+            _body.declare_local(local)
+            _body.ldloc(local)
+        si
+
+        // The default of a type is what a fresh local of it holds.
+        visit(default_value: Values.DEFAULT) is
+            let local = IR.LOCAL(".default.{IR.TEMP.get_next_id()}", default_value.type)
+
+            _body.declare_local(local)
+            _body.ldloc(local)
+        si
+
+        visit_address(default_value: Values.DEFAULT) is
+            let local = IR.LOCAL(".default.{IR.TEMP.get_next_id()}", default_value.type)
+
+            _body.declare_local(local)
+            _body.ldloca(local)
+        si
+
+        visit(deref: Values.DEREF) is
+            _lower(deref.value)
+            _body.load_object(_type_token(deref.type))
+        si
+
+        visit_address(deref: Values.DEREF) is
+            _lower(deref.value)
+        si
+
+        // A value with no address of its own is copied into a local
+        // whose address is taken instead.
+        visit(address: Values.ADDRESS) is
+            let value = address.value
+
+            if value.has_address then
+                value.gen_address(_context)
+
+                return
+            fi
+
+            if !address.local? then
+                address.local = IR.LOCAL(Values.ADDRESS.next_name, address.type)
+            fi
+
+            let local = address.local!
+
+            _body.declare_local(local)
+            _lower(value)
+            _body.stloc(local)
+            _body.ldloca(local)
+        si
+
+        visit_address(address: Values.ADDRESS) is
+            visit(address)
+        si
+
+        visit(steps: Values.STEPS) is
+            _lower_all(steps.steps)
+        si
+
+        visit(decrement: Values.DECREMENT) is
+            _body.ldloc(decrement.counter)
+            _body.ldc_i4(1)
+            _body.op(System.Reflection.Metadata.ILOpCode.SUB)
+            _body.stloc(decrement.counter)
+        si
+
+        // Leaves the counter's value before the increment.
+        visit(increment: Values.POST_INCREMENT) is
+            _body.ldloc(increment.counter)
+            _body.ldloc(increment.counter)
+            _body.ldc_i4(1)
+            _body.op(System.Reflection.Metadata.ILOpCode.ADD)
+            _body.stloc(increment.counter)
+        si
+
+        // Leaves the counter's value after the decrement.
+        visit(decrement: Values.PRE_DECREMENT) is
+            _body.ldloc(decrement.counter)
+            _body.ldc_i4(1)
+            _body.op(System.Reflection.Metadata.ILOpCode.SUB)
+            _body.op(System.Reflection.Metadata.ILOpCode.DUP)
+            _body.stloc(decrement.counter)
+        si
+
+        visit(repack: Values.TUPLE_REPACK) is
+            _body.declare_local(repack.temp)
+            _lower(repack.source)
+            _body.stloc(repack.temp)
+            _lower(repack.built)
+        si
+
+        // The subject is already on the stack, left by the wrap around
+        // the arm this value is built for.
+        visit(spilled: Values.SPILLED_SUBJECT) is
+            _body.declare_local(spilled.temp)
+            _body.stloc(spilled.temp)
+            _lower(spilled.built)
+        si
     si
 si
