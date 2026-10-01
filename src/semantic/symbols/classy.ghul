@@ -1907,50 +1907,29 @@ namespace Semantic.Symbols is
             self.argument_names = symbols |> map(a => a.name) |> collect()
         si
 
-        gen_all(context: IR.Emitter.CIL_CONTEXT, symbol_loader: SYMBOL_LOADER) is
-            gen_constructor(context, symbol_loader)
-        si
+        constructor: Method => _constructor!
 
-        gen_constructor(context: IR.Emitter.CIL_CONTEXT, symbol_loader: SYMBOL_LOADER) is
+        // The frame's constructor stores each argument into the capture
+        // it is named for.
+        constructor_body(symbol_loader: SYMBOL_LOADER) -> Collections.List[IR.Values.Value] is
             let internal = LOCATION.internal
+            let result = Collections.LIST[IR.Values.Value]()
 
-            // The constructor is encoded into a body of its own.
-            // Without one its row carries no code at all, which is
-            // not a constructor a runtime will accept: the image is
-            // rejected outright, before any type in it is loaded.
-            let assembly_emitter = context.srm_assembly_emitter
-            let enclosing = context.current_srm_body_emitter
-            let body_emitter = IR.Emitter.SRM_METHOD_BODY_EMITTER()
+            for c in _captures |> filter(c => c.name !~ "$recurse") do
+                let argument = LOCAL_ARGUMENT(internal, _constructor!, c.name)
+                argument.set_type(c.type!)
 
-            context.current_srm_body_emitter = body_emitter
-
-            try
-                for c in _captures |> filter(c => c.name !~ "$recurse") do
-                    let argument = LOCAL_ARGUMENT(internal, _constructor!, c.name)
-                    argument.set_type(c.type!)
-
+                result.add(
                     c.store(
                         internal,
                         IR.Values.Load.REFERENCE_SELF(self),
                         argument.load(LOCATION.internal, null, symbol_loader),
                         symbol_loader,
                         true
-                    ).gen(context)
-                od
-            catch ex: System.Exception
-                IoC.CONTAINER.instance.logger.exception(
-                    location, ex, "error generating closure frame constructor")
-            yrt
+                    ))
+            od
 
-            body_emitter.ret()
-
-            assembly_emitter.handles.set_body_offset(
-                _constructor!, body_emitter.flush(assembly_emitter))
-            assembly_emitter.handles.set_il_outputs(
-                _constructor!, body_emitter.il_outputs)
-
-            context.current_srm_body_emitter = enclosing
-
+            return result
         si
 
         get_create_instance(

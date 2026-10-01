@@ -1,0 +1,108 @@
+namespace IR.Emitter.UnitTests is
+    use TestClass = Microsoft.VisualStudio.TestTools.UnitTesting.TestClassAttribute
+    use Test = Microsoft.VisualStudio.TestTools.UnitTesting.TestMethodAttribute
+    use Assertions
+
+    // The CIL backend keeps the bodies generate-il begins nested: ending
+    // one goes back to the body, and the member, it was begun inside.
+    @TestClass()
+    class CIL_BACKEND_TESTS is
+        init() is si
+
+        context() -> CIL_CONTEXT is
+            let result =
+                CIL_CONTEXT(
+                    NSubstitute.Substitute.`for`[Logging.Logger](System.Array.empty`[object]()))
+
+            result.install_srm_assembly_emitter("test", "0:0:0:0", true)
+
+            return result
+        si
+
+        member() -> Semantic.Symbols.Symbol =>
+            Semantic.Symbols.CLASSY_GENERIC_ARGUMENT(Source.LOCATION.internal, Semantic.BLOCK_SCOPE(), "T", 0)
+
+        @Test()
+        begin_body__should_open_a_body() is
+            let context = context()
+            let backend = CIL_BACKEND(context)
+
+            backend.begin_body()
+
+            is_not_null(context.current_srm_body_emitter)
+        si
+
+        @Test()
+        end_body__should_return_to_the_enclosing_body() is
+            let context = context()
+            let backend = CIL_BACKEND(context)
+
+            backend.begin_body()
+
+            let outer = context.current_srm_body_emitter
+
+            backend.begin_body()
+
+            are_not_same(outer, context.current_srm_body_emitter)
+
+            backend.end_body()
+
+            are_same(outer, context.current_srm_body_emitter)
+        si
+
+        @Test()
+        end_body__should_return_to_the_enclosing_member() is
+            let context = context()
+            let backend = CIL_BACKEND(context)
+            let outer = member()
+            let inner = member()
+
+            backend.begin_body(outer)
+            backend.begin_body(inner)
+
+            are_same(inner, context.srm_assembly_emitter.current_emission_member)
+
+            backend.end_body()
+
+            are_same(outer, context.srm_assembly_emitter.current_emission_member)
+        si
+
+        @Test()
+        begin_body__without_a_member_should_keep_the_enclosing_member() is
+            let context = context()
+            let backend = CIL_BACKEND(context)
+            let outer = member()
+
+            backend.begin_body(outer)
+            backend.begin_body()
+
+            are_same(outer, context.srm_assembly_emitter.current_emission_member)
+        si
+
+        @Test()
+        abandon_bodies__should_close_every_open_body() is
+            let context = context()
+            let backend = CIL_BACKEND(context)
+
+            backend.begin_body()
+            backend.begin_body()
+            backend.abandon_bodies()
+
+            is_null(context.current_srm_body_emitter)
+        si
+
+        @Test()
+        write__should_lower_into_the_open_body() is
+            let context = context()
+            let backend = CIL_BACKEND(context)
+
+            backend.begin_body()
+            backend.write(IR.Values.RET())
+
+            let encoded = context.current_srm_body_emitter!.encoded
+
+            are_equal(1, encoded.count)
+            are_equal(cast ubyte(cast int(System.Reflection.Metadata.ILOpCode.RET)), encoded[0])
+        si
+    si
+si

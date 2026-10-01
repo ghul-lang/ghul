@@ -9,10 +9,7 @@ namespace IR.Emitter is
     class CIL_LOWERING: Values.Visitor is
         _context: IR.Emitter.CIL_CONTEXT
 
-        // The value whose own `gen` or `gen_address` is being run. A value
-        // that reaches its fallback again from there has neither a visit
-        // nor a `gen` of its own.
-        _falling_back: Values.Value?
+        context: CIL_CONTEXT => _context
 
         _body: SRM_METHOD_BODY_EMITTER => _context.current_srm_body_emitter!
 
@@ -23,42 +20,45 @@ namespace IR.Emitter is
             _async = CIL_ASYNC_LOWERING(context)
         si
 
-        // A value whose lowering has not moved here yet lowers itself.
         visit_value(value: Values.Value) is
-            _fall_back(value, false)
+            throw System.NotImplementedException("no lowering for {value.get_type()} {value}")
         si
 
         visit_address_of_value(value: Values.Value) is
-            _fall_back(value, true)
+            throw System.NotImplementedException("no address lowering for {value.get_type()} {value}")
         si
 
-        _lower(value: Values.Value?) is
-            Values.Value.gen(value, _context)
+        gen(value: Values.Value?) is
+            if value? then
+                value.accept(self)
+            else
+                _context.fixme("null value")
+            fi
+        si
+
+        gen_address(value: Values.Value) is
+            value.accept_address(self)
+        si
+
+        // Lowers an operand as a block lowers each of its values,
+        // marking its source position first.
+        gen_marked(value: Values.Value) is
+            if value.has_location then
+                _context.mark_location(value.location)
+            fi
+
+            gen(value)
+        si
+
+        // Marks the position `value` was built at, after its operands.
+        mark_operator(value: Values.Value) is
+            if let location = value.operator_location then
+                _context.mark_location(location)
+            fi
         si
 
         _field(symbol: Semantic.Symbols.Symbol) -> System.Reflection.Metadata.EntityHandle =>
             _context.resolve_field_target(cast Semantic.Symbols.Field(symbol))
-
-        _fall_back(value: Values.Value, is_address: bool) is
-            if _falling_back == value then
-                throw System.NotImplementedException(
-                    "no {if is_address then "address " else "" fi}lowering for {value.get_type()} {value}")
-            fi
-
-            let outer = _falling_back
-
-            _falling_back = value
-
-            try
-                if is_address then
-                    value.gen_address(_context)
-                else
-                    value.gen(_context)
-                fi
-            finally
-                _falling_back = outer
-            yrt
-        si
 
         visit(number: IR.Values.Literal.NUMBER) is
             let body = _body
@@ -151,7 +151,7 @@ namespace IR.Emitter is
                 _body.ldarg(_context.resolve_argument_index(symbol))
             fi
 
-            load.guard_complement_narrow(_context)
+            _narrow_guard(load.snapshot_type)
         si
 
         visit_address(load: Values.Load.LOCAL_ARGUMENT) is
@@ -176,7 +176,7 @@ namespace IR.Emitter is
                 _body.ldloc((cast Semantic.Symbols.Variable(load.symbol)).ir_local)
             fi
 
-            load.guard_complement_narrow(_context)
+            _narrow_guard(load.snapshot_type)
         si
 
         visit_address(load: Values.Load.LOCAL_VARIABLE) is
@@ -195,10 +195,10 @@ namespace IR.Emitter is
         visit(store: Values.Store.LOCAL_VARIABLE) is
             if let state_machine_field = Values.state_machine_field_for(store.symbol) then
                 _body.ldarg(0)
-                _lower(store.value)
+                gen(store.value)
                 _body.stfld(_context.resolve_field_target(state_machine_field))
             else
-                _lower(store.value)
+                gen(store.value)
                 _body.stloc((cast Semantic.Symbols.Variable(store.symbol)).ir_local)
             fi
         si
@@ -208,46 +208,46 @@ namespace IR.Emitter is
 
             if let state_machine_field = Values.state_machine_field_for(symbol) then
                 _body.ldarg(0)
-                _lower(store.value)
+                gen(store.value)
                 _body.stfld(_context.resolve_field_target(state_machine_field))
             elif let packed_local = Values.packed_parameter_local_for(symbol) then
-                _lower(store.value)
+                gen(store.value)
                 _body.stloc(packed_local)
             else
-                _lower(store.value)
+                gen(store.value)
                 _body.starg(_context.resolve_argument_index(symbol))
             fi
         si
 
         visit(store: Values.Store.STATIC_FIELD) is
-            _lower(store.value)
+            gen(store.value)
             _body.stsfld(_field(store.symbol))
         si
 
         visit(store: Values.Store.GLOBAL_FIELD) is
-            _lower(store.value)
+            gen(store.value)
             _body.stsfld(_field(store.symbol))
         si
 
         visit(store: Values.Store.INSTANCE_FIELD) is
-            _lower(store.from)
-            _lower(store.value)
+            gen(store.from)
+            gen(store.value)
             _body.stfld(_field(store.symbol))
         si
 
         // A load of a symbol with no lowering of its own.
         visit(load: Values.Load.SYMBOL) is
-            _lower(load.from)
+            gen(load.from)
             _context.fixme("load member {load.symbol.qualified_name}")
         si
 
         visit_address(load: Values.Load.SYMBOL) is
-            _lower(load.from)
+            gen(load.from)
             _context.fixme("load member address {load.symbol.qualified_name}")
         si
 
         visit(load: Values.Load.INSTANCE_FIELD) is
-            _lower(load.from)
+            gen(load.from)
             _body.ldfld(_field(load.symbol))
         si
 
@@ -259,9 +259,9 @@ namespace IR.Emitter is
             let from = load.from!
 
             if from.is_value_type then
-                from.gen_address(_context)
+                gen_address(from)
             else
-                _lower(from)
+                gen(from)
             fi
 
             _body.ldflda(_field(load.symbol))
@@ -299,8 +299,8 @@ namespace IR.Emitter is
 
         // A store to a symbol with no lowering of its own.
         visit(store: Values.Store.SYMBOL) is
-            _lower(store.from)
-            _lower(store.value)
+            gen(store.from)
+            gen(store.value)
 
             throw System.NotImplementedException(
                 "the binary back end has no emission for storing to '{store.symbol}' yet")
@@ -308,7 +308,7 @@ namespace IR.Emitter is
 
         _lower_all(values: Collections.Iterable[Values.Value]) is
             for value in values do
-                _lower(value)
+                gen(value)
             od
         si
 
@@ -331,7 +331,7 @@ namespace IR.Emitter is
         si
 
         visit(call: Values.Call.STRUCT) is
-            _lower(call.from)
+            gen(call.from)
             _lower_all(call.arguments)
             _body.call(_context.resolve_call_target(call.function))
         si
@@ -339,7 +339,7 @@ namespace IR.Emitter is
         visit(call: Values.Call.INSTANCE) is
             let from = call.from
 
-            _lower(from)
+            gen(from)
             _lower_all(call.arguments)
 
             if let constrained: Values.CONSTRAINED = from then
@@ -368,7 +368,7 @@ namespace IR.Emitter is
                 return
             fi
 
-            _lower(call.from)
+            gen(call.from)
             _lower_all(call.arguments)
 
             _body.call_virtual(
@@ -379,7 +379,7 @@ namespace IR.Emitter is
         // it the first time it is generated.
         visit(call: Values.Call.INNATE) is
             if !call.is_lowered then
-                _lower(call.lower())
+                gen(call.lower())
             fi
         si
 
@@ -405,13 +405,58 @@ namespace IR.Emitter is
             gen_expansion(composite.expand())
         si
 
+        // A coalesced load has no storage of its own to take the address
+        // of, so its value is spilled to a local first.
+        visit_address(coalesce: Values.COALESCE_LOAD) is
+            let local = IR.LOCAL(".coalesce.{TEMP.get_next_id()}", coalesce.type)
+
+            _body.declare_local(local)
+            gen(coalesce)
+            _body.stloc(local)
+            _body.ldloca(local)
+        si
+
+        // Pushes the operand of a runtime type test as the object
+        // reference isinst and castclass expect; see TYPE_TEST_OPERAND.
+        _type_test_operand(value: Values.Value) is
+            let chosen = Values.TYPE_TEST_OPERAND.mode(value)
+
+            if chosen == Values.TypeTestOperandMode.UNWRAP_MAYBE then
+                gen_expansion(Values.TYPE_TEST_OPERAND.expand_maybe(value, cast Semantic.Types.MAYBE(value.type)))
+
+                return
+            fi
+
+            gen(value)
+
+            if chosen == Values.TypeTestOperandMode.BOX then
+                _body.box(_context.resolve_type_token(value.type!))
+            elif chosen == Values.TypeTestOperandMode.BOX_TYPE_VARIABLE then
+                _body.box(_context.resolve_type_token(value.type!.type_variable_side!))
+            fi
+        si
+
+        // A value type reached through a wider slot is boxed there, so
+        // the check and the unboxing are the same instruction.
+        _narrow_guard(narrowed: Semantic.Types.Type?) is
+            if !Values.NARROW_GUARD.is_needed(narrowed) then
+                return
+            fi
+
+            if narrowed!.is_value_type then
+                _body.unbox_any(_context.resolve_type_token(narrowed!))
+            else
+                _body.cast_class(_context.resolve_type_token(narrowed!))
+            fi
+        si
+
         // Encodes an expansion as part of the composite that built it,
         // marking no source positions for the structure inside it.
         gen_expansion(expansion: Values.BLOCK) is
             _context.begin_unmarked()
 
             for value in expansion.values do
-                value.gen(_context)
+                gen(value)
             od
 
             _context.end_unmarked()
@@ -425,17 +470,17 @@ namespace IR.Emitter is
         si
 
         visit(box: Values.BOX) is
-            _lower(box.value)
+            gen(box.value)
             _body.box(_type_token(box.type!))
         si
 
         visit(unbox: Values.UNBOX) is
-            _lower(unbox.value)
+            gen(unbox.value)
             _body.unbox_any(_type_token(unbox.type!))
         si
 
         visit(conversion: Values.CAST) is
-            Values.TYPE_TEST_OPERAND.gen(conversion.value, _context)
+            _type_test_operand(conversion.value)
 
             if conversion.faults_on_failure then
                 _body.cast_class(_type_token(conversion.type))
@@ -445,7 +490,7 @@ namespace IR.Emitter is
         si
 
         visit(test: Values.ISA) is
-            Values.TYPE_TEST_OPERAND.gen(test.value, _context)
+            _type_test_operand(test.value)
 
             _body.is_instance(_type_token(test.isa_type))
             _body.ldnull()
@@ -481,10 +526,10 @@ namespace IR.Emitter is
 
         visit(negation: Values.NOT) is
             if negation.is_operator then
-                Values.Value.gen_marked(negation.value, _context)
-                negation.mark_operator(_context)
+                gen_marked(negation.value)
+                mark_operator(negation)
             else
-                _lower(negation.value)
+                gen(negation.value)
             fi
 
             _body.ldc_i4(0)
@@ -494,24 +539,24 @@ namespace IR.Emitter is
         visit(arithmetic: Values.ARITHMETIC) is
             for operand in arithmetic.operands do
                 if arithmetic.is_marked then
-                    Values.Value.gen_marked(operand, _context)
+                    gen_marked(operand)
                 else
-                    _lower(operand)
+                    gen(operand)
                 fi
             od
 
             if arithmetic.is_marked then
-                arithmetic.mark_operator(_context)
+                mark_operator(arithmetic)
             fi
 
             _body.op(CIL_OPERATIONS.arithmetic(arithmetic.operation))
         si
 
         visit(compare: Values.COMPARE) is
-            Values.Value.gen_marked(compare.left, _context)
-            Values.Value.gen_marked(compare.right, _context)
+            gen_marked(compare.left)
+            gen_marked(compare.right)
 
-            compare.mark_operator(_context)
+            mark_operator(compare)
 
             let (op_code, negates) = CIL_OPERATIONS.comparison(compare.comparison, compare.is_unsigned)
 
@@ -524,7 +569,7 @@ namespace IR.Emitter is
         si
 
         visit(convert: Values.CONVERT) is
-            _lower(convert.value)
+            gen(convert.value)
 
             for op_code in CIL_OPERATIONS.conversion(convert.from, convert.to) do
                 _body.op(op_code)
@@ -540,8 +585,8 @@ namespace IR.Emitter is
         si
 
         visit(tee: Values.TEE_TEMP) is
-            Values.Value.gen_marked(tee.value, _context)
-            tee.mark_operator(_context)
+            gen_marked(tee.value)
+            mark_operator(tee)
 
             _body.op(System.Reflection.Metadata.ILOpCode.DUP)
             _body.stloc(tee.local)
@@ -549,20 +594,20 @@ namespace IR.Emitter is
 
         visit(discard: Values.DISCARD) is
             if let value = discard.value then
-                Values.Value.gen_marked(value, _context)
+                gen_marked(value)
             fi
 
-            discard.mark_operator(_context)
+            mark_operator(discard)
 
             _body.op(System.Reflection.Metadata.ILOpCode.POP)
         si
 
         visit(thrown: Values.THROW) is
             if let exception = thrown.exception then
-                Values.Value.gen_marked(exception, _context)
+                gen_marked(exception)
             fi
 
-            thrown.mark_operator(_context)
+            mark_operator(thrown)
 
             _body.op(System.Reflection.Metadata.ILOpCode.THROW)
         si
@@ -595,12 +640,12 @@ namespace IR.Emitter is
         si
 
         visit(deref: Values.DEREF) is
-            _lower(deref.value)
+            gen(deref.value)
             _body.load_object(_type_token(deref.type))
         si
 
         visit_address(deref: Values.DEREF) is
-            _lower(deref.value)
+            gen(deref.value)
         si
 
         // A value with no address of its own is copied into a local
@@ -609,7 +654,7 @@ namespace IR.Emitter is
             let value = address.value
 
             if value.has_address then
-                value.gen_address(_context)
+                gen_address(value)
 
                 return
             fi
@@ -621,7 +666,7 @@ namespace IR.Emitter is
             let local = address.local!
 
             _body.declare_local(local)
-            _lower(value)
+            gen(value)
             _body.stloc(local)
             _body.ldloca(local)
         si
@@ -661,9 +706,9 @@ namespace IR.Emitter is
 
         visit(repack: Values.TUPLE_REPACK) is
             _body.declare_local(repack.temp)
-            _lower(repack.source)
+            gen(repack.source)
             _body.stloc(repack.temp)
-            _lower(repack.built)
+            gen(repack.built)
         si
 
         // The subject is already on the stack, left by the wrap around
@@ -671,12 +716,12 @@ namespace IR.Emitter is
         visit(spilled: Values.SPILLED_SUBJECT) is
             _body.declare_local(spilled.temp)
             _body.stloc(spilled.temp)
-            _lower(spilled.built)
+            gen(spilled.built)
         si
 
         visit(address: Values.ARRAY_ELEMENT_ADDRESS) is
-            _lower(address.array)
-            _lower(address.index)
+            gen(address.array)
+            gen(address.index)
             _body.load_element_address(_type_token(address.element_type))
         si
 
@@ -685,14 +730,14 @@ namespace IR.Emitter is
         si
 
         visit(array: Values.NEW_ARRAY) is
-            _lower(array.count)
+            gen(array.count)
             _body.new_array(_type_token(array.element_type))
         si
 
         visit(store: Values.STORE_ARRAY_ELEMENT) is
-            _lower(store.array)
-            _lower(store.index)
-            _lower(IoC.CONTAINER.instance.value_boxer.box_if_needed(store.element, store.element_type))
+            gen(store.array)
+            gen(store.index)
+            gen(IoC.CONTAINER.instance.value_boxer.box_if_needed(store.element, store.element_type))
             _body.store_element(_type_token(store.element_type))
         si
 
@@ -708,7 +753,7 @@ namespace IR.Emitter is
                 _body.op(System.Reflection.Metadata.ILOpCode.DUP)
                 _body.ldc_i4(i)
 
-                _lower(boxer.box_if_needed(values[i], sequence.element_type))
+                gen(boxer.box_if_needed(values[i], sequence.element_type))
 
                 _body.store_element(element)
             od
@@ -717,7 +762,7 @@ namespace IR.Emitter is
         visit(compare: Values.COMPARE_ORDER_TO_ZERO) is
             let (op_code, negates) = CIL_OPERATIONS.comparison(compare.comparison, false)
 
-            _lower(compare.value)
+            gen(compare.value)
 
             _body.ldc_i4(0)
             _body.op(op_code)
@@ -729,7 +774,7 @@ namespace IR.Emitter is
         si
 
         visit(receiver: Values.CONSTRAINED) is
-            _lower(receiver.value)
+            gen(receiver.value)
         si
 
         // The `constrained.` prefix a call through `receiver` takes,
@@ -743,26 +788,26 @@ namespace IR.Emitter is
         si
 
         visit(convert: Values.DECIMAL_CONVERT) is
-            _lower(convert.value)
+            gen(convert.value)
 
             let parameter_types = Collections.LIST[Semantic.Types.Type]()
 
             parameter_types.add(convert.parameter_type)
 
-            _lower(Values.DECIMAL_CALL(convert.type, convert.method_name, parameter_types))
+            gen(Values.DECIMAL_CALL(convert.type, convert.method_name, parameter_types))
         si
 
         visit(equality: Values.EQUALITY_COMPARISON) is
             _body.call(_context.resolve_equality_comparer_default(equality.comparer_type))
 
-            _lower(equality.left)
-            _lower(equality.right)
+            gen(equality.left)
+            gen(equality.right)
 
             _body.call_virtual(_context.resolve_equality_comparer_equals(equality.comparer_type))
         si
 
         visit(test: Values.HAS_VALUE) is
-            _lower(test.value)
+            gen(test.value)
 
             _body.ldnull()
             _body.op(System.Reflection.Metadata.ILOpCode.CGT_UN)
@@ -771,7 +816,7 @@ namespace IR.Emitter is
         // Calling GetType through the reference faults on null, and
         // nothing else; the reference itself is left in place.
         visit(check: Values.REFERENCE_NULL_CHECK) is
-            _lower(check.inner)
+            gen(check.inner)
 
             _body.op(System.Reflection.Metadata.ILOpCode.DUP)
             _body.call_virtual(_context.resolve_object_get_type())
@@ -779,7 +824,7 @@ namespace IR.Emitter is
         si
 
         visit(conversion: Values.SCALAR_CONVERSION) is
-            _lower(conversion.converted)
+            gen(conversion.converted)
         si
 
         visit(dummy: Values.DUMMY) is
@@ -793,56 +838,56 @@ namespace IR.Emitter is
         si
 
         visit(store: Values.Need.STORE) is
-            _lower(store.value)
+            gen(store.value)
 
             assert false else "unresolved need store"
         si
 
         visit(store: Values.Store.INDIRECT) is
-            _lower(store.address)
-            _lower(store.value)
+            gen(store.address)
+            gen(store.value)
             _body.store_object(_type_token(store.type))
         si
 
         visit(wrapper: Values.TYPE_WRAPPER) is
-            _lower(wrapper.value)
+            gen(wrapper.value)
         si
 
         visit_address(wrapper: Values.TYPE_WRAPPER) is
-            wrapper.value.gen_address(_context)
+            gen_address(wrapper.value)
         si
 
         visit(wrapper: Values.WRAPPER) is
             assert wrapper.value? else "generate wrapper without value"
 
-            _lower(wrapper.value)
+            gen(wrapper.value)
         si
 
         visit_address(wrapper: Values.WRAPPER) is
             assert wrapper.value? else "generate wrapper without value"
 
-            wrapper.value.gen_address(_context)
+            gen_address(wrapper.value)
         si
 
         visit(wrap: Values.WRAP_OPTIONAL) is
-            _lower(wrap.value)
+            gen(wrap.value)
             _body.new_object(_context.resolve_generic_constructor(wrap.type, 1))
         si
 
         visit(projection: Values.NARROW_PROJECT) is
-            _lower(projection.projected)
+            gen(projection.projected)
 
-            Values.NARROW_GUARD.emit(projection.type, _context)
+            _narrow_guard(projection.type)
         si
 
         visit(view: Values.NARROW_VIEW) is
-            _lower(view.underlying)
+            gen(view.underlying)
 
-            Values.NARROW_GUARD.emit(view.type, _context)
+            _narrow_guard(view.type)
         si
 
         visit_address(view: Values.NARROW_VIEW) is
-            view.underlying.gen_address(_context)
+            gen_address(view.underlying)
         si
 
         // Records the offset range the marked statement emits. The range
@@ -865,13 +910,13 @@ namespace IR.Emitter is
         // receiver pushed for the delegate's own constructor argument
         // needs a duplicate first.
         visit(delegate: Values.Load.DELEGATE) is
-            _lower(delegate.frame)
+            gen(delegate.frame)
 
             if delegate.function.is_virtual_dispatch then
                 _body.op(System.Reflection.Metadata.ILOpCode.DUP)
             fi
 
-            _lower(delegate.function)
+            gen(delegate.function)
             _body.new_object(_context.resolve_delegate_constructor(delegate.type))
         si
 
@@ -881,7 +926,7 @@ namespace IR.Emitter is
             block.is_emitted = true
 
             for value in block.values do
-                Values.Value.gen_marked(value, _context)
+                gen_marked(value)
             od
         si
 
@@ -937,6 +982,25 @@ namespace IR.Emitter is
             _body.new_object(_context.resolve_assert_failed_constructor())
         si
 
+        visit(init_object: Values.INIT_OBJECT) is
+            gen(init_object.instance)
+            _body.call(_context.resolve_object_constructor())
+        si
+
+        visit(thread_id: Values.CURRENT_THREAD_ID) is
+            _body.call(_context.resolve_current_managed_thread_id())
+        si
+
+        visit(join: Values.JOIN_PIPE) is
+            gen(join.pipe)
+            _body.call(_context.resolve_pipe_join(join.element_type))
+        si
+
+        visit(creation: Values.CREATE_UNIT_VARIANT_INSTANCE) is
+            _body.new_object(_context.resolve_call_target(creation.constructor))
+            _body.stsfld(_context.resolve_unit_variant_instance(creation.variant))
+        si
+
         // The range struct's constructor is not reachable from a Function
         // symbol, so the reference is built from the range type and the
         // known (int, int) signature.
@@ -950,13 +1014,13 @@ namespace IR.Emitter is
         si
 
         visit(equality: Values.REFERENCE_EQUALITY) is
-            _lower(equality.left)
-            _lower(equality.right)
+            gen(equality.left)
+            gen(equality.right)
             _body.op(System.Reflection.Metadata.ILOpCode.CEQ)
         si
 
         visit(construct: Values.CONSTRUCT_MAYBE) is
-            _lower(construct.value)
+            gen(construct.value)
             _body.new_object(_context.resolve_generic_constructor(construct.type, 1))
         si
 
