@@ -12,19 +12,6 @@ namespace IR.Values is
     // a value type through its box, a bare type parameter through its
     // own hash, and an absent optional through the null arm rather
     // than a call that would throw on it.
-    //
-    //   ldc.i4.0
-    //   <operand>            // for each, in declaration order
-    //   dup
-    //   brfalse <null>
-    //   callvirt GetHashCode
-    //   br <combine>
-    //   <null>:
-    //   pop
-    //   ldc.i4.0
-    //   <combine>:
-    //   ...                  // swap-free: the running total is under
-    //   add                  // the member hash, so mul it beforehand
     class HASH_COMBINE: Value is
         operands: Collections.LIST[Value]
         get_hash_code: Semantic.Symbols.Function
@@ -53,38 +40,55 @@ namespace IR.Values is
             self._result_type = result_type
         si
 
-        gen(context: IR.CONTEXT) is
-            let body = context.current_srm_body_emitter!
+        // The running total is multiplied before each member is
+        // evaluated, and an absent member adds nothing to it.
+        expand() -> BLOCK is
+            let expansion = IR.EXPANSION(type)
+            let total = expansion.temp("hash", type)
 
-            if let s = seed then
-                gen(s, context)
-            else
-                body.ldc_i4(0)
-            fi
+            expansion.store(total, seed ?? Literal.NUMBER(0, type))
 
             for operand in operands do
-                // Running total first, multiplied before the member's
-                // hash is computed, so the two are in the order `add`
-                // wants and nothing has to be swapped.
-                body.ldc_i4(31)
-                body.op(ILOpCode.MUL)
+                expansion.store(
+                    total,
+                    INT_ARITHMETIC(ILOpCode.MUL, total.load(), Literal.NUMBER(31, type), type)
+                )
 
-                let null_label = IR.LABEL()
-                let combine_label = IR.LABEL()
+                // A box answers the type it boxes, not the reference it
+                // leaves.
+                let held_type =
+                    if isa BOX(operand) then
+                        IoC.CONTAINER.instance.innate_symbol_lookup.get_object_type()
+                    else
+                        operand.type!
+                    fi
 
-                gen(operand, context)
-                body.op(ILOpCode.DUP)
-                body.branch(ILOpCode.BRFALSE, null_label)
-                body.call_virtual(context.resolve_call_target(get_hash_code))
-                body.branch(ILOpCode.BR, combine_label)
+                let held = expansion.temp("hash.member", held_type)
 
-                body.mark_label(null_label)
-                body.op(ILOpCode.POP)
-                body.ldc_i4(0)
+                expansion.store(held, operand)
 
-                body.mark_label(combine_label)
-                body.op(ILOpCode.ADD)
+                let absent = expansion.region()
+
+                expansion.exit_if(absent, IR.BRANCH.Z, held.load())
+                expansion.store(
+                    total,
+                    INT_ARITHMETIC(
+                        ILOpCode.ADD,
+                        total.load(),
+                        Call.INSTANCE(held.load(), get_hash_code, Collections.LIST[Value](), type),
+                        type
+                    )
+                )
+                expansion.close(absent)
             od
+
+            expansion.add(total.load())
+
+            return expansion.result
+        si
+
+        gen(context: IR.CONTEXT) is
+            IR.EXPANSION.gen(expand(), context)
         si
 
         to_string() -> string =>

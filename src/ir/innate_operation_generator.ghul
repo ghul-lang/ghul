@@ -9,8 +9,7 @@ namespace IR is
 
     class INNATE_OPERATION_GENERATOR(
         _logger: Logging.Logger,
-        _boxer: VALUE_BOXER,
-        _brancher: IR.BRANCHER
+        _boxer: VALUE_BOXER
     ) is
         _type_and_operation_handlers: Collections.MAP[string,(INNATE,BLOCK) -> void]
         _operation_handlers: Collections.MAP[string,(INNATE,BLOCK) -> void]
@@ -119,35 +118,33 @@ namespace IR is
             block.add(Values.INSTRUCTION(ILOpCode.CEQ))
         si
 
+        // The left argument is the result unless it settles the
+        // answer on its own: false for `and_then`, true for `or_else`.
+        // Otherwise the result is the right argument.
         gen_short_circuit_bool(value: INNATE, block: BLOCK) is
             assert value.arguments.count == 2 else "short circuit bool missing arguments"
 
-            let brancher = _brancher.get_for(block)
+            let type = value.type
+            let expansion = IR.EXPANSION(type)
+            let result = expansion.temp("short_circuit", type)
 
-            let exit = IR.LABEL()
-            let operation = value.op_name
+            expansion.store(result, value.arguments[0])
 
-            // push speculative result:
-            if operation =~ "and_then" then
-                block.add(Values.INSTRUCTION(ILOpCode.LDC_I4_0))
-            else
-                block.add(Values.INSTRUCTION(ILOpCode.LDC_I4_1))
-            fi
+            let settled = expansion.region()
 
-            // branch to exit if speculative result is correct based on evaluating left argument:
-            if operation =~ "and_then" then
-                brancher.branch(IR.BRANCH.Z, value.arguments[0], exit)
-            else
-                brancher.branch(IR.BRANCH.NZ, value.arguments[0], exit)
-            fi
+            expansion.exit_if(
+                settled,
+                if value.op_name =~ "and_then" then IR.BRANCH.Z else IR.BRANCH.NZ fi,
+                result.load())
 
-            // speculative result may not be correct, discard it:
-            block.add(Values.INSTRUCTION(ILOpCode.POP))
+            expansion.store(result, value.arguments[1])
+            expansion.close(settled)
 
-            // result is value of right side:
-            gen_argument(value, 1, block)
+            expansion.add(result.load())
 
-            brancher.label(exit)
+            for v in expansion.result.values do
+                block.add(v)
+            od
         si
 
         gen_compare_order(value: INNATE, is_unsigned: bool, block: BLOCK) is

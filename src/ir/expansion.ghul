@@ -1,0 +1,125 @@
+namespace IR is
+    use Semantic.Types.Type
+
+    use Values
+
+    // Builds the target-neutral IR a composite value expands to: its
+    // operands and steps in order, temporaries for anything that has to
+    // outlive a branch, and structured nodes for its control flow, so no
+    // value is left on the stack across a branch. Nothing built here
+    // marks a source position: the composite marks its own.
+    class EXPANSION is
+        result: BLOCK
+
+        _void_type: Type
+        _open: Collections.STACK[BLOCK]
+
+        init(type: Type) is
+            result = BLOCK(type)
+
+            _void_type = IoC.CONTAINER.instance.innate_symbol_lookup.get_void_type()
+            _open = Collections.STACK[BLOCK]()
+            _open.push(result)
+        si
+
+        add(value: Value) is
+            _open.peek().add(value)
+        si
+
+        // Declares a temporary of `type`, named after `prefix`.
+        temp(prefix: string, type: Type) -> TEMPORARY is
+            return local(".{prefix}.{TEMP.get_next_id()}", type)
+        si
+
+        // Declares a local under a name chosen by whoever built the
+        // values that read it.
+        local(name: string, type: Type) -> TEMPORARY is
+            add(DECLARE_LOCAL(name, type))
+
+            return TEMPORARY(name, type)
+        si
+
+        store(temp: TEMPORARY, value: Value) is
+            add(value)
+            add(STORE_TEMP(temp.name, temp.type))
+        si
+
+        // Opens a region: values added from here until `close` land in
+        // it, and an exit from it continues after it.
+        region() -> REGION is
+            let result = REGION(IR.LABEL(), _void_type)
+
+            _open_node(result)
+
+            return result
+        si
+
+        // Opens a loop: values added from here until `close` are
+        // repeated until an exit leaves it.
+        loop() -> LOOP is
+            let result = LOOP(IR.LABEL(), IR.LABEL(), _void_type)
+
+            _open_node(result)
+
+            return result
+        si
+
+        _open_node(node: Breakable) is
+            node.clear_position()
+
+            add(node)
+            _open.push(node.body)
+        si
+
+        close(node: Breakable) is
+            assert _open.peek() == node.body else "expansion nodes closed out of order"
+
+            _open.pop()
+
+            node.close()
+        si
+
+        exit(target: Breakable) is
+            _add_exit(BREAK(target))
+        si
+
+        exit_if(target: Breakable, condition: BRANCH, operand: Value) is
+            _add_exit(BREAK(target, condition, operand))
+        si
+
+        exit_if(target: Breakable, condition: BRANCH, left: Value, right: Value) is
+            _add_exit(BREAK(target, condition, left, right))
+        si
+
+        continue_if(loop: LOOP, condition: BRANCH, operand: Value) is
+            _add_exit(CONTINUE(loop, condition, operand))
+        si
+
+        continue_if(loop: LOOP, condition: BRANCH, left: Value, right: Value) is
+            _add_exit(CONTINUE(loop, condition, left, right))
+        si
+
+        _add_exit(exit: Exit) is
+            exit.clear_position()
+
+            add(exit)
+        si
+
+        // Encodes an expansion as part of the composite that built it,
+        // marking no source positions inside it.
+        gen(expansion: BLOCK, context: IR.CONTEXT) static is
+            context.begin_unmarked()
+
+            for value in expansion.values do
+                value.gen(context)
+            od
+
+            context.end_unmarked()
+        si
+    si
+
+    // A temporary declared by an expansion.
+    class TEMPORARY(name: string, type: Type) is
+        load() -> Values.Value => Values.Load.TEMP(name, type)
+    si
+si

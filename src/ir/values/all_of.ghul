@@ -14,17 +14,6 @@ namespace IR.Values is
     // those is built as a value of its own. This is the conjunction
     // around them, so that nothing has to build a tree of `/\`
     // expressions to say `and` in.
-    //
-    //   <first>
-    //   brfalse <false>
-    //   <second>
-    //   brfalse <false>
-    //   ...
-    //   ldc.i4.1
-    //   br <end>
-    //   <false>:
-    //   ldc.i4.0
-    //   <end>:
     class ALL_OF: Value is
         operands: Collections.LIST[Value]
         _result_type: Type
@@ -39,33 +28,43 @@ namespace IR.Values is
             self._result_type = result_type
         si
 
-        gen(context: IR.CONTEXT) is
-            let body = context.current_srm_body_emitter!
+        // The first operand to answer false leaves the conjunction false,
+        // and the rest are never evaluated.
+        expand() -> BLOCK is
+            let expansion = IR.EXPANSION(type)
 
             // Nothing to be false: an empty conjunction is true, which
             // is what a type with no members to compare answers once
             // its guard has passed.
             if operands.count == 0 then
-                body.ldc_i4(1)
+                expansion.add(Literal.NUMBER(1, type))
 
-                return
+                return expansion.result
             fi
 
-            let false_label = IR.LABEL()
-            let end_label = IR.LABEL()
+            let result = expansion.temp("all_of", type)
+
+            let done = expansion.region()
+            let failed = expansion.region()
 
             for operand in operands do
-                gen(operand, context)
-                body.branch(ILOpCode.BRFALSE, false_label)
+                expansion.exit_if(failed, IR.BRANCH.Z, operand)
             od
 
-            body.ldc_i4(1)
-            body.branch(ILOpCode.BR, end_label)
+            expansion.store(result, Literal.NUMBER(1, type))
+            expansion.exit(done)
+            expansion.close(failed)
 
-            body.mark_label(false_label)
-            body.ldc_i4(0)
+            expansion.store(result, Literal.NUMBER(0, type))
+            expansion.close(done)
 
-            body.mark_label(end_label)
+            expansion.add(result.load())
+
+            return expansion.result
+        si
+
+        gen(context: IR.CONTEXT) is
+            IR.EXPANSION.gen(expand(), context)
         si
 
         to_string() -> string =>

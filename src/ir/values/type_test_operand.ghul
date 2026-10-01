@@ -52,37 +52,40 @@ namespace IR.Values is
         si
 
         _gen_maybe(value: Value, maybe: Semantic.Types.MAYBE, context: IR.CONTEXT) static is
+            IR.EXPANSION.gen(expand_maybe(value, maybe), context)
+        si
+
+        // The payload of a MAYBE operand, boxed, or null where it holds
+        // nothing.
+        expand_maybe(value: Value, maybe: Semantic.Types.MAYBE) -> BLOCK static is
             let loader = IoC.CONTAINER.instance.symbol_loader
+            let object_type = IoC.CONTAINER.instance.innate_symbol_lookup.get_object_type()
             let address = STACK_TOP_ADDRESS(maybe)
 
             let has_value = maybe.find_member("has_value")!.load(LOCATION.internal, address, loader)
             let payload = maybe.find_member("value")!.load(LOCATION.internal, address, loader)
 
-            let absent = IR.LABEL()
-            let end = IR.LABEL()
+            let expansion = IR.EXPANSION(object_type)
+            let held = expansion.temp("type_test", maybe)
 
-            let body = context.current_srm_body_emitter!
-            let temp = ".type_test.{TEMP.get_next_id()}"
+            expansion.store(held, value)
 
-            body.declare_local(temp, maybe)
+            let result = expansion.temp("type_test.boxed", object_type)
 
-            value.gen(context)
+            let done = expansion.region()
+            let absent = expansion.region()
 
-            body.stloc(temp)
-            body.ldloca(temp)
+            expansion.exit_if(absent, IR.BRANCH.Z, STEPS([ADDRESS(held.load()), has_value]:Value))
+            expansion.store(result, BOX(STEPS([ADDRESS(held.load()), payload]:Value)))
+            expansion.exit(done)
+            expansion.close(absent)
 
-            has_value.gen(context)
+            expansion.store(result, NULL(object_type))
+            expansion.close(done)
 
-            body.branch(System.Reflection.Metadata.ILOpCode.BRFALSE, absent)
-            body.ldloca(temp)
+            expansion.add(result.load())
 
-            payload.gen(context)
-
-            body.box(context.resolve_type_token(maybe.arguments[0]))
-            body.branch(System.Reflection.Metadata.ILOpCode.BR, end)
-            body.mark_label(absent)
-            body.ldnull()
-            body.mark_label(end)
+            return expansion.result
         si
     si
 si

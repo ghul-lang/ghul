@@ -208,90 +208,35 @@ namespace IR.Values is
             self.result_il_name = result_il_name
         si
 
-        gen(context: IR.CONTEXT) =>
-            _gen_fused_loop(context)
-
         is_void: bool => Syntax.Process.PIPE_CONSUMER_KIND.is_void(consumer_kind)
 
-        // The loop below is one body of control flow with two ways of
-        // being written down, so the choice of back end is made per
-        // instruction here rather than by keeping a second copy of the
-        // loop. The logic is where the complexity is, and a duplicate of
-        // it would be the thing that drifts.
-        //
-        // The loop names its locals and labels rather than numbering
-        // them, because SRM_METHOD_BODY_EMITTER maps a name to a slot
-        // and to a label handle, forward references included.
-        _declare(context: IR.CONTEXT, name: string, type: Semantic.Types.Type) is
-            let body = context.current_srm_body_emitter!
-                body.declare_local(name, type)
+        gen(context: IR.CONTEXT) is
+            IR.EXPANSION.gen(expand(), context)
         si
 
-        _stloc(context: IR.CONTEXT, name: string) is
-            let body = context.current_srm_body_emitter!
-                body.stloc(name)
-        si
-
-        _ldloc(context: IR.CONTEXT, name: string) is
-            let body = context.current_srm_body_emitter!
-                body.ldloc(name)
-        si
-
-        _mark(context: IR.CONTEXT, label: IR.LABEL) is
-            let body = context.current_srm_body_emitter!
-                body.mark_label(label)
-        si
-
-        _branch(
-            context: IR.CONTEXT,
-            mnemonic: string,
-            op_code: System.Reflection.Metadata.ILOpCode,
-            label: IR.LABEL
-        ) is
-            let body = context.current_srm_body_emitter!
-                body.branch(op_code, label)
-        si
-
-        _ldc_i4(context: IR.CONTEXT, value: int) is
-            let body = context.current_srm_body_emitter!
-                body.ldc_i4(value)
-        si
-
-        _op(
-            context: IR.CONTEXT,
-            mnemonic: string,
-            op_code: System.Reflection.Metadata.ILOpCode
-        ) is
-            let body = context.current_srm_body_emitter!
-                body.op(op_code)
-        si
-
-        // Emit the fused loop, leaving the consumer's result on the stack
-        // (nothing for a void `each`).
-        _gen_fused_loop(context: IR.CONTEXT) is
-            let loop_start = IR.LABEL()
-            let loop_end = IR.LABEL()
-            let take_exit = loop_end
+        // The fused loop, leaving the consumer's result (nothing for a
+        // void `each`).
+        expand() -> BLOCK is
+            let expansion = IR.EXPANSION(_result_type)
+            let int_type = IoC.CONTAINER.instance.innate_symbol_lookup.get_int_type()
 
             // A source read more than once - for its iterator and for its
             // count - is evaluated once, first, and everything below reads
             // the local.
             if let name = source_il_name, type = source_type, init = source_init then
-                _declare(context, name, type)
-                gen(init, context)
-                _stloc(context, name)
+                expansion.store(expansion.local(name, type), init)
             fi
 
+            let result = TEMPORARY(result_il_name, result_local_type ?? _result_type)
+
             if !is_void then
-                _declare(context, result_il_name, result_local_type ?? _result_type)
-                _gen_result_init(context)
+                expansion.add(DECLARE_LOCAL(result.name, result.type))
+                _expand_result_init(expansion, result, int_type)
             fi
 
             // A consumer's function argument is built once into a local.
             if let arg_name = consumer_arg_il_name, arg_type = consumer_arg_type, arg_init = consumer_arg_init then
-                _declare(context, arg_name, arg_type)
-                gen(arg_init, context)
-                _stloc(context, arg_name)
+                expansion.store(expansion.local(arg_name, arg_type), arg_init)
             fi
 
             // Each stage's lambda delegate is built once before the loop; a
@@ -299,17 +244,9 @@ namespace IR.Values is
             // count evaluated once.
             for stage in stages do
                 if stage.is_countdown \/ stage.is_index then
-                    _declare(
-                        context,
-                        stage.counter_il_name,
-                        IoC.CONTAINER.instance.innate_symbol_lookup.get_int_type())
-
-                    gen(stage.count_init!, context)
-                    _stloc(context, stage.counter_il_name)
+                    expansion.store(expansion.local(stage.counter_il_name, int_type), stage.count_init!)
                 else
-                    _declare(context, stage.delegate_il_name, stage.delegate_type)
-                    gen(stage.delegate_init, context)
-                    _stloc(context, stage.delegate_il_name)
+                    expansion.store(expansion.local(stage.delegate_il_name, stage.delegate_type), stage.delegate_init)
                 fi
             od
 
@@ -317,213 +254,162 @@ namespace IR.Values is
             // the source's iterator member or the source is itself an
             // iterator (a value-type range), move_next / current drive it
             // through the local (by address for a value-type iterator).
-            _declare(context, iterator_il_name, iterator_type)
-            gen(iterator_init, context)
-            _stloc(context, iterator_il_name)
+            expansion.store(expansion.local(iterator_il_name, iterator_type), iterator_init)
 
-            _mark(context, loop_start)
+            let loop = expansion.loop()
 
             // Leave before pulling once any take stage has spent its count,
             // so the loop pulls exactly the elements it yields and never
             // advances the source past them.
             for stage in stages do
                 if stage.is_take then
-                    _ldloc(context, stage.counter_il_name)
-                    _ldc_i4(context, 0)
-                    _branch(context, "ble", System.Reflection.Metadata.ILOpCode.BLE, take_exit)
+                    expansion.exit_if(
+                        loop,
+                        IR.BRANCH.LE,
+                        Load.TEMP(stage.counter_il_name, int_type),
+                        Literal.NUMBER(0, int_type))
                 fi
             od
 
-            gen(move_next, context)
-            _branch(context, "brfalse", System.Reflection.Metadata.ILOpCode.BRFALSE, loop_end)
-
-            _declare(context, element_il_name, element_type)
-            gen(read_current, context)
-            _stloc(context, element_il_name)
+            expansion.exit_if(loop, IR.BRANCH.Z, move_next)
+            expansion.store(expansion.local(element_il_name, element_type), read_current)
 
             for stage in stages do
-                if stage.is_take then
-                    // This element spends one of the take's count; the check
-                    // at the top of the loop decides when to stop.
-                    _ldloc(context, stage.counter_il_name)
-                    _ldc_i4(context, 1)
-                    _op(context, "sub", System.Reflection.Metadata.ILOpCode.SUB)
-                    _stloc(context, stage.counter_il_name)
-                elif stage.is_skip then
-                    // Decrement; while the counter stays non-negative this is
-                    // a leading element to drop, so pull the next one.
-                    _gen_countdown(context, stage)
-                    _branch(context, "bge", System.Reflection.Metadata.ILOpCode.BGE, loop_start)
+                if stage.is_countdown then
+                    // This element spends one of the stage's count. A take's
+                    // check at the top of the loop decides when to stop; a
+                    // skip drops the element while its counter stays
+                    // non-negative.
+                    let counter = TEMPORARY(stage.counter_il_name, int_type)
+
+                    expansion.store(
+                        counter,
+                        INT_ARITHMETIC(
+                            System.Reflection.Metadata.ILOpCode.SUB,
+                            counter.load(),
+                            Literal.NUMBER(1, int_type),
+                            int_type))
+
+                    if stage.is_skip then
+                        expansion.continue_if(loop, IR.BRANCH.GE, counter.load(), Literal.NUMBER(0, int_type))
+                    fi
                 elif stage.is_filter then
-                    gen(stage.apply, context)
-                    _branch(context, "brfalse", System.Reflection.Metadata.ILOpCode.BRFALSE, loop_start)
+                    expansion.continue_if(loop, IR.BRANCH.Z, stage.apply)
                 else
-                    _declare(context, stage.output_il_name, stage.output_type!)
-                    gen(stage.apply, context)
-                    _stloc(context, stage.output_il_name)
+                    expansion.store(expansion.local(stage.output_il_name, stage.output_type!), stage.apply)
                 fi
             od
 
-            _gen_element_body(context, loop_start, loop_end)
+            _expand_element_body(expansion, loop, result, int_type)
 
-            _branch(context, "br", System.Reflection.Metadata.ILOpCode.BR, loop_start)
-
-            _mark(context, loop_end)
+            expansion.close(loop)
 
             if let derived = finish then
-                gen(derived, context)
+                expansion.add(derived)
             elif !is_void then
-                _ldloc(context, result_il_name)
+                expansion.add(result.load())
             fi
-        si
 
-        // A skip stage's countdown: decrement the running counter, leaving
-        // both the new value in the local and a copy on the stack for the
-        // caller to compare against zero.
-        _gen_countdown(context: IR.CONTEXT, stage: FUSED_CONSUMER_STAGE) is
-            _ldloc(context, stage.counter_il_name)
-            _ldc_i4(context, 1)
-            _op(context, "sub", System.Reflection.Metadata.ILOpCode.SUB)
-            _op(context, "dup", System.Reflection.Metadata.ILOpCode.DUP)
-            _stloc(context, stage.counter_il_name)
-            _ldc_i4(context, 0)
+            return expansion.result
         si
 
         // Initialise the result local before the loop.
-        _gen_result_init(context: IR.CONTEXT) is
+        _expand_result_init(expansion: IR.EXPANSION, result: IR.TEMPORARY, int_type: Type) is
             if consumer_kind =~ "count" \/ consumer_kind =~ "any" then
                 // count starts at 0; any starts false (0).
-                _ldc_i4(context, 0)
-                _stloc(context, result_il_name)
+                expansion.store(result, Literal.NUMBER(0, result.type))
             elif consumer_kind =~ "all" then
-                _ldc_i4(context, 1)
-                _stloc(context, result_il_name)
+                expansion.store(result, Literal.NUMBER(1, result.type))
             elif presize_array then
                 // The array, allocated at the source's count, and the
                 // index the loop writes at, from zero.
-                let body = context.current_srm_body_emitter!
-
-                _gen_presize_count(context)
-                body.new_array(context.resolve_type_token(presize_element_type!))
-                _stloc(context, result_il_name)
-
-                _declare(context, presize_index_il_name!, IoC.CONTAINER.instance.innate_symbol_lookup.get_int_type())
-                _ldc_i4(context, 0)
-                _stloc(context, presize_index_il_name!)
+                expansion.store(result, NEW_ARRAY(result.type, presize_element_type!, presize_count!))
+                expansion.store(expansion.local(presize_index_il_name!, int_type), Literal.NUMBER(0, int_type))
             elif let seed = seed_init then
                 // reduce (seed), find / first (empty MAYBE), collect (list),
                 // join (the interpolation handler).
-                gen(seed, context)
-                _stloc(context, result_il_name)
+                expansion.store(result, seed)
             fi
 
             if let separator = join_separator_init, name = join_separator_il_name then
-                _declare(context, name, join_separator_type!)
-                gen(separator, context)
-                _stloc(context, name)
+                let bool_type = IoC.CONTAINER.instance.innate_symbol_lookup.get_bool_type()
 
-                _declare(context, join_seen_il_name!, IoC.CONTAINER.instance.innate_symbol_lookup.get_bool_type())
-                _ldc_i4(context, 0)
-                _stloc(context, join_seen_il_name!)
+                expansion.store(expansion.local(name, join_separator_type!), separator)
+                expansion.store(expansion.local(join_seen_il_name!, bool_type), Literal.NUMBER(0, bool_type))
             fi
-        si
-
-        _gen_presize_count(context: IR.CONTEXT) is
-            gen(presize_count!, context)
         si
 
         // Per-element consumer body (after the stages have produced the
         // surviving element).
-        _gen_element_body(context: IR.CONTEXT, loop_start: IR.LABEL, loop_end: IR.LABEL) is
+        _expand_element_body(expansion: IR.EXPANSION, loop: LOOP, result: IR.TEMPORARY, int_type: Type) is
+            let element = Load.TEMP(final_element_il_name, final_element_type)
+
             if consumer_kind =~ "count" then
-                _ldloc(context, result_il_name)
-                _ldc_i4(context, 1)
-                _op(context, "add", System.Reflection.Metadata.ILOpCode.ADD)
-                _stloc(context, result_il_name)
+                expansion.store(result, _add(result.load(), Literal.NUMBER(1, result.type), result.type))
             elif consumer_kind =~ "any" then
-                let next = IR.LABEL()
-                gen(consumer_apply!, context)
-                _branch(context, "brfalse", System.Reflection.Metadata.ILOpCode.BRFALSE, next)
-                _ldc_i4(context, 1)
-                _stloc(context, result_il_name)
-                _branch(context, "br", System.Reflection.Metadata.ILOpCode.BR, loop_end)
-                _mark(context, next)
+                _expand_answer(expansion, loop, result, IR.BRANCH.Z, Literal.NUMBER(1, result.type))
             elif consumer_kind =~ "all" then
-                let next = IR.LABEL()
-                gen(consumer_apply!, context)
-                _branch(context, "brtrue", System.Reflection.Metadata.ILOpCode.BRTRUE, next)
-                _ldc_i4(context, 0)
-                _stloc(context, result_il_name)
-                _branch(context, "br", System.Reflection.Metadata.ILOpCode.BR, loop_end)
-                _mark(context, next)
+                _expand_answer(expansion, loop, result, IR.BRANCH.NZ, Literal.NUMBER(0, result.type))
             elif consumer_kind =~ "each" then
-                gen(consumer_apply!, context)
+                expansion.add(consumer_apply!)
             elif consumer_kind =~ "reduce" then
-                gen(consumer_apply!, context)
-                _stloc(context, result_il_name)
+                expansion.store(result, consumer_apply!)
             elif consumer_kind =~ "join" then
                 // The separator goes in ahead of every element but the
                 // first, then the element's own text, as the runtime's
                 // append_to writes it.
-                let next = IR.LABEL()
+                let bool_type = IoC.CONTAINER.instance.innate_symbol_lookup.get_bool_type()
+                let seen = TEMPORARY(join_seen_il_name!, bool_type)
+                let first = expansion.region()
 
-                _ldloc(context, join_seen_il_name!)
-                _branch(context, "brfalse", System.Reflection.Metadata.ILOpCode.BRFALSE, next)
-                gen(join_append_separator!, context)
-                _mark(context, next)
+                expansion.exit_if(first, IR.BRANCH.Z, seen.load())
+                expansion.add(join_append_separator!)
+                expansion.close(first)
 
-                gen(join_append_element!, context)
-
-                _ldc_i4(context, 1)
-                _stloc(context, join_seen_il_name!)
+                expansion.add(join_append_element!)
+                expansion.store(seen, Literal.NUMBER(1, bool_type))
             elif consumer_kind =~ "sum_by" then
-                // running = running + selector(element).
-                _ldloc(context, result_il_name)
-                gen(consumer_apply!, context)
-                _op(context, "add", System.Reflection.Metadata.ILOpCode.ADD)
-                _stloc(context, result_il_name)
+                expansion.store(result, _add(result.load(), consumer_apply!, result.type))
             elif consumer_kind =~ "sum" then
-                // running = running + element, as the one instruction the
-                // element type's own `+` is. A type whose addition is an
-                // operator method declines at recognition.
-                _ldloc(context, result_il_name)
-                gen(Load.TEMP(final_element_il_name, final_element_type), context)
-                _op(context, "add", System.Reflection.Metadata.ILOpCode.ADD)
-                _stloc(context, result_il_name)
+                // As the one instruction the element type's own `+` is. A
+                // type whose addition is an operator method declines at
+                // recognition.
+                expansion.store(result, _add(result.load(), element, result.type))
             elif consumer_kind =~ "find" then
-                let next = IR.LABEL()
-                gen(consumer_apply!, context)
-                _branch(context, "brfalse", System.Reflection.Metadata.ILOpCode.BRFALSE, next)
-                gen(wrap_element!, context)
-                _stloc(context, result_il_name)
-                _branch(context, "br", System.Reflection.Metadata.ILOpCode.BR, loop_end)
-                _mark(context, next)
+                _expand_answer(expansion, loop, result, IR.BRANCH.Z, wrap_element!)
             elif consumer_kind =~ "first" then
-                gen(wrap_element!, context)
-                _stloc(context, result_il_name)
-                _branch(context, "br", System.Reflection.Metadata.ILOpCode.BR, loop_end)
+                expansion.store(result, wrap_element!)
+                expansion.exit(loop)
             elif presize_array then
-                // result[index] = element; index = index + 1
-                let body = context.current_srm_body_emitter!
                 let element_type = presize_element_type!
-                let index = presize_index_il_name!
+                let index = TEMPORARY(presize_index_il_name!, int_type)
 
-                _ldloc(context, result_il_name)
-                _ldloc(context, index)
-                gen(
-                    IoC.CONTAINER.instance.value_boxer.box_if_needed(
-                        Load.TEMP(final_element_il_name, final_element_type), element_type),
-                    context)
-                body.store_element(context.resolve_type_token(element_type))
+                expansion.add(
+                    STORE_ARRAY_ELEMENT(
+                        result.load(),
+                        index.load(),
+                        IoC.CONTAINER.instance.value_boxer.box_if_needed(element, element_type),
+                        element_type))
 
-                _ldloc(context, index)
-                _ldc_i4(context, 1)
-                _op(context, "add", System.Reflection.Metadata.ILOpCode.ADD)
-                _stloc(context, index)
+                expansion.store(index, _add(index.load(), Literal.NUMBER(1, int_type), int_type))
             elif consumer_kind =~ "collect" \/ consumer_kind =~ "collect_array" then
-                gen(add_element!, context)
+                expansion.add(add_element!)
             fi
         si
+
+        // Unless the consumer's argument answers `skip` for this element,
+        // the loop stops with `answer` as the result.
+        _expand_answer(expansion: IR.EXPANSION, loop: LOOP, result: IR.TEMPORARY, skip: IR.BRANCH, answer: Value) is
+            let next = expansion.region()
+
+            expansion.exit_if(next, skip, consumer_apply!)
+            expansion.store(result, answer)
+            expansion.exit(loop)
+            expansion.close(next)
+        si
+
+        _add(left: Value, right: Value, type: Type) -> Value =>
+            INT_ARITHMETIC(System.Reflection.Metadata.ILOpCode.ADD, left, right, type)
 
         to_string() -> string =>
             "fused-consumer:[{consumer_kind}]({_result_type})"

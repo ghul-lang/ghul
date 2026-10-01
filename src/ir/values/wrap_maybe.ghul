@@ -7,16 +7,6 @@ namespace IR.Values is
     // bridged by a null test: the present path wraps the reference
     // with MAYBE<T>::.ctor(T), the absent path yields the empty MAYBE.
     //
-    //   <value IL>          // [..., a]
-    //   dup                 // [..., a, a]
-    //   brtrue <present>    // pops one a
-    //   pop                 // [...]
-    //   <absent IL>         // [..., empty MAYBE]
-    //   br <end>
-    //   <present>:
-    //   newobj MAYBE<T>::.ctor(T)
-    //   <end>:
-    //
     // Built by VALUE_BOXER.wrap_if_needed. The value-type optional
     // sources (NULLABLE[T], another MAYBE instantiation) go through
     // NULL_COALESCE_VALUE instead, since presence there is a member
@@ -41,24 +31,56 @@ namespace IR.Values is
             self._absent = Values.DEFAULT(maybe_type)
         si
 
+        expand() -> BLOCK is
+            let expansion = IR.EXPANSION(type)
+            let source = expansion.temp("wrap_maybe", value.type!)
+
+            expansion.store(source, value)
+
+            let result = expansion.temp("maybe", type)
+
+            let done = expansion.region()
+            let absent = expansion.region()
+
+            expansion.exit_if(absent, IR.BRANCH.Z, source.load())
+            expansion.store(result, CONSTRUCT_MAYBE(_maybe_type, source.load()))
+            expansion.exit(done)
+            expansion.close(absent)
+
+            expansion.store(result, _absent)
+            expansion.close(done)
+
+            expansion.add(result.load())
+
+            return expansion.result
+        si
+
         gen(context: IR.CONTEXT) is
-            let present_label = IR.LABEL()
-            let end_label = IR.LABEL()
-
-            gen(value, context)
-
-            let body = context.current_srm_body_emitter!
-                body.op(System.Reflection.Metadata.ILOpCode.DUP)
-                body.branch(System.Reflection.Metadata.ILOpCode.BRTRUE, present_label)
-                body.op(System.Reflection.Metadata.ILOpCode.POP)
-                gen(_absent, context)
-                body.branch(System.Reflection.Metadata.ILOpCode.BR, end_label)
-                body.mark_label(present_label)
-                body.new_object(context.resolve_generic_constructor(_maybe_type, 1))
-                body.mark_label(end_label)
+            IR.EXPANSION.gen(expand(), context)
         si
 
         to_string() -> string =>
             "wrap-maybe:[{_maybe_type}]({value})"
+    si
+
+    // A MAYBE[T] holding `value`.
+    class CONSTRUCT_MAYBE: Value is
+        type: Type
+        value: Value
+
+        init(maybe_type: Type, value: Value) is
+            super.init()
+
+            self.type = maybe_type
+            self.value = value
+        si
+
+        gen(context: IR.CONTEXT) is
+            gen(value, context)
+
+            context.current_srm_body_emitter!.new_object(context.resolve_generic_constructor(type, 1))
+        si
+
+        to_string() -> string => "construct-maybe:[{type}]({value})"
     si
 si
