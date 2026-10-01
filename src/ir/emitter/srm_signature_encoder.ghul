@@ -12,7 +12,7 @@ namespace IR.Emitter is
     // signature blob.
     //
     // The shape mirrors Symbols.Classy.gen_type's decision tree — the
-    // il_is_primitive_type short-circuit, then a class-versus-valuetype
+    // built-in type short-circuit, then a class-versus-valuetype
     // split, then generic instantiation — with metadata handles in place
     // of the text that path appends. Keeping the two in step matters:
     // a methodref whose signature disagrees with the target's own
@@ -431,7 +431,7 @@ namespace IR.Emitter is
         si
 
         is_void(type: Semantic.Types.Type) -> bool static =>
-            type.symbol.il_name_override =~ "void"
+            type.symbol.built_in_type =~ Semantic.Symbols.BuiltInType.VOID
 
         encode_type(encoder: SignatureTypeEncoder, type: Semantic.Types.Type) is
             if let array: Semantic.Types.ARRAY = type then
@@ -473,8 +473,8 @@ namespace IR.Emitter is
                 return
             fi
 
-            if symbol.il_is_primitive_type then
-                encode_primitive(encoder, symbol.il_name_override ?? "")
+            if let built_in = symbol.built_in_type then
+                encode_built_in(encoder, built_in)
 
                 return
             fi
@@ -497,8 +497,7 @@ namespace IR.Emitter is
             fi
 
             // string and object have dedicated element-type codes rather
-            // than a typeref, and il_is_primitive_type does not cover
-            // them — neither is a CLR primitive. A signature spelling
+            // than a typeref, and are not built-in types — neither is a CLR primitive. A signature spelling
             // them as a class reference is well-formed, but no other
             // assembly declares them that way, so a methodref built from
             // one binds to nothing.
@@ -530,68 +529,48 @@ namespace IR.Emitter is
             encoder.`type(handle, classy.is_value_type)
         si
 
-        encode_primitive(encoder: SignatureTypeEncoder, il_name: string) static is
-            if il_name =~ "bool" then
-                encoder.boolean()
-            elif il_name =~ "char" then
-                encoder.char()
-            elif il_name =~ "int8" then
-                encoder.sbyte()
-            elif il_name =~ "unsigned int8" then
-                encoder.byte()
-            elif il_name =~ "int16" then
-                encoder.int16()
-            elif il_name =~ "unsigned int16" then
-                encoder.uint16()
-            elif il_name =~ "int32" then
-                encoder.int32()
-            elif il_name =~ "unsigned int32" then
-                encoder.uint32()
-            elif il_name =~ "int64" then
-                encoder.int64()
-            elif il_name =~ "unsigned int64" then
-                encoder.uint64()
-            elif il_name =~ "native int" then
-                encoder.int_ptr()
-            elif il_name =~ "native unsigned int" then
-                encoder.uint_ptr()
-            elif il_name =~ "float32" then
-                encoder.single()
-            elif il_name =~ "float64" then
-                encoder.double()
+        encode_built_in(encoder: SignatureTypeEncoder, built_in: Semantic.Symbols.BuiltInType) static is
+            case built_in
+            when Semantic.Symbols.BuiltInType.BOOL then encoder.boolean()
+            when Semantic.Symbols.BuiltInType.CHAR then encoder.char()
+            when Semantic.Symbols.BuiltInType.INT8 then encoder.sbyte()
+            when Semantic.Symbols.BuiltInType.UINT8 then encoder.byte()
+            when Semantic.Symbols.BuiltInType.INT16 then encoder.int16()
+            when Semantic.Symbols.BuiltInType.UINT16 then encoder.uint16()
+            when Semantic.Symbols.BuiltInType.INT32 then encoder.int32()
+            when Semantic.Symbols.BuiltInType.UINT32 then encoder.uint32()
+            when Semantic.Symbols.BuiltInType.INT64 then encoder.int64()
+            when Semantic.Symbols.BuiltInType.UINT64 then encoder.uint64()
+            when Semantic.Symbols.BuiltInType.INT_NATIVE then encoder.int_ptr()
+            when Semantic.Symbols.BuiltInType.UINT_NATIVE then encoder.uint_ptr()
+            when Semantic.Symbols.BuiltInType.FLOAT32 then encoder.single()
+            when Semantic.Symbols.BuiltInType.FLOAT64 then encoder.double()
             else
                 throw System.NotImplementedException(
-                    "the binary back end cannot encode the primitive type '{il_name}' yet")
-            fi
+                    "the binary back end cannot encode the built-in type {built_in} here")
+            esac
         si
 
-        // A primitive's il_name_override is the assembler keyword, which
-        // is what a signature needs and what a reference must never
-        // carry: there is no type called `int32`. Named here so that a
-        // member reached through a primitive owner - `to_string` on an
-        // `int` - names the type the runtime knows.
-        //
-        // Written as a chain rather than a `case` because `case` over a
-        // string compares by reference, so only interned literals match
-        // and a computed name silently falls through.
-        clr_name_for_primitive(il_name: string) -> string? static =>
-            if il_name =~ "bool" then "System.Boolean"
-            elif il_name =~ "char" then "System.Char"
-            elif il_name =~ "int8" then "System.SByte"
-            elif il_name =~ "unsigned int8" then "System.Byte"
-            elif il_name =~ "int16" then "System.Int16"
-            elif il_name =~ "unsigned int16" then "System.UInt16"
-            elif il_name =~ "int32" then "System.Int32"
-            elif il_name =~ "unsigned int32" then "System.UInt32"
-            elif il_name =~ "int64" then "System.Int64"
-            elif il_name =~ "unsigned int64" then "System.UInt64"
-            elif il_name =~ "native int" then "System.IntPtr"
-            elif il_name =~ "native unsigned int" then "System.UIntPtr"
-            elif il_name =~ "float32" then "System.Single"
-            elif il_name =~ "float64" then "System.Double"
-            elif il_name =~ "void" then "System.Void"
-            else null
-            fi
+        // The name the runtime knows a built-in type by, so that a member
+        // reached through one - to_string on an int - names its owner.
+        clr_name_for(built_in: Semantic.Symbols.BuiltInType) -> string static =>
+            case built_in
+            when Semantic.Symbols.BuiltInType.VOID then "System.Void"
+            when Semantic.Symbols.BuiltInType.BOOL then "System.Boolean"
+            when Semantic.Symbols.BuiltInType.CHAR then "System.Char"
+            when Semantic.Symbols.BuiltInType.INT8 then "System.SByte"
+            when Semantic.Symbols.BuiltInType.UINT8 then "System.Byte"
+            when Semantic.Symbols.BuiltInType.INT16 then "System.Int16"
+            when Semantic.Symbols.BuiltInType.UINT16 then "System.UInt16"
+            when Semantic.Symbols.BuiltInType.INT32 then "System.Int32"
+            when Semantic.Symbols.BuiltInType.UINT32 then "System.UInt32"
+            when Semantic.Symbols.BuiltInType.INT64 then "System.Int64"
+            when Semantic.Symbols.BuiltInType.UINT64 then "System.UInt64"
+            when Semantic.Symbols.BuiltInType.INT_NATIVE then "System.IntPtr"
+            when Semantic.Symbols.BuiltInType.UINT_NATIVE then "System.UIntPtr"
+            when Semantic.Symbols.BuiltInType.FLOAT32 then "System.Single"
+            when Semantic.Symbols.BuiltInType.FLOAT64 then "System.Double"
+            esac
 
         // A type this assembly defines is named by its own TypeDef row,
         // not by a reference; every other type resolves to a TypeRef.
