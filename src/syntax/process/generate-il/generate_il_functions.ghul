@@ -595,18 +595,17 @@ namespace Syntax.Process is
             // `_pre_async_function` (see its commentary). Awaits in
             // the closure body register with the outer holder unless
             // an inner `.try` pushes its own.
+            let move_next = _open_async_move_next()
+
             let outer_dispatch_holder =
                 _open_state_machine_entry(frame, frame.state_field, ".async_state")
 
-            let success_label = IR.LABEL()
-            let end_label = IR.LABEL()
-
             let prev_async_sm = _current_async_state_machine
-            let prev_success = _current_async_success_label
-            let prev_end = _current_async_end_label
+            let prev_success = _current_async_success
+            let prev_resumable = _current_async_resumable
             _current_async_state_machine = async_state_machine
-            _current_async_success_label = success_label
-            _current_async_end_label = end_label
+            _current_async_success = move_next.success
+            _current_async_resumable = move_next.resumable
 
             // The plain-closure path emits this before its body walk
             // too - here into MoveNext, after the state dispatch, where
@@ -623,13 +622,15 @@ namespace Syntax.Process is
             // result type's default.
             _gen_async_body_result(function.body, frame)
 
-            add(Values.BRANCH_TO(ILOpCode.LEAVE, success_label))
+            add(Values.BREAK(move_next.success, true))
 
             _current_async_state_machine = prev_async_sm
-            _current_async_success_label = prev_success
-            _current_async_end_label = prev_end
+            _current_async_success = prev_success
+            _current_async_resumable = prev_resumable
 
             _pop_async_dispatch_holder(outer_dispatch_holder)
+
+            _close_async_move_next(move_next)
 
             leave_block()
             leave_scope(function)
@@ -709,8 +710,7 @@ namespace Syntax.Process is
                 PENDING_ASYNC_STATE_MACHINE(
                     async_state_machine,
                     move_next_block,
-                    success_label,
-                    end_label
+                    move_next
                 )
             )
         si

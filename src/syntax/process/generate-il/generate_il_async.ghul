@@ -173,15 +173,12 @@ namespace Syntax.Process is
             // `leave` from the AwaitUnsafeOnCompleted path fires the
             // finally before exiting), and side effects must be
             // skipped.
+            // The entire MoveNext body lives inside a `.try` whose
+            // handler routes exceptions through `builder.SetException(e)`.
+            let move_next = _open_async_move_next()
+
             let outer_dispatch_holder =
                 _open_state_machine_entry(frame, frame.state_field, ".async_state")
-
-            // Labels used by the trailer: success fall-through and
-            // the end of the wrapping try/catch. The entire MoveNext
-            // body lives inside a `.try` whose handler routes
-            // exceptions through `builder.SetException(e)`.
-            let success_label = IR.LABEL()
-            let end_label = IR.LABEL()
 
             // Stash the emission context so visit(LET-await),
             // visit(AWAIT), and visit(RETURN) inside the body know
@@ -191,11 +188,11 @@ namespace Syntax.Process is
             // level (other functions, nested classes' visits)
             // goes through the standard paths.
             let prev_async_sm = _current_async_state_machine
-            let prev_success = _current_async_success_label
-            let prev_end = _current_async_end_label
+            let prev_success = _current_async_success
+            let prev_resumable = _current_async_resumable
             _current_async_state_machine = async_state_machine
-            _current_async_success_label = success_label
-            _current_async_end_label = end_label
+            _current_async_success = move_next.success
+            _current_async_resumable = move_next.resumable
 
             // Unpack any destructured formal arguments into their leaf
             // frame fields before the body reads them. The plain path's
@@ -214,17 +211,19 @@ namespace Syntax.Process is
             // leaving to success, exactly as `visit(RETURN)` puts it there.
             _gen_async_body_result(function.body, frame)
 
-            // Body fell off the end: leave success_label so the
+            // Body fell off the end: leave for the success path so the
             // trailer fires.
-            add(Values.BRANCH_TO(ILOpCode.LEAVE, success_label))
+            add(Values.BREAK(move_next.success, true))
 
             _current_async_state_machine = prev_async_sm
-            _current_async_success_label = prev_success
-            _current_async_end_label = prev_end
+            _current_async_success = prev_success
+            _current_async_resumable = prev_resumable
 
             // Populate the outer dispatch from the holder that
             // accumulated awaits not enclosed in any inner `.try`.
             _pop_async_dispatch_holder(outer_dispatch_holder)
+
+            _close_async_move_next(move_next)
 
             leave_block()
             leave_scope(function)
@@ -235,8 +234,7 @@ namespace Syntax.Process is
                 PENDING_ASYNC_STATE_MACHINE(
                     async_state_machine,
                     move_next_block,
-                    success_label,
-                    end_label
+                    move_next
                 )
             )
 
@@ -538,8 +536,7 @@ namespace Syntax.Process is
                     _emit_async_state_machine_class(
                         pasm.async_state_machine,
                         pasm.move_next_block,
-                        pasm.success_label,
-                        pasm.end_label
+                        pasm.move_next
                     )
                 od
             fi
@@ -554,8 +551,7 @@ namespace Syntax.Process is
         _emit_async_state_machine_class(
             async_state_machine: Semantic.Symbols.ASYNC_STATE_MACHINE,
             move_next_block: Values.BLOCK,
-            success_label: IR.LABEL,
-            end_label: IR.LABEL
+            move_next: ASYNC_MOVE_NEXT
         ) is
             let frame = async_state_machine.frame
 
@@ -574,7 +570,7 @@ namespace Syntax.Process is
                     IR.Emitter.FrameMember.MOVE_NEXT,
                     () is
                         _gen_async_move_next_srm(
-                            frame, move_next_block, success_label, end_label)
+                            frame, move_next_block, move_next)
                     si)
 
                 _emit_async_frame_member_body_srm(
@@ -613,73 +609,68 @@ namespace Syntax.Process is
             yrt
         si
 
-        // MoveNext, wrapped in the try/catch that routes an escaping
-        // exception through the builder. The success path falls out of
-        // the region to `success_label`, completes the task, and both
-        // paths meet at `end_label`.
+        // MoveNext: the body, inside the try whose handler routes an
+        // escaping exception through the builder. The success path
+        // leaves the success region and completes the task, and both
+        // paths meet at the end of the resumable body.
         _gen_async_move_next_srm(
             frame: Semantic.Symbols.ASYNC_STATE_MACHINE_FRAME,
             move_next_block: Values.BLOCK,
-            success_label: IR.LABEL,
-            end_label: IR.LABEL
+            move_next: ASYNC_MOVE_NEXT
         ) is
-            let body = _context.current_srm_body_emitter!
-
+            let void_type = _innate_symbol_lookup.get_void_type()
             let builder_field = frame.builder_field!
-            let builder_type = builder_field.type!
-            let exception_type = _innate_symbol_lookup.get_exception_type()
 
-            let state_field = _context.resolve_field_target(frame.state_field)
-            let builder_reference = _context.resolve_field_target(builder_field)
+            let handler = Values.CATCH(_innate_symbol_lookup.get_exception_type(), void_type)
 
-            let try_start = body.mark_region_boundary()
+            handler.clear_position()
+            handler.body.add(
+                Values.ASYNC_COMPLETION.failure(
+                    frame.state_field, builder_field, _innate_symbol_lookup.get_exception_type()))
+
+            let leave = Values.BREAK(move_next.resumable, true)
+
+            leave.clear_position()
+            handler.body.add(leave)
+
+            move_next.`try.catches.add(handler)
+
+            move_next.resumable.body.add(
+                Values.ASYNC_COMPLETION.success(frame.state_field, builder_field, frame.result_field))
 
             move_next_block.gen(_context)
-
-            let try_end = body.mark_region_boundary()
-            let handler_start = try_end
-
-            body.declare_local(_EXCEPTION_LOCAL, exception_type)
-            body.stloc(_EXCEPTION_LOCAL)
-            body.ldarg(0)
-            body.ldc_i4(-1)
-            body.stfld(state_field)
-            body.ldarg(0)
-            IR.Values.ASYNC_METHOD_LAUNCH.load_builder(body, builder_type, builder_reference)
-            body.ldloc(_EXCEPTION_LOCAL)
-            body.call(
-                _context.resolve_async_builder_set_exception(builder_type))
-            body.branch(System.Reflection.Metadata.ILOpCode.LEAVE, end_label)
-
-            let handler_end = body.mark_region_boundary()
-
-            body.add_catch_region(
-                try_start,
-                try_end,
-                handler_start,
-                handler_end,
-                _context.resolve_type_token(exception_type))
-
-            body.mark_label(success_label)
-            body.ldarg(0)
-            body.ldc_i4(-1)
-            body.stfld(state_field)
-            body.ldarg(0)
-            IR.Values.ASYNC_METHOD_LAUNCH.load_builder(body, builder_type, builder_reference)
-
-            let result_field = frame.result_field
-
-            if result_field? then
-                body.ldarg(0)
-                body.ldfld(_context.resolve_field_target(result_field))
-            fi
-
-            body.call(_context.resolve_async_builder_set_result(builder_type, result_field?))
-
-            body.mark_label(end_label)
         si
 
-        _EXCEPTION_LOCAL: string static => ".exception"
+        // Opens the structure an async MoveNext body is generated into.
+        // None of it is written in source, so none of it marks a
+        // position.
+        _open_async_move_next() -> ASYNC_MOVE_NEXT is
+            let void_type = _innate_symbol_lookup.get_void_type()
+
+            let resumable = Values.RESUMABLE(LABEL(), void_type)
+            let success = Values.REGION(LABEL(), void_type)
+            let `try = Values.TRY(LABEL(), void_type)
+
+            resumable.clear_position()
+            success.clear_position()
+            `try.clear_position()
+
+            _open_structured(resumable)
+            _open_structured(success)
+            _open_structured(`try)
+
+            return ASYNC_MOVE_NEXT(resumable, success, `try)
+        si
+
+        // Closes the structure, leaving the catch handler and the success
+        // path to be added when the state machine class is emitted.
+        _close_async_move_next(move_next: ASYNC_MOVE_NEXT) is
+            _close_try_body(move_next.`try)
+            move_next.`try.close()
+
+            _close_structured(move_next.success)
+            _close_structured(move_next.resumable)
+        si
 
         // The frame's constructor: chain to Object, then copy each
         // constructor argument into the field the lowering declared for
