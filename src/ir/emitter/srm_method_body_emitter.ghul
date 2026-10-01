@@ -21,7 +21,9 @@ namespace IR.Emitter is
     class SRM_METHOD_BODY_EMITTER is
         _encoder: InstructionEncoder
 
-        _local_slots: Collections.MAP[string, int]
+        // Only looked up, never enumerated: slots are numbered in the
+        // order locals are declared.
+        _local_slots: Collections.MAP[IR.LOCAL, int]
         _local_types: Collections.LIST[Type]
 
         // IR label to the encoder's own label. A branch can name a
@@ -66,7 +68,7 @@ namespace IR.Emitter is
         init() is
             _encoder = InstructionEncoder(BlobBuilder(32), ControlFlowBuilder())
 
-            _local_slots = Collections.MAP[string, int]()
+            _local_slots = Collections.MAP[IR.LOCAL, int]()
             _local_types = Collections.LIST[Type]()
             _labels = Collections.MAP[IR.LABEL, LabelHandle]()
             _region_labels = Collections.LIST[LabelHandle]()
@@ -147,40 +149,39 @@ namespace IR.Emitter is
             _encoder.branch(op_code, _label(label))
         si
 
-        // Declaring the same name twice is not an error: at least one
+        // Declaring the same local twice is not an error: at least one
         // value declares its temp on both arms of a branch. The first
-        // declaration wins, so the slot a later load resolves to is
-        // the one already in use.
-        declare_local(name: string, type: Type) -> int is
-            if _local_slots.contains_key(name) then
-                return _local_slots[name]
+        // declaration gives the local its slot.
+        declare_local(local: IR.LOCAL) -> int is
+            if _local_slots.contains_key(local) then
+                return _local_slots[local]
             fi
 
             let slot = _local_types.count
 
-            _local_types.add(type)
-            _local_slots[name] = slot
+            _local_types.add(local.type)
+            _local_slots[local] = slot
 
             return slot
         si
 
-        // A load of a name that was never declared means the value that
-        // declares it has no binary branch yet. Failing here names the
-        // local, which is a far shorter path to the culprit than the
-        // invalid program it would otherwise produce.
-        _slot(name: string) -> int is
-            assert _local_slots.contains_key(name) else
-                "local '{name}' is loaded but never declared"
+        // A load of a local that was never declared means whatever built
+        // it did not declare it. Failing here names the local, which is a
+        // far shorter path to the culprit than the invalid program it
+        // would otherwise produce.
+        _slot(local: IR.LOCAL) -> int is
+            assert _local_slots.contains_key(local) else
+                "local '{local.name}' is loaded but never declared"
 
-            return _local_slots[name]
+            return _local_slots[local]
         si
 
         has_locals: bool => _local_types.count > 0
         local_types: Collections.List[Type] => _local_types
 
-        ldloc(name: string) is _push(); _encoder.load_local(_slot(name)); si
-        stloc(name: string) is _encoder.store_local(_slot(name)); si
-        ldloca(name: string) is _push(); _encoder.load_local_address(_slot(name)); si
+        ldloc(local: IR.LOCAL) is _push(); _encoder.load_local(_slot(local)); si
+        stloc(local: IR.LOCAL) is _encoder.store_local(_slot(local)); si
+        ldloca(local: IR.LOCAL) is _push(); _encoder.load_local_address(_slot(local)); si
 
         ldarg(index: int) is _push(); _encoder.load_argument(index); si
         starg(index: int) is _encoder.store_argument(index); si

@@ -5,7 +5,7 @@ namespace IR.Values is
     // delegate is hoisted into a local (built once) and `apply` invokes it
     // on the current element, yielding either a bool (a `filter` stage -
     // branch to the next element when false) or the transformed element (a
-    // `map` stage - stored into `output_il_name` for the next stage). The
+    // `map` stage - stored into `output` for the next stage). The
     // delegate is called rather than inlined so a lambda that captures an
     // enclosing local (or nests another closure) keeps its normal capture
     // context.
@@ -16,20 +16,18 @@ namespace IR.Values is
     @suppress("field-definite-assignment")
     class FUSED_CONSUMER_STAGE is
         is_filter: bool public
-        delegate_il_name: string public
-        delegate_type: Type public
+        delegate_local: IR.LOCAL public
         delegate_init: Value public
         apply: Value public
-        output_il_name: string public
-        output_type: Type? public
+        output: IR.LOCAL? public
 
         // A `take`/`skip` stage carries no delegate: the count is evaluated
-        // once into `counter_il_name` and each element decrements it (the
+        // once into `counter` and each element decrements it (the
         // loop stops pulling once a take's runs out, skip drops the element
         // while its remains). `is_countdown` marks either.
         is_take: bool public
         is_skip: bool public
-        counter_il_name: string public
+        counter: IR.LOCAL public
         count_init: Value? public
 
         // An index stage carries a running counter like a countdown does,
@@ -39,29 +37,26 @@ namespace IR.Values is
 
         is_countdown: bool => is_take \/ is_skip
 
-        init(is_filter: bool, delegate_il_name: string, delegate_type: Type, delegate_init: Value, apply: Value, output_il_name: string, output_type: Type?) is
+        init(is_filter: bool, delegate_local: IR.LOCAL, delegate_init: Value, apply: Value, output: IR.LOCAL?) is
             self.is_filter = is_filter
-            self.delegate_il_name = delegate_il_name
-            self.delegate_type = delegate_type
+            self.delegate_local = delegate_local
             self.delegate_init = delegate_init
             self.apply = apply
-            self.output_il_name = output_il_name
-            self.output_type = output_type
+            self.output = output
         si
 
-        init(is_take: bool, is_skip: bool, counter_il_name: string, count_init: Value) is
+        init(is_take: bool, is_skip: bool, counter: IR.LOCAL, count_init: Value) is
             self.is_take = is_take
             self.is_skip = is_skip
-            self.counter_il_name = counter_il_name
+            self.counter = counter
             self.count_init = count_init
         si
 
-        init(counter_il_name: string, start_init: Value, output_il_name: string, output_type: Type, apply: Value) is
+        init(counter: IR.LOCAL, start_init: Value, output: IR.LOCAL, apply: Value) is
             self.is_index = true
-            self.counter_il_name = counter_il_name
+            self.counter = counter
             self.count_init = start_init
-            self.output_il_name = output_il_name
-            self.output_type = output_type
+            self.output = output
             self.apply = apply
         si
     si
@@ -83,21 +78,18 @@ namespace IR.Values is
         // read_current drive it.
         has_iterator: bool public
         iterator_init: Value public
-        iterator_il_name: string public
-        iterator_type: Type public
+        iterator: IR.LOCAL public
         move_next: Value public
         read_current: Value public
 
         // The element local the innermost stage reads.
-        element_il_name: string public
-        element_type: Type public
+        element: IR.LOCAL public
 
         stages: Collections.List[FUSED_CONSUMER_STAGE] public
 
         // The surviving element after every stage - what the consumer body
         // operates on (`collect` adds it, `find` returns it, ...).
-        final_element_il_name: string public
-        final_element_type: Type public
+        final_element: IR.LOCAL public
 
         // Consumer specifics.
         consumer_kind: string public
@@ -108,10 +100,9 @@ namespace IR.Values is
         // before the loop, and whether anything has been written yet.
         // A flag rather than the handler's own length, because an
         // element whose text is empty still counts as written.
-        join_separator_il_name: string? public
-        join_separator_type: Semantic.Types.Type? public
+        join_separator: IR.LOCAL? public
         join_separator_init: Value? public
-        join_seen_il_name: string? public
+        join_seen: IR.LOCAL? public
         join_append_separator: Value? public
         join_append_element: Value? public
 
@@ -119,7 +110,7 @@ namespace IR.Values is
         // values (a `reduce` accumulator) can reference it. It holds the
         // consumer's own type unless `result_local_type` says otherwise:
         // `collect` fills a list there and its `finish` derives the array.
-        result_il_name: string public
+        result: IR.LOCAL public
         result_local_type: Type? public
 
         // A consumer with a function argument (`any`/`all`/`find`/`each`
@@ -127,8 +118,7 @@ namespace IR.Values is
         // the delegate is built once. `consumer_apply` is that argument
         // applied per element (to the final element, and for `reduce` the
         // running result too), pre-built against the hoisted local.
-        consumer_arg_il_name: string? public
-        consumer_arg_type: Type? public
+        consumer_arg: IR.LOCAL? public
         consumer_arg_init: Value? public
         consumer_apply: Value? public
 
@@ -154,8 +144,7 @@ namespace IR.Values is
         // its iterator and for its count. `iterator_init` and the count
         // are then pre-built over that local. Absent, `iterator_init`
         // evaluates the source itself.
-        source_il_name: string? public
-        source_type: Type? public
+        source: IR.LOCAL? public
         source_init: Value? public
 
         // A collect over a source whose count is known before the loop,
@@ -163,12 +152,12 @@ namespace IR.Values is
         // list result the count is the capacity `seed_init` was built
         // with. For an array result `presize_array` is set,
         // `presize_count` is the count pre-built over the source local,
-        // and the loop writes each element at `presize_index_il_name`
+        // and the loop writes each element at `presize_index`
         // into an array allocated at that count, so no list is filled
         // and no copy is made.
         presize_count: Value? public
         presize_array: bool public
-        presize_index_il_name: string? public
+        presize_index: IR.LOCAL? public
         presize_element_type: Type? public
 
         type: Type => _result_type
@@ -178,34 +167,28 @@ namespace IR.Values is
             result_type: Type,
             iterator_init: Value,
             has_iterator: bool,
-            iterator_il_name: string,
-            iterator_type: Type,
+            iterator: IR.LOCAL,
             move_next: Value,
             read_current: Value,
-            element_il_name: string,
-            element_type: Type,
+            element: IR.LOCAL,
             stages: Collections.List[FUSED_CONSUMER_STAGE],
-            final_element_il_name: string,
-            final_element_type: Type,
+            final_element: IR.LOCAL,
             consumer_kind: string,
-            result_il_name: string
+            result: IR.LOCAL
         ) is
             super.init()
 
             self._result_type = result_type
             self.iterator_init = iterator_init
             self.has_iterator = has_iterator
-            self.iterator_il_name = iterator_il_name
-            self.iterator_type = iterator_type
+            self.iterator = iterator
             self.move_next = move_next
             self.read_current = read_current
-            self.element_il_name = element_il_name
-            self.element_type = element_type
+            self.element = element
             self.stages = stages
-            self.final_element_il_name = final_element_il_name
-            self.final_element_type = final_element_type
+            self.final_element = final_element
             self.consumer_kind = consumer_kind
-            self.result_il_name = result_il_name
+            self.result = result
         si
 
         is_void: bool => Syntax.Process.PIPE_CONSUMER_KIND.is_void(consumer_kind)
@@ -223,20 +206,20 @@ namespace IR.Values is
             // A source read more than once - for its iterator and for its
             // count - is evaluated once, first, and everything below reads
             // the local.
-            if let name = source_il_name, type = source_type, init = source_init then
-                expansion.store(expansion.local(name, type), init)
+            if let local = source, init = source_init then
+                expansion.store(expansion.declare(local), init)
             fi
 
-            let result = TEMPORARY(result_il_name, result_local_type ?? _result_type)
+            result.type = result_local_type ?? _result_type
 
             if !is_void then
-                expansion.add(DECLARE_LOCAL(result.name, result.type))
+                expansion.declare(result)
                 _expand_result_init(expansion, result, int_type)
             fi
 
             // A consumer's function argument is built once into a local.
-            if let arg_name = consumer_arg_il_name, arg_type = consumer_arg_type, arg_init = consumer_arg_init then
-                expansion.store(expansion.local(arg_name, arg_type), arg_init)
+            if let local = consumer_arg, arg_init = consumer_arg_init then
+                expansion.store(expansion.declare(local), arg_init)
             fi
 
             // Each stage's lambda delegate is built once before the loop; a
@@ -244,9 +227,9 @@ namespace IR.Values is
             // count evaluated once.
             for stage in stages do
                 if stage.is_countdown \/ stage.is_index then
-                    expansion.store(expansion.local(stage.counter_il_name, int_type), stage.count_init!)
+                    expansion.store(expansion.declare(stage.counter), stage.count_init!)
                 else
-                    expansion.store(expansion.local(stage.delegate_il_name, stage.delegate_type), stage.delegate_init)
+                    expansion.store(expansion.declare(stage.delegate_local), stage.delegate_init)
                 fi
             od
 
@@ -254,7 +237,7 @@ namespace IR.Values is
             // the source's iterator member or the source is itself an
             // iterator (a value-type range), move_next / current drive it
             // through the local (by address for a value-type iterator).
-            expansion.store(expansion.local(iterator_il_name, iterator_type), iterator_init)
+            expansion.store(expansion.declare(iterator), iterator_init)
 
             let loop = expansion.loop()
 
@@ -266,13 +249,13 @@ namespace IR.Values is
                     expansion.exit_if(
                         loop,
                         IR.BRANCH.LE,
-                        Load.TEMP(stage.counter_il_name, int_type),
+                        stage.counter.load(),
                         Literal.NUMBER(0, int_type))
                 fi
             od
 
             expansion.exit_if(loop, IR.BRANCH.Z, move_next)
-            expansion.store(expansion.local(element_il_name, element_type), read_current)
+            expansion.store(expansion.declare(element), read_current)
 
             for stage in stages do
                 if stage.is_countdown then
@@ -280,7 +263,7 @@ namespace IR.Values is
                     // check at the top of the loop decides when to stop; a
                     // skip drops the element while its counter stays
                     // non-negative.
-                    let counter = TEMPORARY(stage.counter_il_name, int_type)
+                    let counter = stage.counter
 
                     expansion.store(
                         counter,
@@ -296,7 +279,7 @@ namespace IR.Values is
                 elif stage.is_filter then
                     expansion.continue_if(loop, IR.BRANCH.Z, stage.apply)
                 else
-                    expansion.store(expansion.local(stage.output_il_name, stage.output_type!), stage.apply)
+                    expansion.store(expansion.declare(stage.output!), stage.apply)
                 fi
             od
 
@@ -314,7 +297,7 @@ namespace IR.Values is
         si
 
         // Initialise the result local before the loop.
-        _expand_result_init(expansion: IR.EXPANSION, result: IR.TEMPORARY, int_type: Type) is
+        _expand_result_init(expansion: IR.EXPANSION, result: IR.LOCAL, int_type: Type) is
             if consumer_kind =~ "count" \/ consumer_kind =~ "any" then
                 // count starts at 0; any starts false (0).
                 expansion.store(result, Literal.NUMBER(0, result.type))
@@ -324,25 +307,25 @@ namespace IR.Values is
                 // The array, allocated at the source's count, and the
                 // index the loop writes at, from zero.
                 expansion.store(result, NEW_ARRAY(result.type, presize_element_type!, presize_count!))
-                expansion.store(expansion.local(presize_index_il_name!, int_type), Literal.NUMBER(0, int_type))
+                expansion.store(expansion.declare(presize_index!), Literal.NUMBER(0, int_type))
             elif let seed = seed_init then
                 // reduce (seed), find / first (empty MAYBE), collect (list),
                 // join (the interpolation handler).
                 expansion.store(result, seed)
             fi
 
-            if let separator = join_separator_init, name = join_separator_il_name then
-                let bool_type = IoC.CONTAINER.instance.innate_symbol_lookup.get_bool_type()
+            if let separator = join_separator_init, local = join_separator then
+                let seen = join_seen!
 
-                expansion.store(expansion.local(name, join_separator_type!), separator)
-                expansion.store(expansion.local(join_seen_il_name!, bool_type), Literal.NUMBER(0, bool_type))
+                expansion.store(expansion.declare(local), separator)
+                expansion.store(expansion.declare(seen), Literal.NUMBER(0, seen.type))
             fi
         si
 
         // Per-element consumer body (after the stages have produced the
         // surviving element).
-        _expand_element_body(expansion: IR.EXPANSION, loop: LOOP, result: IR.TEMPORARY, int_type: Type) is
-            let element = Load.TEMP(final_element_il_name, final_element_type)
+        _expand_element_body(expansion: IR.EXPANSION, loop: LOOP, result: IR.LOCAL, int_type: Type) is
+            let element = final_element.load()
 
             if consumer_kind =~ "count" then
                 expansion.store(result, _add(result.load(), Literal.NUMBER(1, result.type), result.type))
@@ -358,8 +341,7 @@ namespace IR.Values is
                 // The separator goes in ahead of every element but the
                 // first, then the element's own text, as the runtime's
                 // append_to writes it.
-                let bool_type = IoC.CONTAINER.instance.innate_symbol_lookup.get_bool_type()
-                let seen = TEMPORARY(join_seen_il_name!, bool_type)
+                let seen = join_seen!
                 let first = expansion.region()
 
                 expansion.exit_if(first, IR.BRANCH.Z, seen.load())
@@ -367,7 +349,7 @@ namespace IR.Values is
                 expansion.close(first)
 
                 expansion.add(join_append_element!)
-                expansion.store(seen, Literal.NUMBER(1, bool_type))
+                expansion.store(seen, Literal.NUMBER(1, seen.type))
             elif consumer_kind =~ "sum_by" then
                 expansion.store(result, _add(result.load(), consumer_apply!, result.type))
             elif consumer_kind =~ "sum" then
@@ -382,7 +364,7 @@ namespace IR.Values is
                 expansion.exit(loop)
             elif presize_array then
                 let element_type = presize_element_type!
-                let index = TEMPORARY(presize_index_il_name!, int_type)
+                let index = presize_index!
 
                 expansion.add(
                     STORE_ARRAY_ELEMENT(
@@ -399,7 +381,7 @@ namespace IR.Values is
 
         // Unless the consumer's argument answers `skip` for this element,
         // the loop stops with `answer` as the result.
-        _expand_answer(expansion: IR.EXPANSION, loop: LOOP, result: IR.TEMPORARY, skip: IR.BRANCH, answer: Value) is
+        _expand_answer(expansion: IR.EXPANSION, loop: LOOP, result: IR.LOCAL, skip: IR.BRANCH, answer: Value) is
             let next = expansion.region()
 
             expansion.exit_if(next, skip, consumer_apply!)

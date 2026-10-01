@@ -451,9 +451,6 @@ namespace Syntax.Process is
 
             let id = _next_fused_local_id()
 
-            let iterator_il_name = ".fc_iter.{id}"
-            let element_il_name = ".fc_element.{id}"
-
             let source_read_iterator = plan.source_read_iterator
 
             let iterator_type =
@@ -470,35 +467,35 @@ namespace Syntax.Process is
                     plan.source.value!
                 fi
 
-            let iterator_load = cast IR.Values.Value(IR.Values.Load.TEMP(iterator_il_name, iterator_type))
+            let iterator = IR.LOCAL(".fc_iter.{id}", iterator_type)
+            let iterator_load = iterator.load()
 
             let move_next = plan.source_move_next!.call(plan.source.location, iterator_load, Collections.LIST[IR.Values.Value](0), null, _function_caller)
             let read_current = plan.source_read_current!.call(plan.source.location, iterator_load, Collections.LIST[IR.Values.Value](0), null, _function_caller)
 
             let element_type = plan.source_read_current!.return_type!
 
-            let built = _build_consumer_stages(plan, element_il_name, element_type)
+            let element = IR.LOCAL(".fc_element.{id}", element_type)
 
-            let result_il_name = ".fc_result.{id}"
+            let built = _build_consumer_stages(plan, element)
+
+            let result = IR.LOCAL(".fc_result.{id}", call.value!.type!)
 
             let fused = IR.Values.FUSED_CONSUMER(
                 call.value!.type!,
                 iterator_init,
                 source_read_iterator?,
-                iterator_il_name,
-                iterator_type,
+                iterator,
                 move_next,
                 read_current,
-                element_il_name,
-                element_type,
+                element,
                 built.ops,
-                built.final_il_name,
-                built.final_type,
+                built.final,
                 consumer_kind,
-                result_il_name
+                result
             )
 
-            let final_element_load = cast IR.Values.Value(IR.Values.Load.TEMP(built.final_il_name, built.final_type))
+            let final_element_load = built.final.load()
 
             if PIPE_CONSUMER_KIND.takes_function(consumer_kind) then
                 // Hoist the predicate / action delegate and apply it to the
@@ -513,7 +510,7 @@ namespace Syntax.Process is
 
                 let func_type = function.type
 
-                let arg_il_name = ".fc_arg.{id}"
+                let arg = IR.LOCAL(".fc_arg.{id}", func_type)
 
                 let result_type =
                     if func_type.is_action then
@@ -537,41 +534,39 @@ namespace Syntax.Process is
                 let call_arguments = Collections.LIST[IR.Values.Value]()
                 call_arguments.add(final_element_load)
 
-                fused.consumer_arg_il_name = arg_il_name
-                fused.consumer_arg_type = func_type
+                fused.consumer_arg = arg
                 fused.consumer_arg_init = function
                 fused.consumer_apply = IR.Values.Call.CLOSURE(
-                    IR.Values.Load.TEMP(arg_il_name, func_type), result_type, func_type.is_action, func_type, call_arguments)
+                    arg.load(), result_type, func_type.is_action, func_type, call_arguments)
             elif consumer_kind =~ "reduce" then
                 // running = accumulator(running, element).
                 let seed = call.arguments.expressions[1].value!
                 let accumulator = call.arguments.expressions[2].value!
                 let func_type = accumulator.type!
 
-                let arg_il_name = ".fc_arg.{id}"
+                let arg = IR.LOCAL(".fc_arg.{id}", func_type)
                 let running_type = call.value!.type!
 
                 let call_arguments = Collections.LIST[IR.Values.Value]()
-                call_arguments.add(cast IR.Values.Value(IR.Values.Load.TEMP(result_il_name, running_type)))
+                call_arguments.add(cast IR.Values.Value(IR.Values.Load.TEMP(result, running_type)))
                 call_arguments.add(final_element_load)
 
                 fused.seed_init = seed
-                fused.consumer_arg_il_name = arg_il_name
-                fused.consumer_arg_type = func_type
+                fused.consumer_arg = arg
                 fused.consumer_arg_init = accumulator
                 fused.consumer_apply = IR.Values.Call.CLOSURE(
-                    IR.Values.Load.TEMP(arg_il_name, func_type), running_type, false, func_type, call_arguments)
+                    arg.load(), running_type, false, func_type, call_arguments)
             elif consumer_kind =~ "sum" then
                 // The running total starts at the element type's zero and
                 // the loop adds each element with one instruction. A type
                 // whose `+` is an operator method - decimal, bigint, an
                 // INumber implementor of its own - cannot be added that
                 // way, and keeps the runtime's sum.
-                if !_is_add_instruction_type(built.final_type) then
+                if !_is_add_instruction_type(built.final.type) then
                     return _decline_consumer(call, recognizer, consumer_kind, "sum-element-not-add-instruction")
                 fi
 
-                fused.seed_init = IR.Values.DEFAULT(built.final_type)
+                fused.seed_init = IR.Values.DEFAULT(built.final.type)
             fi
 
             // find / first return a MAYBE: seed with the empty MAYBE, and
@@ -612,7 +607,7 @@ namespace Syntax.Process is
                 add_args.add(final_element_load)
 
                 fused.add_element = add_fn.call(
-                    call.location, IR.Values.Load.TEMP(result_il_name, list_type), add_args, null, _function_caller)
+                    call.location, IR.Values.Load.TEMP(result, list_type), add_args, null, _function_caller)
             fi
 
             if consumer_kind =~ "collect_array" then
@@ -640,7 +635,7 @@ namespace Syntax.Process is
                 fi
 
                 let list_arguments = Collections.LIST[Type]()
-                list_arguments.add(built.final_type)
+                list_arguments.add(built.final.type)
 
                 let list_type =
                     cast Type(
@@ -665,11 +660,11 @@ namespace Syntax.Process is
                 add_args.add(final_element_load)
 
                 fused.add_element = add_fn.call(
-                    call.location, IR.Values.Load.TEMP(result_il_name, list_type), add_args, null, _function_caller)
+                    call.location, IR.Values.Load.TEMP(result, list_type), add_args, null, _function_caller)
 
                 fused.finish = to_array.call(
                     call.location,
-                    IR.Values.Load.TEMP(result_il_name, list_type),
+                    IR.Values.Load.TEMP(result, list_type),
                     Collections.LIST[IR.Values.Value](0),
                     null,
                     _function_caller)
@@ -686,13 +681,13 @@ namespace Syntax.Process is
                     return _decline_consumer(call, recognizer, consumer_kind, "join-separator-not-given")
                 fi
 
-                if !_build_fused_join(fused, call, id, result_il_name, final_element_load, built.final_type) then
+                if !_build_fused_join(fused, call, id, result, final_element_load, built.final.type) then
                     return _decline_consumer(call, recognizer, consumer_kind, "join-handler-unresolved")
                 fi
             fi
 
             if consumer_kind =~ "collect" \/ consumer_kind =~ "collect_array" then
-                _try_presize(fused, plan, call, consumer_kind, built.final_type)
+                _try_presize(fused, plan, call, consumer_kind, built.final.type)
             fi
 
             _note_fusion_site(call.location, _pipes_function_name(call) ?? consumer_kind, true, recognizer, true)
@@ -722,8 +717,8 @@ namespace Syntax.Process is
             let source_value = plan.source.value!
             let source_type = source_value.type!
 
-            let source_il_name = ".fc_source.{_next_fused_local_id()}"
-            let source_load = cast IR.Values.Value(IR.Values.Load.TEMP(source_il_name, source_type))
+            let source = IR.LOCAL(".fc_source.{_next_fused_local_id()}", source_type)
+            let source_load = source.load()
 
             let count = known_counts.count_of(plan.source, source_load, source_type, call.location)
 
@@ -731,8 +726,7 @@ namespace Syntax.Process is
                 return
             fi
 
-            fused.source_il_name = source_il_name
-            fused.source_type = source_type
+            fused.source = source
             fused.source_init = source_value
 
             fused.iterator_init =
@@ -745,7 +739,7 @@ namespace Syntax.Process is
             if consumer_kind =~ "collect_array" then
                 fused.presize_array = true
                 fused.presize_count = count
-                fused.presize_index_il_name = ".fc_fill.{_next_fused_local_id()}"
+                fused.presize_index = IR.LOCAL(".fc_fill.{_next_fused_local_id()}", _innate_symbol_lookup.get_int_type())
                 fused.presize_element_type = element_type
                 fused.result_local_type = null
                 fused.seed_init = null
@@ -862,11 +856,10 @@ namespace Syntax.Process is
         // typed local the next stage reads). Every stage is an inlinable
         // lambda: assign the current element to the lambda's parameter local,
         // then the harvested inline body is the applied value.
-        _build_consumer_stages(fusion: PIPE_FUSION, start_il_name: string, start_type: Type) -> (ops: Collections.LIST[IR.Values.FUSED_CONSUMER_STAGE], final_il_name: string, final_type: Type) is
+        _build_consumer_stages(fusion: PIPE_FUSION, start: IR.LOCAL) -> (ops: Collections.LIST[IR.Values.FUSED_CONSUMER_STAGE], final: IR.LOCAL) is
             let ops = Collections.LIST[IR.Values.FUSED_CONSUMER_STAGE]()
 
-            let current_il_name mut = start_il_name
-            let current_type mut = start_type
+            let current mut = start
 
             let index mut = fusion.stages_outermost_first.count - 1
 
@@ -876,9 +869,9 @@ namespace Syntax.Process is
                 if stage.is_countdown then
                     // take/skip: a running counter, no delegate and no
                     // output local - the element passes through unchanged.
-                    let counter_il_name = ".fc_countdown.{_next_fused_local_id()}"
+                    let counter = IR.LOCAL(".fc_countdown.{_next_fused_local_id()}", _innate_symbol_lookup.get_int_type())
 
-                    ops.add(IR.Values.FUSED_CONSUMER_STAGE(stage.is_take, stage.is_skip, counter_il_name, stage.argument!.value!))
+                    ops.add(IR.Values.FUSED_CONSUMER_STAGE(stage.is_take, stage.is_skip, counter, stage.argument!.value!))
 
                     index = index - 1
 
@@ -891,9 +884,9 @@ namespace Syntax.Process is
                     // counter is seeded with the caller's start where one
                     // was given, and with zero otherwise.
                     let int_type = _innate_symbol_lookup.get_int_type()
-                    let counter_il_name = ".fc_index.{_next_fused_local_id()}"
-                    let output_il_name = ".fc_indexed.{_next_fused_local_id()}"
+                    let counter = IR.LOCAL(".fc_index.{_next_fused_local_id()}", int_type)
                     let indexed_type = stage.indexed_value_type!
+                    let output = IR.LOCAL(".fc_indexed.{_next_fused_local_id()}", indexed_type)
 
                     let start =
                         if let start_expression = stage.argument then
@@ -904,20 +897,17 @@ namespace Syntax.Process is
 
                     let build_arguments = Collections.LIST[IR.Values.Value]()
                     build_arguments.add(
-                        cast IR.Values.Value(IR.Values.POST_INCREMENT(counter_il_name, int_type)))
-                    build_arguments.add(
-                        cast IR.Values.Value(IR.Values.Load.TEMP(current_il_name, current_type)))
+                        cast IR.Values.Value(IR.Values.POST_INCREMENT(counter, int_type)))
+                    build_arguments.add(current.load())
 
                     ops.add(
                         IR.Values.FUSED_CONSUMER_STAGE(
-                            counter_il_name,
+                            counter,
                             start,
-                            output_il_name,
-                            indexed_type,
+                            output,
                             IR.Values.NEW(indexed_type, stage.indexed_value_constructor!, build_arguments)))
 
-                    current_il_name = output_il_name
-                    current_type = indexed_type
+                    current = output
 
                     index = index - 1
 
@@ -927,7 +917,7 @@ namespace Syntax.Process is
                 let delegate = stage.argument!.value!
                 let func_type = delegate.type!
 
-                let delegate_il_name = ".fc_stage.{_next_fused_local_id()}"
+                let delegate_local = IR.LOCAL(".fc_stage.{_next_fused_local_id()}", func_type)
 
                 let result_type =
                     if func_type.is_action then
@@ -937,24 +927,25 @@ namespace Syntax.Process is
                     fi
 
                 let call_arguments = Collections.LIST[IR.Values.Value]()
-                call_arguments.add(cast IR.Values.Value(IR.Values.Load.TEMP(current_il_name, current_type)))
+                call_arguments.add(current.load())
 
                 let apply = cast IR.Values.Value(IR.Values.Call.CLOSURE(
-                    IR.Values.Load.TEMP(delegate_il_name, func_type), result_type, func_type.is_action, func_type, call_arguments))
+                    delegate_local.load(), result_type, func_type.is_action, func_type, call_arguments))
 
                 if stage.is_filter then
-                    ops.add(IR.Values.FUSED_CONSUMER_STAGE(true, delegate_il_name, func_type, delegate, apply, "", null))
+                    ops.add(IR.Values.FUSED_CONSUMER_STAGE(true, delegate_local, delegate, apply, null))
                 else
-                    ops.add(IR.Values.FUSED_CONSUMER_STAGE(false, delegate_il_name, func_type, delegate, apply, ".fc_map.{_next_fused_local_id()}", result_type))
+                    let output = IR.LOCAL(".fc_map.{_next_fused_local_id()}", result_type)
 
-                    current_il_name = ops[ops.count - 1].output_il_name
-                    current_type = result_type
+                    ops.add(IR.Values.FUSED_CONSUMER_STAGE(false, delegate_local, delegate, apply, output))
+
+                    current = output
                 fi
 
                 index = index - 1
             od
 
-            return (ops, current_il_name, current_type)
+            return (ops, current)
         si
 
         // Fill an index stage's INDEXED_VALUE type and constructor, and
@@ -1235,7 +1226,7 @@ namespace Syntax.Process is
             fused: IR.Values.FUSED_CONSUMER,
             call: Trees.Expressions.CALL,
             id: int,
-            result_il_name: string,
+            result: IR.LOCAL,
             element_load: IR.Values.Value,
             element_type: Type
         ) -> bool is
@@ -1261,7 +1252,7 @@ namespace Syntax.Process is
             fused.result_local_type = handler_type
             fused.seed_init = IR.Values.NEW(handler_type, ctor, ctor_arguments)
 
-            let handler_load = cast IR.Values.Value(IR.Values.Load.TEMP(result_il_name, handler_type))
+            let handler_load = cast IR.Values.Value(IR.Values.Load.TEMP(result, handler_type))
 
             // The caller's own separator, which the recogniser has already
             // required: the form that supplies none is declined there.
@@ -1271,15 +1262,16 @@ namespace Syntax.Process is
                 return false
             fi
 
-            fused.join_separator_il_name = ".fc_separator.{id}"
-            fused.join_separator_type = string_type
+            let separator_local = IR.LOCAL(".fc_separator.{id}", string_type)
+
+            fused.join_separator = separator_local
             fused.join_separator_init = separator
-            fused.join_seen_il_name = ".fc_seen.{id}"
+            fused.join_seen = IR.LOCAL(".fc_seen.{id}", _innate_symbol_lookup.get_bool_type())
 
             let separator_arguments = Collections.LIST[IR.Values.Value]()
 
             separator_arguments.add(
-                cast IR.Values.Value(IR.Values.Load.TEMP(fused.join_separator_il_name!, string_type)))
+                separator_local.load())
 
             fused.join_append_separator =
                 append_literal.call(call.location, handler_load, separator_arguments, null, _function_caller)
