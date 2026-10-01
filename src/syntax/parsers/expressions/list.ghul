@@ -38,11 +38,34 @@ namespace Syntax.Parsers.Expressions is
             do
                 expressions.add(expression)
 
-                if context.current.token != Lexical.TOKEN.COMMA then
+                let separated = context.current.token == Lexical.TOKEN.COMMA
+
+                // A second expression where the separator belongs is
+                // another element, not the end of the list: reading it as
+                // one leaves the list's own closer where the caller takes
+                // it, rather than as a statement in its own right.
+                if !separated /\ !_at_missing_separator(context, expression) then
                     return Trees.Expressions.LIST(start::expression.location, expressions)
                 fi
 
-                context.next_token()
+                if separated then
+                    context.next_token()
+                else
+                    // reported, and not taken: no comma is written, the
+                    // element after it is read as the next one
+                    context.expect_token(Lexical.TOKEN.COMMA)
+
+                    let before = context.location
+                    let next = parse_element(context)
+
+                    if !next? \/ context.location == before then
+                        break   // nothing read; do not read it again
+                    fi
+
+                    expression = next
+
+                    continue
+                fi
 
                 // Trailing comma: stop when a closing bracket follows.
                 // The same parser drives list literals (`[a, b,]`),
@@ -70,6 +93,16 @@ namespace Syntax.Parsers.Expressions is
             od
 
             return Trees.Expressions.LIST(start::context.location, expressions)
+        si
+
+        // A token that can begin an expression, on the same line, past the
+        // end of `expression`. One that opens a new line is the next
+        // statement, ended by the line break.
+        _at_missing_separator(context: CONTEXT, expression: Trees.Expressions.Expression) -> bool is
+            return
+                can_start_expression(context.current.token) /\
+                !context.current.first_on_line /\
+                context.location.start_column > expression.location.end_column
         si
     si
 si
