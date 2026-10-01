@@ -5,12 +5,15 @@ namespace IR.Values is
     // Per-`await` IL emission inside MoveNext. Stashes the awaiter
     // to a frame field, IsCompleted-short-circuits when the awaited
     // value is already done, otherwise records the state, registers
-    // the continuation through the builder and `leave`s out of
-    // MoveNext. The entry-dispatch placeholder at the top of MoveNext
-    // routes re-entry back to `cold_resume_label`, where state is
-    // cleared and execution falls through to `hot_resume_label` to
-    // call `GetResult` and leave T on the stack (or stack-effect 0
-    // for a void result).
+    // the continuation through the builder and leaves the resumable
+    // MoveNext body. A dispatch routes re-entry back to the resume
+    // point at `cold_resume_label`, where state is cleared and
+    // execution falls through to call `GetResult` and leave T on the
+    // stack (or stack-effect 0 for a void result).
+    //
+    // The control flow is built from structured nodes and encoded
+    // without marking source positions, so the await marks only its
+    // own.
     //
     // The three awaiter-pattern calls arrive as ordinary call values:
     // `get_awaiter` over the awaited operand, and `is_completed` /
@@ -38,8 +41,7 @@ namespace IR.Values is
 
         state_number: int
         cold_resume_label: IR.LABEL
-        hot_resume_label: IR.LABEL
-        end_of_movenext_label: IR.LABEL
+        resumable: RESUMABLE
         state_machine_type: Type
         state_field: Semantic.Symbols.Field
         awaiter_field: Semantic.Symbols.Field
@@ -54,8 +56,7 @@ namespace IR.Values is
             is_critical: bool,
             state_number: int,
             cold_resume_label: IR.LABEL,
-            hot_resume_label: IR.LABEL,
-            end_of_movenext_label: IR.LABEL,
+            resumable: RESUMABLE,
             state_machine_type: Type,
             state_field: Semantic.Symbols.Field,
             awaiter_field: Semantic.Symbols.Field,
@@ -71,8 +72,7 @@ namespace IR.Values is
             self.is_critical = is_critical
             self.state_number = state_number
             self.cold_resume_label = cold_resume_label
-            self.hot_resume_label = hot_resume_label
-            self.end_of_movenext_label = end_of_movenext_label
+            self.resumable = resumable
             self.state_machine_type = state_machine_type
             self.state_field = state_field
             self.awaiter_field = awaiter_field
@@ -85,25 +85,59 @@ namespace IR.Values is
         _STATE_LOCAL: string static => ".async_state"
 
         gen(context: IR.CONTEXT) is
-            let body = context.current_srm_body_emitter!
-                _gen_srm(context, body)
+            let void_type = IoC.CONTAINER.instance.innate_symbol_lookup.get_void_type()
+
+            // Left when the awaited value has already completed, so no
+            // continuation is registered and GetResult runs at once.
+            let completed = REGION(IR.LABEL(), void_type)
+            let skip = BREAK(completed, IR.BRANCH.NZ, is_completed)
+            let suspend = BREAK(resumable, true)
+            let resume = RESUME_POINT(cold_resume_label)
+
+            completed.clear_position()
+            skip.clear_position()
+            suspend.clear_position()
+            resume.clear_position()
+
+            completed.body.add(AWAIT_SUSPEND_STEP(self, AwaitSuspendStep.CAPTURE_AWAITER))
+            completed.body.add(skip)
+            completed.body.add(AWAIT_SUSPEND_STEP(self, AwaitSuspendStep.REGISTER_CONTINUATION))
+            completed.body.add(suspend)
+            completed.body.add(resume)
+            completed.body.add(AWAIT_SUSPEND_STEP(self, AwaitSuspendStep.CLEAR_STATE))
+            completed.close()
+
+            // Resolved before anything is encoded, and in this order, so
+            // the member references are numbered as the steps have always
+            // numbered them.
+            context.resolve_field_target(state_field)
+            context.resolve_field_target(awaiter_field)
+            context.resolve_field_target(builder_field)
+
+            context.begin_unmarked()
+
+            gen(completed, context)
+            gen(get_result, context)
+
+            context.end_unmarked()
         si
 
-        _gen_srm(context: IR.CONTEXT, body: IR.Emitter.SRM_METHOD_BODY_EMITTER) is
-            let state = context.resolve_field_target(state_field)
-            let awaiter = context.resolve_field_target(awaiter_field)
-            let builder = context.resolve_field_target(builder_field)
+        // Capture the awaiter into the frame.
+        gen_capture_awaiter(context: IR.CONTEXT) is
+            let body = context.current_srm_body_emitter!
 
-            // Capture the awaiter into the frame.
             body.ldarg(0)
             gen(get_awaiter, context)
-            body.stfld(awaiter)
+            body.stfld(context.resolve_field_target(awaiter_field))
+        si
 
-            // Already completed: skip registering a continuation.
-            gen(is_completed, context)
-            body.branch(System.Reflection.Metadata.ILOpCode.BRTRUE, hot_resume_label)
+        // Record the state and register the continuation through the
+        // builder.
+        gen_register_continuation(context: IR.CONTEXT) is
+            let body = context.current_srm_body_emitter!
+            let builder = context.resolve_field_target(builder_field)
 
-            _stamp_state_srm(context, body, state_number, state)
+            _stamp_state_srm(context, body, state_number, context.resolve_field_target(state_field))
 
             body.ldarg(0)
 
@@ -117,7 +151,7 @@ namespace IR.Values is
             fi
 
             body.ldarg(0)
-            body.ldflda(awaiter)
+            body.ldflda(context.resolve_field_target(awaiter_field))
 
             // The state machine goes by reference for a builder whose
             // member takes it so, and as the interface object for one
@@ -131,14 +165,13 @@ namespace IR.Values is
             body.call(
                 context.resolve_await_on_completed(
                     builder_field.type!, awaiter_type, state_machine_type, is_critical))
-            body.branch(System.Reflection.Metadata.ILOpCode.LEAVE, end_of_movenext_label)
+        si
 
-            body.mark_label(cold_resume_label)
+        // Mark the machine running again, on a resumed MoveNext.
+        gen_clear_state(context: IR.CONTEXT) is
+            let body = context.current_srm_body_emitter!
 
-            _stamp_state_srm(context, body, -1, state)
-
-            body.mark_label(hot_resume_label)
-            gen(get_result, context)
+            _stamp_state_srm(context, body, -1, context.resolve_field_target(state_field))
         si
 
         // Write a state value to both the cached CLR local and the
@@ -160,5 +193,40 @@ namespace IR.Values is
 
         to_string() -> string =>
             "await-suspend:[{type}](state={state_number})"
+    si
+
+    enum AwaitSuspendStep is
+        CAPTURE_AWAITER,
+        REGISTER_CONTINUATION,
+        CLEAR_STATE
+    si
+
+    // One straight-line step of an AWAIT_SUSPEND, which the await's
+    // control flow is built around.
+    class AWAIT_SUSPEND_STEP: Value is
+        suspend: AWAIT_SUSPEND
+        kind: AwaitSuspendStep
+
+        has_location: bool => false
+
+        init(suspend: AWAIT_SUSPEND, kind: AwaitSuspendStep) is
+            super.init()
+
+            self.suspend = suspend
+            self.kind = kind
+        si
+
+        gen(context: IR.CONTEXT) is
+            case kind
+            when AwaitSuspendStep.CAPTURE_AWAITER then
+                suspend.gen_capture_awaiter(context)
+            when AwaitSuspendStep.REGISTER_CONTINUATION then
+                suspend.gen_register_continuation(context)
+            when AwaitSuspendStep.CLEAR_STATE then
+                suspend.gen_clear_state(context)
+            esac
+        si
+
+        to_string() -> string => "await-step:{kind}"
     si
 si
