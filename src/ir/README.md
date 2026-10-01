@@ -14,7 +14,7 @@ Useful files:
 - `block_context.ghul`/`block_stack.ghul` – track nested blocks while emitting code.
 - `label.ghul` – branch targets and the conditions an exit can test.
 - `expansion.ghul` – builds the structured IR a composite value expands to.
-- `structured_lowering.ghul` – lowers structured nodes to the labels and branches the emitter encodes.
+- `values/visitor.ghul` – the visitor a backend implements to lower values; the CIL backend's is `emitter/cil_lowering.ghul`.
 - `innate_operation_generator.ghul` – emits built in operator calls.
 - `value_boxer.ghul`/`value_converter.ghul` – helper utilities for boxing and type conversion.
 

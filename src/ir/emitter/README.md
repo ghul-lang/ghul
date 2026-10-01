@@ -1,7 +1,8 @@
 # Assembly emitter
 
-Writes the compiled program out as a .NET assembly, encoding metadata tables
-and method bodies through `System.Reflection.Metadata`.
+The CIL backend: lowers IR values to CIL and writes the compiled program out
+as a .NET assembly, encoding metadata tables and method bodies through
+`System.Reflection.Metadata`.
 
 ## The two passes, and why there are two
 
@@ -22,6 +23,13 @@ where misplaced would not fail at all.
 
 ## Files
 
+- `cil_lowering.ghul` – lowers IR values to CIL. It implements the IR's
+  value visitor; a value without a visit there yet still lowers itself in its
+  own `gen`.
+- `structured_lowering.ghul` – lowers structured nodes to the labels and
+  branches the body emitter encodes.
+- `cil_operations.ghul` – the opcodes the target-neutral operations encode
+  as.
 - `srm_assembly_emitter.ghul` – owns the metadata builder and the blob, string
   and user-string heaps; resolves references to imported types and members;
   writes the PE file.
