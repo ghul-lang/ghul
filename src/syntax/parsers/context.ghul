@@ -706,6 +706,45 @@ namespace Syntax.Parsers is
 
         expect_closer(token: Lexical.TOKEN) -> bool => expect_closer(token, "syntax error")
 
+        // The closing bracket of a call's arguments, a tuple or a list.
+        // Where something else is found first, the bracketed text on this
+        // line is skipped up to its own closer, so a missing separator inside
+        // the brackets is one error rather than leaving the rest of the list
+        // to be read as statements. Nothing is skipped when the closer is not
+        // on this line.
+        expect_bracket_closer(opener: Lexical.TOKEN, closer: Lexical.TOKEN, message: string) -> bool is
+            if next_token(closer, message) then
+                return true
+            fi
+
+            if current.first_on_line then
+                return false
+            fi
+
+            let use snapshot = tokenizer_speculate_then_backtrack_bounded()
+
+            let depth mut = 1
+
+            while !is_end_of_file /\ !current.first_on_line do
+                if current_token == opener then
+                    depth = depth + 1
+                elif current_token == closer then
+                    depth = depth - 1
+
+                    if depth == 0 then
+                        next_token()
+                        snapshot.commit()
+
+                        return true
+                    fi
+                fi
+
+                next_token()
+            od
+
+            return false
+        si
+
         // Whether the closing keyword found where the innermost construct's
         // own was expected is that construct's closer, mistyped, rather than
         // an enclosing construct's closer arriving early. It is the

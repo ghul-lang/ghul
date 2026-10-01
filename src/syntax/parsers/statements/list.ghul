@@ -55,6 +55,15 @@ namespace Syntax.Parsers.Statements is
 
                     want_semicolon = false
                     last_terminated = true
+                elif context.current_token == Lexical.TOKEN.COMMA then
+                    // Nothing open is waiting for this comma, or the list
+                    // would have ended at it: it is debris left by an
+                    // expression that broke off before it.
+                    context.error(context.location, "syntax error: unexpected {context.current_token_name}")
+
+                    context.next_token()
+
+                    want_semicolon = false
                 elif want_semicolon then
                     case context.accept_terminator()
                     when Parsers.TERMINATOR.WRITTEN then
@@ -119,8 +128,14 @@ namespace Syntax.Parsers.Statements is
             return result
         si
 
+        // A comma ends a statement list only where something is waiting for
+        // one, so a stray comma in a function body does not end the body.
         at_terminator(context: CONTEXT) -> bool =>
-            terminators |> any(t => t == context.current_token) /\ !context.at_debris_closer
+            (
+                terminators |> any(t => t == context.current_token) \/
+                (context.current_token == Lexical.TOKEN.COMMA /\ context.is_awaited_ender(Lexical.TOKEN.COMMA))
+            ) /\
+            !context.at_debris_closer
 
         // Resynchronise after a statement the parser could not build. The
         // tokens from here to the next statement boundary are unparsed, so
