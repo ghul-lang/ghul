@@ -237,18 +237,14 @@ namespace Syntax.Process is
             // An instance generator hands `this` to the frame's
             // constructor, which stores it into _outer_self so the
             // body's `self` access can read back through the frame.
-            let slot mut = if symbol.is_emitted_with_receiver then 1 else 0 fi
-
             let arguments = Collections.LIST[Value]()
 
-            if let outer_self_field = frame.outer_self_field then
-                arguments.add(Values.Load.ARGUMENT_SLOT(0, outer_self_field.name))
+            if frame.outer_self_field? then
+                arguments.add(Values.Load.RECEIVER(symbol))
             fi
 
-            for name in symbol.argument_names do
-                arguments.add(Values.Load.ARGUMENT_SLOT(slot, name))
-
-                slot = slot + 1
+            for index in 0..symbol.argument_names.count do
+                arguments.add(Values.Load.ARGUMENT(symbol, index))
             od
 
             let constructor = _specialized_frame_constructor(frame, state_machine, symbol.location)
@@ -355,24 +351,22 @@ namespace Syntax.Process is
             body.add(Values.RUNTIME(IR.RuntimeOperation.INIT_OBJECT, _frame_self(frame), null))
 
             // Argument layout mirrors what STATE_MACHINE_FRAME.declare
-            // set up: [$outer_self,] arg0, arg1, ... The constructor is
-            // an instance method, so its declared arguments start at
-            // slot 1.
-            let slot mut = 1
+            // set up: [$outer_self,] arg0, arg1, ...
+            let argument mut = 0
 
             if let outer_self_field = frame.outer_self_field then
-                body.add(_store_frame_field(frame, outer_self_field, Values.Load.ARGUMENT_SLOT(slot, outer_self_field.name)))
+                body.add(_store_frame_field(frame, outer_self_field, Values.Load.ARGUMENT(frame.constructor, argument)))
 
-                slot = slot + 1
+                argument = argument + 1
             fi
 
             // The pristine twins, index-aligned with `argument_fields`.
             let initial_fields = frame.argument_initial_fields
 
             for arg_field in frame.argument_fields do
-                body.add(_store_frame_field(frame, arg_field, Values.Load.ARGUMENT_SLOT(slot, arg_field.name)))
+                body.add(_store_frame_field(frame, arg_field, Values.Load.ARGUMENT(frame.constructor, argument)))
 
-                slot = slot + 1
+                argument = argument + 1
             od
 
             // Copy each freshly stored argument into its pristine twin,
