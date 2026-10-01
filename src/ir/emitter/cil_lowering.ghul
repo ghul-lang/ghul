@@ -188,8 +188,16 @@ namespace IR.Emitter is
             fi
         si
 
-        visit(load: Values.Load.ARGUMENT_SLOT) is
-            _body.ldarg(load.index)
+        // An instance method's receiver is slot 0, so its declared
+        // arguments sit one further along.
+        visit(load: Values.Load.ARGUMENT) is
+            _body.ldarg(if load.function.is_emitted_with_receiver then load.index + 1 else load.index fi)
+        si
+
+        visit(load: Values.Load.RECEIVER) is
+            assert load.function.is_emitted_with_receiver else "{load.function.name} has no receiver"
+
+            _body.ldarg(0)
         si
 
         visit(store: Values.Store.LOCAL_VARIABLE) is
@@ -285,16 +293,6 @@ namespace IR.Emitter is
         _load_delegate(function: Semantic.Symbols.Symbol, delegate_type: Semantic.Types.Type) is
             _body.load_function_pointer(_context.resolve_call_target(cast Semantic.Symbols.Function(function)))
             _body.new_object(_context.resolve_delegate_constructor(delegate_type))
-        si
-
-        visit(load: Values.Load.FUNCTION_POINTER) is
-            let target = _context.resolve_call_target(cast Semantic.Symbols.Function(load.symbol))
-
-            if load.is_virtual then
-                _body.load_virtual_function_pointer(target)
-            else
-                _body.load_function_pointer(target)
-            fi
         si
 
         // A store to a symbol with no lowering of its own.
@@ -935,18 +933,22 @@ namespace IR.Emitter is
             fi
         si
 
-        // `ldvirtftn` consumes the receiver it dispatches against, so the
-        // receiver pushed for the delegate's own constructor argument
-        // needs a duplicate first.
-        visit(delegate: Values.Load.DELEGATE) is
-            gen(delegate.frame)
+        // A delegate over the function pointer, constructed with its
+        // receiver. ldvirtftn consumes the receiver it dispatches on, so
+        // a virtual one loads it twice.
+        visit(closure: Values.MAKE_CLOSURE) is
+            gen(closure.receiver)
 
-            if delegate.function.is_virtual_dispatch then
+            let target = _context.resolve_call_target(closure.function)
+
+            if closure.is_virtual then
                 _body.op(System.Reflection.Metadata.ILOpCode.DUP)
+                _body.load_virtual_function_pointer(target)
+            else
+                _body.load_function_pointer(target)
             fi
 
-            gen(delegate.function)
-            _body.new_object(_context.resolve_delegate_constructor(delegate.type))
+            _body.new_object(_context.resolve_delegate_constructor(closure.type))
         si
 
         visit(block: Values.BLOCK) is

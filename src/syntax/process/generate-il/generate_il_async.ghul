@@ -108,23 +108,19 @@ namespace Syntax.Process is
             let state_machine_type =
                 _specialized_frame_type(frame, construction_type_args, symbol.location) ?? frame.type!
 
-            // ctor args: instance methods prepend `ldarg.0` for
-            // _outer_self, then each user-declared parameter via
-            // `ldarg '<name>'`. Build them as a sequence Value so
+            // ctor args: an instance method's receiver for _outer_self,
+            // then each declared argument. Build them as a sequence Value so
             // ASYNC_METHOD_LAUNCH composes them in the right order.
             let ctor_args_block = Values.BLOCK()
 
             // The enclosing method's own arguments, forwarded
-            // positionally: an instance method's receiver occupies slot
-            // 0, so its declared arguments start at 1.
-            let slot mut = if symbol.is_emitted_with_receiver then 1 else 0 fi
-
+            // positionally after its receiver, if it has one.
             if frame.outer_self_field? then
-                ctor_args_block.add(Values.Load.ARGUMENT_SLOT(0, "ldarg.0"))
+                ctor_args_block.add(Values.Load.RECEIVER(symbol))
             fi
-            for arg_name in symbol.argument_names do
-                ctor_args_block.add(Values.Load.ARGUMENT_SLOT(slot, "ldarg '{arg_name}'"))
-                slot = slot + 1
+
+            for index in 0..symbol.argument_names.count do
+                ctor_args_block.add(Values.Load.ARGUMENT(symbol, index))
             od
             ctor_args_block.close()
 
@@ -668,18 +664,18 @@ namespace Syntax.Process is
 
             body.add(Values.RUNTIME(IR.RuntimeOperation.INIT_OBJECT, _frame_self(frame), null))
 
-            let slot mut = 1
+            let index mut = 0
 
             if let outer_self_field = frame.outer_self_field then
-                body.add(_store_frame_field(frame, outer_self_field, Values.Load.ARGUMENT_SLOT(slot, outer_self_field.name)))
+                body.add(_store_frame_field(frame, outer_self_field, Values.Load.ARGUMENT(frame.constructor, index)))
 
-                slot = slot + 1
+                index = index + 1
             fi
 
             for arg_field in frame.argument_fields do
-                body.add(_store_frame_field(frame, arg_field, Values.Load.ARGUMENT_SLOT(slot, arg_field.name)))
+                body.add(_store_frame_field(frame, arg_field, Values.Load.ARGUMENT(frame.constructor, index)))
 
-                slot = slot + 1
+                index = index + 1
             od
 
             body.add(Values.RET())
