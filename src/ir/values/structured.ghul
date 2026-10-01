@@ -19,6 +19,9 @@ namespace IR.Values is
 
         is_closed: bool
 
+        // Whether any exit leaves this node.
+        is_targeted: bool
+
         // A position is marked by the lowering, against the values it
         // adds, so the node itself has none to mark.
         has_location: bool => false
@@ -31,6 +34,10 @@ namespace IR.Values is
             position = IoC.CONTAINER.instance.location_stack.current
 
             body = BLOCK(void_type)
+        si
+
+        mark_targeted() is
+            is_targeted = true
         si
 
         // Records that the body is complete.
@@ -74,6 +81,89 @@ namespace IR.Values is
         to_string() -> string => "loop {start}:[{body}]"
     si
 
+    // The body of a state machine's resumable method. A suspend made
+    // inside a protected region cannot return directly, so it leaves
+    // this node instead, continuing after the body where the method
+    // returns. An end that no exit targets is not marked.
+    class RESUMABLE: Breakable is
+        init(end: IR.LABEL, void_type: Type) is
+            super.init(end, void_type)
+        si
+
+        to_string() -> string => "resumable {end}:[{body}]"
+    si
+
+    // A point a state machine resumes at, which a DISPATCH reaches by
+    // its label.
+    class RESUME_POINT: Value is
+        label: IR.LABEL
+        position: Source.LOCATION?
+
+        has_location: bool => false
+
+        init(label: IR.LABEL) is
+            super.init()
+
+            self.label = label
+            position = IoC.CONTAINER.instance.location_stack.current
+        si
+
+        gen(context: IR.CONTEXT) is
+            IR.STRUCTURED_LOWERING.gen(self, context)
+        si
+
+        to_string() -> string => "resume {label}"
+    si
+
+    // Where a resumed state machine finds its place: compares the state
+    // held in the local `state_local` with each entry's state, and
+    // jumps to the matching entry's resume point. A dispatch opens a
+    // resumable body and each protected region inside one, so a jump
+    // never enters a region from outside it: a dispatch reaches a
+    // resume point in an inner region by jumping to that region's own
+    // dispatch, whose `top` is a resume point too.
+    //
+    // `position` is the position current where the dispatch is made and
+    // `entries_position` the one current where its entries are known.
+    class DISPATCH: Value is
+        state_local: string
+        state_type: Type
+        top: IR.LABEL
+        entries: Collections.LIST[(state: int, target: IR.LABEL)]
+
+        position: Source.LOCATION?
+        entries_position: Source.LOCATION?
+
+        has_location: bool => false
+
+        init(state_local: string, state_type: Type) is
+            super.init()
+
+            self.state_local = state_local
+            self.state_type = state_type
+
+            top = IR.LABEL()
+            entries = Collections.LIST[(state: int, target: IR.LABEL)]()
+
+            position = IoC.CONTAINER.instance.location_stack.current
+        si
+
+        add_entry(state: int, target: IR.LABEL) is
+            entries.add((state, target))
+        si
+
+        // Records that every entry is known.
+        close() is
+            entries_position = IoC.CONTAINER.instance.location_stack.current
+        si
+
+        gen(context: IR.CONTEXT) is
+            IR.STRUCTURED_LOWERING.gen(self, context)
+        si
+
+        to_string() -> string => "dispatch {top} {state_local}:[{entries |> map(e => "{e.state} -> {e.target}") |> join(", ")}]"
+    si
+
     // A protected body with catch handlers or a finally, never both: a
     // try with both is a TRY with a finally whose body is a TRY with
     // the catches. Leaving the TRY continues after the whole construct.
@@ -85,7 +175,6 @@ namespace IR.Values is
         finally_region: REGION? public
 
         body_end_position: Source.LOCATION?
-        is_targeted: bool
 
         init(end: IR.LABEL, void_type: Type) is
             super.init(end, void_type)
@@ -96,10 +185,6 @@ namespace IR.Values is
         // Records that the protected body is complete.
         close_body() is
             body_end_position = IoC.CONTAINER.instance.location_stack.current
-        si
-
-        mark_targeted() is
-            is_targeted = true
         si
 
         to_string() -> string =>
@@ -171,9 +256,7 @@ namespace IR.Values is
             self.operands = operands
             self.via_leave = via_leave
 
-            if let `try: TRY = target then
-                `try.mark_targeted()
-            fi
+            target.mark_targeted()
 
             position = IoC.CONTAINER.instance.location_stack.current
         si

@@ -115,26 +115,27 @@ namespace Syntax.Process is
             // without branching into a protected region from
             // outside (ECMA-335 forbids that, and the previous
             // centralized-dispatch shape had exactly that bug).
+            let resumable = Values.RESUMABLE(LABEL(), _innate_symbol_lookup.get_void_type())
+
+            _open_structured(resumable)
+
             let outer_dispatch_holder =
                 _open_state_machine_entry(frame, frame.state_field, ".gen_state")
 
-            // Stash the previous generator-yield-return label so
-            // nested generator functions (rare) don't trip over
-            // each other. visit(YIELD) lazily allocates a label the
-            // first time it needs to `leave` from inside a `.try`.
-            let prev_yield_return = _current_generator_yield_return_label
-            _current_generator_yield_return_label = null
+            // Stash the enclosing generator's resumable body so nested
+            // generator functions (rare) don't trip over each other.
+            let prev_resumable = _current_generator_resumable
+            _current_generator_resumable = resumable
 
             // A frame whose stream has ended stays ended: a read that wants
             // to start over takes a fresh frame from GetEnumerator.
             let int_type = _innate_symbol_lookup.get_int_type()
-            let brancher = get_brancher_for_block()
-            let not_done = LABEL()
+            let not_done = _open_region(LABEL())
 
-            brancher.branch(BRANCH.NE, cast Value(Values.Load.TEMP(".gen_state", int_type)), cast Value(Literal.NUMBER(-1, int_type)), not_done)
+            add(Values.BREAK(not_done, BRANCH.NE, Values.Load.TEMP(".gen_state", int_type), Literal.NUMBER(-1, int_type)))
             add(Values.INSTRUCTION(ILOpCode.LDC_I4_0))
             add(Values.RET())
-            brancher.label(not_done)
+            _close_structured(not_done)
 
             // The body, emitted into current_block, which is MoveNext's
             // block: each yield appends its suspend here.
@@ -147,19 +148,18 @@ namespace Syntax.Process is
             add(Values.INSTRUCTION(ILOpCode.LDC_I4_0))
             add(Values.RET())
 
-            // If any yield inside an inner `.try` used the
-            // leave-return-true label, emit it now (outside any try)
-            // followed by `ldc.i4.1; ret`. Reached only via `leave
-            // L:` from inside a protected region.
-            if let yield_return_label = _current_generator_yield_return_label then
-                add(Values.MARK_LABEL(yield_return_label))
+            _current_generator_resumable = prev_resumable
+
+            _pop_async_dispatch_holder(outer_dispatch_holder)
+
+            _close_structured(resumable)
+
+            // If any yield inside an inner `.try` left the resumable
+            // body, return true after it (outside any try).
+            if resumable.is_targeted then
                 add(Values.INSTRUCTION(ILOpCode.LDC_I4_1))
                 add(Values.RET())
             fi
-
-            _current_generator_yield_return_label = prev_yield_return
-
-            _pop_async_dispatch_holder(outer_dispatch_holder)
 
             leave_block()
             leave_scope(scope)

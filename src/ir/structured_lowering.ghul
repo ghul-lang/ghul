@@ -70,6 +70,14 @@ namespace IR is
                 _linearise_loop(cast LOOP(value), result)
             elif isa TRY(value) then
                 _linearise_try(cast TRY(value), result)
+            elif isa RESUMABLE(value) then
+                _linearise_resumable(cast RESUMABLE(value), result)
+            elif isa DISPATCH(value) then
+                _linearise_dispatch(cast DISPATCH(value), result)
+            elif isa RESUME_POINT(value) then
+                let resume = cast RESUME_POINT(value)
+
+                result.add(FLAT_VALUE(MARK_LABEL(resume.label), resume.position))
             elif isa REGION(value) then
                 _linearise_region(cast REGION(value), result)
             elif isa Exit(value) then
@@ -136,6 +144,26 @@ namespace IR is
             if `try.is_targeted then
                 into.add(FLAT_VALUE(MARK_LABEL(`try.end), `try.end_position))
             fi
+        si
+
+        _linearise_resumable(resumable: RESUMABLE, into: Collections.MutableList[FLAT_VALUE]) static is
+            _linearise_body(resumable, into)
+
+            if resumable.is_targeted then
+                into.add(FLAT_VALUE(MARK_LABEL(resumable.end), resumable.end_position))
+            fi
+        si
+
+        _linearise_dispatch(dispatch: DISPATCH, into: Collections.MutableList[FLAT_VALUE]) static is
+            into.add(FLAT_VALUE(MARK_LABEL(dispatch.top), dispatch.position))
+
+            let position = dispatch.entries_position
+
+            for entry in dispatch.entries do
+                into.add(FLAT_VALUE.of(Load.TEMP(dispatch.state_local, dispatch.state_type)))
+                into.add(FLAT_VALUE(Literal.NUMBER(entry.state, dispatch.state_type), position))
+                into.add(FLAT_VALUE(BRANCH_TO(ILOpCode.BEQ, entry.target), position))
+            od
         si
 
         _linearise_body(node: Breakable, into: Collections.MutableList[FLAT_VALUE]) static is
