@@ -1,0 +1,117 @@
+namespace Logging is
+    // The `detail` of an inlay hint, as Markdown.
+    //
+    // A detail is code and prose: what the hint is about - a narrowed type,
+    // a declaration and the members related to it - and, for a hint that
+    // discards something, the sentence saying why. One rule draws the line
+    // between them: code goes in a ```ghul fence, prose stays outside as
+    // ordinary Markdown. A client that renders Markdown then needs no
+    // knowledge of the hints themselves, and a client that wants plain text
+    // has only the fences to drop.
+    //
+    // The format lives here so that the producers and the mergers compose the
+    // same thing: a producer writes its code and its prose, a merger joins
+    // fragments from several carriers, and both hand the result here rather
+    // than assembling fences themselves.
+    class INLAY_MARKDOWN is
+        // Lines of code, joined into one body.
+        body(lines: Collections.Iterable[string]) -> string static =>
+            join(lines, "\n")
+
+        // Lines of code, the first of them given separately because the
+        // callers have it in hand and the rest in a list.
+        body(head: string, lines: Collections.Iterable[string]) -> string static is
+            let all = Collections.LIST[string]()
+
+            all.add(head)
+
+            for l in lines do
+                all.add(l)
+            od
+
+            return body(all)
+        si
+
+        // Prose notes, joined so that each stands as its own paragraph.
+        notes(lines: Collections.Iterable[string]) -> string static =>
+            join(lines, "\n\n")
+
+        // A complete detail: a code body, and prose after it when there is
+        // any. The fence closes the code and a blank line separates it from
+        // the prose, so the two can be taken apart again by a merger.
+        detail(body: string, prose: string?) -> string static is
+            if !prose? \/ prose == "" then
+                return "{_OPEN}{body}\n```"
+            fi
+
+            return "{_OPEN}{body}\n```\n\n{prose}"
+        si
+
+        // The code half of a detail, without its fence. A detail that is not
+        // fenced is all code, which is what one written before the format
+        // moved here reads as, so that a merger passes such a detail through
+        // rather than losing it.
+        body_of(detail: string) -> string static => _parts(detail)[0]
+
+        // The prose half of a detail, or null when it has none.
+        prose_of(detail: string) -> string? static is
+            let said = _parts(detail)[1]
+
+            if said == "" then
+                return null
+            fi
+
+            return said
+        si
+
+        join(lines: Collections.Iterable[string], between: string) -> string static is
+            let joined = System.Text.StringBuilder()
+
+            for l in lines do
+                if joined.length > 0 then
+                    joined.append(between)
+                fi
+
+                joined.append(l)
+            od
+
+            return "{joined}"
+        si
+
+        // A detail's code and its prose, as two strings, the prose empty
+        // when there is none. A detail that is not fenced is all code, which
+        // is what one written before the format moved here reads as, so that
+        // a merger passes such a detail through rather than losing it.
+        _parts(detail: string) -> Collections.LIST[string] static is
+            let parts = Collections.LIST[string]()
+
+            if !detail.starts_with(_OPEN) then
+                parts.add(detail)
+                parts.add("")
+
+                return parts
+            fi
+
+            // What the opening fence left: the body, the closing fence, and
+            // then whatever prose follows it.
+            let rest = detail.substring(_OPEN.length)
+
+            let close = rest.index_of(_CLOSE_LINE)
+
+            if close < 0 then
+                parts.add(rest.trim_end())
+                parts.add("")
+
+                return parts
+            fi
+
+            parts.add(rest.substring(0, close).trim_end())
+            parts.add(rest.substring(close + _CLOSE_LINE.length).trim())
+
+            return parts
+        si
+
+        _OPEN: string static => "```ghul\n"
+        _CLOSE_LINE: string static => "\n```"
+    si
+si

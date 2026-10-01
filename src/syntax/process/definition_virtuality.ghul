@@ -3,6 +3,7 @@ namespace Syntax.Process is
     use Trees
     use Ghul.Disposable
 
+    use Logging.INLAY_MARKDOWN
     use Logging.Logger
 
     use Semantic.Symbols.Classy
@@ -132,31 +133,37 @@ namespace Syntax.Process is
             let prefix = if half? then "{half} " else "" fi
 
             let glyphs = System.Text.StringBuilder()
-            let notes = Collections.LIST[string]()
+            let relations = Collections.LIST[string]()
 
             if is_abstract then
                 glyphs.append(ABSTRACT)
-                notes.add("{prefix}{ABSTRACT} abstract")
+                relations.add("{prefix}{ABSTRACT} abstract")
             fi
 
             if overridees.count > 0 then
                 glyphs.append(OVERRIDES)
-                notes.add("{prefix}{OVERRIDES} overrides {_join(overridees)}")
+                relations.add("{prefix}{OVERRIDES} overrides {_join(overridees)}")
             fi
 
             if overriders.count > 0 then
                 glyphs.append(OVERRIDDEN)
-                notes.add("{prefix}{OVERRIDDEN} overridden by {_join(overriders)}")
+                relations.add("{prefix}{OVERRIDDEN} overridden by {_join(overriders)}")
             fi
 
             if is_open then
                 glyphs.append(OPEN)
-                notes.add("{prefix}{OPEN} can be overridden outside this assembly")
+                relations.add("{prefix}{OPEN} can be overridden outside this assembly")
             fi
 
             let code = if half? then "{CODE}-{half}" else CODE fi
 
-            _logger.inlay(name.location, code, "{glyphs}", "{_subject(function)}\n\n{_bullets(notes)}")
+            // Every note here names a relation or a property of the
+            // declaration, so all of them are code: the detail is the
+            // declaration's own name and the relations under it, fenced, with
+            // no prose beneath.
+            let detail = INLAY_MARKDOWN.detail(INLAY_MARKDOWN.body(_subject(function), relations), null)
+
+            _logger.inlay(name.location, code, "{glyphs}", detail)
         si
 
         visit(`class: Definitions.CLASS) is
@@ -186,11 +193,12 @@ namespace Syntax.Process is
             fi
 
             let glyphs = System.Text.StringBuilder()
-            let notes = Collections.LIST[string]()
+            let relations = Collections.LIST[string]()
+            let prose = Collections.LIST[string]()
 
             if is_implicitly_abstract then
                 glyphs.append(ABSTRACT)
-                notes.add("{ABSTRACT} abstract — inferred from a body-less method, not written")
+                prose.add("{ABSTRACT} abstract — inferred from a body-less method, not written")
             fi
 
             if implementors.count > 0 then
@@ -198,10 +206,21 @@ namespace Syntax.Process is
 
                 let verb = if symbol.is_trait then "implemented by" else "extended by" fi
 
-                notes.add("{OVERRIDDEN} {verb} {_join(implementors)}")
+                relations.add("{OVERRIDDEN} {verb} {_join(implementors)}")
             fi
 
-            _logger.inlay(name.location, CODE, "{glyphs}", "{name.name}\n\n{_bullets(notes)}")
+            // The implementors name declarations and stay in the fence; the
+            // sentence explaining an inferred abstractness is prose about the
+            // declaration and stays outside it.
+            let said mut = null
+
+            if prose.count > 0 then
+                said = INLAY_MARKDOWN.notes(prose)
+            fi
+
+            let detail = INLAY_MARKDOWN.detail(INLAY_MARKDOWN.body(name.name, relations), said)
+
+            _logger.inlay(name.location, CODE, "{glyphs}", detail)
         si
 
         // What this declaration is called in the hover's first line. An
@@ -232,20 +251,6 @@ namespace Syntax.Process is
             return if function.is_assign_accessor then "set" else "get" fi
         si
 
-        _bullets(notes: Collections.Iterable[string]) -> string is
-            let body = System.Text.StringBuilder()
-
-            for n in notes do
-                if body.length > 0 then
-                    body.append("\n")
-                fi
-
-                body.append("- ").append(n)
-            od
-
-            return "{body}"
-        si
-
         _join(names: Collections.Iterable[string]) -> string is
             let joined = System.Text.StringBuilder()
 
@@ -254,7 +259,7 @@ namespace Syntax.Process is
                     joined.append(", ")
                 fi
 
-                joined.append("`").append(n).append("`")
+                joined.append(n)
             od
 
             return "{joined}"

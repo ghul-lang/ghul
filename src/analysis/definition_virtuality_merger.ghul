@@ -89,13 +89,28 @@ namespace Analysis is
             od
 
             // The subject line is the property's name, which both halves
-            // carry, so it is taken once from whichever came first.
+            // carry, so it is taken once from whichever came first. Every
+            // carrier's code goes under it inside the fence, and every
+            // carrier's prose below it.
             let body = System.Text.StringBuilder()
+            let prose = Collections.LIST[string]()
 
             body.append(_subject(head))
 
             for c in _get_first(group) do
-                body.append("\n\n").append(_notes(c))
+                let said = _notes(c)
+
+                if said != "" then
+                    prose.add(said)
+                fi
+
+                // Only the relations: each carrier repeats the subject as its
+                // own first line, and it is already the one above.
+                let lines = _relations(c)
+
+                if lines != "" then
+                    body.append("\n").append(lines)
+                fi
             od
 
             return INLAY(
@@ -104,7 +119,7 @@ namespace Analysis is
                 head.location,
                 Syntax.Process.DEFINITION_VIRTUALITY.CODE,
                 "{glyphs}",
-                "{body}"
+                INLAY_MARKDOWN.detail(body.to_string(), INLAY_MARKDOWN.notes(prose))
             )
         si
 
@@ -128,16 +143,46 @@ namespace Analysis is
             return ordered
         si
 
+        // A carrier's subject is the first line of its code, its relations
+        // the rest, and its prose everything under the fence.
         _subject(c: INLAY) -> string is
+            let code = _code(c)
+
+            if code == "" then
+                return ""
+            fi
+
+            let eol = code.index_of("\n")
+
+            return if eol < 0 then code else code.substring(0, eol) fi
+        si
+
+        // The relations, which is the subject line minus itself.
+        _code(c: INLAY) -> string is
             let detail = c.detail
 
             if !detail? then
                 return ""
             fi
 
-            let separator = detail.index_of("\n\n")
+            return INLAY_MARKDOWN.body_of(detail!)
+        si
 
-            return if separator >= 0 then detail.substring(0, separator) else detail fi
+        // A carrier's code without the subject line it repeats.
+        _relations(c: INLAY) -> string is
+            let code = _code(c)
+
+            if code == "" then
+                return ""
+            fi
+
+            let eol = code.index_of("\n")
+
+            if eol < 0 then
+                return ""
+            fi
+
+            return code.substring(eol + 1)
         si
 
         _notes(c: INLAY) -> string is
@@ -147,9 +192,13 @@ namespace Analysis is
                 return ""
             fi
 
-            let separator = detail.index_of("\n\n")
+            let said = INLAY_MARKDOWN.prose_of(detail!)
 
-            return if separator >= 0 then detail.substring(separator + 2) else "" fi
+            if !said? then
+                return ""
+            fi
+
+            return said!
         si
 
         _is_accessor(c: INLAY) -> bool =>
