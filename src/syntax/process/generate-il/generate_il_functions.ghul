@@ -71,12 +71,16 @@ namespace Syntax.Process is
 
             enter_scope(function)
 
-            _context.current_srm_body_emitter = IR.Emitter.SRM_METHOD_BODY_EMITTER()
+            _backend.begin_body()
 
             // Which function the assembly enters at was settled by
             // select-entry-point, before any IL was written; this hands
-            // the choice to the emitter as the walk reaches it.
-            symbol.gen_entrypoint(_context)
+            // the choice to the backend as the walk reaches it.
+            if symbol.is_entry_point then
+                IoC.CONTAINER.instance.entry_point.seen = true
+
+                _backend.mark_entry_point(symbol)
+            fi
 
             enter_block()
 
@@ -115,9 +119,6 @@ namespace Syntax.Process is
                 IO.Std.error.write_line("emit: {symbol.qualified_name} {symbol.location}")
             fi
 
-            let body_emitter = _context.current_srm_body_emitter!
-            let assembly_emitter = _context.srm_assembly_emitter
-
             // A body-less method that overrides an implemented one has
             // a slot to fill and nothing to fill it with, so the body
             // is a throw naming the method rather than a load of the
@@ -136,12 +137,11 @@ namespace Syntax.Process is
             // value loaded below.
             let tail = if throws_unimplemented then null else _function_body_tail(function.body) fi
 
-            if !tail? then
-                current_block.gen(_context)
-            else
+            if tail? then
                 add(_boxer.box_if_needed(tail, symbol.return_type!))
-                current_block.gen(_context)
             fi
+
+            _backend.write(current_block)
 
             leave_block()
 
@@ -162,20 +162,18 @@ namespace Syntax.Process is
                 if let return_type = symbol.return_type then
                     if return_type.compare(_innate_symbol_lookup.get_void_type()) != Semantic.Types.MATCH.SAME then
                         if let completion = _builder_task_like_completion(symbol, return_type) then
-                            completion.gen(_context)
+                            _backend.write(completion)
                         else
-                            Values.DEFAULT_RETURN(return_type).gen(_context)
+                            _backend.write(Values.DEFAULT_RETURN(return_type))
                         fi
                     fi
                 fi
             fi
 
-            body_emitter.ret()
+            _backend.write(Values.RET())
 
-            assembly_emitter.handles.set_body_offset(symbol, body_emitter.flush(assembly_emitter))
-            assembly_emitter.handles.set_il_outputs(symbol, body_emitter.il_outputs)
-
-            _context.current_srm_body_emitter = null
+            _backend.finish_body(symbol)
+            _backend.end_body()
 
             leave_scope(function)
         si
@@ -382,23 +380,11 @@ namespace Syntax.Process is
                 return
             fi
 
-            // The closure's body is encoded into a method body of its
-            // own. The enclosing method is mid-encode, so its emitter
-            // is set aside for the duration and restored after: the
-            // two bodies are separate, and the instructions of one
-            // must not land in the other.
-            let assembly_emitter = _context.srm_assembly_emitter
-            let enclosing = _context.current_srm_body_emitter
-            let enclosing_member = assembly_emitter.current_emission_member
-            let body_emitter = IR.Emitter.SRM_METHOD_BODY_EMITTER()
-
-            _context.current_srm_body_emitter = body_emitter
-
-            // Instructions in this body name types in the closure's terms,
-            // and a TypeSpec they reference is built from here rather than
-            // from the closure's own signature, so the emitter is told
-            // which member it is writing into.
-            assembly_emitter.current_emission_member = closure
+            // The closure's body is a body of its own, begun while the
+            // enclosing one is still open. Its values name types in the
+            // closure's terms, so the backend is told which member it
+            // is writing into.
+            _backend.begin_body(closure)
 
             _gen_closure_destructure_prologue(function, closure)
 
@@ -424,17 +410,12 @@ namespace Syntax.Process is
 
             add(Values.RET())
 
-            current_block.gen(_context)
+            _backend.write(current_block)
 
             leave_block()
 
-            assembly_emitter.handles.set_body_offset(
-                closure, body_emitter.flush(assembly_emitter))
-            assembly_emitter.handles.set_il_outputs(
-                closure, body_emitter.il_outputs)
-
-            _context.current_srm_body_emitter = enclosing
-            assembly_emitter.current_emission_member = enclosing_member
+            _backend.finish_body(closure)
+            _backend.end_body()
 
             super.visit(function)
 
@@ -681,23 +662,15 @@ namespace Syntax.Process is
 
             // The launch is the closure's own method body, not part of
             // whatever is being emitted around the literal, so it needs
-            // a body emitter of its own or it lands in the enclosing
-            // method.
-            let assembly_emitter = _context.srm_assembly_emitter
-            let enclosing = _context.current_srm_body_emitter
-            let body = IR.Emitter.SRM_METHOD_BODY_EMITTER()
-
-            _context.current_srm_body_emitter = body
+            // a body of its own or it lands in the enclosing method.
+            _backend.begin_body()
 
             try
-                current_block.gen(_context)
+                _backend.write(current_block)
 
-                assembly_emitter.handles.set_body_offset(
-                    closure, body.flush(assembly_emitter))
-                assembly_emitter.handles.set_il_outputs(
-                    closure, body.il_outputs)
+                _backend.finish_body(closure)
             finally
-                _context.current_srm_body_emitter = enclosing
+                _backend.end_body()
             yrt
 
             leave_block()

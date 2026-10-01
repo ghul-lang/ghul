@@ -1,5 +1,4 @@
 namespace Syntax.Process is
-    use System.Reflection.Metadata.ILOpCode
     use IO.Std
 
     use System.Text.StringBuilder
@@ -49,7 +48,7 @@ namespace Syntax.Process is
             //
             // Forward this method's own arguments, construct the
             // frame, return it.
-            _emit_generator_outer_method_srm(symbol, frame, state_machine)
+            _without_position(() is _emit_generator_outer_method_srm(symbol, frame, state_machine) si)
 
             // --- Walk the body into MoveNext's block ---
             //
@@ -199,7 +198,7 @@ namespace Syntax.Process is
                 () => _gen_generator_literal_body(function, closure)
             )
 
-            _emit_generator_outer_method_srm(closure, frame, state_machine)
+            _without_position(() is _emit_generator_outer_method_srm(closure, frame, state_machine) si)
         si
 
         _gen_generator_function_body(function: Definitions.FUNCTION) is
@@ -238,32 +237,29 @@ namespace Syntax.Process is
             frame: Semantic.Symbols.STATE_MACHINE_FRAME,
             state_machine: Semantic.Symbols.STATE_MACHINE
         ) is
-            let assembly_emitter = _context.srm_assembly_emitter
-            let body = IR.Emitter.SRM_METHOD_BODY_EMITTER()
-
             // An instance generator hands `this` to the frame's
             // constructor, which stores it into _outer_self so the
             // body's `self` access can read back through the frame.
             let slot mut = if symbol.is_emitted_with_receiver then 1 else 0 fi
 
-            if frame.outer_self_field? then
-                body.ldarg(0)
+            let arguments = Collections.LIST[Value]()
+
+            if let outer_self_field = frame.outer_self_field then
+                arguments.add(Values.Load.ARGUMENT_SLOT(0, outer_self_field.name))
             fi
 
-            for i in 0..symbol.argument_names.count do
-                body.ldarg(slot)
+            for name in symbol.argument_names do
+                arguments.add(Values.Load.ARGUMENT_SLOT(slot, name))
 
                 slot = slot + 1
             od
 
-            body.new_object(
-                _context.resolve_call_target(
-                    _specialized_frame_constructor(frame, state_machine, symbol.location)))
+            let constructor = _specialized_frame_constructor(frame, state_machine, symbol.location)
 
-            body.ret()
-
-            assembly_emitter.handles.set_body_offset(symbol, body.flush(assembly_emitter))
-            assembly_emitter.handles.set_il_outputs(symbol, body.il_outputs)
+            _backend.begin_body()
+            _backend.write(_returning(Values.NEW(frame.type!, constructor, arguments)))
+            _backend.finish_body(symbol)
+            _backend.end_body()
         si
 
         // The frame constructor as it must be named from outside: on the
@@ -326,14 +322,14 @@ namespace Syntax.Process is
             state_machine.install_body_emission_overrides()
 
             // .ctor — parameterless, chains to Object::.ctor.
-            _gen_state_machine_ctor_srm(frame)
+            _without_position(() is _gen_state_machine_ctor_srm(frame) si)
 
             // MoveNext — populated during the body walk.
             _emit_frame_member_body_srm(
-                frame, IR.Emitter.FrameMember.MOVE_NEXT, move_next_block)
+                frame, IR.FrameMember.MOVE_NEXT, move_next_block)
 
             // Other Iterator[T] / IDisposable members.
-            _gen_state_machine_accessors_srm(frame)
+            _without_position(() is _gen_state_machine_accessors_srm(frame) si)
 
             state_machine.uninstall_body_emission_overrides()
         si
@@ -345,22 +341,13 @@ namespace Syntax.Process is
         // assembly.
         _emit_frame_member_body_srm(
             frame: Semantic.Symbols.STATE_MACHINE_FRAME,
-            member: IR.Emitter.FrameMember,
+            member: IR.FrameMember,
             block: Values.BLOCK
         ) is
-            let assembly_emitter = _context.srm_assembly_emitter
-            let previous = _context.current_srm_body_emitter
-
-            let body = IR.Emitter.SRM_METHOD_BODY_EMITTER()
-
-            _context.current_srm_body_emitter = body
-
-            block.gen(_context)
-
-            _context.current_srm_body_emitter = previous
-
-            assembly_emitter.handles.set_frame_member_body(
-                frame, member, body.flush(assembly_emitter))
+            _backend.begin_body()
+            _backend.write(block)
+            _backend.finish_frame_member_body(frame, member)
+            _backend.end_body()
         si
 
         // The frame's constructor: chain to Object, then copy each
@@ -368,11 +355,9 @@ namespace Syntax.Process is
         // it. It is a declared symbol with a row of its own, so its body
         // is deposited the same way any other method's is.
         _gen_state_machine_ctor_srm(frame: Semantic.Symbols.STATE_MACHINE_FRAME) is
-            let assembly_emitter = _context.srm_assembly_emitter
-            let body = IR.Emitter.SRM_METHOD_BODY_EMITTER()
+            let body = Values.BLOCK(_innate_symbol_lookup.get_void_type())
 
-            body.ldarg(0)
-            body.call(_context.resolve_object_constructor())
+            body.add(Values.INIT_OBJECT(_frame_self(frame)))
 
             // Argument layout mirrors what STATE_MACHINE_FRAME.declare
             // set up: [$outer_self,] arg0, arg1, ... The constructor is
@@ -381,9 +366,7 @@ namespace Syntax.Process is
             let slot mut = 1
 
             if let outer_self_field = frame.outer_self_field then
-                body.ldarg(0)
-                body.ldarg(slot)
-                body.stfld(_context.resolve_field_target(outer_self_field))
+                body.add(_store_frame_field(frame, outer_self_field, Values.Load.ARGUMENT_SLOT(slot, outer_self_field.name)))
 
                 slot = slot + 1
             fi
@@ -392,9 +375,7 @@ namespace Syntax.Process is
             let initial_fields = frame.argument_initial_fields
 
             for arg_field in frame.argument_fields do
-                body.ldarg(0)
-                body.ldarg(slot)
-                body.stfld(_context.resolve_field_target(arg_field))
+                body.add(_store_frame_field(frame, arg_field, Values.Load.ARGUMENT_SLOT(slot, arg_field.name)))
 
                 slot = slot + 1
             od
@@ -406,26 +387,60 @@ namespace Syntax.Process is
             let index mut = 0
 
             for arg_field in frame.argument_fields do
-                body.ldarg(0)
-                body.ldarg(0)
-                body.ldfld(_context.resolve_field_target(arg_field))
-                body.stfld(_context.resolve_field_target(initial_fields[index]))
+                body.add(_store_frame_field(frame, initial_fields[index], _load_frame_field(frame, arg_field)))
 
                 index = index + 1
             od
 
-            body.ldarg(0)
-            body.call(_context.resolve_current_managed_thread_id())
-            body.stfld(_context.resolve_field_target(frame.thread_field))
+            body.add(
+                _store_frame_field(
+                    frame,
+                    frame.thread_field,
+                    Values.CURRENT_THREAD_ID(_innate_symbol_lookup.get_int_type())))
 
-            body.ret()
+            body.add(Values.RET())
 
-            assembly_emitter.handles.set_body_offset(
-                frame.constructor, body.flush(assembly_emitter))
-            assembly_emitter.handles.set_il_outputs(
-                frame.constructor, body.il_outputs)
+            _backend.begin_body()
+            _backend.write(body)
+            _backend.finish_body(frame.constructor)
+            _backend.end_body()
         si
 
+        // A synthesised body is written by no source, so whatever position
+        // the walk is at, the values built for it mark none.
+        _without_position(generate: () -> void) is
+            let locations = IoC.CONTAINER.instance.location_stack
+
+            locations.push(Source.LOCATION.internal)
+
+            try
+                generate()
+            finally
+                locations.pop()
+            yrt
+        si
+
+        _frame_self(frame: Semantic.Symbols.Classy) -> Value =>
+            Values.Load.REFERENCE_SELF(frame)
+
+        _load_frame_field(frame: Semantic.Symbols.Classy, target: Semantic.Symbols.Field) -> Value =>
+            Values.Load.INSTANCE_FIELD(_frame_self(frame), target)
+
+        _store_frame_field(frame: Semantic.Symbols.Classy, target: Semantic.Symbols.Field, value: Value) -> Value =>
+            Values.Store.INSTANCE_FIELD(_frame_self(frame), target, value)
+
+        // A body made of a single value followed by a return.
+        _returning(value: Value?) -> Values.BLOCK is
+            let body = Values.BLOCK(_innate_symbol_lookup.get_void_type())
+
+            if value? then
+                body.add(value)
+            fi
+
+            body.add(Values.RET())
+
+            return body
+        si
 
         // The iterator surface every consumer reaches a frame through.
         // Each body is fixed and small, so they are built here rather
@@ -433,85 +448,85 @@ namespace Syntax.Process is
         // GetEnumerator returns the frame itself or a fresh one, Dispose
         // and Reset do nothing, and ToString joins the pipe.
         _gen_state_machine_accessors_srm(frame: Semantic.Symbols.STATE_MACHINE_FRAME) is
-            let assembly_emitter = _context.srm_assembly_emitter
-            let handles = assembly_emitter.handles
-
-            // get_Current — read the current field.
-            let get_current = IR.Emitter.SRM_METHOD_BODY_EMITTER()
-            get_current.ldarg(0)
-            get_current.ldfld(_context.resolve_field_target(frame.current_field))
-            get_current.ret()
-            handles.set_frame_member_body(
+            // get_Current - read the current field.
+            _emit_frame_member_body_srm(
                 frame,
-                IR.Emitter.FrameMember.GET_CURRENT,
-                get_current.flush(assembly_emitter))
+                IR.FrameMember.GET_CURRENT,
+                _returning(_load_frame_field(frame, frame.current_field)))
 
-            // GetEnumerator — the frame implements Iterator[T] itself, so
-            // the first read from the thread that made it is the frame.
-            // Every other read is a fresh frame, constructed from the
-            // arguments this one was, so each read starts from the
-            // beginning and reads in progress at once are independent.
-            let get_enumerator = IR.Emitter.SRM_METHOD_BODY_EMITTER()
-            let fresh = IR.LABEL()
-
-            get_enumerator.ldarg(0)
-            get_enumerator.ldfld(_context.resolve_field_target(frame.claimed_field))
-            get_enumerator.branch(ILOpCode.BRTRUE, fresh)
-
-            get_enumerator.call(_context.resolve_current_managed_thread_id())
-            get_enumerator.ldarg(0)
-            get_enumerator.ldfld(_context.resolve_field_target(frame.thread_field))
-            get_enumerator.branch(ILOpCode.BNE_UN, fresh)
-
-            get_enumerator.ldarg(0)
-            get_enumerator.op(ILOpCode.LDC_I4_1)
-            get_enumerator.stfld(_context.resolve_field_target(frame.claimed_field))
-            get_enumerator.ldarg(0)
-            get_enumerator.ret()
-
-            get_enumerator.mark_label(fresh)
-
-            if let outer_self_field = frame.outer_self_field then
-                get_enumerator.ldarg(0)
-                get_enumerator.ldfld(_context.resolve_field_target(outer_self_field))
-            fi
-
-            for initial_field in frame.argument_initial_fields do
-                get_enumerator.ldarg(0)
-                get_enumerator.ldfld(_context.resolve_field_target(initial_field))
-            od
-
-            get_enumerator.new_object(_context.resolve_call_target(frame.constructor))
-            get_enumerator.ret()
-            handles.set_frame_member_body(
+            _emit_frame_member_body_srm(
                 frame,
-                IR.Emitter.FrameMember.GET_ENUMERATOR,
-                get_enumerator.flush(assembly_emitter))
+                IR.FrameMember.GET_ENUMERATOR,
+                _get_enumerator_body(frame))
 
-            // Dispose — a no-op. A generator abandoned mid-flight does
+            // Dispose - a no-op. A generator abandoned mid-flight does
             // not run the user's finally bodies.
-            let dispose = IR.Emitter.SRM_METHOD_BODY_EMITTER()
-            dispose.ret()
-            handles.set_frame_member_body(
-                frame, IR.Emitter.FrameMember.DISPOSE, dispose.flush(assembly_emitter))
+            _emit_frame_member_body_srm(frame, IR.FrameMember.DISPOSE, _returning(null))
 
-            // Reset — a no-op: a read that wants to start over takes a
+            // Reset - a no-op: a read that wants to start over takes a
             // fresh frame from GetEnumerator.
-            let reset = IR.Emitter.SRM_METHOD_BODY_EMITTER()
-            reset.ret()
-            handles.set_frame_member_body(
-                frame, IR.Emitter.FrameMember.RESET, reset.flush(assembly_emitter))
+            _emit_frame_member_body_srm(frame, IR.FrameMember.RESET, _returning(null))
 
-            // ToString — a generator is a Pipe[T], so stringify it the
+            // ToString - a generator is a Pipe[T], so stringify it the
             // way every other Pipe does. The trait's default is a
             // default interface method and does not override
             // Object.ToString, so each implementing class needs its own.
-            let to_string = IR.Emitter.SRM_METHOD_BODY_EMITTER()
-            to_string.ldarg(0)
-            to_string.call(_context.resolve_pipe_join(frame.class_element_type))
-            to_string.ret()
-            handles.set_frame_member_body(
-                frame, IR.Emitter.FrameMember.TO_STRING, to_string.flush(assembly_emitter))
+            _emit_frame_member_body_srm(
+                frame,
+                IR.FrameMember.TO_STRING,
+                _returning(Values.JOIN_PIPE(_frame_self(frame), frame.class_element_type)))
+        si
+
+        // GetEnumerator - the frame implements Iterator[T] itself, so
+        // the first read from the thread that made it is the frame.
+        // Every other read is a fresh frame, constructed from the
+        // arguments this one was, so each read starts from the
+        // beginning and reads in progress at once are independent.
+        _get_enumerator_body(frame: Semantic.Symbols.STATE_MACHINE_FRAME) -> Values.BLOCK is
+            let void_type = _innate_symbol_lookup.get_void_type()
+            let body = Values.BLOCK(void_type)
+
+            let claim = Values.REGION(IR.LABEL(), void_type)
+            claim.clear_position()
+
+            let already_claimed = Values.BREAK(claim, IR.BRANCH.NZ, _load_frame_field(frame, frame.claimed_field))
+            already_claimed.clear_position()
+            claim.body.add(already_claimed)
+
+            let other_thread =
+                Values.BREAK(
+                    claim,
+                    IR.BRANCH.NE,
+                    Values.CURRENT_THREAD_ID(_innate_symbol_lookup.get_int_type()),
+                    _load_frame_field(frame, frame.thread_field))
+            other_thread.clear_position()
+            claim.body.add(other_thread)
+
+            claim.body.add(
+                _store_frame_field(
+                    frame,
+                    frame.claimed_field,
+                    Values.Literal.NUMBER(1, _innate_symbol_lookup.get_bool_type())))
+            claim.body.add(_frame_self(frame))
+            claim.body.add(Values.RET())
+            claim.close()
+
+            body.add(claim)
+
+            let arguments = Collections.LIST[Value]()
+
+            if let outer_self_field = frame.outer_self_field then
+                arguments.add(_load_frame_field(frame, outer_self_field))
+            fi
+
+            for initial_field in frame.argument_initial_fields do
+                arguments.add(_load_frame_field(frame, initial_field))
+            od
+
+            body.add(Values.NEW(frame.type!, frame.constructor, arguments))
+            body.add(Values.RET())
+
+            return body
         si
     si
 si

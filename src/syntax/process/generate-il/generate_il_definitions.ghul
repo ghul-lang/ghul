@@ -24,9 +24,9 @@ namespace Syntax.Process is
             // A body that fails to emit unwinds to `Classy.walk`, which
             // restores the symbol table and the diagnostics but knows
             // nothing about emission state. Without this the abandoned
-            // body emitter is still installed when the next class opens,
-            // and everything that class emits is reported against it.
-            _context.current_srm_body_emitter = null
+            // body is still open when the next class opens, and
+            // everything that class emits is written into it.
+            _backend.abandon_bodies()
         si
 
         leave_class(symbol: Semantic.Symbols.Classy) is
@@ -61,19 +61,14 @@ namespace Syntax.Process is
 
             if let reset0 = reset then
 
-                let assembly_emitter = _context.srm_assembly_emitter
-                let enclosing = _context.current_srm_body_emitter
-                let body = IR.Emitter.SRM_METHOD_BODY_EMITTER()
-
-                _context.current_srm_body_emitter = body
+                _backend.begin_body()
 
                 try
-                    IR.Values.THROW(IR.Values.NEW_NOT_SUPPORTED_EXCEPTION()).gen(_context)
+                    _backend.write(IR.Values.THROW(IR.Values.NEW_NOT_SUPPORTED_EXCEPTION()))
 
-                    assembly_emitter.handles.set_body_offset(
-                        reset0, body.flush(assembly_emitter))
+                    _backend.finish_body(reset0)
                 finally
-                    _context.current_srm_body_emitter = enclosing
+                    _backend.end_body()
                 yrt
             fi
         si
@@ -327,7 +322,7 @@ namespace Syntax.Process is
                     return
                 fi
 
-                _gen_unit_variant_singleton_srm(variant_symbol)
+                _without_position(() is _gen_unit_variant_singleton_srm(variant_symbol) si)
             fi
         si
 
@@ -335,12 +330,7 @@ namespace Syntax.Process is
         // structure walk, which cannot encode a body; the body is
         // deposited here, in the pass that encodes every other body.
         _gen_unit_variant_singleton_srm(variant: Semantic.Symbols.VARIANT) is
-            let assembly_emitter = _context.srm_assembly_emitter
-            let handles = assembly_emitter.handles
-
-            let instance = handles.unit_variant_instance(variant)
-
-            if !instance? then
+            if !_backend.has_unit_variant_instance(variant) then
                 return
             fi
 
@@ -350,16 +340,45 @@ namespace Syntax.Process is
                 return
             fi
 
-            let body = IR.Emitter.SRM_METHOD_BODY_EMITTER()
-
-            body.new_object(_context.resolve_call_target(constructors.functions[0]))
-            body.stsfld(_context.resolve_unit_variant_instance(variant))
-            body.ret()
-
-            handles.set_unit_variant_initializer_body(variant, body.flush(assembly_emitter))
+            _backend.begin_body()
+            _backend.write(_returning(IR.Values.CREATE_UNIT_VARIANT_INSTANCE(variant, constructors.functions[0])))
+            _backend.finish_unit_variant_initializer(variant)
+            _backend.end_body()
         si
 
 
+
+        // A closure's frame has a constructor no source declares. Its
+        // body is generated in the closure's terms.
+        _gen_closure_frame(closure: Semantic.Symbols.Closure) is
+            if !closure.frame? then
+                return
+            fi
+
+            let frame = closure.frame!
+
+            closure.map_type_arguments()
+            closure.set_type_arguments()
+
+            _backend.begin_body()
+
+            try
+                try
+                    for value in frame.constructor_body(_symbol_loader) do
+                        _backend.write(value)
+                    od
+                catch ex: System.Exception
+                    _logger.exception(frame.location, ex, "error generating closure frame constructor")
+                yrt
+
+                _backend.write(IR.Values.RET())
+                _backend.finish_body(frame.constructor)
+            finally
+                _backend.end_body()
+            yrt
+
+            closure.unmap_type_arguments()
+        si
 
         gen_closures(closures: Collections.Iterable[Semantic.Symbols.Closure]?) is
             if !closures? then
@@ -368,7 +387,7 @@ namespace Syntax.Process is
 
             // A delegate has no frame of its own unless it is cached over one.
             for closure in closures |> filter(c => !c.is_anon_func /\ (!c.is_delegate \/ c.is_cached_on_frame)) do
-                closure.gen_frame(_context, _symbol_loader)
+                _gen_closure_frame(closure)
             od
 
             for closure in closures |> filter(c => c.pack_thunk?) do

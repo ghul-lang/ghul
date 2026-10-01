@@ -1,0 +1,133 @@
+namespace IR.Emitter is
+    use Semantic.Symbols.Symbol
+    use Semantic.Symbols.Classy
+    use Semantic.Symbols.Function
+
+    // Writes each body as a CIL method body, encoded into the assembly
+    // the context holds.
+    class CIL_BACKEND: Backend is
+        _context: CIL_CONTEXT
+
+        _enclosing: Collections.STACK[(body: SRM_METHOD_BODY_EMITTER?, member: Symbol?)]
+
+        init(context: CIL_CONTEXT) is
+            _context = context
+            _enclosing = Collections.STACK[(body: SRM_METHOD_BODY_EMITTER?, member: Symbol?)]()
+        si
+
+        install(module_name: string, module_version: string, want_library: bool) is
+            _context.install_srm_assembly_emitter(module_name, module_version, want_library)
+        si
+
+        reset() is
+            _context.reset_srm_assembly_emitter()
+        si
+
+        begin_assembly() is
+            let container = IoC.CONTAINER.instance
+            let emitter = _context.srm_assembly_emitter
+
+            emitter.referenced_assemblies = container.referenced_assemblies
+
+            // Not at the point the emitter is constructed: the
+            // constructor signature these reference is built from
+            // the string type, which the symbol table does not
+            // hold until the reflected assemblies have been read.
+            container.assembly_info.gen(emitter)
+
+            Semantic.DotNet.SESSION_CELL_ATTRIBUTES.gen(
+                emitter,
+                container.build_flags.submission_name,
+                container.assemblies)
+
+            // Assign every definition its metadata row before any
+            // body is encoded, so a body can name a target whose
+            // row is not written yet.
+            SRM_STRUCTURE_WALK(emitter).number(container.symbol_table.global_scope)
+        si
+
+        // Writes the rows the numbering promised, now that every body
+        // has been encoded and deposited. Driven by the sequence the
+        // numbering recorded, not by the symbol table, which has moved
+        // on since.
+        end_assembly() is
+            SRM_STRUCTURE_WALK(_context.srm_assembly_emitter).write_rows()
+        si
+
+        add_resource(name: string, content: ubyte[]) is
+            _context.srm_assembly_emitter.add_resource(name, content)
+        si
+
+        write(path: string) is
+            _context.srm_assembly_emitter.write_to(path)
+        si
+
+        begin_body() is
+            _begin(_context.srm_assembly_emitter.current_emission_member)
+        si
+
+        begin_body(member: Symbol) is
+            _begin(member)
+        si
+
+        _begin(member: Symbol?) is
+            let assembly_emitter = _context.srm_assembly_emitter
+
+            _enclosing.push((body = _context.current_srm_body_emitter, member = assembly_emitter.current_emission_member))
+
+            _context.current_srm_body_emitter = SRM_METHOD_BODY_EMITTER()
+            assembly_emitter.current_emission_member = member
+        si
+
+        write(value: Values.Value) is
+            _context.lowering.gen(value)
+        si
+
+        finish_body(function: Function) is
+            let assembly_emitter = _context.srm_assembly_emitter
+            let body = _context.current_srm_body_emitter!
+
+            assembly_emitter.handles.set_body_offset(function, body.flush(assembly_emitter))
+            assembly_emitter.handles.set_il_outputs(function, body.il_outputs)
+        si
+
+        finish_frame_member_body(frame: Classy, member: FrameMember) is
+            let assembly_emitter = _context.srm_assembly_emitter
+            let body = _context.current_srm_body_emitter!
+
+            assembly_emitter.handles.set_frame_member_body(frame, member, body.flush(assembly_emitter))
+        si
+
+        finish_unit_variant_initializer(variant: Classy) is
+            let assembly_emitter = _context.srm_assembly_emitter
+            let body = _context.current_srm_body_emitter!
+
+            assembly_emitter.handles.set_unit_variant_initializer_body(variant, body.flush(assembly_emitter))
+        si
+
+        end_body() is
+            assert _enclosing.count > 0 else "body ended without one begun"
+
+            let enclosing = _enclosing.pop()
+
+            _context.current_srm_body_emitter = enclosing.body
+            _context.srm_assembly_emitter.current_emission_member = enclosing.member
+        si
+
+        abandon_bodies() is
+            _enclosing.clear()
+
+            _context.current_srm_body_emitter = null
+        si
+
+        has_unit_variant_instance(variant: Classy) -> bool =>
+            _context.srm_assembly_emitter.handles.unit_variant_instance(variant)?
+
+        mark_entry_point(function: Function) is
+            // The entry point is marked by handle once the method's row
+            // is written, so this records the function rather than
+            // emitting anything here.
+            _context.srm_assembly_emitter.entry_point_function = function
+        si
+    si
+si

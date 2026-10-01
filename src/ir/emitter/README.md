@@ -23,13 +23,14 @@ where misplaced would not fail at all.
 
 ## Files
 
+- `cil_backend.ghul` – the IR's `Backend` for CIL: opens and finishes each
+  method body, and installs, prepares and writes the assembly.
 - `cil_context.ghul` – the state the backend carries while it lowers and
   encodes: the assembly emitter it writes through, the body emitter for the
   function being generated, and how a value reaches the members and types
   it names.
 - `cil_lowering.ghul` – lowers IR values to CIL. It implements the IR's
-  value visitor; a value without a visit there yet still lowers itself in its
-  own `gen`.
+  value visitor, and every value has a visit there.
 - `cil_async_lowering.ghul` – lowers the async state-machine values through
   the .NET async builder protocol.
 - `structured_lowering.ghul` – lowers structured nodes to the labels and
