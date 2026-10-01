@@ -215,27 +215,22 @@ namespace Syntax.Process is
             let symbol = find(variable.name!)
 
             // State-machine-resident catch variable (async function):
-            // the exception's on the stack but `stloc <name>` would
-            // reference an undeclared CLR local since pre(VARIABLE)
-            // skipped the `.locals init` directive. Route through
+            // the exception's on the stack but the variable has no
+            // local, since pre(VARIABLE) declared none. Route through
             // the frame field via a temp instead.
             if let v: Semantic.Symbols.Variable = symbol, sm_field = v.state_machine_field then
-                let exception_type = variable.type_expression.type!
-                let caught = ".catch_exc"
+                let caught = IR.LOCAL(".catch_exc", variable.type_expression.type!)
 
-                add(Values.DECLARE_LOCAL(caught, exception_type))
-                add(Values.STORE_TEMP(caught, exception_type))
+                add(Values.DECLARE_LOCAL(caught))
+                add(Values.STORE_TEMP(caught))
 
                 add(
                     _build_frame_field_store(
                         cast Semantic.Symbols.STATE_MACHINE_FRAME_BASE?(sm_field.owner)!,
                         sm_field,
-                        Values.Load.TEMP(caught, exception_type)))
+                        Values.Load.TEMP(caught)))
             else
-                add(
-                    Values.STORE_TEMP(
-                        symbol!.il_name,
-                        variable.type_expression.type!))
+                add(Values.STORE_TEMP((cast Semantic.Symbols.Variable(symbol)).ir_local))
             fi
 
             `catch.body.walk(self)
@@ -502,9 +497,7 @@ namespace Syntax.Process is
                     stage_delegates.add(null)
                     stage_counters.add(counter)
                 elif stage.is_inlined then
-                    add(
-                        Values.DECLARE_LOCAL(
-                            stage.param_local!.il_name, stage.param_local!.storage_type!))
+                    add(Values.DECLARE_LOCAL(stage.param_local!.ir_local))
                     stage_delegates.add(null)
                     stage_counters.add(null)
                 elif stage.is_index then
@@ -573,11 +566,11 @@ namespace Syntax.Process is
                     // checks the count before pulling the next element (see
                     // _gen_fused_take_guards). The element passes through
                     // unchanged.
-                    add(IR.Values.DECREMENT(stage_counters[index]!.il_name, int_type))
+                    add(IR.Values.DECREMENT(stage_counters[index]!.local, int_type))
                 elif stage.is_skip then
                     // Decrement the counter; while it stays non-negative this
                     // is a leading element to drop, so pull the next one.
-                    add(Values.CONTINUE(loop, BRANCH.GE, IR.Values.PRE_DECREMENT(stage_counters[index]!.il_name, int_type), Literal.NUMBER(0, int_type)))
+                    add(Values.CONTINUE(loop, BRANCH.GE, IR.Values.PRE_DECREMENT(stage_counters[index]!.local, int_type), Literal.NUMBER(0, int_type)))
                 else
                     let stage_result: Value mut
 
@@ -594,7 +587,7 @@ namespace Syntax.Process is
                         // INDEXED_VALUE(counter, current) with the counter
                         // post-incremented in place - no INDEX_PIPE object.
                         let arguments = Collections.LIST[Value]()
-                        arguments.add(cast Value(IR.Values.POST_INCREMENT(stage_counters[index]!.il_name, int_type)))
+                        arguments.add(cast Value(IR.Values.POST_INCREMENT(stage_counters[index]!.local, int_type)))
                         arguments.add(current_value)
 
                         stage_result = IR.Values.NEW(stage.indexed_value_type!, stage.indexed_value_constructor!, arguments)

@@ -144,8 +144,7 @@ namespace Syntax.Process is
                 _specialized_field(
                     frame, frame.state_field, construction_type_args, symbol.location),
                 _specialized_field(
-                    frame, frame.builder_field!, construction_type_args, symbol.location),
-                ".sm"
+                    frame, frame.builder_field!, construction_type_args, symbol.location)
             )
 
             _emit_async_outer_method_srm(symbol, launch)
@@ -240,17 +239,15 @@ namespace Syntax.Process is
             return true
         si
 
-        // The state-local IL spelling of the innermost open
-        // dispatch holder — `'.async_state'` for async state
-        // machines, `'.gen_state'` for generators, null when no
-        // state machine is open. Used by `.try` emission and the
-        // finally-body state guard so the same code paths emit the
-        // right local name without each caller having to know.
-        _current_state_local_il() -> string? is
+        // The state local of the innermost open dispatch holder, or
+        // null when no state machine is open. Used by `.try` emission,
+        // the finally-body state guard and suspension, so the same code
+        // paths use the right local without each caller having to know.
+        _current_state_local() -> IR.LOCAL? is
             if _async_dispatch_stack.count == 0 then
                 return null
             fi
-            return _async_dispatch_stack[_async_dispatch_stack.count - 1].state_local_il
+            return _async_dispatch_stack[_async_dispatch_stack.count - 1].state_local
         si
 
         // Declare a CLR `int32` local in the MoveNext frame, copy
@@ -259,20 +256,22 @@ namespace Syntax.Process is
         // the caller can pop it at the end of the body walk via
         // `_pop_async_dispatch_holder`. Used by every state-machine
         // entry point (named function, lambda closure, generator).
-        // `state_local_il` is the local's IL spelling —
+        // `state_local_name` names the local -
         // `'.async_state'` for async, `'.gen_state'` for
         // generators — and travels with the holder so inner
         // dispatch sites pick it up.
         _open_state_machine_entry(
             frame: Semantic.Symbols.STATE_MACHINE_FRAME_BASE,
             state_field: Semantic.Symbols.Field,
-            state_local_il: string
+            state_local_name: string
         ) -> ASYNC_DISPATCH_HOLDER is
-            add(Values.DECLARE_LOCAL(state_local_il, _innate_symbol_lookup.get_int_type()))
-            add(_build_frame_field_load(frame, state_field))
-            add(Values.STORE_TEMP(state_local_il, _innate_symbol_lookup.get_int_type()))
+            let state_local = IR.LOCAL(state_local_name, _innate_symbol_lookup.get_int_type())
 
-            let dispatch = Values.DISPATCH(state_local_il, _innate_symbol_lookup.get_int_type())
+            add(Values.DECLARE_LOCAL(state_local))
+            add(_build_frame_field_load(frame, state_field))
+            add(Values.STORE_TEMP(state_local))
+
+            let dispatch = Values.DISPATCH(state_local)
             add(dispatch)
             let holder = ASYNC_DISPATCH_HOLDER(dispatch, true)
             _async_dispatch_stack.add(holder)
@@ -286,7 +285,7 @@ namespace Syntax.Process is
         // `_maybe_pop_dispatch_holder` for symmetric cleanup
         // without an `if` at every call site.
         _maybe_push_dispatch_holder() -> ASYNC_DISPATCH_HOLDER? is
-            if !_current_state_local_il()? then
+            if !_current_state_local()? then
                 return null
             fi
             return _push_async_dispatch_holder()
@@ -424,9 +423,9 @@ namespace Syntax.Process is
         // Returns null when not inside a state machine — caller
         // emits the finally body unguarded.
         _open_finally_state_guard() -> Values.REGION? is
-            let state_local_il = _current_state_local_il()
+            let state_local = _current_state_local()
 
-            if !state_local_il? then
+            if !state_local? then
                 return null
             fi
 
@@ -438,7 +437,7 @@ namespace Syntax.Process is
                 Values.BREAK(
                     skip,
                     BRANCH.GE,
-                    Values.Load.TEMP(state_local_il, int_type),
+                    Values.Load.TEMP(state_local),
                     Values.Literal.NUMBER(1, int_type)))
 
             return skip
@@ -465,7 +464,7 @@ namespace Syntax.Process is
         _push_async_dispatch_holder() -> ASYNC_DISPATCH_HOLDER is
             assert _async_dispatch_stack.count > 0 else "no outer dispatch holder to inherit state-local name from"
             let outer = _async_dispatch_stack[_async_dispatch_stack.count - 1]
-            let dispatch = Values.DISPATCH(outer.state_local_il, _innate_symbol_lookup.get_int_type())
+            let dispatch = Values.DISPATCH(outer.state_local)
             add(dispatch)
             let holder = ASYNC_DISPATCH_HOLDER(dispatch, false)
             _async_dispatch_stack.add(holder)
