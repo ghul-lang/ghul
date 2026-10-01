@@ -48,7 +48,7 @@ namespace Syntax.Process is
             //
             // Forward this method's own arguments, construct the
             // frame, return it.
-            _without_position(() is _emit_generator_outer_method_srm(symbol, frame, state_machine) si)
+            _without_position(() is _emit_generator_outer_method(symbol, frame, state_machine) si)
 
             // --- Walk the body into MoveNext's block ---
             //
@@ -198,7 +198,7 @@ namespace Syntax.Process is
                 () => _gen_generator_literal_body(function, closure)
             )
 
-            _without_position(() is _emit_generator_outer_method_srm(closure, frame, state_machine) si)
+            _without_position(() is _emit_generator_outer_method(closure, frame, state_machine) si)
         si
 
         _gen_generator_function_body(function: Definitions.FUNCTION) is
@@ -226,13 +226,10 @@ namespace Syntax.Process is
         // class-T's appear in the signature; for a non-generic frame,
         // just the default ctor's IL reference. Exceptions in lookup
         // are logged and a sentinel returned.
-        // A generator's outer method, encoded rather than written. Its
+        // A generator's outer method, built rather than walked. Its
         // whole body is: forward this method's own arguments, construct
         // the frame, return it.
-        //
-        // The row is the function's own, so this deposits its offset the
-        // same way an ordinary method body does.
-        _emit_generator_outer_method_srm(
+        _emit_generator_outer_method(
             symbol: Semantic.Symbols.Function,
             frame: Semantic.Symbols.STATE_MACHINE_FRAME,
             state_machine: Semantic.Symbols.STATE_MACHINE
@@ -322,24 +319,22 @@ namespace Syntax.Process is
             state_machine.install_body_emission_overrides()
 
             // .ctor — parameterless, chains to Object::.ctor.
-            _without_position(() is _gen_state_machine_ctor_srm(frame) si)
+            _without_position(() is _gen_state_machine_ctor(frame) si)
 
             // MoveNext — populated during the body walk.
-            _emit_frame_member_body_srm(
+            _emit_frame_member_body(
                 frame, IR.FrameMember.MOVE_NEXT, move_next_block)
 
             // Other Iterator[T] / IDisposable members.
-            _without_position(() is _gen_state_machine_accessors_srm(frame) si)
+            _without_position(() is _gen_state_machine_accessors(frame) si)
 
             state_machine.uninstall_body_emission_overrides()
         si
 
-        // A frame member the lowering synthesises, encoded into a body
-        // of its own and deposited against the (frame, member) key the
-        // structure walk reads when it writes the row. There is no
-        // symbol to key on: the member exists only in the emitted
-        // assembly.
-        _emit_frame_member_body_srm(
+        // A frame member the lowering synthesises, finished against the
+        // frame and which member it is. There is no symbol to finish it
+        // against: the member exists only in the emitted assembly.
+        _emit_frame_member_body(
             frame: Semantic.Symbols.STATE_MACHINE_FRAME,
             member: IR.FrameMember,
             block: Values.BLOCK
@@ -354,7 +349,7 @@ namespace Syntax.Process is
         // constructor argument into the field the lowering declared for
         // it. It is a declared symbol with a row of its own, so its body
         // is deposited the same way any other method's is.
-        _gen_state_machine_ctor_srm(frame: Semantic.Symbols.STATE_MACHINE_FRAME) is
+        _gen_state_machine_ctor(frame: Semantic.Symbols.STATE_MACHINE_FRAME) is
             let body = Values.BLOCK(_innate_symbol_lookup.get_void_type())
 
             body.add(Values.INIT_OBJECT(_frame_self(frame)))
@@ -447,31 +442,31 @@ namespace Syntax.Process is
         // than walked: get_Current reads the current field,
         // GetEnumerator returns the frame itself or a fresh one, Dispose
         // and Reset do nothing, and ToString joins the pipe.
-        _gen_state_machine_accessors_srm(frame: Semantic.Symbols.STATE_MACHINE_FRAME) is
+        _gen_state_machine_accessors(frame: Semantic.Symbols.STATE_MACHINE_FRAME) is
             // get_Current - read the current field.
-            _emit_frame_member_body_srm(
+            _emit_frame_member_body(
                 frame,
                 IR.FrameMember.GET_CURRENT,
                 _returning(_load_frame_field(frame, frame.current_field)))
 
-            _emit_frame_member_body_srm(
+            _emit_frame_member_body(
                 frame,
                 IR.FrameMember.GET_ENUMERATOR,
                 _get_enumerator_body(frame))
 
             // Dispose - a no-op. A generator abandoned mid-flight does
             // not run the user's finally bodies.
-            _emit_frame_member_body_srm(frame, IR.FrameMember.DISPOSE, _returning(null))
+            _emit_frame_member_body(frame, IR.FrameMember.DISPOSE, _returning(null))
 
             // Reset - a no-op: a read that wants to start over takes a
             // fresh frame from GetEnumerator.
-            _emit_frame_member_body_srm(frame, IR.FrameMember.RESET, _returning(null))
+            _emit_frame_member_body(frame, IR.FrameMember.RESET, _returning(null))
 
             // ToString - a generator is a Pipe[T], so stringify it the
             // way every other Pipe does. The trait's default is a
             // default interface method and does not override
             // Object.ToString, so each implementing class needs its own.
-            _emit_frame_member_body_srm(
+            _emit_frame_member_body(
                 frame,
                 IR.FrameMember.TO_STRING,
                 _returning(Values.JOIN_PIPE(_frame_self(frame), frame.class_element_type)))
