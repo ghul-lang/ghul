@@ -1,5 +1,5 @@
 namespace Semantic is
-    use System.Reflection.Metadata.ILOpCode
+    use IR.Scalar
     use IO.Std
 
     use Logging
@@ -59,19 +59,17 @@ namespace Semantic is
                     return true
                 fi
 
-                let instruction = _value_converter.get_instruction(target_type)
                 let enum_type = _innate_symbol_lookup.get_enum_type()
 
-                if instruction? then
-                    // A `conv.*` opcode only accepts a source already on
-                    // the evaluation stack in a compatible primitive
-                    // shape - one of the built-in scalars, or an enum
-                    // (which decays to its underlying integral type on
-                    // the stack per ECMA-335). A multi-field value type
-                    // like Half or Int128 is neither, so `get_instruction`
-                    // being keyed on the target alone isn't enough here.
+                if _value_converter.scalar(target_type)? then
+                    // A built-in conversion only accepts a source in a
+                    // compatible primitive shape - one of the built-in
+                    // scalars, or an enum (which decays to its underlying
+                    // integral type on the stack per ECMA-335). A
+                    // multi-field value type like Half or Int128 is
+                    // neither, so a scalar target alone isn't enough here.
                     if
-                        !_value_converter.get_instruction(source_type)? /\
+                        !_value_converter.scalar(source_type)? /\
                         !enum_type.is_assignable_from(source_type) /\
                         !_conversion_lookup.find(source_type, target_type)?
                     then
@@ -193,31 +191,25 @@ namespace Semantic is
                         )
                 fi
 
-                let instruction = _value_converter.get_instruction(target_type)
+                let target_scalar = _value_converter.scalar(target_type)
+                let source_scalar = _value_converter.scalar(value.type!)
                 let enum_type = _innate_symbol_lookup.get_enum_type()
 
-                if instruction? then
-                    // See the matching comment in check_cast_is_valid:
-                    // `get_instruction` is keyed on the target alone, so
-                    // it says nothing about whether `value` is actually
-                    // stack-compatible with the resulting `conv.*`
-                    // opcode. A multi-field value type like Half or
-                    // Int128 isn't, and reaching the JIT with one gives
-                    // an InvalidProgramException rather than a compile
+                if let to = target_scalar then
+                    // See the matching comment in check_cast_is_valid: a
+                    // scalar target says nothing about whether `value`
+                    // can be converted by a built-in conversion. A
+                    // multi-field value type like Half or Int128 can't,
+                    // and reaching the JIT with one gives an
+                    // InvalidProgramException rather than a compile
                     // error.
-                    if
-                        _value_converter.get_instruction(value.type!)? \/
-                        enum_type.is_assignable_from(value.type!)
-                    then
-                        return _convert(value, target_type, instruction)
+                    if source_scalar? \/ enum_type.is_assignable_from(value.type!) then
+                        return CONVERT(target_type, value, source_scalar, to)
                     fi
                 elif enum_type.is_assignable_from(target_type) then
-                    return
-                        CONVERT(
-                            target_type,
-                            value,
-                            ILOpCode.CONV_I4
-                        )
+                    // An enum target decays to int32 the way an enum
+                    // source does.
+                    return CONVERT(target_type, value, source_scalar, Scalar.INT32)
                 fi
 
                 let conversion_function = _conversion_lookup.find(value.type!, target_type)
@@ -269,41 +261,6 @@ namespace Semantic is
         find_user_defined_conversion(source_type: Type, target_type: Type) -> Symbols.Function? =>
             _conversion_lookup.find(source_type, target_type)
 
-        // A uint, ulong or uword fills its whole stack slot, so its top
-        // bit is part of the magnitude rather than a sign, and widening
-        // it to a signed integer or a floating type takes the unsigned
-        // form of the conversion. The narrower unsigned types are already
-        // zero-extended on the stack, and need nothing different.
-        _convert(value: Value, target_type: Type, instruction: ILOpCode) -> Value is
-            let source = value.type!
-
-            let full_width_unsigned =
-                source.matches(_innate_symbol_lookup.get_uint_type()) \/
-                source.matches(_innate_symbol_lookup.get_ulong_type()) \/
-                source.matches(_innate_symbol_lookup.get_uword_type())
-
-            if !full_width_unsigned then
-                return CONVERT(target_type, value, instruction)
-            fi
-
-            if instruction == ILOpCode.CONV_R4 \/ instruction == ILOpCode.CONV_R8 then
-                let widened =
-                    CONVERT(
-                        _innate_symbol_lookup.get_double_type(),
-                        value,
-                        ILOpCode.CONV_R_UN
-                    )
-
-                return CONVERT(target_type, widened, instruction)
-            elif instruction == ILOpCode.CONV_I8 then
-                return CONVERT(target_type, value, ILOpCode.CONV_U8)
-            elif instruction == ILOpCode.CONV_I then
-                return CONVERT(target_type, value, ILOpCode.CONV_U)
-            fi
-
-            CONVERT(target_type, value, instruction)
-        si
-
         _build_conversion_call(value: Value, function: Symbols.Function, target_type: Type) -> Value is
             let arguments = Collections.LIST[Value]()
             arguments.add(value)
@@ -348,7 +305,7 @@ namespace Semantic is
                 `try.catches.add(handler)
 
                 block.open_body(handler.body)
-                block.add(IR.Values.INSTRUCTION(ILOpCode.POP))
+                block.add(IR.Values.DISCARD())
                 result.store(IR.Values.DEFAULT(target_type))
                 block.add(IR.Values.BREAK(`try))
                 block.close_body(handler.body)

@@ -1,5 +1,4 @@
 namespace IR is
-    use System.Reflection.Metadata.ILOpCode
     use IO.Std
 
     use Semantic.Types.Type
@@ -23,46 +22,47 @@ namespace IR is
         _logger: Logging.Logger,
         _innate_symbol_lookup: Semantic.Lookups.InnateSymbolLookup
     ) is
-        _instructions: Collections.MAP[string, ILOpCode]?
+        // The built-in scalar types, each with its kind.
+        _scalars: Collections.LIST[(type: Type, scalar: Scalar)]?
 
         // System.Decimal has no `conv.*` IL opcode. Conversion to or
         // from decimal is a static call to `op_Implicit` / `op_Explicit`
         // on the Decimal type, overloaded per neighbouring type; this
         // is the set of neighbours those overloads cover. Populated by
-        // complete_initialization alongside _instructions.
+        // complete_initialization alongside _scalars.
         _decimal_neighbours: Collections.SET[string]
         _decimal_implicit_sources: Collections.SET[string]
 
         super()
 
         complete_initialization() is
-            if _instructions? then
+            if _scalars? then
                 return
             fi
 
-            _instructions = Collections.MAP[string, ILOpCode]()
+            _scalars = Collections.LIST[(type: Type, scalar: Scalar)]()
 
-            add_instruction(_innate_symbol_lookup.get_bool_type(), ILOpCode.CONV_U1)
+            add_scalar(_innate_symbol_lookup.get_bool_type(), Scalar.BOOL)
 
-            add_instruction(_innate_symbol_lookup.get_ubyte_type(), ILOpCode.CONV_U1)
-            add_instruction(_innate_symbol_lookup.get_byte_type(), ILOpCode.CONV_I1)
+            add_scalar(_innate_symbol_lookup.get_ubyte_type(), Scalar.UINT8)
+            add_scalar(_innate_symbol_lookup.get_byte_type(), Scalar.INT8)
 
-            add_instruction(_innate_symbol_lookup.get_char_type(), ILOpCode.CONV_U2)
+            add_scalar(_innate_symbol_lookup.get_char_type(), Scalar.CHAR)
 
-            add_instruction(_innate_symbol_lookup.get_ushort_type(), ILOpCode.CONV_U2)
-            add_instruction(_innate_symbol_lookup.get_short_type(), ILOpCode.CONV_I2)
+            add_scalar(_innate_symbol_lookup.get_ushort_type(), Scalar.UINT16)
+            add_scalar(_innate_symbol_lookup.get_short_type(), Scalar.INT16)
 
-            add_instruction(_innate_symbol_lookup.get_uint_type(), ILOpCode.CONV_U4)
-            add_instruction(_innate_symbol_lookup.get_int_type(), ILOpCode.CONV_I4)
+            add_scalar(_innate_symbol_lookup.get_uint_type(), Scalar.UINT32)
+            add_scalar(_innate_symbol_lookup.get_int_type(), Scalar.INT32)
 
-            add_instruction(_innate_symbol_lookup.get_ulong_type(), ILOpCode.CONV_U8)
-            add_instruction(_innate_symbol_lookup.get_long_type(), ILOpCode.CONV_I8)
+            add_scalar(_innate_symbol_lookup.get_ulong_type(), Scalar.UINT64)
+            add_scalar(_innate_symbol_lookup.get_long_type(), Scalar.INT64)
 
-            add_instruction(_innate_symbol_lookup.get_uword_type(), ILOpCode.CONV_U)
-            add_instruction(_innate_symbol_lookup.get_word_type(), ILOpCode.CONV_I)
+            add_scalar(_innate_symbol_lookup.get_uword_type(), Scalar.UINT_NATIVE)
+            add_scalar(_innate_symbol_lookup.get_word_type(), Scalar.INT_NATIVE)
 
-            add_instruction(_innate_symbol_lookup.get_single_type(), ILOpCode.CONV_R4)
-            add_instruction(_innate_symbol_lookup.get_double_type(), ILOpCode.CONV_R8)
+            add_scalar(_innate_symbol_lookup.get_single_type(), Scalar.FLOAT32)
+            add_scalar(_innate_symbol_lookup.get_double_type(), Scalar.FLOAT64)
 
             _decimal_neighbours = Collections.SET[string]()
             _decimal_implicit_sources = Collections.SET[string]()
@@ -87,8 +87,8 @@ namespace IR is
             register_decimal_neighbour(_innate_symbol_lookup.get_double_type(), false)
         si
 
-        add_instruction(type: Type, op_code: ILOpCode) is
-            _instructions![type.symbol.qualified_name] = op_code
+        add_scalar(type: Type, scalar: Scalar) is
+            _scalars!.add((type, scalar))
         si
 
         register_decimal_neighbour(type: Type, is_implicit_to_decimal: bool) is
@@ -99,20 +99,23 @@ namespace IR is
             fi
         si
 
-        get_instruction(type: Type?) -> ILOpCode? is
+        // The scalar kind of `type`, or null where it is not one of the
+        // built-in scalar types.
+        scalar(type: Type?) -> Scalar? is
             complete_initialization()
 
             if !type? then
                 return null
             fi
 
-            let name = type.symbol.qualified_name
+            let symbol = type.symbol
 
-            let instructions = _instructions
+            for entry in _scalars! do
+                if entry.type.symbol == symbol then
+                    return entry.scalar
+                fi
+            od
 
-            if instructions? /\ instructions.contains_key(name) then
-                return instructions[name]
-            fi
             return null
         si
 

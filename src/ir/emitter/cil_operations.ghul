@@ -1,0 +1,94 @@
+namespace IR.Emitter is
+    use System.Reflection.Metadata.ILOpCode
+
+    // How the CIL backend encodes the target-neutral operations.
+    class CIL_OPERATIONS is
+        // A conversion to `to` from a value of kind `from`, or of a kind
+        // that is not a scalar (an enum) where `from` is null.
+        //
+        // A uint, ulong or uword fills its whole stack slot, so its top
+        // bit is part of the magnitude rather than a sign, and widening
+        // it to a signed integer or a floating type takes the unsigned
+        // form of the conversion. The narrower unsigned types are already
+        // zero-extended on the stack, and need nothing different.
+        conversion(from: Scalar?, to: Scalar) -> Collections.List[ILOpCode] static is
+            let full_width_unsigned =
+                if let f = from then
+                    f == Scalar.UINT32 \/ f == Scalar.UINT64 \/ f == Scalar.UINT_NATIVE
+                else
+                    false
+                fi
+
+            if full_width_unsigned then
+                if to == Scalar.FLOAT32 \/ to == Scalar.FLOAT64 then
+                    return [ILOpCode.CONV_R_UN, _conversion_to(to)]
+                elif to == Scalar.INT64 then
+                    return [ILOpCode.CONV_U8]
+                elif to == Scalar.INT_NATIVE then
+                    return [ILOpCode.CONV_U]
+                fi
+            fi
+
+            return [_conversion_to(to)]
+        si
+
+        _conversion_to(to: Scalar) -> ILOpCode static =>
+            case to
+            when Scalar.BOOL then ILOpCode.CONV_U1
+            when Scalar.UINT8 then ILOpCode.CONV_U1
+            when Scalar.INT8 then ILOpCode.CONV_I1
+            when Scalar.CHAR then ILOpCode.CONV_U2
+            when Scalar.UINT16 then ILOpCode.CONV_U2
+            when Scalar.INT16 then ILOpCode.CONV_I2
+            when Scalar.UINT32 then ILOpCode.CONV_U4
+            when Scalar.INT32 then ILOpCode.CONV_I4
+            when Scalar.UINT64 then ILOpCode.CONV_U8
+            when Scalar.INT64 then ILOpCode.CONV_I8
+            when Scalar.UINT_NATIVE then ILOpCode.CONV_U
+            when Scalar.INT_NATIVE then ILOpCode.CONV_I
+            when Scalar.FLOAT32 then ILOpCode.CONV_R4
+            when Scalar.FLOAT64 then ILOpCode.CONV_R8
+            else throw System.InvalidOperationException("no conversion to {to}")
+            esac
+
+        arithmetic(operation: ArithmeticOperation) -> ILOpCode static =>
+            case operation
+            when ArithmeticOperation.ADD then ILOpCode.ADD
+            when ArithmeticOperation.SUBTRACT then ILOpCode.SUB
+            when ArithmeticOperation.MULTIPLY then ILOpCode.MUL
+            when ArithmeticOperation.DIVIDE then ILOpCode.DIV
+            when ArithmeticOperation.DIVIDE_UNSIGNED then ILOpCode.DIV_UN
+            when ArithmeticOperation.REMAINDER then ILOpCode.REM
+            when ArithmeticOperation.REMAINDER_UNSIGNED then ILOpCode.REM_UN
+            when ArithmeticOperation.NEGATE then ILOpCode.NEG
+            when ArithmeticOperation.COMPLEMENT then ILOpCode.NOT
+            when ArithmeticOperation.AND then ILOpCode.AND
+            when ArithmeticOperation.OR then ILOpCode.OR
+            when ArithmeticOperation.XOR then ILOpCode.XOR
+            when ArithmeticOperation.SHIFT_LEFT then ILOpCode.SHL
+            when ArithmeticOperation.SHIFT_RIGHT then ILOpCode.SHR
+            when ArithmeticOperation.SHIFT_RIGHT_UNSIGNED then ILOpCode.SHR_UN
+            else throw System.InvalidOperationException("no instruction for {operation}")
+            esac
+
+        // A comparison of the two values on the stack. CIL has only
+        // equal, greater and less, so the other three are the negation
+        // of one of those.
+        comparison(comparison: Comparison, is_unsigned: bool) -> (op_code: ILOpCode, negates: bool) static =>
+            case comparison
+            when Comparison.EQUAL then (ILOpCode.CEQ, false)
+            when Comparison.NOT_EQUAL then (ILOpCode.CEQ, true)
+            when Comparison.GREATER then (_greater(is_unsigned), false)
+            when Comparison.LESS_OR_EQUAL then (_greater(is_unsigned), true)
+            when Comparison.LESS then (_less(is_unsigned), false)
+            when Comparison.GREATER_OR_EQUAL then (_less(is_unsigned), true)
+            else throw System.InvalidOperationException("no instruction for {comparison}")
+            esac
+
+        _greater(is_unsigned: bool) -> ILOpCode static =>
+            if is_unsigned then ILOpCode.CGT_UN else ILOpCode.CGT fi
+
+        _less(is_unsigned: bool) -> ILOpCode static =>
+            if is_unsigned then ILOpCode.CLT_UN else ILOpCode.CLT fi
+    si
+si

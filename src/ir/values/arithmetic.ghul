@@ -1,0 +1,77 @@
+namespace IR.Values is
+    use Semantic.Types.Type
+
+    use Ghul.Pipes
+
+    // A built-in arithmetic or bitwise operator applied to one operand
+    // or two.
+    class ARITHMETIC: Value is
+        operation: IR.ArithmeticOperation
+        operands: Collections.List[Value]
+
+        type: Type
+
+        init(operation: IR.ArithmeticOperation, operands: Collections.List[Value], type: Type) is
+            super.init()
+
+            assert operands.count == 1 \/ operands.count == 2 else "arithmetic takes one operand or two"
+
+            self.operation = operation
+            self.operands = operands
+            self.type = type
+        si
+
+        init(operation: IR.ArithmeticOperation, left: Value, right: Value, type: Type) is
+            self.init(operation, [left, right]:Value, type)
+        si
+
+        gen(context: IR.CONTEXT) is
+            for operand in operands do
+                gen_marked(operand, context)
+            od
+
+            context.current_srm_body_emitter!.op(IR.Emitter.CIL_OPERATIONS.arithmetic(operation))
+        si
+
+        to_string() -> string => "arithmetic:{operation}({operands |> join(", ")})"
+    si
+
+    // A built-in comparison of two values, answering a bool. An
+    // unsigned comparison orders integers as unsigned, and floating
+    // values with unordered operands answering true.
+    class COMPARE: Value is
+        comparison: IR.Comparison
+        left: Value
+        right: Value
+        is_unsigned: bool
+
+        type: Type
+
+        init(comparison: IR.Comparison, left: Value, right: Value, is_unsigned: bool, type: Type) is
+            super.init()
+
+            self.comparison = comparison
+            self.left = left
+            self.right = right
+            self.is_unsigned = is_unsigned
+            self.type = type
+        si
+
+        gen(context: IR.CONTEXT) is
+            gen_marked(left, context)
+            gen_marked(right, context)
+
+            let body = context.current_srm_body_emitter!
+            let (op_code, negates) = IR.Emitter.CIL_OPERATIONS.comparison(comparison, is_unsigned)
+
+            body.op(op_code)
+
+            if negates then
+                body.ldc_i4(0)
+                body.op(System.Reflection.Metadata.ILOpCode.CEQ)
+            fi
+        si
+
+        to_string() -> string => "compare:{comparison}{if is_unsigned then ".unsigned" else "" fi}({left}, {right})"
+    si
+si
