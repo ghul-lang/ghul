@@ -1862,7 +1862,7 @@ namespace Syntax.Process is
 
             let direct_result = build_optional_type(direct_type, _innate_symbol_lookup)
 
-            if !direct_type.is_optional /\ direct_result.is_value_type then
+            if !direct_type.is_optional /\ _is_value_optional(direct_result) then
                 return IR.Values.WRAP_OPTIONAL(direct_result, direct)
             fi
 
@@ -1880,6 +1880,9 @@ namespace Syntax.Process is
         //   - reference T → T flagged optional, IL identity.
         //   - value T     → NULLABLE[T] via WRAP_OPTIONAL (newobj
         //                   Nullable<T>::.ctor(T)).
+        //   - type parameter T → T? as its declared kind lowers it,
+        //                   through WRAP_OPTIONAL where that is
+        //                   NULLABLE[T] or MAYBE[T].
         //   - already-optional U → identity.
         _widen_coalesce_arm(raw: Value) -> COALESCE_ARM? is
             let raw_type = raw.type
@@ -1895,7 +1898,7 @@ namespace Syntax.Process is
             let result_type = build_optional_type(raw_type, _innate_symbol_lookup)
 
             let member_value: Value =
-                if !raw_type.is_optional /\ result_type.is_value_type then
+                if !raw_type.is_optional /\ _is_value_optional(result_type) then
                     IR.Values.WRAP_OPTIONAL(result_type, raw)
                 else
                     raw
@@ -1909,6 +1912,15 @@ namespace Syntax.Process is
 
             return COALESCE_ARM(member_value, null_value, result_type)
         si
+
+        // True when a widened result is a struct carrier, NULLABLE[T] or
+        // MAYBE[T], that a present value is constructed into. A type
+        // parameter reports is_value_type whatever its kind, so one
+        // left as its own optional form (a `class` parameter flagged
+        // optional, or an `optional` one) is excluded: its present
+        // value is already the result.
+        _is_value_optional(result_type: Type) -> bool =>
+            result_type.is_value_type /\ !result_type.is_type_variable
 
         // The null-arm sentinel for a coalescing access of result
         // type `result_type`: `ldnull` for a reference type, a fresh
@@ -1928,15 +1940,22 @@ namespace Syntax.Process is
         si
 
         // The `T?` form of `t`: NULLABLE[T] for a value type, the
-        // flagged reference for a reference type. `as_optional()`
-        // alone returns the receiver for a value type — leaving the
-        // result mistyped as `T` — so this dispatches the way
-        // `resolve_type_expressions` does for a written `T?`. Static
-        // so the rule can be pinned without standing up a full
+        // flagged reference for a reference type, and for a type
+        // parameter whatever its declared kind lowers `T?` to.
+        // `as_optional()` alone returns the receiver for a value type —
+        // leaving the result mistyped as `T` — so this dispatches the
+        // way `resolve_type_expressions` does for a written `T?`.
+        // Static so the rule can be pinned without standing up a full
         // COMPILE_ACCESS instance.
         build_optional_type(t: Type, lookup: Semantic.Lookups.InnateSymbolLookup) -> Type static is
             if t.is_optional then
                 return t
+            fi
+
+            if t.is_type_variable then
+                if let lowered = Semantic.TYPE_VARIABLE_OPTIONAL.of(t, lookup) then
+                    return lowered
+                fi
             fi
 
             if t.is_value_type then
