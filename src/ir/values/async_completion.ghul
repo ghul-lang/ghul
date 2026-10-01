@@ -1,0 +1,70 @@
+namespace IR.Values is
+    use Semantic.Types.Type
+    use Semantic.Symbols.Field
+
+    // Completes an async state machine's task through its builder, after
+    // marking the machine finished. A failure stores the exception on
+    // the evaluation stack, as a catch handler starts with it, and sets
+    // it on the builder; a success sets the result held in
+    // `result_field`, or no result where that is null.
+    class ASYNC_COMPLETION: Value is
+        state_field: Field
+        builder_field: Field
+        result_field: Field?
+        exception_type: Type?
+
+        // Written by the MoveNext lowering, not by any statement, so it
+        // marks no position.
+        has_location: bool => false
+
+        init(state_field: Field, builder_field: Field, result_field: Field?, exception_type: Type?) is
+            super.init()
+
+            self.state_field = state_field
+            self.builder_field = builder_field
+            self.result_field = result_field
+            self.exception_type = exception_type
+        si
+
+        failure(state_field: Field, builder_field: Field, exception_type: Type) -> ASYNC_COMPLETION static =>
+            ASYNC_COMPLETION(state_field, builder_field, null, exception_type)
+
+        success(state_field: Field, builder_field: Field, result_field: Field?) -> ASYNC_COMPLETION static =>
+            ASYNC_COMPLETION(state_field, builder_field, result_field, null)
+
+        _EXCEPTION_LOCAL: string static => ".exception"
+
+        gen(context: IR.CONTEXT) is
+            let body = context.current_srm_body_emitter!
+
+            let builder_type = builder_field.type!
+            let builder_reference = context.resolve_field_target(builder_field)
+
+            if let exception_type = self.exception_type then
+                body.declare_local(_EXCEPTION_LOCAL, exception_type)
+                body.stloc(_EXCEPTION_LOCAL)
+            fi
+
+            body.ldarg(0)
+            body.ldc_i4(-1)
+            body.stfld(context.resolve_field_target(state_field))
+            body.ldarg(0)
+            ASYNC_METHOD_LAUNCH.load_builder(body, builder_type, builder_reference)
+
+            if exception_type? then
+                body.ldloc(_EXCEPTION_LOCAL)
+                body.call(context.resolve_async_builder_set_exception(builder_type))
+            else
+                if let result = result_field then
+                    body.ldarg(0)
+                    body.ldfld(context.resolve_field_target(result))
+                fi
+
+                body.call(context.resolve_async_builder_set_result(builder_type, result_field?))
+            fi
+        si
+
+        to_string() -> string =>
+            if exception_type? then "async-fail" else "async-succeed" fi
+    si
+si
