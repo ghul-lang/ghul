@@ -1,0 +1,128 @@
+namespace IR is
+    use System.Reflection.Metadata.ILOpCode
+
+    use Ghul.Pipes
+
+    use Values
+
+    // Lowers structured control flow to the flat form the CIL emitter
+    // consumes: labels, branches and the values between them, in the
+    // order they are encoded.
+    //
+    // Lowering is one level deep. A structured node in another's body
+    // stays a value in the flat sequence and lowers itself when it is
+    // generated, so the loops open at any point are exactly those
+    // being generated.
+    class STRUCTURED_LOWERING is
+        linearise(value: Value) -> Collections.List[Value] static =>
+            _linearise(value) |> map(f => f.value) |> collect()
+
+        // Encode a structured node by encoding its flat form. A value
+        // from the node's body marks its own position, as it would in a
+        // block; a label or branch the lowering adds marks the position
+        // of the node it was added for.
+        gen(value: Value, context: IR.CONTEXT) static is
+            let loop = if isa LOOP(value) then cast LOOP(value) else null fi
+
+            if loop? then
+                context.enter_structured_loop(loop)
+            elif isa LoopExit(value) then
+                let exit = cast LoopExit(value)
+
+                assert context.is_structured_loop_open(exit.loop) else "loop exit outside the loop it leaves: {exit}"
+            fi
+
+            for flat in _linearise(value) do
+                if flat.position? then
+                    context.mark_location(flat.position)
+                fi
+
+                flat.value.gen(context)
+            od
+
+            if loop? then
+                context.leave_structured_loop(loop)
+            fi
+        si
+
+        branch_instruction(condition: BRANCH) -> ILOpCode static =>
+            case condition
+            when BRANCH.EQ then ILOpCode.BEQ
+            when BRANCH.GE then ILOpCode.BGE
+            when BRANCH.GEU then ILOpCode.BGE_UN
+            when BRANCH.GT then ILOpCode.BGT
+            when BRANCH.GTU then ILOpCode.BGT_UN
+            when BRANCH.LE then ILOpCode.BLE
+            when BRANCH.LEU then ILOpCode.BLE_UN
+            when BRANCH.LT then ILOpCode.BLT
+            when BRANCH.LTU then ILOpCode.BLT_UN
+            when BRANCH.NE then ILOpCode.BNE_UN
+            when BRANCH.Z then ILOpCode.BRFALSE
+            when BRANCH.NZ then ILOpCode.BRTRUE
+            when BRANCH.ALWAYS then ILOpCode.BR
+            else throw System.InvalidOperationException("no branch instruction for {condition}")
+            esac
+
+        _linearise(value: Value) -> Collections.List[FLAT_VALUE] static is
+            let result = Collections.LIST[FLAT_VALUE]()
+
+            if isa LOOP(value) then
+                _linearise_loop(cast LOOP(value), result)
+            elif isa LoopExit(value) then
+                _linearise_exit(cast LoopExit(value), result)
+            else
+                result.add(FLAT_VALUE.of(value))
+            fi
+
+            return result
+        si
+
+        _linearise_loop(loop: LOOP, into: Collections.MutableList[FLAT_VALUE]) static is
+            into.add(FLAT_VALUE(MARK_LABEL(loop.start), loop.position))
+
+            for value in loop.body.values do
+                into.add(FLAT_VALUE.of(value))
+            od
+
+            into.add(FLAT_VALUE(BRANCH_TO(ILOpCode.BR, loop.start), loop.end_position))
+            into.add(FLAT_VALUE(MARK_LABEL(loop.end), loop.end_position))
+        si
+
+        _linearise_exit(exit: LoopExit, into: Collections.MutableList[FLAT_VALUE]) static is
+            let target =
+                if isa BREAK(exit) then
+                    exit.loop.end
+                else
+                    exit.loop.start
+                fi
+
+            if exit.condition == BRANCH.ALWAYS then
+                let op_code =
+                    if exit.within_protected_region then
+                        ILOpCode.LEAVE
+                    else
+                        ILOpCode.BR
+                    fi
+
+                into.add(FLAT_VALUE(BRANCH_TO(op_code, target), exit.position))
+
+                return
+            fi
+
+            for operand in exit.operands do
+                into.add(FLAT_VALUE.of(operand))
+            od
+
+            into.add(FLAT_VALUE(BRANCH_TO(branch_instruction(exit.condition), target), exit.position))
+        si
+    si
+
+    // A value in a lowered sequence, with the source position to mark
+    // before it is encoded.
+    class FLAT_VALUE(value: Values.Value, position: Source.LOCATION?) is
+        of(value: Values.Value) -> FLAT_VALUE static =>
+            FLAT_VALUE(
+                value,
+                if value.has_location then value.location else null fi)
+    si
+si
