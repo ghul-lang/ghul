@@ -778,5 +778,98 @@ namespace IR.Emitter is
         visit(conversion: Values.SCALAR_CONVERSION) is
             _lower(conversion.converted)
         si
+
+        visit(dummy: Values.DUMMY) is
+            IoC.CONTAINER.instance.logger.poison(dummy.location, "generated dummy value: {dummy.type} from {dummy.location}")
+            _context.fixme("dummy {dummy.type} from {dummy.location}")
+        si
+
+        visit(type_expression: Values.TYPE_EXPRESSION) is
+            IoC.CONTAINER.instance.logger.poison(type_expression.location, "generated type expression: {type_expression.type} from {type_expression.location}")
+            _context.fixme("type expression {type_expression.type} from {type_expression.location}")
+        si
+
+        visit(store: Values.Need.STORE) is
+            _lower(store.value)
+
+            assert false else "unresolved need store"
+        si
+
+        visit(store: Values.Store.INDIRECT) is
+            _lower(store.address)
+            _lower(store.value)
+            _body.store_object(_type_token(store.type))
+        si
+
+        visit(wrapper: Values.TYPE_WRAPPER) is
+            _lower(wrapper.value)
+        si
+
+        visit_address(wrapper: Values.TYPE_WRAPPER) is
+            wrapper.value.gen_address(_context)
+        si
+
+        visit(wrapper: Values.WRAPPER) is
+            assert wrapper.value? else "generate wrapper without value"
+
+            _lower(wrapper.value)
+        si
+
+        visit_address(wrapper: Values.WRAPPER) is
+            assert wrapper.value? else "generate wrapper without value"
+
+            wrapper.value.gen_address(_context)
+        si
+
+        visit(wrap: Values.WRAP_OPTIONAL) is
+            _lower(wrap.value)
+            _body.new_object(_context.resolve_generic_constructor(wrap.type, 1))
+        si
+
+        visit(projection: Values.NARROW_PROJECT) is
+            _lower(projection.projected)
+
+            Values.NARROW_GUARD.emit(projection.type, _context)
+        si
+
+        visit(view: Values.NARROW_VIEW) is
+            _lower(view.underlying)
+
+            Values.NARROW_GUARD.emit(view.type, _context)
+        si
+
+        visit_address(view: Values.NARROW_VIEW) is
+            view.underlying.gen_address(_context)
+        si
+
+        // Records the offset range the marked statement emits. The range
+        // leaves the method as a custom attribute the IL test runner
+        // reads. Outside a body there is no range to record: a pragma on
+        // a declaration marks nothing this can measure.
+        visit(enter: Values.ENTER_FILE) is
+            if let body = _context.current_srm_body_emitter then
+                body.begin_il_output(enter.path, _context.next_il_output_sequence())
+            fi
+        si
+
+        visit(leave: Values.LEAVE_FILE) is
+            if let body = _context.current_srm_body_emitter then
+                body.end_il_output()
+            fi
+        si
+
+        // `ldvirtftn` consumes the receiver it dispatches against, so the
+        // receiver pushed for the delegate's own constructor argument
+        // needs a duplicate first.
+        visit(delegate: Values.Load.DELEGATE) is
+            _lower(delegate.frame)
+
+            if delegate.function.is_virtual_dispatch then
+                _body.op(System.Reflection.Metadata.ILOpCode.DUP)
+            fi
+
+            _lower(delegate.function)
+            _body.new_object(_context.resolve_delegate_constructor(delegate.type))
+        si
     si
 si
