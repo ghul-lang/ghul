@@ -340,7 +340,7 @@ namespace IR.Emitter is
             _lower_all(call.arguments)
 
             if let constrained: Values.CONSTRAINED = from then
-                constrained.gen_prefix(_context)
+                constrained_prefix(constrained)
             fi
 
             let target = _context.resolve_call_target(call.function)
@@ -669,6 +669,114 @@ namespace IR.Emitter is
             _body.declare_local(spilled.temp)
             _body.stloc(spilled.temp)
             _lower(spilled.built)
+        si
+
+        visit(address: Values.ARRAY_ELEMENT_ADDRESS) is
+            _lower(address.array)
+            _lower(address.index)
+            _body.load_element_address(_type_token(address.element_type))
+        si
+
+        visit_address(address: Values.ARRAY_ELEMENT_ADDRESS) is
+            visit(address)
+        si
+
+        visit(array: Values.NEW_ARRAY) is
+            _lower(array.count)
+            _body.new_array(_type_token(array.element_type))
+        si
+
+        visit(store: Values.STORE_ARRAY_ELEMENT) is
+            _lower(store.array)
+            _lower(store.index)
+            _lower(IoC.CONTAINER.instance.value_boxer.box_if_needed(store.element, store.element_type))
+            _body.store_element(_type_token(store.element_type))
+        si
+
+        visit(sequence: Values.SEQUENCE) is
+            let boxer = IoC.CONTAINER.instance.value_boxer
+            let element = _type_token(sequence.element_type)
+            let values = sequence.values
+
+            _body.ldc_i4(values.count)
+            _body.new_array(element)
+
+            for i in 0..values.count do
+                _body.op(System.Reflection.Metadata.ILOpCode.DUP)
+                _body.ldc_i4(i)
+
+                _lower(boxer.box_if_needed(values[i], sequence.element_type))
+
+                _body.store_element(element)
+            od
+        si
+
+        visit(compare: Values.COMPARE_ORDER_TO_ZERO) is
+            let (op_code, negates) = CIL_OPERATIONS.comparison(compare.comparison, false)
+
+            _lower(compare.value)
+
+            _body.ldc_i4(0)
+            _body.op(op_code)
+
+            if negates then
+                _body.ldc_i4(0)
+                _body.op(System.Reflection.Metadata.ILOpCode.CEQ)
+            fi
+        si
+
+        visit(receiver: Values.CONSTRAINED) is
+            _lower(receiver.value)
+        si
+
+        // The `constrained.` prefix a call through `receiver` takes,
+        // immediately before its `callvirt`.
+        constrained_prefix(receiver: Values.CONSTRAINED) is
+            _body.constrained(_type_token(receiver.type!))
+        si
+
+        visit(call: Values.DECIMAL_CALL) is
+            _body.call(_context.resolve_decimal_method(call.method_name, call.parameter_types, call.type))
+        si
+
+        visit(convert: Values.DECIMAL_CONVERT) is
+            _lower(convert.value)
+
+            let parameter_types = Collections.LIST[Semantic.Types.Type]()
+
+            parameter_types.add(convert.parameter_type)
+
+            _lower(Values.DECIMAL_CALL(convert.type, convert.method_name, parameter_types))
+        si
+
+        visit(equality: Values.EQUALITY_COMPARISON) is
+            _body.call(_context.resolve_equality_comparer_default(equality.comparer_type))
+
+            _lower(equality.left)
+            _lower(equality.right)
+
+            _body.call_virtual(_context.resolve_equality_comparer_equals(equality.comparer_type))
+        si
+
+        visit(test: Values.HAS_VALUE) is
+            _lower(test.value)
+
+            _body.ldnull()
+            _body.op(System.Reflection.Metadata.ILOpCode.CGT_UN)
+        si
+
+        // Calling GetType through the reference faults on null, and
+        // nothing else; the reference itself is left in place.
+        visit(check: Values.REFERENCE_NULL_CHECK) is
+            _lower(check.inner)
+
+            _body.op(System.Reflection.Metadata.ILOpCode.DUP)
+            _body.call_virtual(_context.resolve_object_get_type())
+            _body.op(System.Reflection.Metadata.ILOpCode.POP)
+        si
+
+        visit(conversion: Values.SCALAR_CONVERSION) is
+            _lower(conversion.converted)
         si
     si
 si
