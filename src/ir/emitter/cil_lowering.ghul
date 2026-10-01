@@ -413,5 +413,119 @@ namespace IR.Emitter is
 
             _context.end_unmarked()
         si
+
+        _type_token(type: Semantic.Types.Type) -> System.Reflection.Metadata.EntityHandle =>
+            _context.resolve_type_token(type)
+
+        visit(null_value: Values.NULL) is
+            _body.ldnull()
+        si
+
+        visit(box: Values.BOX) is
+            _lower(box.value)
+            _body.box(_type_token(box.type!))
+        si
+
+        visit(unbox: Values.UNBOX) is
+            _lower(unbox.value)
+            _body.unbox_any(_type_token(unbox.type!))
+        si
+
+        visit(conversion: Values.CAST) is
+            Values.TYPE_TEST_OPERAND.gen(conversion.value, _context)
+
+            if conversion.faults_on_failure then
+                _body.cast_class(_type_token(conversion.type))
+            else
+                _body.is_instance(_type_token(conversion.type))
+            fi
+        si
+
+        visit(test: Values.ISA) is
+            Values.TYPE_TEST_OPERAND.gen(test.value, _context)
+
+            _body.is_instance(_type_token(test.isa_type))
+            _body.ldnull()
+            _body.op(System.Reflection.Metadata.ILOpCode.CGT_UN)
+        si
+
+        visit(type_of: Values.TYPEOF) is
+            _body.ldtoken(_type_token(type_of.typeof_type))
+            _body.call(_context.resolve_get_type_from_handle())
+        si
+
+        visit(tuple: Values.TUPLE) is
+            _lower_all(tuple.values)
+            _body.new_object(_context.resolve_generic_constructor(tuple.type, tuple.values.count))
+        si
+
+        // A unit variant is a single shared instance. Which one to load
+        // follows from the value's own type rather than from wherever the
+        // constructor was found: for a generic variant the type names the
+        // instantiation, while the constructor's owner is the open
+        // definition, whose parameters an imported variant does not even
+        // declare.
+        visit(construction: Values.NEW) is
+            if construction.constructor.owner!.is_unit_variant then
+                _body.ldsfld(_context.resolve_unit_variant_instance(construction.type.symbol))
+
+                return
+            fi
+
+            _lower_all(construction.arguments)
+            _body.new_object(_context.resolve_call_target(construction.constructor))
+        si
+
+        visit(negation: Values.NOT) is
+            if negation.is_operator then
+                Values.Value.gen_marked(negation.value, _context)
+                negation.mark_operator(_context)
+            else
+                _lower(negation.value)
+            fi
+
+            _body.ldc_i4(0)
+            _body.op(System.Reflection.Metadata.ILOpCode.CEQ)
+        si
+
+        visit(arithmetic: Values.ARITHMETIC) is
+            for operand in arithmetic.operands do
+                if arithmetic.is_marked then
+                    Values.Value.gen_marked(operand, _context)
+                else
+                    _lower(operand)
+                fi
+            od
+
+            if arithmetic.is_marked then
+                arithmetic.mark_operator(_context)
+            fi
+
+            _body.op(CIL_OPERATIONS.arithmetic(arithmetic.operation))
+        si
+
+        visit(compare: Values.COMPARE) is
+            Values.Value.gen_marked(compare.left, _context)
+            Values.Value.gen_marked(compare.right, _context)
+
+            compare.mark_operator(_context)
+
+            let (op_code, negates) = CIL_OPERATIONS.comparison(compare.comparison, compare.is_unsigned)
+
+            _body.op(op_code)
+
+            if negates then
+                _body.ldc_i4(0)
+                _body.op(System.Reflection.Metadata.ILOpCode.CEQ)
+            fi
+        si
+
+        visit(convert: Values.CONVERT) is
+            _lower(convert.value)
+
+            for op_code in CIL_OPERATIONS.conversion(convert.from, convert.to) do
+                _body.op(op_code)
+            od
+        si
     si
 si
