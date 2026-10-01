@@ -15,7 +15,25 @@ namespace IR is
     // being generated.
     class STRUCTURED_LOWERING is
         linearise(value: Value) -> Collections.List[Value] static =>
-            _linearise(value) |> map(f => f.value) |> collect()
+            linearise(value, Collections.LIST[Breakable]())
+
+        // Lowers `value` as if generated inside `open`, innermost first.
+        linearise(value: Value, open: Collections.Iterable[Breakable]) -> Collections.List[Value] static =>
+            _linearise(value, open) |> map(f => f.value) |> collect()
+
+        // An exit leaves a protected region where its target is a try,
+        // or a try is open inside its target.
+        leaves_protected_region(target: Breakable, open: Collections.Iterable[Breakable]) -> bool static is
+            for node in open do
+                if isa TRY(node) then
+                    return true
+                elif node == target then
+                    return false
+                fi
+            od
+
+            return false
+        si
 
         // Encode a structured node by encoding its flat form. A value
         // from the node's body marks its own position, as it would in a
@@ -32,7 +50,7 @@ namespace IR is
                 assert context.is_structured_open(exit.target) else "exit outside the node it leaves: {exit}"
             fi
 
-            for flat in _linearise(value) do
+            for flat in _linearise(value, context.open_structured) do
                 if flat.position? /\ context.is_marking_structure then
                     context.mark_location(flat.position)
                 fi
@@ -63,7 +81,7 @@ namespace IR is
             else throw System.InvalidOperationException("no branch instruction for {condition}")
             esac
 
-        _linearise(value: Value) -> Collections.List[FLAT_VALUE] static is
+        _linearise(value: Value, open: Collections.Iterable[Breakable]) -> Collections.List[FLAT_VALUE] static is
             let result = Collections.LIST[FLAT_VALUE]()
 
             if isa LOOP(value) then
@@ -81,7 +99,7 @@ namespace IR is
             elif isa REGION(value) then
                 _linearise_region(cast REGION(value), result)
             elif isa Exit(value) then
-                _linearise_exit(cast Exit(value), result)
+                _linearise_exit(cast Exit(value), open, result)
             else
                 result.add(FLAT_VALUE.of(value))
             fi
@@ -172,7 +190,7 @@ namespace IR is
             od
         si
 
-        _linearise_exit(exit: Exit, into: Collections.MutableList[FLAT_VALUE]) static is
+        _linearise_exit(exit: Exit, open: Collections.Iterable[Breakable], into: Collections.MutableList[FLAT_VALUE]) static is
             let target =
                 if let `continue: CONTINUE = exit then
                     `continue.loop.start
@@ -180,9 +198,11 @@ namespace IR is
                     exit.target.end
                 fi
 
+            let leaves_protected_region = leaves_protected_region(exit.target, open)
+
             if exit.condition == BRANCH.ALWAYS then
                 let op_code =
-                    if exit.via_leave then
+                    if leaves_protected_region then
                         ILOpCode.LEAVE
                     else
                         ILOpCode.BR
@@ -192,6 +212,8 @@ namespace IR is
 
                 return
             fi
+
+            assert !leaves_protected_region else "conditional exit from a protected region: {exit}"
 
             for operand in exit.operands do
                 into.add(FLAT_VALUE.of(operand))

@@ -7,6 +7,7 @@ namespace IR.UnitTests is
     use IR.Values.BLOCK
     use IR.Values.BRANCH_TO
     use IR.Values.BREAK
+    use IR.Values.Breakable
     use IR.Values.CATCH
     use IR.Values.HANDLER_END
     use IR.Values.HANDLER_START
@@ -116,7 +117,7 @@ namespace IR.UnitTests is
             let outer = REGION(LABEL(), Semantic.Types.ERROR())
             let inner = REGION(LABEL(), Semantic.Types.ERROR())
 
-            inner.body.add(BREAK(outer, false))
+            inner.body.add(BREAK(outer))
             inner.close()
 
             outer.body.add(inner)
@@ -134,7 +135,7 @@ namespace IR.UnitTests is
             let handled = STUB_VALUE()
 
             `try.body.add(guarded)
-            `try.body.add(BREAK(`try, true))
+            `try.body.add(BREAK(`try))
 
             let handler = CATCH(Semantic.Types.ERROR(), Semantic.Types.ERROR())
 
@@ -159,7 +160,7 @@ namespace IR.UnitTests is
         try_with_a_finally__should_end_its_handler_with_endfinally() is
             let `try = TRY(LABEL(), Semantic.Types.ERROR())
 
-            `try.body.add(BREAK(`try, true))
+            `try.body.add(BREAK(`try))
 
             let `finally = REGION(LABEL(), Semantic.Types.ERROR())
 
@@ -197,36 +198,57 @@ namespace IR.UnitTests is
         break__should_branch_to_the_loop_end() is
             let loop = new_loop()
 
-            let flat = STRUCTURED_LOWERING.linearise(BREAK(loop, false))
+            let flat = STRUCTURED_LOWERING.linearise(BREAK(loop))
 
             are_equal(1, flat.count)
             assert_branch(ILOpCode.BR, loop.end, flat[0])
         si
 
         @Test()
-        break__should_leave_from_within_a_protected_region() is
+        break__should_leave_a_try_open_inside_its_loop() is
             let loop = new_loop()
+            let `try = TRY(LABEL(), Semantic.Types.ERROR())
 
-            let flat = STRUCTURED_LOWERING.linearise(BREAK(loop, true))
+            let flat = STRUCTURED_LOWERING.linearise(BREAK(loop), [`try, loop]:Breakable)
 
             assert_branch(ILOpCode.LEAVE, loop.end, flat[0])
+        si
+
+        @Test()
+        break__should_branch_from_a_loop_open_inside_a_try() is
+            let loop = new_loop()
+            let `try = TRY(LABEL(), Semantic.Types.ERROR())
+
+            let flat = STRUCTURED_LOWERING.linearise(BREAK(loop), [loop, `try]:Breakable)
+
+            assert_branch(ILOpCode.BR, loop.end, flat[0])
+        si
+
+        @Test()
+        break__should_leave_the_try_it_targets() is
+            let `try = TRY(LABEL(), Semantic.Types.ERROR())
+
+            let flat = STRUCTURED_LOWERING.linearise(BREAK(`try), [`try]:Breakable)
+
+            assert_branch(ILOpCode.LEAVE, `try.end, flat[0])
         si
 
         @Test()
         continue__should_branch_to_the_loop_start() is
             let loop = new_loop()
 
-            let flat = STRUCTURED_LOWERING.linearise(CONTINUE(loop, false))
+            let flat = STRUCTURED_LOWERING.linearise(CONTINUE(loop))
 
             are_equal(1, flat.count)
             assert_branch(ILOpCode.BR, loop.start, flat[0])
         si
 
         @Test()
-        continue__should_leave_from_within_a_protected_region() is
+        continue__should_leave_a_try_open_inside_its_loop() is
             let loop = new_loop()
+            let `try = TRY(LABEL(), Semantic.Types.ERROR())
 
-            let flat = STRUCTURED_LOWERING.linearise(CONTINUE(loop, true))
+            let flat = STRUCTURED_LOWERING.linearise(CONTINUE(loop), [`try, loop]:Breakable)
 
             assert_branch(ILOpCode.LEAVE, loop.start, flat[0])
         si
@@ -272,7 +294,7 @@ namespace IR.UnitTests is
             let failed mut = false
 
             try
-                EMITTED_IL.encoded(BREAK(loop, false))
+                EMITTED_IL.encoded(BREAK(loop))
             catch e: System.Exception
                 failed = true
             yrt
@@ -284,7 +306,7 @@ namespace IR.UnitTests is
         generating_a_loop__should_encode_an_exit_inside_it() is
             let loop = new_loop()
 
-            loop.body.add(BREAK(loop, false))
+            loop.body.add(BREAK(loop))
 
             let encoded = EMITTED_IL.encoded(closed(loop))
 
