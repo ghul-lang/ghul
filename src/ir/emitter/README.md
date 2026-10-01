@@ -30,6 +30,9 @@ where misplaced would not fail at all.
   branches the body emitter encodes.
 - `cil_operations.ghul` – the opcodes the target-neutral operations encode
   as.
+- `flat_values.ghul`, `protected_region.ghul` – the instructions, labels,
+  branches and protected-region boundaries structured nodes lower to. Only
+  the CIL lowering makes these, and they lower themselves.
 - `srm_assembly_emitter.ghul` – owns the metadata builder and the blob, string
   and user-string heaps; resolves references to imported types and members;
   writes the PE file.
