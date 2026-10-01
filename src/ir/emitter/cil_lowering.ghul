@@ -1,0 +1,70 @@
+namespace IR.Emitter is
+    // Lowers IR values to CIL, through the method body emitter of the
+    // function being generated.
+    class CIL_LOWERING: Values.Visitor is
+        _context: IR.CONTEXT
+
+        _body: SRM_METHOD_BODY_EMITTER => _context.current_srm_body_emitter!
+
+        init(context: IR.CONTEXT) is
+            _context = context
+        si
+
+        // A value whose lowering has not moved here yet lowers itself.
+        visit_value(value: Values.Value) is
+            value.gen(_context)
+        si
+
+        visit(number: IR.Values.Literal.NUMBER) is
+            let body = _body
+
+            case number.constant
+            when i4: IR.Values.Literal.CONSTANT.I4 then body.ldc_i4(i4.value)
+            when i8: IR.Values.Literal.CONSTANT.I8 then body.ldc_i8(i8.value)
+            when r4: IR.Values.Literal.CONSTANT.R4 then body.ldc_r4(r4.value)
+            when r8: IR.Values.Literal.CONSTANT.R8 then body.ldc_r8(r8.value)
+            esac
+
+            if let to = number.narrowing then
+                let from =
+                    case number.constant
+                    when _: IR.Values.Literal.CONSTANT.I4 then Scalar.INT32
+                    when _: IR.Values.Literal.CONSTANT.I8 then Scalar.INT64
+                    when _: IR.Values.Literal.CONSTANT.R4 then Scalar.FLOAT32
+                    when _: IR.Values.Literal.CONSTANT.R8 then Scalar.FLOAT64
+                    esac
+
+                for op_code in CIL_OPERATIONS.conversion(from, to) do
+                    body.op(op_code)
+                od
+            fi
+        si
+
+        visit(string: IR.Values.Literal.STRING) is
+            _body.ldstr(_context.srm_assembly_emitter, string.value)
+        si
+
+        visit(decimal: IR.Values.Literal.DECIMAL) is
+            let body = _body
+
+            body.ldc_i4(decimal.lo)
+            body.ldc_i4(decimal.mid)
+            body.ldc_i4(decimal.hi)
+            body.ldc_i4(0)
+            body.ldc_i4(decimal.scale)
+            body.new_object(_context.resolve_decimal_constructor())
+        si
+
+        visit(bigint: IR.Values.Literal.BIGINT) is
+            let body = _body
+
+            if bigint.fits_long then
+                body.ldc_i8(bigint.as_long)
+                body.new_object(_context.resolve_bigint_constructor(bigint.type))
+            else
+                body.ldstr(_context.srm_assembly_emitter, bigint.value)
+                body.call(_context.resolve_bigint_parse(bigint.type))
+            fi
+        si
+    si
+si
