@@ -9,15 +9,6 @@ namespace IR.Values is
     // Behaviour matches `inner` exactly because the wrapped literal
     // captures nothing and carries no type arguments, so a single
     // instance is interchangeable everywhere it is used.
-    //
-    //   ldsfld <cache>
-    //   dup
-    //   brtrue Lpresent
-    //   pop
-    //   <inner delegate-creation IL>
-    //   dup
-    //   stsfld <cache>
-    //   Lpresent:
     class MEMOIZED_DELEGATE: Value, TypeTyped is
         _inner: Value
         _cache_field: Semantic.Symbols.Field
@@ -47,20 +38,28 @@ namespace IR.Values is
         // of one baked into a RAW and duplicated.
         freeze() -> Value => self
 
+        // The cached delegate, or, the first time, the inner value,
+        // cached.
+        expand() -> BLOCK is
+            let expansion = IR.EXPANSION(_type)
+            let result = expansion.temp("memoized", _type)
+
+            expansion.store(result, Load.STATIC_FIELD(_cache_field))
+
+            let cached = expansion.region()
+
+            expansion.exit_if(cached, IR.BRANCH.NZ, result.load())
+            expansion.store(result, _inner)
+            expansion.add(Store.STATIC_FIELD(_cache_field, result.load()))
+            expansion.close(cached)
+
+            expansion.add(result.load())
+
+            return expansion.result
+        si
+
         gen(context: IR.CONTEXT) is
-            let present = IR.LABEL()
-
-            let body = context.current_srm_body_emitter!
-                let cache = context.resolve_field_target(_cache_field)
-
-                body.ldsfld(cache)
-                body.op(System.Reflection.Metadata.ILOpCode.DUP)
-                body.branch(System.Reflection.Metadata.ILOpCode.BRTRUE, present)
-                body.op(System.Reflection.Metadata.ILOpCode.POP)
-                gen(_inner, context)
-                body.op(System.Reflection.Metadata.ILOpCode.DUP)
-                body.stsfld(cache)
-                body.mark_label(present)
+            IR.EXPANSION.gen(expand(), context)
         si
 
         to_string() -> string =>
