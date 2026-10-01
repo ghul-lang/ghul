@@ -11,6 +11,12 @@ namespace IR.Values is
 
         type: Type
 
+        // Marked before the operator rather than before the operands,
+        // which mark their own positions, unless unmarked.
+        has_location: bool => !_is_marked /\ super.has_location
+
+        _is_marked: bool
+
         init(operation: IR.ArithmeticOperation, operands: Collections.List[Value], type: Type) is
             super.init()
 
@@ -19,16 +25,34 @@ namespace IR.Values is
             self.operation = operation
             self.operands = operands
             self.type = type
+
+            _is_marked = true
         si
 
         init(operation: IR.ArithmeticOperation, left: Value, right: Value, type: Type) is
             self.init(operation, [left, right]:Value, type)
         si
 
+        // Marks no source positions inside it: whatever holds it marks
+        // its position as a whole, if anything does.
+        unmarked() -> ARITHMETIC is
+            _is_marked = false
+
+            return self
+        si
+
         gen(context: IR.CONTEXT) is
             for operand in operands do
-                gen_marked(operand, context)
+                if _is_marked then
+                    gen_marked(operand, context)
+                else
+                    gen(operand, context)
+                fi
             od
+
+            if _is_marked then
+                mark_operator(context)
+            fi
 
             context.current_srm_body_emitter!.op(IR.Emitter.CIL_OPERATIONS.arithmetic(operation))
         si
@@ -47,6 +71,10 @@ namespace IR.Values is
 
         type: Type
 
+        // Marked before the comparison rather than before the
+        // operands, which mark their own positions.
+        has_location: bool => false
+
         init(comparison: IR.Comparison, left: Value, right: Value, is_unsigned: bool, type: Type) is
             super.init()
 
@@ -60,6 +88,8 @@ namespace IR.Values is
         gen(context: IR.CONTEXT) is
             gen_marked(left, context)
             gen_marked(right, context)
+
+            mark_operator(context)
 
             let body = context.current_srm_body_emitter!
             let (op_code, negates) = IR.Emitter.CIL_OPERATIONS.comparison(comparison, is_unsigned)
