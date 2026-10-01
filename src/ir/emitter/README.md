@@ -23,9 +23,15 @@ where misplaced would not fail at all.
 
 ## Files
 
+- `cil_context.ghul` – the state the backend carries while it lowers and
+  encodes: the assembly emitter it writes through, the body emitter for the
+  function being generated, and how a value reaches the members and types
+  it names.
 - `cil_lowering.ghul` – lowers IR values to CIL. It implements the IR's
   value visitor; a value without a visit there yet still lowers itself in its
   own `gen`.
+- `cil_async_lowering.ghul` – lowers the async state-machine values through
+  the .NET async builder protocol.
 - `structured_lowering.ghul` – lowers structured nodes to the labels and
   branches the body emitter encodes.
 - `cil_operations.ghul` – the opcodes the target-neutral operations encode
