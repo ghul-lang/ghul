@@ -11,30 +11,6 @@ namespace IR.Values is
     // equality is has been decided by the caller in the same way as for
     // any other operand; this node only supplies the loop around it.
     // Both counts are read twice, so they arrive as repeatable loads.
-    //
-    //   <left count>
-    //   <right count>
-    //   ceq
-    //   brfalse <unequal>
-    //   ldc.i4.0
-    //   stloc i
-    //   <loop>:
-    //   ldloc i
-    //   <left count>
-    //   bge <equal>           // every element compared equal
-    //   <element comparison>  // reads a[i] and b[i] through the local
-    //   brfalse <unequal>
-    //   ldloc i
-    //   ldc.i4.1
-    //   add
-    //   stloc i
-    //   br <loop>
-    //   <equal>:
-    //   ldc.i4.1
-    //   br <end>
-    //   <unequal>:
-    //   ldc.i4.0
-    //   <end>:
     class SEQUENCE_EQUALITY: Value is
         left_count: Value
         right_count: Value
@@ -64,46 +40,45 @@ namespace IR.Values is
             self._result_type = result_type
         si
 
+        // Unequal counts, or the first element pair to compare unequal,
+        // leave the comparison false.
+        expand() -> BLOCK is
+            let expansion = IR.EXPANSION(type)
+            let result = expansion.temp("sequence_equality", type)
+            let index = TEMPORARY(index_name, index_type)
+
+            expansion.add(DECLARE_LOCAL(index_name, index_type))
+
+            let done = expansion.region()
+            let unequal = expansion.region()
+
+            expansion.exit_if(unequal, IR.BRANCH.NE, left_count, right_count)
+            expansion.store(index, Literal.NUMBER(0, index_type))
+
+            let loop = expansion.loop()
+
+            expansion.exit_if(loop, IR.BRANCH.GE, index.load(), left_count)
+            expansion.exit_if(unequal, IR.BRANCH.Z, element_equals)
+            expansion.store(
+                index,
+                INT_ARITHMETIC(ILOpCode.ADD, index.load(), Literal.NUMBER(1, index_type), index_type)
+            )
+            expansion.close(loop)
+
+            expansion.store(result, Literal.NUMBER(1, type))
+            expansion.exit(done)
+            expansion.close(unequal)
+
+            expansion.store(result, Literal.NUMBER(0, type))
+            expansion.close(done)
+
+            expansion.add(result.load())
+
+            return expansion.result
+        si
+
         gen(context: IR.CONTEXT) is
-            let loop_label = IR.LABEL()
-            let equal_label = IR.LABEL()
-            let unequal_label = IR.LABEL()
-            let end_label = IR.LABEL()
-
-            let body = context.current_srm_body_emitter!
-
-            body.declare_local(index_name, index_type)
-
-            gen(left_count, context)
-            gen(right_count, context)
-            body.op(ILOpCode.CEQ)
-            body.branch(ILOpCode.BRFALSE, unequal_label)
-
-            body.ldc_i4(0)
-            body.stloc(index_name)
-
-            body.mark_label(loop_label)
-            body.ldloc(index_name)
-            gen(left_count, context)
-            body.branch(ILOpCode.BGE, equal_label)
-
-            gen(element_equals, context)
-            body.branch(ILOpCode.BRFALSE, unequal_label)
-
-            body.ldloc(index_name)
-            body.ldc_i4(1)
-            body.op(ILOpCode.ADD)
-            body.stloc(index_name)
-            body.branch(ILOpCode.BR, loop_label)
-
-            body.mark_label(equal_label)
-            body.ldc_i4(1)
-            body.branch(ILOpCode.BR, end_label)
-
-            body.mark_label(unequal_label)
-            body.ldc_i4(0)
-
-            body.mark_label(end_label)
+            IR.EXPANSION.gen(expand(), context)
         si
 
         to_string() -> string =>
