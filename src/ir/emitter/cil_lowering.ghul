@@ -4,6 +4,11 @@ namespace IR.Emitter is
     class CIL_LOWERING: Values.Visitor is
         _context: IR.CONTEXT
 
+        // The value whose own `gen` or `gen_address` is being run. A value
+        // that reaches its fallback again from there has neither a visit
+        // nor a `gen` of its own.
+        _falling_back: Values.Value?
+
         _body: SRM_METHOD_BODY_EMITTER => _context.current_srm_body_emitter!
 
         init(context: IR.CONTEXT) is
@@ -12,7 +17,32 @@ namespace IR.Emitter is
 
         // A value whose lowering has not moved here yet lowers itself.
         visit_value(value: Values.Value) is
-            value.gen(_context)
+            _fall_back(value, false)
+        si
+
+        visit_address_of_value(value: Values.Value) is
+            _fall_back(value, true)
+        si
+
+        _fall_back(value: Values.Value, is_address: bool) is
+            if _falling_back == value then
+                throw System.NotImplementedException(
+                    "no {if is_address then "address " else "" fi}lowering for {value.get_type()} {value}")
+            fi
+
+            let outer = _falling_back
+
+            _falling_back = value
+
+            try
+                if is_address then
+                    value.gen_address(_context)
+                else
+                    value.gen(_context)
+                fi
+            finally
+                _falling_back = outer
+            yrt
         si
 
         visit(number: IR.Values.Literal.NUMBER) is
