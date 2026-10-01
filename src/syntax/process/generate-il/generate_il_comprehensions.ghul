@@ -41,11 +41,6 @@ namespace Syntax.Process is
             spiller.enter()
 
             try
-                // The brancher binds to the block current now, after the
-                // capture switch, so the loops' labels land in the same
-                // stream as their bodies.
-                let brancher = get_brancher_for_block()
-
                 if
                     let count = comprehension.presize_count,
                     source_name = comprehension.presize_source_name,
@@ -69,7 +64,7 @@ namespace Syntax.Process is
                             int_type
                         )
 
-                    _gen_comprehension_for(comprehension, comprehension.first, fill, brancher, Values.Load.TEMP(source_name, source_type))
+                    _gen_comprehension_for(comprehension, comprehension.first, fill, Values.Load.TEMP(source_name, source_type))
 
                     spiller.emit_value(fill.result!.load())
                 else
@@ -82,7 +77,7 @@ namespace Syntax.Process is
                             )
                         )
 
-                    _gen_comprehension_clause(comprehension, comprehension.first, fill, brancher)
+                    _gen_comprehension_clause(comprehension, comprehension.first, fill)
 
                     spiller.emit_value(
                         comprehension.list_to_array!.call(
@@ -137,9 +132,7 @@ namespace Syntax.Process is
                     state_machine,
                     frame,
                     () is
-                        let brancher = get_brancher_for_block()
-
-                        _gen_comprehension_clause(comprehension, comprehension.first, COMPREHENSION_FILL(state_machine), brancher)
+                        _gen_comprehension_clause(comprehension, comprehension.first, COMPREHENSION_FILL(state_machine))
                     si
                 )
 
@@ -154,15 +147,14 @@ namespace Syntax.Process is
         _gen_comprehension_clause(
             comprehension: Expressions.COMPREHENSION,
             clause: Expressions.COMPREHENSION_CLAUSE?,
-            fill: COMPREHENSION_FILL,
-            brancher: BLOCK_BRANCHER
+            fill: COMPREHENSION_FILL
         ) is
             if !clause? then
                 _gen_comprehension_element(comprehension, fill)
             elif let for_clause: Expressions.COMPREHENSION_FOR = clause then
-                _gen_comprehension_for(comprehension, for_clause, fill, brancher, null)
+                _gen_comprehension_for(comprehension, for_clause, fill, null)
             elif let if_clause: Expressions.COMPREHENSION_IF = clause then
-                _gen_comprehension_if(comprehension, if_clause, fill, brancher)
+                _gen_comprehension_if(comprehension, if_clause, fill)
             fi
         si
 
@@ -208,7 +200,6 @@ namespace Syntax.Process is
             comprehension: Expressions.COMPREHENSION,
             clause: Expressions.COMPREHENSION_FOR,
             fill: COMPREHENSION_FILL,
-            brancher: BLOCK_BRANCHER,
             evaluated_source: Value?
         ) is
             super.pre(clause)
@@ -252,23 +243,21 @@ namespace Syntax.Process is
                         () => cast Value(temp.load())
                     fi
 
-                let start = LABEL()
-                let end = LABEL()
+                let loop = Values.LOOP(LABEL(), LABEL(), _innate_symbol_lookup.get_void_type())
 
-                brancher.label(start)
+                _open_structured(loop)
 
                 let has_next = clause.move_next!.call(source.location, load_iterator(), Collections.LIST[Value](0), null, _function_caller)
 
-                brancher.branch(BRANCH.Z, has_next, end)
+                add(Values.BREAK(loop, BRANCH.Z, has_next))
 
                 let current = clause.read_current!.call(source.location, load_iterator(), Collections.LIST[Value](0), null, _function_caller)
 
                 gen_destructuring_initialize(clause.variable.left, current)
 
-                _gen_comprehension_clause(comprehension, clause.inner, fill, brancher)
+                _gen_comprehension_clause(comprehension, clause.inner, fill)
 
-                brancher.branch(start)
-                brancher.label(end)
+                _close_structured(loop)
             finally
                 super.visit(clause)
             yrt
@@ -277,20 +266,19 @@ namespace Syntax.Process is
         _gen_comprehension_if(
             comprehension: Expressions.COMPREHENSION,
             clause: Expressions.COMPREHENSION_IF,
-            fill: COMPREHENSION_FILL,
-            brancher: BLOCK_BRANCHER
+            fill: COMPREHENSION_FILL
         ) is
             let condition = clause.condition
 
             condition.walk(self)
 
-            let skip = LABEL()
+            let skip = _open_region(LABEL())
 
-            brancher.branch(BRANCH.Z, condition.value!, skip)
+            add(Values.BREAK(skip, BRANCH.Z, condition.value!))
 
-            _gen_comprehension_clause(comprehension, clause.inner, fill, brancher)
+            _gen_comprehension_clause(comprehension, clause.inner, fill)
 
-            brancher.label(skip)
+            _close_structured(skip)
         si
     si
 

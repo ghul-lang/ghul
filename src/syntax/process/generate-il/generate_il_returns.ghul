@@ -235,36 +235,32 @@ namespace Syntax.Process is
                     _build_frame_field_store(
                         _current_state_machine_frame()!, spill_field, stored))
 
-                if crosses_try then
-                    get_brancher_for_block().leave(frame.end_label)
-                else
-                    get_brancher_for_block().branch(frame.end_label)
-                fi
+                add(Values.BREAK(frame.region!, crosses_try))
             elif !crosses_try then
                 // Capture mode no-cross-try: push the value and
                 // `br` end_label — the join shape if / case use.
                 if let v = value then
                     add(v)
                 fi
-                get_brancher_for_block().branch(frame.end_label)
+                add(Values.BREAK(frame.region!, false))
             elif !value? then
                 // Capture mode cross-try, void val-block: nothing
                 // to carry, `leave end_label` directly. (end_label
                 // sits outside any inner try because the frame
                 // cached enclosing_try_count.)
-                get_brancher_for_block().leave(frame.end_label)
+                add(Values.BREAK(frame.region!, true))
             else
                 // Capture mode cross-try, value val-block: stash
                 // value into the pre-allocated cross_try_temp,
-                // `leave` to cross_try_join_label. VAL_BLOCK.pre's
+                // leave cross_try_join_region. VAL_BLOCK.pre's
                 // post-body emission `ldloc`s the TEMP at the join
                 // and falls into end_label.
                 assert frame.cross_try_temp? else "capture-mode val-block missing cross-try TEMP"
-                assert frame.cross_try_join_label? else "capture-mode val-block missing cross-try join label"
+                assert frame.cross_try_join_region? else "capture-mode val-block missing cross-try join"
 
                 frame.cross_try_used = true
                 frame.cross_try_temp!.store(value)
-                get_brancher_for_block().leave(frame.cross_try_join_label!)
+                add(Values.BREAK(frame.cross_try_join_region!, true))
             fi
         si
 
@@ -424,12 +420,9 @@ namespace Syntax.Process is
 
             add(_build_frame_field_store(frame, iterator_field, iterator))
 
-            let brancher = get_brancher_for_block()
+            let loop = Values.LOOP(LABEL(), LABEL(), _innate_symbol_lookup.get_void_type())
 
-            let start = LABEL()
-            let end = LABEL()
-
-            brancher.label(start)
+            _open_structured(loop)
 
             let has_next =
                 move_next.call(
@@ -440,7 +433,7 @@ namespace Syntax.Process is
                     _function_caller
                 )
 
-            brancher.branch(BRANCH.Z, has_next, end)
+            add(Values.BREAK(loop, BRANCH.Z, has_next))
 
             let current = Values.BLOCK()
 
@@ -490,9 +483,7 @@ namespace Syntax.Process is
                 Values.INSTRUCTION(ILOpCode.LDC_I4_M1),
                 ".gen_state")
 
-            brancher.branch(start)
-
-            brancher.label(end)
+            _close_structured(loop)
         si
 
         // Write a state value to BOTH the CLR local cached at MoveNext

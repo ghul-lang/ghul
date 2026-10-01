@@ -344,18 +344,17 @@ namespace Syntax.Process is
         si
 
         _append_bool(location: Source.LOCATION, interpolator: TEMP, value: Value) is
-            let brancher = get_brancher_for_block()
-            let is_false = LABEL()
-            let done = LABEL()
+            let done = _open_region(LABEL())
+            let true_arm = _open_region(LABEL())
 
-            brancher.branch(IR.BRANCH.Z, value, is_false)
+            add(Values.BREAK(true_arm, IR.BRANCH.Z, value))
             _append_text(location, interpolator, "true")
-            brancher.branch(done)
+            add(Values.BREAK(done, false))
 
-            brancher.label(is_false)
+            _close_structured(true_arm)
             _append_text(location, interpolator, "false")
 
-            brancher.label(done)
+            _close_structured(done)
         si
 
         // Append what an optional holds, by the rules for its non-optional
@@ -363,40 +362,40 @@ namespace Syntax.Process is
         _append_optional(location: Source.LOCATION, interpolator: TEMP, value: Value) is
             let type = value.type!
             let inner = type.optional_inner_type!
-            let brancher = get_brancher_for_block()
-            let absent = LABEL()
-            let done = LABEL()
+
+            if type.is_value_type /\ (!type.find_member("has_value")? \/ !type.find_member("value")?) then
+                _append_formatted(location, interpolator, value)
+
+                return
+            fi
+
+            let done = _open_region(LABEL())
+            let present = _open_region(LABEL())
 
             if type.is_value_type then
-                let has_value = type.find_member("has_value")
-                let payload = type.find_member("value")
-
-                if !has_value? \/ !payload? then
-                    _append_formatted(location, interpolator, value)
-
-                    return
-                fi
+                let has_value = type.find_member("has_value")!
+                let payload = type.find_member("value")!
 
                 let holder = TEMP(current_block, "optional", value)
                 let symbol_loader = IoC.CONTAINER.instance.symbol_loader
 
-                brancher.branch(IR.BRANCH.Z, has_value.load(location, IR.Values.ADDRESS(holder.load()), symbol_loader), absent)
+                add(Values.BREAK(present, IR.BRANCH.Z, has_value.load(location, IR.Values.ADDRESS(holder.load()), symbol_loader)))
                 _append_interpolated_value(location, interpolator, payload.load(location, IR.Values.ADDRESS(holder.load()), symbol_loader))
             else
                 let holder = TEMP(current_block, "optional", inner)
 
                 holder.store(value)
 
-                brancher.branch(IR.BRANCH.Z, holder.load(), absent)
+                add(Values.BREAK(present, IR.BRANCH.Z, holder.load()))
                 _append_interpolated_value(location, interpolator, holder.load())
             fi
 
-            brancher.branch(done)
+            add(Values.BREAK(done, false))
 
-            brancher.label(absent)
+            _close_structured(present)
             _append_text(location, interpolator, "null")
 
-            brancher.label(done)
+            _close_structured(done)
         si
     si
 si

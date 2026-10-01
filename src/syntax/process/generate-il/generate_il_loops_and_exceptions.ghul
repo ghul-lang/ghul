@@ -288,14 +288,14 @@ namespace Syntax.Process is
             // slot they reach is allocated before it - mirroring how
             // VAL_BLOCK pre-allocates its cross-try TEMP at block head.
             if let vb = value_block, rt = loop.result_type then
+                loop.result_region = _open_region(LABEL())
+
                 if spiller.is_spilling then
                     loop.spill_field = spiller.spill_field
                 else
                     loop.cross_try_temp = TEMP(vb, "loop_cross_try", rt)
-                    loop.cross_try_join = LABEL()
+                    loop.cross_try_join_region = _open_region(LABEL())
                 fi
-
-                loop.result_label = LABEL()
             fi
 
             let structured = _open_structured_loop(loop)
@@ -402,14 +402,14 @@ namespace Syntax.Process is
             // Breaks emit during the body walk, so every label and
             // slot they reach is allocated before it.
             if let vb = value_block, rt = loop.result_type then
+                loop.result_region = _open_region(LABEL())
+
                 if spiller.is_spilling then
                     loop.spill_field = spiller.spill_field
                 else
                     loop.cross_try_temp = TEMP(vb, "loop_cross_try", rt)
-                    loop.cross_try_join = LABEL()
+                    loop.cross_try_join_region = _open_region(LABEL())
                 fi
-
-                loop.result_label = LABEL()
             fi
 
             let expression = `for.expression!
@@ -649,22 +649,24 @@ namespace Syntax.Process is
         // LABELS): the natural exit yields absence; valued breaks
         // arrive having pushed or stored their value; a cross-try
         // join reloads the stashed temp. One result-typed value is
-        // available to the consumer afterwards. The result label was
-        // allocated at loop entry — breaks target it from inside the
-        // body walk.
+        // available to the consumer afterwards. The result region was
+        // opened at loop entry — breaks leave it from inside the body
+        // walk.
         _gen_loop_result(loop: LOOP_LABELS, result_type: Semantic.Types.Type, spiller: COMPOSITE_VALUE_SPILLER) is
-            let brancher = get_brancher_for_block()
-            let result = loop.result_label!
+            let result = loop.result_region!
 
             spiller.emit_value(IR.Values.DEFAULT(result_type))
-            brancher.branch(result)
+            add(Values.BREAK(result, false))
 
-            if loop.cross_try_used then
-                brancher.label(loop.cross_try_join!)
-                add(loop.cross_try_temp!.load())
+            if let join = loop.cross_try_join_region then
+                _close_structured(join)
+
+                if loop.cross_try_used then
+                    add(loop.cross_try_temp!.load())
+                fi
             fi
 
-            brancher.label(result)
+            _close_structured(result)
         si
 
         // Opens the structured loop `loop`'s body is generated into.
