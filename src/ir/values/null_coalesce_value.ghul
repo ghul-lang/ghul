@@ -5,25 +5,11 @@ namespace IR.Values is
     // NULLABLE[T] or MAYBE[T]. The receiver is spilled to a local so
     // its address can feed the has_value / value accessor calls: the
     // left operand can be any expression, not just an addressable
-    // slot. `b` is evaluated only on the absent path.
+    // slot. `b` is evaluated only on the absent path. The presence
+    // test and the value extract read the receiver's address from the
+    // stack, and the present arm reads the extracted value from it.
     //
-    //   .locals init (<recv type> '.coalesce.N')
-    //   <receiver IL>          // [..., recv]
-    //   stloc '.coalesce.N'    // [...]
-    //   ldloca '.coalesce.N'   // [..., &recv]
-    //   <presence_test IL>     // [..., bool]  (get_has_value on 'this' addr)
-    //   brfalse <absent>
-    //   ldloca '.coalesce.N'   // [..., &recv]
-    //   <value_extract IL>     // [..., T]     (get_value on 'this' addr)
-    //   <present_arm IL>       // [..., R]     (coercion over the payload, often nothing)
-    //   br <end>
-    //   <absent>:
-    //   <absent_arm IL>        // [..., R]
-    //   <end>:
-    //
-    // Built by COMPILE_OPERATORS._visit_null_coalesce. Branches use
-    // the long forms — either arm can hold an arbitrarily large
-    // expression.
+    // Built by COMPILE_OPERATORS._visit_null_coalesce.
     class NULL_COALESCE_VALUE: Value is
         receiver: Value
         presence_test: Value
@@ -53,27 +39,34 @@ namespace IR.Values is
             self._result_type = result_type
         si
 
+        // The receiver is held in a temporary, whose address the
+        // presence test and the value extract read.
+        expand() -> BLOCK is
+            let expansion = IR.EXPANSION(type)
+            let held = expansion.temp("coalesce", receiver.type!)
+
+            expansion.store(held, receiver)
+
+            let result = expansion.temp("coalesced", type)
+
+            let done = expansion.region()
+            let absent = expansion.region()
+
+            expansion.exit_if(absent, IR.BRANCH.Z, STEPS([ADDRESS(held.load()), presence_test]:Value))
+            expansion.store(result, STEPS([ADDRESS(held.load()), value_extract, present_arm]:Value))
+            expansion.exit(done)
+            expansion.close(absent)
+
+            expansion.store(result, absent_arm)
+            expansion.close(done)
+
+            expansion.add(result.load())
+
+            return expansion.result
+        si
+
         gen(context: IR.CONTEXT) is
-            let id = TEMP.get_next_id()
-            let absent_label = IR.LABEL()
-            let end_label = IR.LABEL()
-
-            let body = context.current_srm_body_emitter!
-                let temp = ".coalesce.{id}"
-
-                body.declare_local(temp, receiver.type!)
-                gen(receiver, context)
-                body.stloc(temp)
-                body.ldloca(temp)
-                gen(presence_test, context)
-                body.branch(System.Reflection.Metadata.ILOpCode.BRFALSE, absent_label)
-                body.ldloca(temp)
-                gen(value_extract, context)
-                gen(present_arm, context)
-                body.branch(System.Reflection.Metadata.ILOpCode.BR, end_label)
-                body.mark_label(absent_label)
-                gen(absent_arm, context)
-                body.mark_label(end_label)
+            IR.EXPANSION.gen(expand(), context)
         si
 
         to_string() -> string =>

@@ -2,16 +2,8 @@ namespace IR.Values is
     use Semantic.Types.Type
 
     // The result of `a ?? b` for a reference-typed `a: T?`. `T?` is a
-    // reference that may be null at IL, so a single dup-and-branch is
-    // enough — `b` is evaluated only when `a` is null.
-    //
-    //   <left IL>           // [..., a]
-    //   dup                 // [..., a, a]
-    //   brtrue.s <end>      // pops the top a; non-null leaves the
-    //                       // other a on the stack at end
-    //   pop                 // [...]
-    //   <right IL>          // [..., b]
-    //   <end>:
+    // reference that may be null, so a null test is enough — `b` is
+    // evaluated only when `a` is null.
     //
     // Built by COMPILE_OPERATORS.visit_binary when the operator is `??`.
     // The two operands are evaluated by their own Values; this Value
@@ -32,17 +24,30 @@ namespace IR.Values is
             self._result_type = result_type
         si
 
+        // `a` where it is present, and `b` only where it is not.
+        expand() -> BLOCK is
+            let expansion = IR.EXPANSION(type)
+            let result = expansion.temp("coalesce", type)
+
+            expansion.store(result, left)
+
+            let done = expansion.region()
+            let absent = expansion.region()
+
+            expansion.exit_if(absent, IR.BRANCH.Z, result.load())
+            expansion.exit(done)
+            expansion.close(absent)
+
+            expansion.store(result, right)
+            expansion.close(done)
+
+            expansion.add(result.load())
+
+            return expansion.result
+        si
+
         gen(context: IR.CONTEXT) is
-            let end_label = IR.LABEL()
-
-            gen(left, context)
-
-            let body = context.current_srm_body_emitter!
-                body.op(System.Reflection.Metadata.ILOpCode.DUP)
-                body.branch(System.Reflection.Metadata.ILOpCode.BRTRUE, end_label)
-                body.op(System.Reflection.Metadata.ILOpCode.POP)
-                gen(right, context)
-                body.mark_label(end_label)
+            IR.EXPANSION.gen(expand(), context)
         si
 
         to_string() -> string =>
