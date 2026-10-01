@@ -16,8 +16,11 @@ namespace IR.Emitter is
 
         _body: SRM_METHOD_BODY_EMITTER => _context.current_srm_body_emitter!
 
+        _async: CIL_ASYNC_LOWERING
+
         init(context: IR.CONTEXT) is
             _context = context
+            _async = CIL_ASYNC_LOWERING(context)
         si
 
         // A value whose lowering has not moved here yet lowers itself.
@@ -301,6 +304,691 @@ namespace IR.Emitter is
 
             throw System.NotImplementedException(
                 "the binary back end has no emission for storing to '{store.symbol}' yet")
+        si
+
+        _lower_all(values: Collections.Iterable[Values.Value]) is
+            for value in values do
+                _lower(value)
+            od
+        si
+
+        visit(call: Values.Call.GLOBAL) is
+            _lower_all(call.arguments)
+            _body.call(_context.resolve_call_target(call.function))
+        si
+
+        // A static interface member reached through a type parameter,
+        // or through the type an interface is instantiated at, takes
+        // the `constrained.` prefix.
+        visit(call: Values.Call.STATIC) is
+            _lower_all(call.arguments)
+
+            if let receiver = call.constrained_receiver then
+                _body.constrained(_context.resolve_type_token(receiver))
+            fi
+
+            _body.call(_context.resolve_call_target(call.function))
+        si
+
+        visit(call: Values.Call.STRUCT) is
+            _lower(call.from)
+            _lower_all(call.arguments)
+            _body.call(_context.resolve_call_target(call.function))
+        si
+
+        visit(call: Values.Call.INSTANCE) is
+            let from = call.from
+
+            _lower(from)
+            _lower_all(call.arguments)
+
+            if let constrained: Values.CONSTRAINED = from then
+                constrained_prefix(constrained)
+            fi
+
+            let target = _context.resolve_call_target(call.function)
+
+            if from.is_super \/ !call.function.is_virtual then
+                _body.call(target)
+            else
+                _body.call_virtual(target)
+            fi
+        si
+
+        // A function type still carrying an inference placeholder means
+        // inference never settled and nothing upstream reported it.
+        // Encoding the signature would fail inside the emitter as an
+        // opaque internal error, so report a located diagnostic instead
+        // and leave the call unemitted.
+        visit(call: Values.Call.CLOSURE) is
+            let func_type = call.func_type
+
+            if IR.CONTEXT.contains_sentinel(func_type) then
+                _context.report_unresolved_type(call.location, func_type!)
+                return
+            fi
+
+            _lower(call.from)
+            _lower_all(call.arguments)
+
+            _body.call_virtual(
+                _context.resolve_delegate_invoke(func_type!, call.arguments.count, call.is_action))
+        si
+
+        // A built-in operation is lowered to the values that implement
+        // it the first time it is generated.
+        visit(call: Values.Call.INNATE) is
+            if !call.is_lowered then
+                _lower(call.lower())
+            fi
+        si
+
+        visit(node: Values.Breakable) is
+            assert node.is_closed else "structured node generated before it was closed"
+
+            STRUCTURED_LOWERING.gen(node, _context)
+        si
+
+        visit(exit: Values.Exit) is
+            STRUCTURED_LOWERING.gen(exit, _context)
+        si
+
+        visit(dispatch: Values.DISPATCH) is
+            STRUCTURED_LOWERING.gen(dispatch, _context)
+        si
+
+        visit(resume: Values.RESUME_POINT) is
+            STRUCTURED_LOWERING.gen(resume, _context)
+        si
+
+        visit(composite: Values.Composite) is
+            gen_expansion(composite.expand())
+        si
+
+        // Encodes an expansion as part of the composite that built it,
+        // marking no source positions for the structure inside it.
+        gen_expansion(expansion: Values.BLOCK) is
+            _context.begin_unmarked()
+
+            for value in expansion.values do
+                value.gen(_context)
+            od
+
+            _context.end_unmarked()
+        si
+
+        _type_token(type: Semantic.Types.Type) -> System.Reflection.Metadata.EntityHandle =>
+            _context.resolve_type_token(type)
+
+        visit(null_value: Values.NULL) is
+            _body.ldnull()
+        si
+
+        visit(box: Values.BOX) is
+            _lower(box.value)
+            _body.box(_type_token(box.type!))
+        si
+
+        visit(unbox: Values.UNBOX) is
+            _lower(unbox.value)
+            _body.unbox_any(_type_token(unbox.type!))
+        si
+
+        visit(conversion: Values.CAST) is
+            Values.TYPE_TEST_OPERAND.gen(conversion.value, _context)
+
+            if conversion.faults_on_failure then
+                _body.cast_class(_type_token(conversion.type))
+            else
+                _body.is_instance(_type_token(conversion.type))
+            fi
+        si
+
+        visit(test: Values.ISA) is
+            Values.TYPE_TEST_OPERAND.gen(test.value, _context)
+
+            _body.is_instance(_type_token(test.isa_type))
+            _body.ldnull()
+            _body.op(System.Reflection.Metadata.ILOpCode.CGT_UN)
+        si
+
+        visit(type_of: Values.TYPEOF) is
+            _body.ldtoken(_type_token(type_of.typeof_type))
+            _body.call(_context.resolve_get_type_from_handle())
+        si
+
+        visit(tuple: Values.TUPLE) is
+            _lower_all(tuple.values)
+            _body.new_object(_context.resolve_generic_constructor(tuple.type, tuple.values.count))
+        si
+
+        // A unit variant is a single shared instance. Which one to load
+        // follows from the value's own type rather than from wherever the
+        // constructor was found: for a generic variant the type names the
+        // instantiation, while the constructor's owner is the open
+        // definition, whose parameters an imported variant does not even
+        // declare.
+        visit(construction: Values.NEW) is
+            if construction.constructor.owner!.is_unit_variant then
+                _body.ldsfld(_context.resolve_unit_variant_instance(construction.type.symbol))
+
+                return
+            fi
+
+            _lower_all(construction.arguments)
+            _body.new_object(_context.resolve_call_target(construction.constructor))
+        si
+
+        visit(negation: Values.NOT) is
+            if negation.is_operator then
+                Values.Value.gen_marked(negation.value, _context)
+                negation.mark_operator(_context)
+            else
+                _lower(negation.value)
+            fi
+
+            _body.ldc_i4(0)
+            _body.op(System.Reflection.Metadata.ILOpCode.CEQ)
+        si
+
+        visit(arithmetic: Values.ARITHMETIC) is
+            for operand in arithmetic.operands do
+                if arithmetic.is_marked then
+                    Values.Value.gen_marked(operand, _context)
+                else
+                    _lower(operand)
+                fi
+            od
+
+            if arithmetic.is_marked then
+                arithmetic.mark_operator(_context)
+            fi
+
+            _body.op(CIL_OPERATIONS.arithmetic(arithmetic.operation))
+        si
+
+        visit(compare: Values.COMPARE) is
+            Values.Value.gen_marked(compare.left, _context)
+            Values.Value.gen_marked(compare.right, _context)
+
+            compare.mark_operator(_context)
+
+            let (op_code, negates) = CIL_OPERATIONS.comparison(compare.comparison, compare.is_unsigned)
+
+            _body.op(op_code)
+
+            if negates then
+                _body.ldc_i4(0)
+                _body.op(System.Reflection.Metadata.ILOpCode.CEQ)
+            fi
+        si
+
+        visit(convert: Values.CONVERT) is
+            _lower(convert.value)
+
+            for op_code in CIL_OPERATIONS.conversion(convert.from, convert.to) do
+                _body.op(op_code)
+            od
+        si
+
+        visit(declaration: Values.DECLARE_LOCAL) is
+            _body.declare_local(declaration.local)
+        si
+
+        visit(store: Values.STORE_TEMP) is
+            _body.stloc(store.local)
+        si
+
+        visit(tee: Values.TEE_TEMP) is
+            Values.Value.gen_marked(tee.value, _context)
+            tee.mark_operator(_context)
+
+            _body.op(System.Reflection.Metadata.ILOpCode.DUP)
+            _body.stloc(tee.local)
+        si
+
+        visit(discard: Values.DISCARD) is
+            if let value = discard.value then
+                Values.Value.gen_marked(value, _context)
+            fi
+
+            discard.mark_operator(_context)
+
+            _body.op(System.Reflection.Metadata.ILOpCode.POP)
+        si
+
+        visit(thrown: Values.THROW) is
+            if let exception = thrown.exception then
+                Values.Value.gen_marked(exception, _context)
+            fi
+
+            thrown.mark_operator(_context)
+
+            _body.op(System.Reflection.Metadata.ILOpCode.THROW)
+        si
+
+        visit(ret: Values.RET) is
+            _body.ret()
+        si
+
+        // A fresh local of the return type, never assigned.
+        visit(default_return: Values.DEFAULT_RETURN) is
+            let local = IR.LOCAL(".default", default_return.type)
+
+            _body.declare_local(local)
+            _body.ldloc(local)
+        si
+
+        // The default of a type is what a fresh local of it holds.
+        visit(default_value: Values.DEFAULT) is
+            let local = IR.LOCAL(".default.{IR.TEMP.get_next_id()}", default_value.type)
+
+            _body.declare_local(local)
+            _body.ldloc(local)
+        si
+
+        visit_address(default_value: Values.DEFAULT) is
+            let local = IR.LOCAL(".default.{IR.TEMP.get_next_id()}", default_value.type)
+
+            _body.declare_local(local)
+            _body.ldloca(local)
+        si
+
+        visit(deref: Values.DEREF) is
+            _lower(deref.value)
+            _body.load_object(_type_token(deref.type))
+        si
+
+        visit_address(deref: Values.DEREF) is
+            _lower(deref.value)
+        si
+
+        // A value with no address of its own is copied into a local
+        // whose address is taken instead.
+        visit(address: Values.ADDRESS) is
+            let value = address.value
+
+            if value.has_address then
+                value.gen_address(_context)
+
+                return
+            fi
+
+            if !address.local? then
+                address.local = IR.LOCAL(Values.ADDRESS.next_name, address.type)
+            fi
+
+            let local = address.local!
+
+            _body.declare_local(local)
+            _lower(value)
+            _body.stloc(local)
+            _body.ldloca(local)
+        si
+
+        visit_address(address: Values.ADDRESS) is
+            visit(address)
+        si
+
+        visit(steps: Values.STEPS) is
+            _lower_all(steps.steps)
+        si
+
+        visit(decrement: Values.DECREMENT) is
+            _body.ldloc(decrement.counter)
+            _body.ldc_i4(1)
+            _body.op(System.Reflection.Metadata.ILOpCode.SUB)
+            _body.stloc(decrement.counter)
+        si
+
+        // Leaves the counter's value before the increment.
+        visit(increment: Values.POST_INCREMENT) is
+            _body.ldloc(increment.counter)
+            _body.ldloc(increment.counter)
+            _body.ldc_i4(1)
+            _body.op(System.Reflection.Metadata.ILOpCode.ADD)
+            _body.stloc(increment.counter)
+        si
+
+        // Leaves the counter's value after the decrement.
+        visit(decrement: Values.PRE_DECREMENT) is
+            _body.ldloc(decrement.counter)
+            _body.ldc_i4(1)
+            _body.op(System.Reflection.Metadata.ILOpCode.SUB)
+            _body.op(System.Reflection.Metadata.ILOpCode.DUP)
+            _body.stloc(decrement.counter)
+        si
+
+        visit(repack: Values.TUPLE_REPACK) is
+            _body.declare_local(repack.temp)
+            _lower(repack.source)
+            _body.stloc(repack.temp)
+            _lower(repack.built)
+        si
+
+        // The subject is already on the stack, left by the wrap around
+        // the arm this value is built for.
+        visit(spilled: Values.SPILLED_SUBJECT) is
+            _body.declare_local(spilled.temp)
+            _body.stloc(spilled.temp)
+            _lower(spilled.built)
+        si
+
+        visit(address: Values.ARRAY_ELEMENT_ADDRESS) is
+            _lower(address.array)
+            _lower(address.index)
+            _body.load_element_address(_type_token(address.element_type))
+        si
+
+        visit_address(address: Values.ARRAY_ELEMENT_ADDRESS) is
+            visit(address)
+        si
+
+        visit(array: Values.NEW_ARRAY) is
+            _lower(array.count)
+            _body.new_array(_type_token(array.element_type))
+        si
+
+        visit(store: Values.STORE_ARRAY_ELEMENT) is
+            _lower(store.array)
+            _lower(store.index)
+            _lower(IoC.CONTAINER.instance.value_boxer.box_if_needed(store.element, store.element_type))
+            _body.store_element(_type_token(store.element_type))
+        si
+
+        visit(sequence: Values.SEQUENCE) is
+            let boxer = IoC.CONTAINER.instance.value_boxer
+            let element = _type_token(sequence.element_type)
+            let values = sequence.values
+
+            _body.ldc_i4(values.count)
+            _body.new_array(element)
+
+            for i in 0..values.count do
+                _body.op(System.Reflection.Metadata.ILOpCode.DUP)
+                _body.ldc_i4(i)
+
+                _lower(boxer.box_if_needed(values[i], sequence.element_type))
+
+                _body.store_element(element)
+            od
+        si
+
+        visit(compare: Values.COMPARE_ORDER_TO_ZERO) is
+            let (op_code, negates) = CIL_OPERATIONS.comparison(compare.comparison, false)
+
+            _lower(compare.value)
+
+            _body.ldc_i4(0)
+            _body.op(op_code)
+
+            if negates then
+                _body.ldc_i4(0)
+                _body.op(System.Reflection.Metadata.ILOpCode.CEQ)
+            fi
+        si
+
+        visit(receiver: Values.CONSTRAINED) is
+            _lower(receiver.value)
+        si
+
+        // The `constrained.` prefix a call through `receiver` takes,
+        // immediately before its `callvirt`.
+        constrained_prefix(receiver: Values.CONSTRAINED) is
+            _body.constrained(_type_token(receiver.type!))
+        si
+
+        visit(call: Values.DECIMAL_CALL) is
+            _body.call(_context.resolve_decimal_method(call.method_name, call.parameter_types, call.type))
+        si
+
+        visit(convert: Values.DECIMAL_CONVERT) is
+            _lower(convert.value)
+
+            let parameter_types = Collections.LIST[Semantic.Types.Type]()
+
+            parameter_types.add(convert.parameter_type)
+
+            _lower(Values.DECIMAL_CALL(convert.type, convert.method_name, parameter_types))
+        si
+
+        visit(equality: Values.EQUALITY_COMPARISON) is
+            _body.call(_context.resolve_equality_comparer_default(equality.comparer_type))
+
+            _lower(equality.left)
+            _lower(equality.right)
+
+            _body.call_virtual(_context.resolve_equality_comparer_equals(equality.comparer_type))
+        si
+
+        visit(test: Values.HAS_VALUE) is
+            _lower(test.value)
+
+            _body.ldnull()
+            _body.op(System.Reflection.Metadata.ILOpCode.CGT_UN)
+        si
+
+        // Calling GetType through the reference faults on null, and
+        // nothing else; the reference itself is left in place.
+        visit(check: Values.REFERENCE_NULL_CHECK) is
+            _lower(check.inner)
+
+            _body.op(System.Reflection.Metadata.ILOpCode.DUP)
+            _body.call_virtual(_context.resolve_object_get_type())
+            _body.op(System.Reflection.Metadata.ILOpCode.POP)
+        si
+
+        visit(conversion: Values.SCALAR_CONVERSION) is
+            _lower(conversion.converted)
+        si
+
+        visit(dummy: Values.DUMMY) is
+            IoC.CONTAINER.instance.logger.poison(dummy.location, "generated dummy value: {dummy.type} from {dummy.location}")
+            _context.fixme("dummy {dummy.type} from {dummy.location}")
+        si
+
+        visit(type_expression: Values.TYPE_EXPRESSION) is
+            IoC.CONTAINER.instance.logger.poison(type_expression.location, "generated type expression: {type_expression.type} from {type_expression.location}")
+            _context.fixme("type expression {type_expression.type} from {type_expression.location}")
+        si
+
+        visit(store: Values.Need.STORE) is
+            _lower(store.value)
+
+            assert false else "unresolved need store"
+        si
+
+        visit(store: Values.Store.INDIRECT) is
+            _lower(store.address)
+            _lower(store.value)
+            _body.store_object(_type_token(store.type))
+        si
+
+        visit(wrapper: Values.TYPE_WRAPPER) is
+            _lower(wrapper.value)
+        si
+
+        visit_address(wrapper: Values.TYPE_WRAPPER) is
+            wrapper.value.gen_address(_context)
+        si
+
+        visit(wrapper: Values.WRAPPER) is
+            assert wrapper.value? else "generate wrapper without value"
+
+            _lower(wrapper.value)
+        si
+
+        visit_address(wrapper: Values.WRAPPER) is
+            assert wrapper.value? else "generate wrapper without value"
+
+            wrapper.value.gen_address(_context)
+        si
+
+        visit(wrap: Values.WRAP_OPTIONAL) is
+            _lower(wrap.value)
+            _body.new_object(_context.resolve_generic_constructor(wrap.type, 1))
+        si
+
+        visit(projection: Values.NARROW_PROJECT) is
+            _lower(projection.projected)
+
+            Values.NARROW_GUARD.emit(projection.type, _context)
+        si
+
+        visit(view: Values.NARROW_VIEW) is
+            _lower(view.underlying)
+
+            Values.NARROW_GUARD.emit(view.type, _context)
+        si
+
+        visit_address(view: Values.NARROW_VIEW) is
+            view.underlying.gen_address(_context)
+        si
+
+        // Records the offset range the marked statement emits. The range
+        // leaves the method as a custom attribute the IL test runner
+        // reads. Outside a body there is no range to record: a pragma on
+        // a declaration marks nothing this can measure.
+        visit(enter: Values.ENTER_FILE) is
+            if let body = _context.current_srm_body_emitter then
+                body.begin_il_output(enter.path, _context.next_il_output_sequence())
+            fi
+        si
+
+        visit(leave: Values.LEAVE_FILE) is
+            if let body = _context.current_srm_body_emitter then
+                body.end_il_output()
+            fi
+        si
+
+        // `ldvirtftn` consumes the receiver it dispatches against, so the
+        // receiver pushed for the delegate's own constructor argument
+        // needs a duplicate first.
+        visit(delegate: Values.Load.DELEGATE) is
+            _lower(delegate.frame)
+
+            if delegate.function.is_virtual_dispatch then
+                _body.op(System.Reflection.Metadata.ILOpCode.DUP)
+            fi
+
+            _lower(delegate.function)
+            _body.new_object(_context.resolve_delegate_constructor(delegate.type))
+        si
+
+        visit(block: Values.BLOCK) is
+            assert !block.is_emitted else "oops: block value already emitted"
+
+            block.is_emitted = true
+
+            for value in block.values do
+                Values.Value.gen_marked(value, _context)
+            od
+        si
+
+        visit(block: Values.DUMMY_BLOCK) is
+            throw System.InvalidOperationException("oops: dummy block generated, created at: {block.location} because: {block.why}")
+        si
+
+        visit(self_load: Values.Load.REFERENCE_SELF) is
+            _body.ldarg(0)
+        si
+
+        visit_address(self_load: Values.Load.REFERENCE_SELF) is
+            _body.ldarg(0)
+        si
+
+        // A closure's frame holds the self of the function it was made in.
+        visit(self_load: Values.Load.OUTER_SELF) is
+            _body.ldarg(0)
+            _body.ldfld(_context.resolve_field_target(self_load.outer_self_field))
+        si
+
+        visit_address(self_load: Values.Load.OUTER_SELF) is
+            visit(self_load)
+        si
+
+        // A struct's own `self` is its address; the value is loaded from it.
+        visit(self_load: Values.Load.VALUE_SELF) is
+            _body.ldarg(0)
+            _body.load_object(_type_token(self_load.type!))
+        si
+
+        visit_address(self_load: Values.Load.VALUE_SELF) is
+            _body.ldarg(0)
+        si
+
+        visit(concat: Values.CALL_STRING_CONCAT) is
+            _body.call(_context.resolve_string_concat())
+        si
+
+        visit(equality: Values.CALL_STRING_EQUALITY) is
+            _body.call(_context.resolve_string_equality())
+        si
+
+        visit(exception: Values.NEW_NOT_IMPLEMENTED_EXCEPTION) is
+            _body.new_object(_context.resolve_not_implemented_constructor())
+        si
+
+        visit(exception: Values.NEW_NOT_SUPPORTED_EXCEPTION) is
+            _body.new_object(_context.resolve_not_supported_constructor())
+        si
+
+        visit(exception: Values.NEW_ASSERT_FAILED_EXCEPTION) is
+            _body.new_object(_context.resolve_assert_failed_constructor())
+        si
+
+        // The range struct's constructor is not reachable from a Function
+        // symbol, so the reference is built from the range type and the
+        // known (int, int) signature.
+        visit(range: Values.NEW_RANGE) is
+            _body.new_object(_context.resolve_range_constructor(range.type))
+        si
+
+        // The emitter reserves the same depth for every body it writes,
+        // so nothing is encoded for this.
+        visit(max_stack: Values.MAX_STACK) is
+        si
+
+        visit(equality: Values.REFERENCE_EQUALITY) is
+            _lower(equality.left)
+            _lower(equality.right)
+            _body.op(System.Reflection.Metadata.ILOpCode.CEQ)
+        si
+
+        visit(construct: Values.CONSTRUCT_MAYBE) is
+            _lower(construct.value)
+            _body.new_object(_context.resolve_generic_constructor(construct.type, 1))
+        si
+
+        // Stands for a value an earlier step left on the stack, so there
+        // is nothing to encode.
+        visit(stack_top: Values.STACK_TOP) is
+        si
+
+        visit(stack_top: Values.STACK_TOP_ADDRESS) is
+        si
+
+        visit_address(stack_top: Values.STACK_TOP_ADDRESS) is
+        si
+
+        visit(launch: Values.ASYNC_METHOD_LAUNCH) is
+            _async.launch(launch)
+        si
+
+        visit(completion: Values.ASYNC_COMPLETION) is
+            _async.complete(completion)
+        si
+
+        visit(completed: Values.COMPLETED_TASK_LIKE) is
+            _async.completed(completed)
+        si
+
+        visit(suspend: Values.AWAIT_SUSPEND) is
+            _async.suspend(suspend)
+        si
+
+        visit(step: Values.AWAIT_SUSPEND_STEP) is
+            _async.step(step)
         si
     si
 si

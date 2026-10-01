@@ -82,7 +82,10 @@ namespace IR.Values is
             self.builder_field = builder_field
         si
 
-        gen(context: IR.CONTEXT) is
+        // The control flow an await suspends through: the completed
+        // check, registering the continuation, leaving the resumable
+        // body, and the point a resumed MoveNext comes back to.
+        structure() -> REGION is
             let void_type = IoC.CONTAINER.instance.innate_symbol_lookup.get_void_type()
 
             // Left when the awaited value has already completed, so no
@@ -105,88 +108,11 @@ namespace IR.Values is
             completed.body.add(AWAIT_SUSPEND_STEP(self, AwaitSuspendStep.CLEAR_STATE))
             completed.close()
 
-            // Resolved before anything is encoded, and in this order, so
-            // the member references are numbered as the steps have always
-            // numbered them.
-            context.resolve_field_target(state_field)
-            context.resolve_field_target(awaiter_field)
-            context.resolve_field_target(builder_field)
-
-            context.begin_unmarked()
-
-            gen(completed, context)
-            gen(get_result, context)
-
-            context.end_unmarked()
+            return completed
         si
 
-        // Capture the awaiter into the frame.
-        gen_capture_awaiter(context: IR.CONTEXT) is
-            let body = context.current_srm_body_emitter!
-
-            body.ldarg(0)
-            gen(get_awaiter, context)
-            body.stfld(context.resolve_field_target(awaiter_field))
-        si
-
-        // Record the state and register the continuation through the
-        // builder.
-        gen_register_continuation(context: IR.CONTEXT) is
-            let body = context.current_srm_body_emitter!
-            let builder = context.resolve_field_target(builder_field)
-
-            _stamp_state_srm(context, body, state_number, context.resolve_field_target(state_field))
-
-            body.ldarg(0)
-
-            // The builder goes by address for a struct - the shape the
-            // BCL builders use - and as the object a class builder's
-            // methods receive as `this`.
-            if builder_field.type!.is_value_type then
-                body.ldflda(builder)
-            else
-                body.ldfld(builder)
-            fi
-
-            body.ldarg(0)
-            body.ldflda(context.resolve_field_target(awaiter_field))
-
-            // The state machine goes by reference for a builder whose
-            // member takes it so, and as the interface object for one
-            // that takes it by value.
-            if context.builder_awaits_sm_by_reference(builder_field.type!, is_critical) then
-                body.ldarga(0)
-            else
-                body.ldarg(0)
-            fi
-
-            body.call(
-                context.resolve_await_on_completed(
-                    builder_field.type!, awaiter_type, state_machine_type, is_critical))
-        si
-
-        // Mark the machine running again, on a resumed MoveNext.
-        gen_clear_state(context: IR.CONTEXT) is
-            let body = context.current_srm_body_emitter!
-
-            _stamp_state_srm(context, body, -1, context.resolve_field_target(state_field))
-        si
-
-        // Write a state value to both the cached CLR local and the
-        // frame's state field, so a `leave` out of a protected region
-        // fires finally bodies that read the local and see the right
-        // sentinel.
-        _stamp_state_srm(
-            context: IR.CONTEXT,
-            body: IR.Emitter.SRM_METHOD_BODY_EMITTER,
-            value: int,
-            state: System.Reflection.Metadata.EntityHandle
-        ) is
-            body.ldarg(0)
-            body.ldc_i4(value)
-            body.op(System.Reflection.Metadata.ILOpCode.DUP)
-            body.stloc(state_local)
-            body.stfld(state)
+        accept(visitor: Visitor) is
+            visitor.visit(self)
         si
 
         to_string() -> string =>
@@ -214,15 +140,8 @@ namespace IR.Values is
             self.kind = kind
         si
 
-        gen(context: IR.CONTEXT) is
-            case kind
-            when AwaitSuspendStep.CAPTURE_AWAITER then
-                suspend.gen_capture_awaiter(context)
-            when AwaitSuspendStep.REGISTER_CONTINUATION then
-                suspend.gen_register_continuation(context)
-            when AwaitSuspendStep.CLEAR_STATE then
-                suspend.gen_clear_state(context)
-            esac
+        accept(visitor: Visitor) is
+            visitor.visit(self)
         si
 
         to_string() -> string => "await-step:{kind}"
