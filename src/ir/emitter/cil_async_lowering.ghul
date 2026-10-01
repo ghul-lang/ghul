@@ -1,0 +1,212 @@
+namespace IR.Emitter is
+    use Semantic.Types.Type
+
+    use System.Reflection.Metadata.EntityHandle
+
+    // Lowers the async state-machine values to CIL: launching a
+    // machine, completing it, suspending at an await, and a task-like
+    // that is complete from the start. Each goes through the .NET async
+    // builder protocol.
+    class CIL_ASYNC_LOWERING is
+        _context: IR.CONTEXT
+
+        _body: SRM_METHOD_BODY_EMITTER => _context.current_srm_body_emitter!
+
+        init(context: IR.CONTEXT) is
+            _context = context
+        si
+
+        // Constructs the state machine into a local, marks it not yet
+        // started, creates its builder, starts it, and leaves the
+        // builder's task.
+        launch(launch: Values.ASYNC_METHOD_LAUNCH) is
+            let body = _body
+            let builder_type = launch.builder_field.type!
+            let local = launch.state_machine_local
+
+            body.declare_local(local)
+
+            Values.Value.gen(launch.ctor_arg_loads, _context)
+            body.new_object(_context.resolve_call_target(launch.constructor))
+            body.stloc(local)
+
+            body.ldloc(local)
+            body.ldc_i4(-1)
+            body.stfld(_context.resolve_field_target(launch.state_field))
+
+            body.ldloc(local)
+            body.call(_context.resolve_builder_member(builder_type, "create", 0))
+            body.stfld(_context.resolve_field_target(launch.builder_field))
+
+            body.ldloc(local)
+            _load_builder_field(builder_type, launch.builder_field)
+            body.ldloca(local)
+            body.call(_context.resolve_async_builder_start(builder_type, launch.state_machine_type))
+
+            body.ldloc(local)
+            _load_builder_field(builder_type, launch.builder_field)
+            body.call(_context.resolve_builder_property(builder_type, "task"))
+        si
+
+        // Marks the machine finished and hands the builder its result,
+        // or the exception the handler caught.
+        //
+        // The builder field is resolved before the state field, so the
+        // member references are numbered as they always have been.
+        complete(completion: Values.ASYNC_COMPLETION) is
+            let body = _body
+            let builder_type = completion.builder_field.type!
+            let builder_reference = _context.resolve_field_target(completion.builder_field)
+
+            let exception_local =
+                if let exception_type = completion.exception_type then
+                    IR.LOCAL(".exception", exception_type)
+                else
+                    null
+                fi
+
+            if let local = exception_local then
+                body.declare_local(local)
+                body.stloc(local)
+            fi
+
+            body.ldarg(0)
+            body.ldc_i4(-1)
+            body.stfld(_context.resolve_field_target(completion.state_field))
+            body.ldarg(0)
+            _load_builder(builder_type, builder_reference)
+
+            if let local = exception_local then
+                body.ldloc(local)
+                body.call(_context.resolve_async_builder_set_exception(builder_type))
+            else
+                if let result = completion.result_field then
+                    body.ldarg(0)
+                    body.ldfld(_context.resolve_field_target(result))
+                fi
+
+                body.call(_context.resolve_async_builder_set_result(builder_type, completion.result_field?))
+            fi
+        si
+
+        // A task-like whose builder is created and given its result at
+        // once.
+        completed(completed: Values.COMPLETED_TASK_LIKE) is
+            let body = _body
+            let builder_type = completed.builder_type
+            let local = IR.LOCAL(".completed_builder", builder_type)
+
+            body.declare_local(local)
+
+            body.call(_context.resolve_builder_member(builder_type, "create", 0))
+            body.stloc(local)
+
+            _load_builder_local(builder_type, local)
+            body.call(_context.resolve_builder_member(builder_type, "set_result", 0))
+
+            _load_builder_local(builder_type, local)
+            body.call(_context.resolve_builder_property(builder_type, "task"))
+        si
+
+        // The member references are resolved before anything is encoded,
+        // and in this order, so they are numbered as the steps have always
+        // numbered them.
+        suspend(suspend: Values.AWAIT_SUSPEND) is
+            _context.resolve_field_target(suspend.state_field)
+            _context.resolve_field_target(suspend.awaiter_field)
+            _context.resolve_field_target(suspend.builder_field)
+
+            _context.begin_unmarked()
+
+            Values.Value.gen(suspend.structure(), _context)
+            Values.Value.gen(suspend.get_result, _context)
+
+            _context.end_unmarked()
+        si
+
+        step(step: Values.AWAIT_SUSPEND_STEP) is
+            let suspend = step.suspend
+
+            case step.kind
+            when Values.AwaitSuspendStep.CAPTURE_AWAITER then
+                _capture_awaiter(suspend)
+            when Values.AwaitSuspendStep.REGISTER_CONTINUATION then
+                _register_continuation(suspend)
+            when Values.AwaitSuspendStep.CLEAR_STATE then
+                _stamp_state(suspend, -1)
+            esac
+        si
+
+        // Capture the awaiter into the frame.
+        _capture_awaiter(suspend: Values.AWAIT_SUSPEND) is
+            _body.ldarg(0)
+            Values.Value.gen(suspend.get_awaiter, _context)
+            _body.stfld(_context.resolve_field_target(suspend.awaiter_field))
+        si
+
+        // Record the state and register the continuation through the
+        // builder. The builder goes by address for a struct - the shape
+        // the BCL builders use - and as the object a class builder's
+        // methods receive as `this`. The state machine goes by reference
+        // for a builder whose member takes it so, and as the interface
+        // object for one that takes it by value.
+        _register_continuation(suspend: Values.AWAIT_SUSPEND) is
+            let body = _body
+            let builder_type = suspend.builder_field.type!
+
+            _stamp_state(suspend, suspend.state_number)
+
+            body.ldarg(0)
+            _load_builder_field(builder_type, suspend.builder_field)
+
+            body.ldarg(0)
+            body.ldflda(_context.resolve_field_target(suspend.awaiter_field))
+
+            if _context.builder_awaits_sm_by_reference(builder_type, suspend.is_critical) then
+                body.ldarga(0)
+            else
+                body.ldarg(0)
+            fi
+
+            body.call(
+                _context.resolve_await_on_completed(
+                    builder_type, suspend.awaiter_type, suspend.state_machine_type, suspend.is_critical))
+        si
+
+        // Write a state value to both the cached local and the frame's
+        // state field, so a `leave` out of a protected region fires
+        // finally bodies that read the local and see the right sentinel.
+        _stamp_state(suspend: Values.AWAIT_SUSPEND, value: int) is
+            let body = _body
+
+            body.ldarg(0)
+            body.ldc_i4(value)
+            body.op(System.Reflection.Metadata.ILOpCode.DUP)
+            body.stloc(suspend.state_local)
+            body.stfld(_context.resolve_field_target(suspend.state_field))
+        si
+
+        // A struct builder is reached through its address - `this` for a
+        // byref receiver and the `ref` the builder methods take - while a
+        // class builder is reached through the object the field holds.
+        _load_builder_field(builder_type: Type, builder_field: Semantic.Symbols.Field) is
+            _load_builder(builder_type, _context.resolve_field_target(builder_field))
+        si
+
+        _load_builder(builder_type: Type, reference: EntityHandle) is
+            if builder_type.is_value_type then
+                _body.ldflda(reference)
+            else
+                _body.ldfld(reference)
+            fi
+        si
+
+        _load_builder_local(builder_type: Type, local: IR.LOCAL) is
+            if builder_type.is_value_type then
+                _body.ldloca(local)
+            else
+                _body.ldloc(local)
+            fi
+        si
+    si
+si

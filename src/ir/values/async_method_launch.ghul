@@ -18,7 +18,7 @@ namespace IR.Values is
         state_field: Semantic.Symbols.Field
         builder_field: Semantic.Symbols.Field
 
-        _state_machine_local: IR.LOCAL
+        state_machine_local: IR.LOCAL
 
         init(
             type: Type,
@@ -36,67 +36,11 @@ namespace IR.Values is
             self.ctor_arg_loads = ctor_arg_loads
             self.state_field = state_field
             self.builder_field = builder_field
-            _state_machine_local = IR.LOCAL(".sm", state_machine_type)
+            self.state_machine_local = IR.LOCAL(".sm", state_machine_type)
         si
 
-        gen(context: IR.CONTEXT) is
-            let body = context.current_srm_body_emitter!
-                _gen_srm(context, body)
-        si
-
-        _gen_srm(context: IR.CONTEXT, body: IR.Emitter.SRM_METHOD_BODY_EMITTER) is
-            let builder_type = builder_field.type!
-
-            body.declare_local(_state_machine_local)
-
-            gen(ctor_arg_loads, context)
-            body.new_object(context.resolve_call_target(constructor))
-            body.stloc(_state_machine_local)
-
-            body.ldloc(_state_machine_local)
-            body.ldc_i4(-1)
-            body.stfld(context.resolve_field_target(state_field))
-
-            body.ldloc(_state_machine_local)
-            body.call(
-                context.resolve_builder_member(builder_type, "create", 0))
-            body.stfld(context.resolve_field_target(builder_field))
-
-            body.ldloc(_state_machine_local)
-            _load_builder(context, body, builder_type)
-            body.ldloca(_state_machine_local)
-            body.call(context.resolve_async_builder_start(builder_type, state_machine_type))
-
-            body.ldloc(_state_machine_local)
-            _load_builder(context, body, builder_type)
-            body.call(
-                context.resolve_builder_property(builder_type, "task"))
-        si
-
-        // A struct builder is reached through its address - `this` for a
-        // byref receiver and the `ref` the builder methods take - while a
-        // class builder is reached through the object the field holds.
-        // Shared with the MoveNext trailer, which reaches the builder
-        // the same way.
-        load_builder(
-            body: IR.Emitter.SRM_METHOD_BODY_EMITTER,
-            builder_type: Type,
-            builder_reference: System.Reflection.Metadata.EntityHandle
-        ) static is
-            if builder_type.is_value_type then
-                body.ldflda(builder_reference)
-            else
-                body.ldfld(builder_reference)
-            fi
-        si
-
-        _load_builder(
-            context: IR.CONTEXT,
-            body: IR.Emitter.SRM_METHOD_BODY_EMITTER,
-            builder_type: Type
-        ) is
-            load_builder(
-                body, builder_type, context.resolve_field_target(builder_field))
+        accept(visitor: Visitor) is
+            visitor.visit(self)
         si
 
         to_string() -> string =>
