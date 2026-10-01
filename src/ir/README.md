@@ -14,6 +14,7 @@ Useful files:
 - `frame_member.ghul` – the state-machine frame members no symbol declares.
 - `operations.ghul` – the scalar kinds, arithmetic operations and comparisons built-in operators are described by.
 - `local.ghul` – a local of the function being generated.
+- `runtime_operation.ghul` – the operations a program needs from the runtime it runs on, which each backend maps to its own runtime's members.
 - `block_context.ghul`/`block_stack.ghul` – track nested blocks while emitting code.
 - `label.ghul` – branch targets and the conditions an exit can test.
 - `expansion.ghul` – builds the structured IR a composite value expands to.

@@ -220,42 +220,29 @@ namespace Syntax.Process is
 
             add(Values.BREAK(passed, BRANCH.NZ, condition_value))
 
-            let need_exception_wrapper mut = true
+            let string_type = _innate_symbol_lookup.get_string_type()
 
-            if message? then
-                let message_value = message.value
-                if !_innate_symbol_lookup.get_exception_type().is_assignable_from(message_value!.type!) then
-                    add(
-                        Literal.STRING(
-                            "{location}: ",
-                            _innate_symbol_lookup.get_string_type()
-                        )
-                    )
-
-                    add(message_value!)
-
-                    add(Values.CALL_STRING_CONCAT())
+            let thrown =
+                if !message? then
+                    _assert_failed(Literal.STRING("{location}: {default_message_source}", string_type))
+                elif _innate_symbol_lookup.get_exception_type().is_assignable_from(message.value!.type!) then
+                    message.value!
                 else
-                    add(message_value!)
-                    need_exception_wrapper = false
+                    _assert_failed(
+                        Values.RUNTIME(
+                            IR.RuntimeOperation.CONCAT_STRINGS,
+                            Literal.STRING("{location}: ", string_type),
+                            message.value!,
+                            string_type))
                 fi
-            else
-                add(
-                    Literal.STRING(
-                        "{location}: {default_message_source}",
-                        _innate_symbol_lookup.get_string_type()
-                    )
-                )
-            fi
 
-            if need_exception_wrapper then
-                add(Values.NEW_ASSERT_FAILED_EXCEPTION())
-            fi
-
-            add(Values.THROW())
+            add(Values.THROW(thrown))
 
             _close_structured(passed)
         si
+
+        _assert_failed(message: Value) -> Value =>
+            Values.RUNTIME(IR.RuntimeOperation.NEW_ASSERT_FAILED, message, null)
 
         visit(`assert: Statements.ASSERT) is
             super.visit(`assert)
