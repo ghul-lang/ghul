@@ -22,24 +22,10 @@ namespace IR.Values is
     // `!~` wraps the whole thing in a NOT, so it negates these arms
     // along with the body's answer.
     //
-    //   <left presence>      // each presence child is read up to twice,
-    //   brtrue <present>     // so the caller hands over repeatable
-    //                        // loads rather than the expressions
-    //   <right presence>
-    //   ldc.i4.0
-    //   ceq                  // both absent
-    //   br <end>
-    //   <present>:
-    //   <right presence>     // only when guards_argument
-    //   brtrue <both>
-    //   ldc.i4.0             // left present, right absent
-    //   br <end>
-    //   <both>:
-    //   <equals call>
-    //   <end>:
+    // Each presence child is read up to twice, so the caller hands over
+    // repeatable loads rather than the expressions.
     //
-    // Built by COMPILE_OPERATORS. The branch offsets are written long
-    // rather than short: the call arm carries an arbitrary user body.
+    // Built by COMPILE_OPERATORS.
     class NULL_SAFE_EQUALITY: Value is
         left_presence: Value?
         right_presence: Value?
@@ -66,42 +52,48 @@ namespace IR.Values is
             self._result_type = result_type
         si
 
-        gen(context: IR.CONTEXT) is
-            let left_present = IR.LABEL()
-            let both_present = IR.LABEL()
-            let end_label = IR.LABEL()
+        expand() -> BLOCK is
+            let expansion = IR.EXPANSION(type)
+            let result = expansion.temp("null_safe_equals", type)
 
-            let body = context.current_srm_body_emitter!
+            let done = expansion.region()
 
-            if left_presence? then
-                gen(left_presence, context)
-                body.branch(System.Reflection.Metadata.ILOpCode.BRTRUE, left_present)
+            if let left_presence = self.left_presence then
+                let left_present = expansion.region()
 
-                if right_presence? then
-                    gen(right_presence, context)
-                    body.ldc_i4(0)
-                    body.op(System.Reflection.Metadata.ILOpCode.CEQ)
+                expansion.exit_if(left_present, IR.BRANCH.NZ, left_presence)
+
+                // Absent on the left: equal exactly when the right is
+                // absent too.
+                if let right_presence = self.right_presence then
+                    expansion.store(result, NOT(right_presence))
                 else
-                    // a right operand that can never be absent does not
-                    // match an absent left one
-                    body.ldc_i4(0)
+                    expansion.store(result, Literal.NUMBER(0, type))
                 fi
 
-                body.branch(System.Reflection.Metadata.ILOpCode.BR, end_label)
-                body.mark_label(left_present)
+                expansion.exit(done)
+                expansion.close(left_present)
             fi
 
             if guards_argument /\ right_presence? then
-                gen(right_presence, context)
-                body.branch(System.Reflection.Metadata.ILOpCode.BRTRUE, both_present)
-                body.ldc_i4(0)
-                body.branch(System.Reflection.Metadata.ILOpCode.BR, end_label)
-                body.mark_label(both_present)
+                let both_present = expansion.region()
+
+                expansion.exit_if(both_present, IR.BRANCH.NZ, right_presence!)
+                expansion.store(result, Literal.NUMBER(0, type))
+                expansion.exit(done)
+                expansion.close(both_present)
             fi
 
-            gen(equals_call, context)
+            expansion.store(result, equals_call)
+            expansion.close(done)
 
-            body.mark_label(end_label)
+            expansion.add(result.load())
+
+            return expansion.result
+        si
+
+        gen(context: IR.CONTEXT) is
+            IR.EXPANSION.gen(expand(), context)
         si
 
         to_string() -> string =>

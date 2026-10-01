@@ -1,6 +1,5 @@
 namespace IR.Values is
     use Semantic.Types.Type
-    use System.Reflection.Metadata.ILOpCode
 
     // The result of a coalescing member access `a?.b` or method call
     // `a?.m(...)`. The receiver is short-circuited to absent on null
@@ -13,30 +12,11 @@ namespace IR.Values is
     // wires sub-Values whose gen() composes the final IL inline - no
     // `if let` tree-rewrite, no semantic-pass spilling.
     //
-    // Reference-type receiver (T? where T is a class), ref-type
-    // member result:
-    //   <recv IL>                // [..., recv]
-    //   dup                      // [..., recv, recv]
-    //   brfalse <null>           // [..., recv]
-    //   <member_load IL>         // [..., U]   (member_load reads 'this' from stack)
-    //   br <end>
-    //   <null>:
-    //   pop
-    //   <null_value IL>          // ldnull (ref) or default sentinel (value)
-    //   <end>:
-    //
-    // Value-type receiver (NULLABLE[T] / MAYBE[T]):
-    //   <recv address IL>        // [..., &recv]
-    //   dup                      // [..., &recv, &recv]
-    //   <presence_test IL>       // [..., &recv, bool]  (call get_has_value on 'this' addr)
-    //   brfalse <null>           // [..., &recv]
-    //   <value_extract IL>       // [..., T]            (call get_value on 'this' addr)
-    //   <member_load IL>         // [..., U]
-    //   br <end>
-    //   <null>:
-    //   pop
-    //   <null_value IL>
-    //   <end>:
+    // The receiver is held in a temporary, or, for a value-type
+    // receiver that already has an address, read again through that
+    // address. The member value reads its receiver from the stack, as
+    // the value extract and the presence test read the receiver's
+    // address.
     //
     // The null_value is `ldnull` for a reference-type result and a
     // fresh DEFAULT for a value-type result (DEFAULT hoists a
@@ -45,9 +25,9 @@ namespace IR.Values is
     // arm leaves a result on the stack.
     //
     // A static member reached through `?.` never consumes the tested
-    // receiver: `receiver_consumed` false makes the present arm pop
-    // the receiver (or its dup'd address) before the member value,
-    // and the value-type shape skips the value extract entirely.
+    // receiver: with `receiver_consumed` false the present arm is the
+    // member value alone, and the value-type shape skips the value
+    // extract entirely.
     class COALESCE_LOAD: Value is
         receiver: Value
         presence_test: Value?
@@ -110,64 +90,77 @@ namespace IR.Values is
             self._receiver_consumed = receiver_consumed
         si
 
-        gen(context: IR.CONTEXT) is
-            let null_label = IR.LABEL()
-            let end_label = IR.LABEL()
+        expand() -> BLOCK is
+            let expansion = IR.EXPANSION(type)
+            let has_result = !type.is_void
 
-            let body = context.current_srm_body_emitter!
-                if _receiver_is_value_type then
-                    // A receiver with no address of its own - a call
-                    // result, or a nested coalescing wrap - is spilled
-                    // to a local first, the same way NULL_COALESCE_VALUE
-                    // drives its value-shape `??`.
-                    let spilled mut = ""
+            // A repeatable read of the receiver: its address for a value
+            // type, its value for a reference.
+            let read_receiver: () -> Value =
+                if _receiver_is_value_type /\ receiver.has_address then
+                    () => cast Value(ADDRESS(receiver))
+                else
+                    let held = expansion.temp("coalesce.receiver", receiver.type!)
 
-                    if receiver.has_address then
-                        receiver.gen_address(context)
+                    expansion.store(held, receiver)
+
+                    if _receiver_is_value_type then
+                        () => cast Value(ADDRESS(held.load()))
                     else
-                        spilled = ".coalesce.receiver.{TEMP.get_next_id()}"
-                        body.declare_local(spilled, receiver.type!)
-                        gen(receiver, context)
-                        body.stloc(spilled)
-                        body.ldloca(spilled)
+                        () => held.load()
                     fi
+                fi
 
-                    body.op(ILOpCode.DUP)
-                    gen(presence_test!, context)
-                    body.branch(ILOpCode.BRFALSE, null_label)
+            let result: IR.TEMPORARY? = if has_result then expansion.temp("coalesce.result", type) else null fi
+
+            let done = expansion.region()
+            let absent = expansion.region()
+
+            let present: Value =
+                if _receiver_is_value_type then
+                    expansion.exit_if(absent, IR.BRANCH.Z, STEPS([read_receiver(), presence_test!]:Value))
 
                     if _receiver_consumed then
-                        gen(value_extract!, context)
+                        STEPS([read_receiver(), value_extract!, member_load]:Value)
                     else
-                        body.op(ILOpCode.POP)
+                        member_load
                     fi
                 else
-                    gen(receiver, context)
-                    body.op(ILOpCode.DUP)
-                    body.branch(ILOpCode.BRFALSE, null_label)
+                    expansion.exit_if(absent, IR.BRANCH.Z, read_receiver())
 
-                    if !_receiver_consumed then
-                        body.op(ILOpCode.POP)
+                    if _receiver_consumed then
+                        STEPS([read_receiver(), member_load]:Value)
+                    else
+                        member_load
                     fi
                 fi
 
-                gen(member_load, context)
-                body.branch(ILOpCode.BR, end_label)
-                body.mark_label(null_label)
-                body.op(ILOpCode.POP)
+            if let r = result then
+                expansion.store(r, present)
+            else
+                expansion.add(present)
+            fi
 
-                if null_value? then
-                    gen(null_value, context)
-                fi
+            expansion.exit(done)
+            expansion.close(absent)
 
-                body.mark_label(end_label)
+            if let r = result, absent_value = null_value then
+                expansion.store(r, absent_value)
+            fi
+
+            expansion.close(done)
+
+            if let r = result then
+                expansion.add(r.load())
+            fi
+
+            return expansion.result
         si
 
-        // Spill the whole short-circuit to a local and hand back its
-        // address: the composite's own branching can't run in address
-        // mode, and a consumer asking for the address (a `~>` stage
-        // whose subject is itself a `~>` result, `??` over a
-        // value-type optional) needs a stable slot.
+        gen(context: IR.CONTEXT) is
+            IR.EXPANSION.gen(expand(), context)
+        si
+
         gen_address(context: IR.CONTEXT) is
             let id = TEMP.get_next_id()
 
