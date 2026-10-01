@@ -74,6 +74,73 @@ namespace IR.Values is
         to_string() -> string => "loop {start}:[{body}]"
     si
 
+    // A protected body with catch handlers or a finally, never both: a
+    // try with both is a TRY with a finally whose body is a TRY with
+    // the catches. Leaving the TRY continues after the whole construct.
+    //
+    // `body_end_position` is the position current where the protected
+    // body ends. An end that no exit targets is not marked.
+    class TRY: Breakable is
+        catches: Collections.LIST[CATCH]
+        finally_region: REGION? public
+
+        body_end_position: Source.LOCATION?
+        is_targeted: bool
+
+        init(end: IR.LABEL, void_type: Type) is
+            super.init(end, void_type)
+
+            catches = Collections.LIST[CATCH]()
+        si
+
+        // Records that the protected body is complete.
+        close_body() is
+            body_end_position = IoC.CONTAINER.instance.location_stack.current
+        si
+
+        mark_targeted() is
+            is_targeted = true
+        si
+
+        to_string() -> string =>
+            "try {end}:[{body}] {catches |> join(" ")} finally {finally_region}"
+    si
+
+    // A catch handler of a TRY. It handles an exception of `type`, or,
+    // where that is null, of the framework type `type_name` names. The
+    // exception is on the CIL evaluation stack where `body` starts.
+    class CATCH is
+        type: Type?
+        type_name: (assembly: string, `namespace: string, name: string)?
+        body: BLOCK
+
+        position: Source.LOCATION?
+        end_position: Source.LOCATION?
+
+        init(type: Type, void_type: Type) is
+            self.type = type
+            self.type_name = null
+
+            position = IoC.CONTAINER.instance.location_stack.current
+            body = BLOCK(void_type)
+        si
+
+        init(assembly: string, `namespace: string, name: string, void_type: Type) is
+            self.type = null
+            self.type_name = (assembly = assembly, `namespace = `namespace, name = name)
+
+            position = IoC.CONTAINER.instance.location_stack.current
+            body = BLOCK(void_type)
+        si
+
+        // Records that the handler body is complete.
+        close() is
+            end_position = IoC.CONTAINER.instance.location_stack.current
+        si
+
+        to_string() -> string => "catch:[{body}]"
+    si
+
     // An exit from an enclosing structured node, taken when
     // `condition` holds of `operands`, or always where the condition
     // is ALWAYS.
@@ -103,6 +170,10 @@ namespace IR.Values is
             self.condition = condition
             self.operands = operands
             self.via_leave = via_leave
+
+            if let `try: TRY = target then
+                `try.mark_targeted()
+            fi
 
             position = IoC.CONTAINER.instance.location_stack.current
         si

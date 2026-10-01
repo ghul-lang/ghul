@@ -7,10 +7,17 @@ namespace IR.UnitTests is
     use IR.Values.BLOCK
     use IR.Values.BRANCH_TO
     use IR.Values.BREAK
+    use IR.Values.CATCH
+    use IR.Values.HANDLER_END
+    use IR.Values.HANDLER_START
+    use IR.Values.INSTRUCTION
     use IR.Values.CONTINUE
     use IR.Values.LOOP
     use IR.Values.MARK_LABEL
     use IR.Values.REGION
+    use IR.Values.TRY
+    use IR.Values.TRY_END
+    use IR.Values.TRY_START
     use IR.Values.Value
 
     use TestClass = Microsoft.VisualStudio.TestTools.UnitTesting.TestClassAttribute
@@ -118,6 +125,76 @@ namespace IR.UnitTests is
             let encoded = EMITTED_IL.encoded(outer)
 
             is_true(encoded.count > 0)
+        si
+
+        @Test()
+        try_with_a_catch__should_lower_to_a_protected_body_then_a_handler() is
+            let `try = TRY(LABEL(), Semantic.Types.ERROR())
+            let guarded = STUB_VALUE()
+            let handled = STUB_VALUE()
+
+            `try.body.add(guarded)
+            `try.body.add(BREAK(`try, true))
+            `try.close_body()
+
+            let handler = CATCH(Semantic.Types.ERROR(), Semantic.Types.ERROR())
+
+            handler.body.add(handled)
+            handler.close()
+            `try.catches.add(handler)
+            `try.close()
+
+            let flat = STRUCTURED_LOWERING.linearise(`try)
+
+            are_equal(8, flat.count)
+            is_true(isa TRY_START(flat[0]))
+            are_same(guarded, flat[1])
+            is_true(isa BREAK(flat[2]))
+            is_true(isa TRY_END(flat[3]))
+            is_true(isa HANDLER_START(flat[4]))
+            are_same(handled, flat[5])
+            is_true(isa HANDLER_END(flat[6]))
+            assert_label(`try.end, flat[7])
+        si
+
+        @Test()
+        try_with_a_finally__should_end_its_handler_with_endfinally() is
+            let `try = TRY(LABEL(), Semantic.Types.ERROR())
+
+            `try.body.add(BREAK(`try, true))
+            `try.close_body()
+
+            let `finally = REGION(LABEL(), Semantic.Types.ERROR())
+
+            `finally.close()
+            `try.finally_region = `finally
+            `try.close()
+
+            let flat = STRUCTURED_LOWERING.linearise(`try)
+
+            is_true(isa HANDLER_START(flat[3]))
+            are_same(`finally, flat[4])
+
+            if let endfinally: INSTRUCTION = flat[5] then
+                are_equal(ILOpCode.ENDFINALLY, endfinally.op_code)
+            else
+                fail("expected endfinally, got {flat[5]}")
+            fi
+
+            is_true(isa HANDLER_END(flat[6]))
+        si
+
+        @Test()
+        try_that_nothing_leaves__should_not_mark_its_end() is
+            let `try = TRY(LABEL(), Semantic.Types.ERROR())
+
+            `try.close_body()
+            `try.catches.add(CATCH(Semantic.Types.ERROR(), Semantic.Types.ERROR()))
+            `try.close()
+
+            let flat = STRUCTURED_LOWERING.linearise(`try)
+
+            is_false(isa MARK_LABEL(flat[flat.count - 1]))
         si
 
         @Test()

@@ -68,6 +68,8 @@ namespace IR is
 
             if isa LOOP(value) then
                 _linearise_loop(cast LOOP(value), result)
+            elif isa TRY(value) then
+                _linearise_try(cast TRY(value), result)
             elif isa REGION(value) then
                 _linearise_region(cast REGION(value), result)
             elif isa Exit(value) then
@@ -92,6 +94,48 @@ namespace IR is
             _linearise_body(region, into)
 
             into.add(FLAT_VALUE(MARK_LABEL(region.end), region.end_position))
+        si
+
+        _linearise_try(`try: TRY, into: Collections.MutableList[FLAT_VALUE]) static is
+            let extent = TRY_EXTENT()
+
+            into.add(FLAT_VALUE(TRY_START(extent), `try.position))
+
+            _linearise_body(`try, into)
+
+            into.add(FLAT_VALUE(TRY_END(extent), `try.body_end_position))
+
+            for `catch in `try.catches do
+                let region =
+                    if let type = `catch.type then
+                        PROTECTED_REGION(extent, type)
+                    else
+                        let name = `catch.type_name!
+
+                        PROTECTED_REGION(extent, name.assembly, name.`namespace, name.name)
+                    fi
+
+                into.add(FLAT_VALUE(HANDLER_START(region), `catch.position))
+
+                for value in `catch.body.values do
+                    into.add(FLAT_VALUE.of(value))
+                od
+
+                into.add(FLAT_VALUE(HANDLER_END(region), `catch.end_position))
+            od
+
+            if let `finally = `try.finally_region then
+                let region = PROTECTED_REGION(extent, null)
+
+                into.add(FLAT_VALUE(HANDLER_START(region), `finally.position))
+                into.add(FLAT_VALUE(`finally, null))
+                into.add(FLAT_VALUE(INSTRUCTION(ILOpCode.ENDFINALLY), `finally.end_position))
+                into.add(FLAT_VALUE(HANDLER_END(region), `finally.end_position))
+            fi
+
+            if `try.is_targeted then
+                into.add(FLAT_VALUE(MARK_LABEL(`try.end), `try.end_position))
+            fi
         si
 
         _linearise_body(node: Breakable, into: Collections.MutableList[FLAT_VALUE]) static is

@@ -45,11 +45,13 @@ namespace Syntax.Process is
             return (outer_try, return_needed, return_value)
         si
 
+        // After the structured try for `label` has closed: when a
+        // return inside it is pending, carry it on out through any
+        // enclosing try, or return.
         gen_exception_handler_exit(outer_try: LOOP_LABELS?, label: LOOP_LABELS, return_value: TEMP?) is
-            let brancher = get_brancher_for_block()
+            let no_return = _open_region(label.end)
 
-            brancher.label(label.start)
-            brancher.branch(BRANCH.Z, label.return_needed!.load(), label.end)
+            add(Values.BREAK(no_return, BRANCH.Z, label.return_needed!.load()))
 
             if outer_try? then
                 if return_value? then
@@ -59,9 +61,9 @@ namespace Syntax.Process is
 
                 if outer_try.is_in_finally then
                     outer_try.return_needed!.store(Literal.NUMBER(1, _innate_symbol_lookup.get_bool_type()))
-                    brancher.branch(outer_try.middle)
+                    add(Values.BREAK(outer_try.finally_region!, false))
                 else
-                    brancher.leave(outer_try.start)
+                    add(Values.BREAK(outer_try.structured_try!, true))
                 fi
             elif
                 _current_async_state_machine? /\
@@ -93,7 +95,7 @@ namespace Syntax.Process is
                 add(Values.RET())
             fi
 
-            brancher.label(label.end)
+            _close_structured(no_return)
         si
 
         visit(`try: Statements.TRY) is
@@ -109,62 +111,58 @@ namespace Syntax.Process is
                 return
             fi
 
-            let brancher = get_brancher_for_block()
-
-            let return_type = current_function!.return_type
-
             let (outer_try, return_needed, return_value) = get_exception_handler_temps()
 
             let label = _loops.enter_try(return_needed, return_value)
 
             let need_double_try = `try.catches.count > 0 /\ `try.`finally?
 
-            // The extent each handler is attached to. With both
-            // catches and a finally the two `.try` blocks are separate
-            // extents, the finally's covering the catches; with only
-            // one kind of handler there is a single block and both
-            // names stand for it.
-            let body_extent = Values.TRY_EXTENT()
+            // With both catches and a finally the finally's try encloses
+            // the catches' try, as CIL nests the two `.try` blocks; with
+            // only one kind of handler there is a single try. Leaving
+            // the outermost one leaves the whole statement.
+            let void_type = _innate_symbol_lookup.get_void_type()
 
-            let finally_extent =
-                if need_double_try then
-                    Values.TRY_EXTENT()
-                else
-                    body_extent
-                fi
-
+            let outer: Values.TRY? = if need_double_try then Values.TRY(label.start, void_type) else null fi
             let outer_dispatch_holder: ASYNC_DISPATCH_HOLDER? mut = null
-            let body_dispatch_holder: ASYNC_DISPATCH_HOLDER? mut = null
 
-            if need_double_try then
-                add(Values.TRY_START(finally_extent))
+            if outer? then
+                _open_structured(outer)
                 outer_dispatch_holder = _maybe_push_dispatch_holder()
             fi
 
-            add(Values.TRY_START(body_extent))
+            let inner = Values.TRY(if outer? then LABEL() else label.start fi, void_type)
+            let whole = outer ?? inner
 
-            body_dispatch_holder = _maybe_push_dispatch_holder()
+            label.structured_try = whole
+
+            _open_structured(inner)
+
+            let body_dispatch_holder = _maybe_push_dispatch_holder()
 
             `try.body.walk(self)
             end_try_body(`try)
 
             _maybe_pop_dispatch_holder(body_dispatch_holder)
 
-            brancher.leave(label.start)
+            add(Values.BREAK(whole, true))
 
-            add(Values.TRY_END(body_extent))
+            _close_try_body(inner)
 
-            _try_extents.push(body_extent)
+            _catching_trys.push(inner)
 
             for c in `try.catches do
                 c.walk(self)
             od
 
-            _try_extents.pop()
+            _catching_trys.pop()
 
-            if need_double_try then
+            if outer? then
                 _maybe_pop_dispatch_holder(outer_dispatch_holder)
-                add(Values.TRY_END(finally_extent))
+
+                inner.close()
+
+                _close_try_body(outer)
             fi
 
             let `finally = `try.`finally
@@ -172,25 +170,21 @@ namespace Syntax.Process is
             if `finally? then
                 label.is_in_finally = true
 
-                let region = Values.PROTECTED_REGION(finally_extent, null)
+                let finally_region = _open_finally_region(whole, label)
 
-                add(Values.HANDLER_START(region))
-
-                let skip_finally_label = _open_finally_state_guard()
+                let skip_finally = _open_finally_state_guard()
 
                 `finally.walk(self)
 
-                _close_finally_state_guard(skip_finally_label)
+                _close_finally_state_guard(skip_finally)
 
-                brancher.label(label.middle)
-
-                add(Values.INSTRUCTION(ILOpCode.ENDFINALLY))
-                add(Values.HANDLER_END(region))
+                _close_finally_region(finally_region)
             fi
 
             _loops.leave_loop()
 
-            // let outer_try = _loops.get_current_try();
+            whole.close()
+
             gen_exception_handler_exit(outer_try, label, return_value)
 
             super.visit(`try)
@@ -205,14 +199,11 @@ namespace Syntax.Process is
         visit(`catch: Statements.CATCH) is
             let variable = `catch.variable!
 
-            let region =
-                Values.PROTECTED_REGION(
-                    _try_extents.peek(),
-                    variable.type_expression.type!)
+            let handler = Values.CATCH(variable.type_expression.type!, _innate_symbol_lookup.get_void_type())
 
-            add(Values.HANDLER_START(region))
+            _catching_trys.peek().catches.add(handler)
 
-            let brancher = get_brancher_for_block()
+            _open_part(handler.body)
 
             // Catch handler enters with the exception on the stack
             // and immediately stores it into the catch variable. The
@@ -250,9 +241,10 @@ namespace Syntax.Process is
 
             `catch.body.walk(self)
 
-            brancher.leave(_loops.get_current_try()!.start)
+            add(Values.BREAK(_loops.get_current_try()!.structured_try!, true))
 
-            add(Values.HANDLER_END(region))
+            _close_part(handler.body)
+            handler.close()
 
             super.visit(`catch)
         si
@@ -697,15 +689,51 @@ namespace Syntax.Process is
         // _close_structured land in it.
         _open_structured(node: Values.Breakable) is
             add(node)
-            current_block.open_body(node.body)
-            enter_block(node.body)
+            _open_part(node.body)
         si
 
         _close_structured(node: Values.Breakable) is
-            leave_block()
-            current_block.close_body(node.body)
+            _close_part(node.body)
 
             node.close()
+        si
+
+        // Ends the protected body of `try`, so its handlers can follow.
+        _close_try_body(`try: Values.TRY) is
+            _close_part(`try.body)
+
+            `try.close_body()
+        si
+
+        // Opens the region the finally body of `try`, whose loop stack
+        // entry is `label`, is generated into.
+        _open_finally_region(`try: Values.TRY, label: LOOP_LABELS) -> Values.REGION is
+            let result = Values.REGION(label.middle, _innate_symbol_lookup.get_void_type())
+
+            `try.finally_region = result
+            label.finally_region = result
+
+            _open_part(result.body)
+
+            return result
+        si
+
+        _close_finally_region(region: Values.REGION) is
+            _close_part(region.body)
+
+            region.close()
+        si
+
+        // Values added from here until _close_part land in `body`, a
+        // part of a structured node in the current block.
+        _open_part(body: Values.BLOCK) is
+            current_block.open_body(body)
+            enter_block(body)
+        si
+
+        _close_part(body: Values.BLOCK) is
+            leave_block()
+            current_block.close_body(body)
         si
 
         _visit_fused_for(`for: Statements.FOR) is

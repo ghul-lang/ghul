@@ -439,11 +439,13 @@ namespace Syntax.Process is
             od
 
             let label = _loops.enter_try(return_needed, return_value)
-            let extent = Values.TRY_EXTENT()
+            let `try = Values.TRY(label.start, _innate_symbol_lookup.get_void_type())
 
-            add(Values.TRY_START(extent))
+            label.structured_try = `try
 
-            return DISPOSAL_REGION(outer_try, return_value, label, extent, _maybe_push_dispatch_holder())
+            _open_structured(`try)
+
+            return DISPOSAL_REGION(outer_try, return_value, label, `try, _maybe_push_dispatch_holder())
         si
 
         // Closes a region opened by _open_disposal_region, disposing its
@@ -455,7 +457,6 @@ namespace Syntax.Process is
             variables: Collections.List[Semantic.Symbols.Variable],
             location: Source.LOCATION
         ) is
-            let brancher = get_brancher_for_block()
             let try_label = region.label
 
             _maybe_pop_dispatch_holder(region.dispatch_holder)
@@ -464,24 +465,23 @@ namespace Syntax.Process is
 
             try_label.is_in_finally = true
 
-            brancher.leave(try_label.start)
+            add(Values.BREAK(region.`try, true))
 
-            let handler = Values.PROTECTED_REGION(region.extent, null)
+            _close_try_body(region.`try)
 
-            add(Values.TRY_END(region.extent))
-            add(Values.HANDLER_START(handler))
+            let finally_region = _open_finally_region(region.`try, try_label)
 
-            let skip_dispose_label = _open_finally_state_guard()
+            let skip_dispose = _open_finally_state_guard()
 
             let i mut = variables.count - 1
 
             while i >= 0 do
                 let v = variables[i]
 
-                let skip_label: LABEL? mut = null
+                let skip: Values.REGION? mut = null
 
                 if !v.type!.is_value_type then
-                    skip_label = LABEL()
+                    skip = _open_region(LABEL())
 
                     // v.load rather than load_local_variable: a top-level
                     // `let use` promotes the variable to a field on the
@@ -491,7 +491,7 @@ namespace Syntax.Process is
                     // the variable's own location rather than the list's:
                     // the list starts before the declaration, which a
                     // top-level variable reads as use-before-declaration.
-                    brancher.branch(BRANCH.Z, v.load(v.location, null, _symbol_loader), skip_label)
+                    add(Values.BREAK(skip, BRANCH.Z, v.load(v.location, null, _symbol_loader)))
                 fi
 
                 let variable_value = v.load(v.location, null, _symbol_loader)
@@ -499,21 +499,20 @@ namespace Syntax.Process is
 
                 add(dispose_call)
 
-                if skip_label? then
-                    brancher.label(skip_label)
+                if skip? then
+                    _close_structured(skip)
                 fi
 
                 i = i - 1
             od
 
-            _close_finally_state_guard(skip_dispose_label)
+            _close_finally_state_guard(skip_dispose)
 
-            brancher.label(try_label.middle)
-
-            add(Values.INSTRUCTION(ILOpCode.ENDFINALLY))
-            add(Values.HANDLER_END(handler))
+            _close_finally_region(finally_region)
 
             _loops.leave_loop()
+
+            region.`try.close()
 
             gen_exception_handler_exit(region.outer_try, try_label, region.return_value)
         si
@@ -631,7 +630,7 @@ namespace Syntax.Process is
         outer_try: LOOP_LABELS?,
         return_value: TEMP?,
         label: LOOP_LABELS,
-        extent: IR.Values.TRY_EXTENT,
+        `try: IR.Values.TRY,
         dispatch_holder: ASYNC_DISPATCH_HOLDER?
     )
 si
