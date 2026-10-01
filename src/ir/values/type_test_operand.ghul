@@ -3,8 +3,8 @@ namespace IR.Values is
 
     use Semantic.Types.Type
 
-    // Pushes the operand of a runtime type test as the object reference
-    // `isinst` and `castclass` expect. A value type is boxed: boxing a
+    // The operand of a runtime type test, as the object reference the
+    // test examines. A value type is boxed: boxing a
     // `Nullable<T>` already yields null or the boxed payload. A `MAYBE[T]`
     // does not box that way - the box would hold the carrier rather than
     // its payload - so it is unwrapped first, giving null when absent. A
@@ -30,6 +30,20 @@ namespace IR.Values is
             else
                 TypeTestOperandMode.AS_IS
             fi
+
+        // The operand a runtime type test examines, as an object
+        // reference.
+        operand(value: Value) -> Value static =>
+            case mode(value)
+            when TypeTestOperandMode.UNWRAP_MAYBE then
+                MAYBE_PAYLOAD(value, cast Semantic.Types.MAYBE(value.type))
+            when TypeTestOperandMode.BOX then
+                BOX(value)
+            when TypeTestOperandMode.BOX_TYPE_VARIABLE then
+                BOX(value, value.type!.type_variable_side!)
+            else
+                value
+            esac
 
         // The payload of a MAYBE operand, boxed, or null where it holds
         // nothing.
@@ -63,5 +77,24 @@ namespace IR.Values is
 
             return expansion.result
         si
+    si
+
+    // The payload a MAYBE holds, boxed, or null where it holds nothing.
+    class MAYBE_PAYLOAD: Composite is
+        value: Value
+        maybe: Semantic.Types.MAYBE
+        type: Type
+
+        init(value: Value, maybe: Semantic.Types.MAYBE) is
+            super.init()
+
+            self.value = value
+            self.maybe = maybe
+            type = IoC.CONTAINER.instance.innate_symbol_lookup.get_object_type()
+        si
+
+        expand() -> BLOCK => TYPE_TEST_OPERAND.expand_maybe(value, maybe)
+
+        to_string() -> string => "maybe-payload({value})"
     si
 si
