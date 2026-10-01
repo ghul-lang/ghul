@@ -302,5 +302,82 @@ namespace IR.Emitter is
             throw System.NotImplementedException(
                 "the binary back end has no emission for storing to '{store.symbol}' yet")
         si
+
+        _lower_all(values: Collections.Iterable[Values.Value]) is
+            for value in values do
+                _lower(value)
+            od
+        si
+
+        visit(call: Values.Call.GLOBAL) is
+            _lower_all(call.arguments)
+            _body.call(_context.resolve_call_target(call.function))
+        si
+
+        // A static interface member reached through a type parameter,
+        // or through the type an interface is instantiated at, takes
+        // the `constrained.` prefix.
+        visit(call: Values.Call.STATIC) is
+            _lower_all(call.arguments)
+
+            if let receiver = call.constrained_receiver then
+                _body.constrained(_context.resolve_type_token(receiver))
+            fi
+
+            _body.call(_context.resolve_call_target(call.function))
+        si
+
+        visit(call: Values.Call.STRUCT) is
+            _lower(call.from)
+            _lower_all(call.arguments)
+            _body.call(_context.resolve_call_target(call.function))
+        si
+
+        visit(call: Values.Call.INSTANCE) is
+            let from = call.from
+
+            _lower(from)
+            _lower_all(call.arguments)
+
+            if let constrained: Values.CONSTRAINED = from then
+                constrained.gen_prefix(_context)
+            fi
+
+            let target = _context.resolve_call_target(call.function)
+
+            if from.is_super \/ !call.function.is_virtual then
+                _body.call(target)
+            else
+                _body.call_virtual(target)
+            fi
+        si
+
+        // A function type still carrying an inference placeholder means
+        // inference never settled and nothing upstream reported it.
+        // Encoding the signature would fail inside the emitter as an
+        // opaque internal error, so report a located diagnostic instead
+        // and leave the call unemitted.
+        visit(call: Values.Call.CLOSURE) is
+            let func_type = call.func_type
+
+            if IR.CONTEXT.contains_sentinel(func_type) then
+                _context.report_unresolved_type(call.location, func_type!)
+                return
+            fi
+
+            _lower(call.from)
+            _lower_all(call.arguments)
+
+            _body.call_virtual(
+                _context.resolve_delegate_invoke(func_type!, call.arguments.count, call.is_action))
+        si
+
+        // A built-in operation is lowered to the values that implement
+        // it the first time it is generated.
+        visit(call: Values.Call.INNATE) is
+            if !call.is_lowered then
+                _lower(call.lower())
+            fi
+        si
     si
 si
