@@ -783,18 +783,47 @@ namespace IR.Emitter is
             _body.constrained(_type_token(receiver.type!))
         si
 
-        visit(call: Values.DECIMAL_CALL) is
-            _body.call(_context.resolve_decimal_method(call.method_name, call.parameter_types, call.type))
+        // Decimal's operators are its own static members.
+        visit(arithmetic: Values.DECIMAL_ARITHMETIC) is
+            for operand in arithmetic.operands do
+                gen_marked(operand)
+            od
+
+            mark_operator(arithmetic)
+
+            _call_decimal(CIL_OPERATIONS.decimal_arithmetic(arithmetic.operation), arithmetic.operands.count, arithmetic.type)
+        si
+
+        visit(compare: Values.DECIMAL_COMPARE) is
+            gen_marked(compare.left)
+            gen_marked(compare.right)
+
+            mark_operator(compare)
+
+            _call_decimal(CIL_OPERATIONS.decimal_comparison(compare.comparison), 2, compare.type)
+        si
+
+        _call_decimal(method_name: string, operand_count: int, return_type: Semantic.Types.Type) is
+            let decimal_type = IoC.CONTAINER.instance.innate_symbol_lookup.get_decimal_type()
+            let parameter_types = Collections.LIST[Semantic.Types.Type]()
+
+            for i in 0..operand_count do
+                parameter_types.add(decimal_type)
+            od
+
+            _body.call(_context.resolve_decimal_method(method_name, parameter_types, return_type))
         si
 
         visit(convert: Values.DECIMAL_CONVERT) is
             gen(convert.value)
 
+            let conversion = IoC.CONTAINER.instance.value_converter.get_decimal_conversion(convert.from, convert.type)!
+
             let parameter_types = Collections.LIST[Semantic.Types.Type]()
 
-            parameter_types.add(convert.parameter_type)
+            parameter_types.add(conversion.parameter_type)
 
-            gen(Values.DECIMAL_CALL(convert.type, convert.method_name, parameter_types))
+            _body.call(_context.resolve_decimal_method(conversion.method_name, parameter_types, convert.type))
         si
 
         visit(equality: Values.EQUALITY_COMPARISON) is
@@ -962,50 +991,48 @@ namespace IR.Emitter is
             _body.ldarg(0)
         si
 
-        visit(concat: Values.CALL_STRING_CONCAT) is
-            _body.call(_context.resolve_string_concat())
-        si
+        // Each runtime operation is a member of the .NET runtime or of
+        // ghūl's own runtime library.
+        visit(runtime: Values.RUNTIME) is
+            if runtime.is_marked_as_call then
+                gen(_context.string_builder.lowered(runtime))
 
-        visit(equality: Values.CALL_STRING_EQUALITY) is
-            _body.call(_context.resolve_string_equality())
-        si
+                return
+            fi
 
-        visit(exception: Values.NEW_NOT_IMPLEMENTED_EXCEPTION) is
-            _body.new_object(_context.resolve_not_implemented_constructor())
-        si
+            for operand in runtime.operands do
+                gen_marked(operand)
+            od
 
-        visit(exception: Values.NEW_NOT_SUPPORTED_EXCEPTION) is
-            _body.new_object(_context.resolve_not_supported_constructor())
-        si
+            mark_operator(runtime)
 
-        visit(exception: Values.NEW_ASSERT_FAILED_EXCEPTION) is
-            _body.new_object(_context.resolve_assert_failed_constructor())
-        si
-
-        visit(init_object: Values.INIT_OBJECT) is
-            gen(init_object.instance)
-            _body.call(_context.resolve_object_constructor())
-        si
-
-        visit(thread_id: Values.CURRENT_THREAD_ID) is
-            _body.call(_context.resolve_current_managed_thread_id())
-        si
-
-        visit(join: Values.JOIN_PIPE) is
-            gen(join.pipe)
-            _body.call(_context.resolve_pipe_join(join.element_type))
+            case runtime.operation
+            when IR.RuntimeOperation.CONCAT_STRINGS then
+                _body.call(_context.resolve_string_concat())
+            when IR.RuntimeOperation.STRINGS_EQUAL then
+                _body.call(_context.resolve_string_equality())
+            when IR.RuntimeOperation.NEW_NOT_IMPLEMENTED then
+                _body.new_object(_context.resolve_not_implemented_constructor())
+            when IR.RuntimeOperation.NEW_NOT_SUPPORTED then
+                _body.new_object(_context.resolve_not_supported_constructor())
+            when IR.RuntimeOperation.NEW_ASSERT_FAILED then
+                _body.new_object(_context.resolve_assert_failed_constructor())
+            when IR.RuntimeOperation.INIT_OBJECT then
+                _body.call(_context.resolve_object_constructor())
+            when IR.RuntimeOperation.CURRENT_THREAD_ID then
+                _body.call(_context.resolve_current_managed_thread_id())
+            when IR.RuntimeOperation.JOIN_PIPE then
+                _body.call(_context.resolve_pipe_join(runtime.type_argument!))
+            when IR.RuntimeOperation.NEW_RANGE then
+                _body.new_object(_context.resolve_range_constructor(runtime.type!))
+            else
+                throw System.NotImplementedException("no lowering for runtime operation {runtime.operation}")
+            esac
         si
 
         visit(creation: Values.CREATE_UNIT_VARIANT_INSTANCE) is
             _body.new_object(_context.resolve_call_target(creation.constructor))
             _body.stsfld(_context.resolve_unit_variant_instance(creation.variant))
-        si
-
-        // The range struct's constructor is not reachable from a Function
-        // symbol, so the reference is built from the range type and the
-        // known (int, int) signature.
-        visit(range: Values.NEW_RANGE) is
-            _body.new_object(_context.resolve_range_constructor(range.type))
         si
 
         // The emitter reserves the same depth for every body it writes,

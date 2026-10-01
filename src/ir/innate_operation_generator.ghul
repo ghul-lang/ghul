@@ -196,12 +196,17 @@ namespace IR is
             let innate_name = value.function.innate_name
 
             if innate_name =~ "string.equals" then
-                gen_arguments(value, block)
+                let equality =
+                    Values.RUNTIME(
+                        IR.RuntimeOperation.STRINGS_EQUAL,
+                        value.arguments[0],
+                        value.arguments[1],
+                        IoC.CONTAINER.instance.innate_symbol_lookup.get_bool_type())
 
                 if value.actual_operation =~ "!~" then
-                    block.add(Values.NOT.operator(Values.CALL_STRING_EQUALITY()))
+                    block.add(Values.NOT.operator(equality))
                 else
-                    block.add(Values.CALL_STRING_EQUALITY())
+                    block.add(equality)
                 fi
             else
                 throw System.Exception("unexpected string innate operation: {innate_name}")
@@ -274,18 +279,11 @@ namespace IR is
         gen_range(value: INNATE, block: BLOCK) is
             assert value.arguments.count == 2 else "create range incorrect arguments"
 
-            gen_arguments(value, block)
-
-            let prefix = "['ghul-runtime']"
-
             if value.op_name !~ "inclusive" /\ value.op_name !~ "exclusive" then
                 throw Exception("unexpected range innate operation: {value.innate_name}")
             fi
 
-            // The range's own type names the struct being constructed,
-            // so the constructor is reachable from a symbol rather than
-            // from the type's spelling.
-            block.add(Values.NEW_RANGE(value.type))
+            block.add(Values.RUNTIME(IR.RuntimeOperation.NEW_RANGE, value.arguments[0], value.arguments[1], value.type))
 
             return
         si
@@ -299,59 +297,37 @@ namespace IR is
         si
 
         gen_arithmetic_decimal(value: INNATE, block: BLOCK) is
-            gen_arguments(value, block)
-
             let op = value.op_name
 
-            let method_name: string mut
-            let is_unary mut = false
-
-            if op =~ "neg" then
-                method_name = "op_UnaryNegation"
-                is_unary = true
-            elif op =~ "add" then
-                method_name = "op_Addition"
-            elif op =~ "sub" then
-                method_name = "op_Subtraction"
-            elif op =~ "mul" then
-                method_name = "op_Multiply"
-            elif op =~ "div" then
-                method_name = "op_Division"
-            else
-                throw System.Exception("unexpected arithmetic_decimal operation: {op}")
-            fi
+            let operation =
+                if op =~ "neg" then
+                    IR.ArithmeticOperation.NEGATE
+                elif op =~ "add" then
+                    IR.ArithmeticOperation.ADD
+                elif op =~ "sub" then
+                    IR.ArithmeticOperation.SUBTRACT
+                elif op =~ "mul" then
+                    IR.ArithmeticOperation.MULTIPLY
+                elif op =~ "div" then
+                    IR.ArithmeticOperation.DIVIDE
+                else
+                    throw System.Exception("unexpected arithmetic_decimal operation: {op}")
+                fi
 
             let decimal_type = IoC.CONTAINER.instance.innate_symbol_lookup.get_decimal_type()
 
-            block.add(
-                Values.DECIMAL_CALL(
-                    decimal_type,
-                    method_name,
-                    _decimal_parameters(decimal_type, if is_unary then 1 else 2 fi)))
-        si
-
-        _decimal_parameters(decimal_type: Semantic.Types.Type, count: int) -> Collections.List[Semantic.Types.Type] is
-            let result = Collections.LIST[Semantic.Types.Type]()
-
-            for i in 0..count do
-                result.add(decimal_type)
-            od
-
-            return result
+            block.add(Values.DECIMAL_ARITHMETIC(operation, value.arguments, decimal_type))
         si
 
         gen_compare_decimal(value: INNATE, block: BLOCK) is
-            gen_arguments(value, block)
-
-            let lookup = IoC.CONTAINER.instance.innate_symbol_lookup
-            let decimal_type = lookup.get_decimal_type()
-            let bool_type = lookup.get_bool_type()
-            let operands = _decimal_parameters(decimal_type, 2)
+            let bool_type = IoC.CONTAINER.instance.innate_symbol_lookup.get_bool_type()
+            let left = value.arguments[0]
+            let right = value.arguments[1]
 
             let op = value.op_name
 
             if op =~ "equality" then
-                let equality = Values.DECIMAL_CALL(bool_type, "op_Equality", operands)
+                let equality = Values.DECIMAL_COMPARE(IR.Comparison.EQUAL, left, right, bool_type)
 
                 if value.actual_operation =~ "!=" then
                     block.add(Values.NOT.operator(equality))
@@ -364,21 +340,21 @@ namespace IR is
 
             if op =~ "order" then
                 let actual = value.actual_operation
-                let method_name: string mut
 
-                if actual =~ ">" then
-                    method_name = "op_GreaterThan"
-                elif actual =~ ">=" then
-                    method_name = "op_GreaterThanOrEqual"
-                elif actual =~ "<" then
-                    method_name = "op_LessThan"
-                elif actual =~ "<=" then
-                    method_name = "op_LessThanOrEqual"
-                else
-                    throw System.Exception("unexpected compare_decimal.order operation: {actual}")
-                fi
+                let comparison =
+                    if actual =~ ">" then
+                        IR.Comparison.GREATER
+                    elif actual =~ ">=" then
+                        IR.Comparison.GREATER_OR_EQUAL
+                    elif actual =~ "<" then
+                        IR.Comparison.LESS
+                    elif actual =~ "<=" then
+                        IR.Comparison.LESS_OR_EQUAL
+                    else
+                        throw System.Exception("unexpected compare_decimal.order operation: {actual}")
+                    fi
 
-                block.add(Values.DECIMAL_CALL(bool_type, method_name, operands))
+                block.add(Values.DECIMAL_COMPARE(comparison, left, right, bool_type))
 
                 return
             fi

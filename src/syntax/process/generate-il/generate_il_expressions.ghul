@@ -243,12 +243,11 @@ namespace Syntax.Process is
                 TEMP(
                     current_block,
                     "interpolator",
-                    IR.Values.NEW(
-                        _interpolation_handler!,
-                        _constructor, [
-                            literal_length,
-                            expression_count
-                        ]:Value
+                    Values.RUNTIME(
+                        IR.RuntimeOperation.NEW_STRING_BUILDER,
+                        literal_length,
+                        expression_count,
+                        _innate_symbol_lookup.get_interpolated_string_handler_type()
                     )
                 )
 
@@ -258,10 +257,6 @@ namespace Syntax.Process is
                 let format = eaf.format
                 let expr_value = expression.value!
 
-                let args = Collections.LIST[Value](1)
-
-                args.add(expr_value)
-
                 if !eaf.is_expression then
                     let literal = cast Expressions.Literals.STRING?(expression)!
 
@@ -269,41 +264,37 @@ namespace Syntax.Process is
                         continue
                     fi
 
-                    let call = _append_literal.call(interpolation.location, interpolator.load(), args, null, _function_caller)
-
-                    add(call)
+                    add(Values.RUNTIME(IR.RuntimeOperation.APPEND_TEXT, interpolator.load(), expr_value, null))
                 elif !format? /\ !alignment? then
                     _append_interpolated_value(interpolation.location, interpolator, expr_value)
                 else
-                    let append_formatted: Semantic.Symbols.Symbol mut
-                    let args = Collections.LIST[Value](3)
+                    let operands = Collections.LIST[Value](4)
 
-                    args.add(expr_value)
+                    operands.add(interpolator.load())
+                    operands.add(expr_value)
+
+                    let operation: IR.RuntimeOperation mut
 
                     if format? /\ alignment? then
-                        args.add(alignment.value!)
-                        args.add(Literal.STRING(format, string_type))
+                        operands.add(alignment.value!)
+                        operands.add(Literal.STRING(format, string_type))
 
-                        append_formatted = _append_formatted_generic_alignment_format.specialize([expr_value.type!])
-
+                        operation = IR.RuntimeOperation.APPEND_ALIGNED_FORMATTED_VALUE
                     elif format? then
-                        args.add(Literal.STRING(format, string_type))
+                        operands.add(Literal.STRING(format, string_type))
 
-                        append_formatted = _append_formatted_generic_format.specialize([expr_value.type!])
+                        operation = IR.RuntimeOperation.APPEND_FORMATTED_VALUE
                     else
-                        args.add(alignment!.value!)
+                        operands.add(alignment!.value!)
 
-                        append_formatted = _append_formatted_generic_alignment.specialize([expr_value.type!])
+                        operation = IR.RuntimeOperation.APPEND_ALIGNED_VALUE
                     fi
 
-                    let call = append_formatted.call(interpolation.location, interpolator.load(), args, null, _function_caller)
-
-                    add(call)
+                    add(Values.RUNTIME(operation, operands, null, expr_value.type!))
                 fi
             od
 
-            let result = _to_string_and_clear.call(interpolation.location, interpolator.load(), System.Array.empty`[Value](), null, _function_caller)
-            add(result)
+            add(Values.RUNTIME(IR.RuntimeOperation.BUILD_STRING, interpolator.load(), string_type))
 
             leave_block()
         si
@@ -332,13 +323,16 @@ namespace Syntax.Process is
         si
 
         _append_formatted(location: Source.LOCATION, interpolator: TEMP, value: Value) is
-            let append = _append_formatted_generic.specialize([value.type!])
-
-            add(append.call(location, interpolator.load(), [value]:Value, null, _function_caller))
+            add(Values.RUNTIME(IR.RuntimeOperation.APPEND_VALUE, [interpolator.load(), value]:Value, null, value.type!))
         si
 
         _append_text(location: Source.LOCATION, interpolator: TEMP, text: string) is
-            add(_append_literal.call(location, interpolator.load(), [Literal.STRING(text, _innate_symbol_lookup.get_string_type())]:Value, null, _function_caller))
+            add(
+                Values.RUNTIME(
+                    IR.RuntimeOperation.APPEND_TEXT,
+                    interpolator.load(),
+                    Literal.STRING(text, _innate_symbol_lookup.get_string_type()),
+                    null))
         si
 
         _append_bool(location: Source.LOCATION, interpolator: TEMP, value: Value) is
