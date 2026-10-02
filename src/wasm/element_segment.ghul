@@ -12,10 +12,12 @@ namespace Wasm is
     // resolved into them.
     //
     // The specification gives eight forms rather than one per
-    // combination, because an active segment on the first table holding
-    // function references leaves out both the table and the element type.
-    // Which form a segment takes is therefore decided by its three
-    // properties together, not by any one of them.
+    // combination, because two of them leave out both the table and the
+    // element type. Those two are an active segment on the first table
+    // whose elements are function references, and leaving the element
+    // type out fixes it at `funcref` - which is only right when that is
+    // what the segment holds. An active segment on the first table of
+    // anything else has to name its table after all.
     class ELEMENT_SEGMENT is
         _mode: ElementMode
         _by_function: bool
@@ -40,6 +42,7 @@ namespace Wasm is
             result._mode = mode
             result._by_function = true
             result._table_index = table_index
+            result._reference = VALUE_TYPE.of_abstract(AbstractHeapType.FUNC)
             result._offset = offset
             result._function_indices = function_indices
 
@@ -67,7 +70,9 @@ namespace Wasm is
         si
 
         write(buffer: BYTE_BUFFER) is
-            let on_first_table = _mode == ElementMode.ACTIVE /\ _table_index == 0
+            // The two forms that leave the table out are the two that
+            // leave the element type with it.
+            let on_first_table = _elides_table_and_type()
 
             buffer.write_byte(_form(on_first_table))
 
@@ -105,6 +110,23 @@ namespace Wasm is
                     buffer.write_byte(cast ubyte(Opcode.END))
                 od
             fi
+        si
+
+        // Whether this is one of the two forms that name neither the
+        // table nor the element type: an active segment on the first
+        // table whose elements are function references.
+        _elides_table_and_type() -> bool is
+            if _mode != ElementMode.ACTIVE then
+                return false
+            elif _table_index != 0 then
+                return false
+            fi
+
+            return _by_function \/ _holds_func_references()
+        si
+
+        _holds_func_references() -> bool is
+            return _reference.matches(VALUE_TYPE.of_abstract(AbstractHeapType.FUNC))
         si
 
         _form(on_first_table: bool) -> ubyte is

@@ -101,10 +101,16 @@ over the types themselves, never over a rendering of them. A recursion
 group is never deduplicated: the group is what a type inside it may name,
 which is not the same thing as its shape.
 
+**The two element forms that leave the table out also leave out the
+element type.** An active segment on the first table holding function
+references is the only one that can, since leaving the type out fixes it
+at `funcref`. A segment of any other element type on that table names its
+table after all, which is how a table of references to declared types is
+filled.
+
 **A field's mutability byte is always written.** The format leaves it out
-for a field that cannot be assigned through. That is one byte per
-immutable field, and an engine rejects the omission, so it is written
-either way.
+for a field that cannot be assigned through, and an engine here rejects
+the omission.
 
 **A `sub` with no supertypes is written as a `sub`.** The marker, not the
 length of the supertype list, is what makes a type open, and an open type
