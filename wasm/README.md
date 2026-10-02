@@ -119,7 +119,7 @@ of is written.
 
 ## Testing
 
-The unit tests are under `unit-tests/src/wasm/`, one file per class, and
+The unit tests are under `tests/`, one file per class, and
 pin exact bytes for every encoding primitive and for whole modules
 whose bytes are written out in full. A mismatch is reported as the two
 byte sequences, so a failure names the bytes rather than reporting that
