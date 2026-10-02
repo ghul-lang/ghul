@@ -7,9 +7,9 @@
 # throwaway test that dumps each module to a file, runs it, then validates
 # every file against each engine it can find and removes the test again.
 #
-# Engines, first found wins:
-#   node     always tried - WebAssembly.validate
-#   wasmtime tried when on PATH - `compile` with exceptions and gc enabled
+# Engines, each run when it is on the PATH, skipped silently when not:
+#   node     - WebAssembly.validate
+#   wasmtime - `compile` with exceptions and gc enabled
 #
 # Usage: wasm/tests/engine-check.sh [output-dir]
 #        (default: a fresh directory under /tmp)
