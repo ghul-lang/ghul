@@ -16,55 +16,6 @@ or data segments - though the two array instructions that name a data
 segment are, since an index into one is written the same way whatever
 holds the segment.
 
-## Files
-
-- `byte_buffer.ghul` — the bytes a module is assembled in, and the
-  primitive encodings: unsigned and signed LEB128 for 32- and 64-bit
-  values, `f32` and `f64` as their bits little-endian, names behind
-  their UTF-8 byte count, and vector lengths.
-- `value_type.ghul` — the types a function can take and return and a
-  local or global can hold: a scalar or vector type, which is a byte, or a
-  reference, which is a marker and a heap type.
-- `heap_type.ghul` — what a reference points at: one of the abstract heap
-  types, or an index into the type section.
-- `field_type.ghul` — what a struct field or an array element holds,
-  which is any value type — so a struct can point at another struct — or
-  one of the two packed types, and whether it can be assigned through.
-- `composite_type.ghul` — what a declared type is made of: a function
-  signature, a struct's fields, or an array's element type.
-- `sub_type.ghul` — a composite type, whether it is closed, and the
-  declared types it is a subtype of.
-- `type_entry.ghul` — one entry of the type section: a single type, or a
-  recursion group of types that may name each other.
-- `element_segment.ghul` — a run of values for a table, or a run of
-  function indices to be resolved into them.
-- `block_type.ghul` — what a `block`, `loop` or `if` produces.
-- `opcode.ghul` — every opcode, at the byte or bytes the specification
-  gives it.
-- `instruction.ghul` — the instruction classes, which differ by the
-  immediate they carry rather than by meaning.
-- `limits.ghul` — a minimum size and, where one is given, a maximum.
-- `table.ghul` — a table of references of one type.
-- `global.ghul` — a global variable and its constant expression.
-- `import.ghul` — the module, name, kind and descriptor an import is.
-- `export.ghul` — a name, a kind and an index.
-- `function.ghul` — a defined function: its signature index, its locals
-  and its body. Also the run-length encoding of locals.
-- `tag.ghul` — an exception and the signature its payload is carried in;
-  the tag section is a list of them, and a tag import enters the same
-  index space ahead of them.
-- `catch.ghul` — which exceptions a `try_table` hands to which label, one
-  clause of a handler.
-- `name_section.ghul` — the module's own name and the names of its
-  functions and locals, as the custom section the format reserves them
-  for.
-- `custom_section.ghul` — a section under a name the specification does
-  not define.
-- `module.ghul` — the module itself, and the index spaces its parts
-  share.
-- `binary_writer.ghul` — writes a module out, its sections in the order
-  the specification fixes.
-
 ## The index spaces
 
 A module's imports and its definitions share an index space per kind: an
