@@ -128,7 +128,22 @@ That check is not part of the suite — Node is not a build dependency — and
 it is what caught the `br_table` vector counting its default label as one
 of its entries, and the short form of a `const` field being rejected.
 
-The garbage collection modules are checked the same way, and the engine
+The garbage collection modules are checked the same way. Every one of
+them is accepted: a struct with a field written, a struct read through
+`struct.get`, an array read through `array.get`, an array of a fixed
+length, a null reference tested for absence, a struct holding a reference
+to another struct, and a recursion group whose two members hold a reference
+to each other. Two more cover `ref.test` and `ref.cast`, and a cast
+branch.
+
+Two things that check turned up are worth recording, because in both the
+instruction index writes the *type* an instruction produces where a reader
+can take it for the immediate it takes. `ref.test (ref null ht)` is the
+type the instruction produces; the immediate is the heap type alone, and
+whether the reference can be absent is in the opcode, which is why there
+are four of them rather than one. And `br_on_cast` takes the nullability
+of its two heap types in a flags byte ahead of the label, not in the types
+themselves.The garbage collection modules are checked the same way, and the engine
 available is behind the specification in two places. `ref.test` and
 `ref.cast` take a reference type, and this engine reads that marker as a
 bare heap type; `call_indirect` takes a function reference, and this engine
