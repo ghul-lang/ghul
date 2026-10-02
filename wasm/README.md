@@ -10,11 +10,11 @@ This folder is a plain library. It depends on nothing else in the compiler
 its own, which is why the WebAssembly backend will be able to be built
 against it one piece at a time.
 
-The exception handling instructions and the `.wat` printer are not here
-yet. The legacy `try`, `catch` and `delegate` instructions are not planned
-at all, and neither are memories or data segments - though the two array
-instructions that name a data segment are, since an index into one is
-written the same way whatever holds the segment.
+The `.wat` printer is not here yet. The legacy `try`, `catch` and
+`delegate` instructions are not planned at all, and neither are memories
+or data segments - though the two array instructions that name a data
+segment are, since an index into one is written the same way whatever
+holds the segment.
 
 ## Files
 
@@ -142,10 +142,9 @@ to another struct, and a recursion group whose two members hold a reference
 to each other. Two more cover `ref.test` and `ref.cast`, and a cast
 branch.
 
-`call_indirect` is the one instruction no engine here could be asked
-about. The specification types it as taking a function reference, and the
-engine available types it as taking an index, so a module using it is the
-one that could not be validated.
+`call_indirect` takes an index into the table it calls through, which is
+how the engines available read it, and the `calls` module is the one that
+exercises it against an engine.
 
 Two things that check turned up are worth recording, because in both the
 instruction index writes the *type* an instruction produces where a reader
@@ -167,9 +166,15 @@ remembering to write a module for it.
 
 `tests/matrix_tests.ghul` writes every module of the matrix and checks the
 preamble, which is what the suite can do on its own. Whether the bytes are
-ones an engine accepts is checked with Node's `WebAssembly.validate` while
-the tests are written, and the result is recorded in the pull request;
-Node is not a build dependency, so that run is not part of the suite.
+ones an engine accepts is checked while the tests are written, by handing
+each module's bytes to Node's `WebAssembly.validate` - the writer's output
+goes to a file, and the file to
+
+    node -e "const b=require('fs').readFileSync(process.argv[1]); console.log(WebAssembly.validate(b))" module.wasm
+
+Node is not a build dependency, so that run is not part of the suite. A
+module the engine rejects is wrong, however carefully the encoding was
+reasoned about.
 
 What the matrix covers, and why each module is there:
 
@@ -211,5 +216,3 @@ What the matrix covers, and why each module is there:
 - `typed-block` - a block whose signature takes an operand, which the
   block's body has to consume: an empty body leaves the operand on the
   stack at the block's end, and that is not the block's fallthrough.
-
-The last engine run accepted all twenty-two.
