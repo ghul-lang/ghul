@@ -1,0 +1,1015 @@
+namespace Wasm is
+    // The names a name section gave a module, which is what the printer
+    // spells a module, its functions and their locals with. A module
+    // printed without one has none, and every part keeps its index.
+    class NAMES is
+        _module_name: string
+        _functions: NAME_MAP?
+        _local_maps: Collections.LIST[LOCAL_NAME_MAP]?
+
+        init() is
+            _module_name = ""
+        si
+
+        // Reads the names out of a module's custom sections. The first
+        // section filed under `name` is the one; a reader of the module
+        // format treats later ones the same way.
+        of_module(module: MODULE) -> NAMES static is
+            let result = NAMES()
+
+            for section in module.custom_sections() do
+                if section.name() =~ "name" then
+                    let parsed = NAME_SECTION.of_bytes(section.payload())
+
+                    result._module_name = parsed.module_name()
+                    result._functions = parsed.function_names()
+                    result._local_maps = parsed.local_maps()
+
+                    return result
+                fi
+            od
+
+            return result
+        si
+
+        module_name() -> string => _module_name
+
+        // The name of the function at an index of the function index
+        // space, which counts imported functions first.
+        function_name(index: int) -> string? is
+            if let map = _functions then
+                return map.name_of(index)
+            fi
+
+            return null
+        si
+
+        // The names of the locals of the function at an index, which are
+        // named over its parameters and locals together.
+        locals_of(index: int) -> NAME_MAP? is
+            if let maps = _local_maps then
+                for map in maps do
+                    if map.function_index == index then
+                        return map.locals
+                    fi
+                od
+            fi
+
+            return null
+        si
+    si
+
+    // The module model printed as WebAssembly text format, in the flat
+    // form: one instruction a line, the structured instructions indented
+    // and closed by the `end` and `else` the binary spells with bytes.
+    //
+    // The parts are printed in the order the binary sections have them -
+    // types, imports, tables, tags, globals, exports, the start function,
+    // the element segments, and the functions last - which keeps the
+    // printing stable rather than merely correct.
+    //
+    // Where the name section carried names, they are used: the module's
+    // own name after `module`, a function's after `func`, a local's after
+    // `local`, and a reference to a named function or local reads as the
+    // name rather than the index. What has no name keeps its index.
+    class WAT_PRINTER is
+        _lines: Collections.LIST[string]
+        _indent: int
+
+        init() is
+            _lines = Collections.LIST[string]()
+            _indent = 0
+        si
+
+        print(module: MODULE) -> string is
+            let names = NAMES.of_module(module)
+            let types = _flatten_types(module)
+
+            _line("(module{_declared_name(names.module_name())}")
+
+            _indent = _indent + 1
+
+            let type_index mut = 0
+
+            for entry in module.types() do
+                _print_type_entry(entry, type_index)
+
+                type_index = type_index + entry.type_count()
+            od
+
+            let functions_imported mut = 0
+            let globals_imported mut = 0
+
+            for imported in module.imports() do
+                _print_import(imported, names, functions_imported, globals_imported)
+
+                if imported.kind == ImportKind.FUNCTION then
+                    functions_imported = functions_imported + 1
+                elif imported.kind == ImportKind.GLOBAL then
+                    globals_imported = globals_imported + 1
+                fi
+            od
+
+            let table_index mut = _count_imports(module, ImportKind.TABLE)
+
+            for table in module.tables() do
+                _line("{_table_text(table, table_index)}")
+
+                table_index = table_index + 1
+            od
+
+            let tag_index mut = _count_imports(module, ImportKind.TAG)
+
+            for tag in module.tags() do
+                _line("(tag (;{tag_index};) (type {tag.type_index}))")
+
+                tag_index = tag_index + 1
+            od
+
+            for global in module.globals() do
+                _line("(global (;{globals_imported};) {_global_type(global.value_type, global.is_mutable)} ({_expression(global.initialiser(), names, null)}))")
+
+                globals_imported = globals_imported + 1
+            od
+
+            for exported in module.exports() do
+                _line("(export \"{exported.name()}\" {_export_target(exported, names)})")
+            od
+
+            if let start = module.start() then
+                _line("(start {_function(names, start)})")
+            fi
+
+            for segment in module.element_segments() do
+                _print_element_segment(segment, names)
+            od
+
+            let index mut = functions_imported
+
+            for function in module.functions() do
+                _print_function(function, index, names, types)
+
+                index = index + 1
+            od
+
+            // A module with no parts is one line, which is what a reader
+            // of the text expects the empty module to be.
+            if _lines.count > 1 then
+                _indent = _indent - 1
+
+                _line(")")
+            else
+                _lines[0] = "(module)"
+            fi
+
+            return _joined()
+        si
+
+        // --- the module fields ---
+
+        _print_type_entry(entry: TYPE_ENTRY, index: int) is
+            if entry.is_rec_group() then
+                _line("(rec")
+
+                _indent = _indent + 1
+
+                let sub_index mut = index
+
+                for sub_type in entry.types() do
+                    _print_sub_type(sub_type, sub_index)
+
+                    sub_index = sub_index + 1
+                od
+
+                _indent = _indent - 1
+
+                _line(")")
+            else
+                _print_sub_type(entry.types()[0], index)
+            fi
+        si
+
+        _print_sub_type(sub_type: SUB_TYPE, index: int) is
+            let supers = sub_type.super_types()
+            let composite = _composite_text(sub_type.composite())
+
+            // A final type with no supertypes is what a plain type
+            // definition abbreviates, so it prints as one; anything else
+            // is a `sub` inside its type, which is where the format has
+            // it.
+            if sub_type.final() /\ supers.count == 0 then
+                _line("(type (;{index};) {composite})")
+            else
+                let sub mut = "(sub"
+
+                if sub_type.final() then
+                    sub = "{sub} final"
+                fi
+
+                for super_type in supers do
+                    sub = "{sub} {super_type}"
+                od
+
+                _line("(type (;{index};) {sub} {composite}))")
+            fi
+        si
+
+        _composite_text(composite: COMPOSITE_TYPE) -> string is
+            if isa FUNC_TYPE(composite) then
+                let text mut = "(func{_params(composite.parameters())}"
+
+                if composite.results().count > 0 then
+                    text = "{text} (result"
+
+                    for result in composite.results() do
+                        text = "{text} {_value_type(result)}"
+                    od
+
+                    text = "{text})"
+                fi
+
+                return "{text})"
+            elif isa STRUCT_TYPE(composite) then
+                if composite.fields().count == 0 then
+                    return "(struct)"
+                fi
+
+                let text mut = "(struct"
+
+                for each in composite.fields() do
+                    text = "{text} (field {_field_type(each)})"
+                od
+
+                return "{text})"
+            elif isa ARRAY_TYPE(composite) then
+                return "(array {_field_type(composite.element())})"
+            fi
+
+            throw System.Exception("the printer has no spelling for this composite type")
+        si
+
+        _print_import(imported: IMPORT, names: NAMES, function_index: int, global_index: int) is
+            let target mut = ""
+
+            if isa FUNCTION_IMPORT(imported) then
+                target = "(func {_declared_function(names, function_index)}(type {imported.type_index}))"
+            elif isa TABLE_IMPORT(imported) then
+                target = "(table{_limits_text(imported.table.limits())} {_value_type(imported.table.element_type())})"
+            elif isa GLOBAL_IMPORT(imported) then
+                target = "(global {_declared_global()}{_global_type(imported.value_type, imported.is_mutable)})"
+            elif isa TAG_IMPORT(imported) then
+                target = "(tag (type {imported.tag.type_index}))"
+            fi
+
+            _line("(import \"{imported.module}\" \"{imported.name}\" {target})")
+        si
+
+        _table_text(table: TABLE, index: int) -> string is
+            let limits = table.limits()
+            let text mut = "(table (;{index};)"
+
+            if let maximum = limits.maximum() then
+                text = "{text} {limits.minimum()} {maximum}"
+            else
+                text = "{text} {limits.minimum()}"
+            fi
+
+            return "{text} {_value_type(table.element_type())})"
+        si
+
+        _limits_text(limits: LIMITS) -> string is
+            if let maximum = limits.maximum() then
+                return " {limits.minimum()} {maximum}"
+            fi
+
+            return " {limits.minimum()}"
+        si
+
+        // How many entries of one kind the imports fix ahead of the
+        // defined ones, which is where a defined entry's index starts.
+        _count_imports(module: MODULE, kind: ImportKind) -> int is
+            let count mut = 0
+
+            for imported in module.imports() do
+                if imported.kind == kind then
+                    count = count + 1
+                fi
+            od
+
+            return count
+        si
+
+        _print_tag(tag: TAG) is
+            _line("(tag (type {tag.type_index}))")
+        si
+
+        _export_target(exported: EXPORT, names: NAMES) -> string is
+            case exported.kind()
+                when ExportKind.FUNCTION then return "(func {_function(names, exported.index())})"
+                when ExportKind.TABLE then return "(table {exported.index()})"
+                when ExportKind.GLOBAL then return "(global {exported.index()})"
+                else return "(tag {exported.index()})"
+            esac
+        si
+
+        _print_element_segment(segment: ELEMENT_SEGMENT, names: NAMES) is
+            let elided = segment.elides_table_and_type()
+            let header mut = "(elem"
+
+            if segment.mode() == ElementMode.ACTIVE then
+                if !elided then
+                    header = "{header} (table {segment.table_index()})"
+                fi
+
+                header = "{header} ({_expression(segment.offset(), names, null)})"
+            elif segment.mode() == ElementMode.DECLARATIVE then
+                header = "{header} declare"
+            fi
+
+            if segment.by_function() then
+                header = "{header} func"
+
+                for index in segment.function_indices() do
+                    header = "{header} {_function(names, index)}"
+                od
+
+                _line("{header})")
+            else
+                _line("{header} {_value_type(segment.reference())}")
+
+                _indent = _indent + 1
+
+                for expression in segment.expressions() do
+                    _line("({_expression(expression, names, null)})")
+                od
+
+                _indent = _indent - 1
+
+                _line(")")
+            fi
+        si
+
+        _print_function(function: FUNCTION, index: int, names: NAMES, types: Collections.LIST[SUB_TYPE]) is
+            let type_index = function.type_index()
+            let local_names = names.locals_of(index)
+            let header mut = "(func {_declared_function(names, index)}(type {type_index})"
+
+            let locals = function.locals()
+            let param_count = _param_count(types, type_index)
+            let i mut = 0
+
+            while i < locals.count do
+                header = "{header} (local {_declared_local(local_names, param_count + i)}{_value_type(locals[i])})"
+
+                i = i + 1
+            od
+
+            if function.body().count == 0 then
+                _line("{header})")
+            else
+                _line(header)
+
+                _indent = _indent + 1
+
+                _print_instructions(function.body(), names, local_names)
+
+                _indent = _indent - 1
+
+                _line(")")
+            fi
+        si
+
+        // --- instructions ---
+
+        _print_instructions(instructions: Collections.Iterable[INSTRUCTION], names: NAMES, local_names: NAME_MAP?) is
+            for instruction in instructions do
+                _print_instruction(instruction, names, local_names)
+            od
+        si
+
+        _print_instruction(instruction: INSTRUCTION, names: NAMES, local_names: NAME_MAP?) is
+            if isa BLOCK_INSTRUCTION(instruction) then
+                _line("{_mnemonic(instruction.opcode)}{_block_type_text(instruction.block_type())}")
+
+                _indent = _indent + 1
+
+                _print_instructions(instruction.body(), names, local_names)
+
+                _indent = _indent - 1
+
+                _line("end")
+            elif isa IF_INSTRUCTION(instruction) then
+                _line("{_mnemonic(instruction.opcode)}{_block_type_text(instruction.block_type())}")
+
+                _indent = _indent + 1
+
+                _print_instructions(instruction.then_branch(), names, local_names)
+
+                _indent = _indent - 1
+
+                if instruction.else_branch().count > 0 then
+                    _line("else")
+
+                    _indent = _indent + 1
+
+                    _print_instructions(instruction.else_branch(), names, local_names)
+
+                    _indent = _indent - 1
+                fi
+
+                _line("end")
+            elif isa TRY_TABLE_INSTRUCTION(instruction) then
+                let text mut = "{_mnemonic(instruction.opcode)}{_block_type_text(instruction.block_type())}"
+
+                for clause in instruction.clauses() do
+                    text = "{text} {_clause(clause)}"
+                od
+
+                _line(text)
+
+                _indent = _indent + 1
+
+                _print_instructions(instruction.body(), names, local_names)
+
+                _indent = _indent - 1
+
+                _line("end")
+            else
+                _line(_instruction_text(instruction, names, local_names))
+            fi
+        si
+
+        // The text of an instruction with no body of its own, which is
+        // also what a constant expression's instructions print as.
+        _instruction_text(instruction: INSTRUCTION, names: NAMES, local_names: NAME_MAP?) -> string is
+            if isa BR_TABLE_INSTRUCTION(instruction) then
+                let text mut = "br_table"
+
+                for label in instruction.labels() do
+                    text = "{text} {label}"
+                od
+
+                return "{text} {instruction.default_label()}"
+            elif isa CALL_INDIRECT_INSTRUCTION(instruction) then
+                let text mut = "call_indirect"
+
+                if instruction.table_index != 0 then
+                    text = "{text} {instruction.table_index}"
+                fi
+
+                return "{text} (type {instruction.type_index})"
+            elif isa TYPED_SELECT_INSTRUCTION(instruction) then
+                return "select (result {_value_type(instruction.type())})"
+            elif isa CAST_BRANCH_INSTRUCTION(instruction) then
+                return "{_mnemonic(instruction.opcode)} {instruction.label} {_reference_text(instruction.source_nullable, instruction.source)} {_reference_text(instruction.target_nullable, instruction.target)}"
+            elif isa TYPE_FIELD_INSTRUCTION(instruction) then
+                return "{_mnemonic(instruction.opcode)} {instruction.type_index} {instruction.field_index}"
+            elif isa TYPE_LENGTH_INSTRUCTION(instruction) then
+                return "{_mnemonic(instruction.opcode)} {instruction.type_index} {instruction.length}"
+            elif isa TWO_TYPE_INSTRUCTION(instruction) then
+                return "{_mnemonic(instruction.opcode)} {instruction.target_type_index} {instruction.source_type_index}"
+            elif isa TYPE_INSTRUCTION(instruction) then
+                return "{_mnemonic(instruction.opcode)} {instruction.type_index}"
+            elif isa HEAP_TYPE_INSTRUCTION(instruction) then
+                // The four test and cast instructions carry nullability
+                // in their opcode rather than in the heap type, so their
+                // spelling is a reference type, not a bare heap type.
+                if instruction.opcode == Opcode.REF_TEST \/ instruction.opcode == Opcode.REF_TEST_NULL then
+                    return "ref.test {_reference_text(instruction.opcode == Opcode.REF_TEST_NULL, instruction.heap_type())}"
+                elif instruction.opcode == Opcode.REF_CAST \/ instruction.opcode == Opcode.REF_CAST_NULL then
+                    return "ref.cast {_reference_text(instruction.opcode == Opcode.REF_CAST_NULL, instruction.heap_type())}"
+                fi
+
+                return "{_mnemonic(instruction.opcode)} {_heap_type(instruction.heap_type())}"
+            elif isa THROW_INSTRUCTION(instruction) then
+                return "throw {instruction.tag_index}"
+            elif isa I32_CONSTANT(instruction) then
+                return "i32.const {instruction.value}"
+            elif isa I64_CONSTANT(instruction) then
+                return "i64.const {instruction.value}"
+            elif isa F32_CONSTANT(instruction) then
+                return "f32.const {_single_text(instruction.value)}"
+            elif isa F64_CONSTANT(instruction) then
+                return "f64.const {_double_text(instruction.value)}"
+            elif isa INDEX_INSTRUCTION(instruction) then
+                return "{_mnemonic(instruction.opcode)} {_index_operand(instruction.opcode, instruction.index, names, local_names)}"
+            elif isa SIMPLE_INSTRUCTION(instruction) then
+                return _mnemonic(instruction.opcode)
+            fi
+
+            throw System.Exception("the printer has no spelling for opcode {cast int(instruction.opcode)}")
+        si
+
+        // The operand of an index instruction, which is a name where the
+        // name section names it and the index where it does not.
+        _index_operand(opcode: Opcode, index: int, names: NAMES, local_names: NAME_MAP?) -> string is
+            case opcode
+                when Opcode.LOCAL_GET then return _local(local_names, index)
+                when Opcode.LOCAL_SET then return _local(local_names, index)
+                when Opcode.LOCAL_TEE then return _local(local_names, index)
+                when Opcode.CALL then return _function(names, index)
+                when Opcode.REF_FUNC then return _function(names, index)
+                else return "{index}"
+            esac
+        si
+
+        _clause(clause: CATCH_CLAUSE) -> string is
+            case clause.kind
+                when CatchKind.CATCH then return "(catch {clause.tag_index} {clause.label})"
+                when CatchKind.CATCH_REF then return "(catch_ref {clause.tag_index} {clause.label})"
+                when CatchKind.CATCH_ALL then return "(catch_all {clause.label})"
+                else return "(catch_all_ref {clause.label})"
+            esac
+        si
+
+        // --- the pieces instructions and fields are spelled with ---
+
+        _block_type_text(block_type: BLOCK_TYPE) -> string is
+            if let index = block_type.type_index() then
+                return " (type {index})"
+            elif let type = block_type.value_type() then
+                return " (result {_value_type(type)})"
+            fi
+
+            return ""
+        si
+
+        _global_type(type: VALUE_TYPE, is_mutable: bool) -> string is
+            if is_mutable then
+                return "(mut {_value_type(type)})"
+            fi
+
+            return _value_type(type)
+        si
+
+        _field_type(each: FIELD_TYPE) -> string is
+            if let packed = each.packed() then
+                if each.mutable() then
+                    return "(mut {_packed(packed)})"
+                fi
+
+                return _packed(packed)
+            fi
+
+            if each.mutable() then
+                return "(mut {_value_type(each.value()!)})"
+            fi
+
+            return _value_type(each.value()!)
+        si
+
+        _packed(packed: PackedType) -> string is
+            case packed
+                when PackedType.I8 then return "i8"
+                else return "i16"
+            esac
+        si
+
+        _value_type(type: VALUE_TYPE) -> string is
+            if let numeric = type.numeric() then
+                case numeric
+                    when NumericType.I32 then return "i32"
+                    when NumericType.I64 then return "i64"
+                    when NumericType.F32 then return "f32"
+                    when NumericType.F64 then return "f64"
+                    else return "v128"
+                esac
+            fi
+
+            let heap_type = type.heap_type()!
+
+            if heap_type.is_abstract() /\ type.nullable() then
+                return _nullable_abstract(heap_type.abstract_type()!)
+            fi
+
+            return _reference_text(type.nullable(), heap_type)
+        si
+
+        _reference_text(nullable: bool, heap_type: HEAP_TYPE) -> string is
+            if nullable then
+                return "(ref null {_heap_type(heap_type)})"
+            fi
+
+            return "(ref {_heap_type(heap_type)})"
+        si
+
+        _nullable_abstract(type: AbstractHeapType) -> string is
+            case type
+                when AbstractHeapType.FUNC then return "funcref"
+                when AbstractHeapType.EXTERN then return "externref"
+                when AbstractHeapType.ANY then return "anyref"
+                when AbstractHeapType.EQ then return "eqref"
+                when AbstractHeapType.I31 then return "i31ref"
+                when AbstractHeapType.STRUCT then return "structref"
+                when AbstractHeapType.ARRAY then return "arrayref"
+                when AbstractHeapType.EXN then return "exnref"
+                when AbstractHeapType.NONE then return "nullref"
+                when AbstractHeapType.NOFUNC then return "nullfuncref"
+                when AbstractHeapType.NOEXTERN then return "nullexternref"
+                else return "nullexnref"
+            esac
+        si
+
+        _heap_type(heap_type: HEAP_TYPE) -> string is
+            if let abstract_type = heap_type.abstract_type() then
+                case abstract_type
+                    when AbstractHeapType.FUNC then return "func"
+                    when AbstractHeapType.EXTERN then return "extern"
+                    when AbstractHeapType.ANY then return "any"
+                    when AbstractHeapType.EQ then return "eq"
+                    when AbstractHeapType.I31 then return "i31"
+                    when AbstractHeapType.STRUCT then return "struct"
+                    when AbstractHeapType.ARRAY then return "array"
+                    when AbstractHeapType.EXN then return "exn"
+                    when AbstractHeapType.NONE then return "none"
+                    when AbstractHeapType.NOFUNC then return "nofunc"
+                    when AbstractHeapType.NOEXTERN then return "noextern"
+                    else return "noexn"
+                esac
+            fi
+
+            let index = heap_type.type_index()!
+
+            return "{index}"
+        si
+
+        _single_text(value: single) -> string is
+            let infinity = 1.0s / 0.0s
+
+            if !(value =~ value) then
+                return "nan"
+            elif value > infinity then
+                return "inf"
+            elif value < -infinity then
+                return "-inf"
+            fi
+
+            return "{value}"
+        si
+
+        _double_text(value: double) -> string is
+            let infinity = 1.0 / 0.0
+
+            if !(value =~ value) then
+                return "nan"
+            elif value > infinity then
+                return "inf"
+            elif value < -infinity then
+                return "-inf"
+            fi
+
+            return "{value}"
+        si
+
+        // --- names ---
+
+        // A function as an operand: its name where it has one, its index
+        // where it has not.
+        _function(names: NAMES, index: int) -> string is
+            if let name = names.function_name(index) then
+                return "${name}"
+            fi
+
+            return "{index}"
+        si
+
+        // A function at the head of a declaration, which is followed by
+        // whatever the declaration carries.
+        _declared_function(names: NAMES, index: int) -> string is
+            if let name = names.function_name(index) then
+                return "${name} "
+            fi
+
+            return "(;{index};) "
+        si
+
+        _local(names: NAME_MAP?, index: int) -> string is
+            if let name = _local_name(names, index) then
+                return "${name}"
+            fi
+
+            return "{index}"
+        si
+
+        _declared_local(names: NAME_MAP?, index: int) -> string is
+            if let name = _local_name(names, index) then
+                return "${name} "
+            fi
+
+            return ""
+        si
+
+        _local_name(names: NAME_MAP?, index: int) -> string? is
+            if let map = names then
+                return map.name_of(index)
+            fi
+
+            return null
+        si
+
+        _declared_name(name: string) -> string is
+            if name.length > 0 then
+                return " ${name}"
+            fi
+
+            return ""
+        si
+
+        // A global has no name the name section carries, so an imported
+        // or defined global is declared without one.
+        _declared_global() -> string is
+            return ""
+        si
+
+        // --- the small counts and joins ---
+
+        _flatten_types(module: MODULE) -> Collections.LIST[SUB_TYPE] is
+            let result = Collections.LIST[SUB_TYPE]()
+
+            for entry in module.types() do
+                for sub_type in entry.types() do
+                    result.add(sub_type)
+                od
+            od
+
+            return result
+        si
+
+        _params(types: VALUE_TYPE[]) -> string is
+            if types.count == 0 then
+                return ""
+            fi
+
+            let text mut = " (param"
+
+            for parameter in types do
+                text = "{text} {_value_type(parameter)}"
+            od
+
+            return "{text})"
+        si
+
+        _param_count(types: Collections.LIST[SUB_TYPE], index: int) -> int is
+            let sub_type = types[index]
+            let composite = sub_type.composite()
+
+            if isa FUNC_TYPE(composite) then
+                return composite.parameters().count
+            fi
+
+            return 0
+        si
+
+        _expression(instructions: Collections.Iterable[INSTRUCTION], names: NAMES, local_names: NAME_MAP?) -> string is
+            let text mut = ""
+            let first mut = true
+
+            for instruction in instructions do
+                if !first then
+                    text = "{text} "
+                fi
+
+                text = "{text}{_instruction_text(instruction, names, local_names)}"
+
+                first = false
+            od
+
+            return text
+        si
+
+        // --- output ---
+
+        _line(text: string) is
+            let pad mut = ""
+            let width mut = _indent
+
+            while width > 0 do
+                pad = "{pad}  "
+
+                width = width - 1
+            od
+
+            _lines.add("{pad}{text}")
+        si
+
+        _joined() -> string is
+            let text = System.Text.StringBuilder()
+
+            for line in _lines do
+                text.append(line)
+                text.append("\n")
+            od
+
+            return text.to_string()
+        si
+
+        _mnemonic(opcode: Opcode) -> string is
+            case opcode
+                when Opcode.UNREACHABLE then return "unreachable"
+                when Opcode.NOP then return "nop"
+                when Opcode.BLOCK then return "block"
+                when Opcode.LOOP then return "loop"
+                when Opcode.IF then return "if"
+                when Opcode.BR then return "br"
+                when Opcode.BR_IF then return "br_if"
+                when Opcode.BR_TABLE then return "br_table"
+                when Opcode.RETURN then return "return"
+                when Opcode.CALL then return "call"
+                when Opcode.CALL_INDIRECT then return "call_indirect"
+                when Opcode.DROP then return "drop"
+                when Opcode.THROW then return "throw"
+                when Opcode.THROW_REF then return "throw_ref"
+                when Opcode.TRY_TABLE then return "try_table"
+                when Opcode.SELECT then return "select"
+                when Opcode.SELECT_T then return "select"
+                when Opcode.LOCAL_GET then return "local.get"
+                when Opcode.LOCAL_SET then return "local.set"
+                when Opcode.LOCAL_TEE then return "local.tee"
+                when Opcode.GLOBAL_GET then return "global.get"
+                when Opcode.GLOBAL_SET then return "global.set"
+                when Opcode.I32_CONST then return "i32.const"
+                when Opcode.I64_CONST then return "i64.const"
+                when Opcode.F32_CONST then return "f32.const"
+                when Opcode.F64_CONST then return "f64.const"
+                when Opcode.I32_EQZ then return "i32.eqz"
+                when Opcode.I32_EQ then return "i32.eq"
+                when Opcode.I32_NE then return "i32.ne"
+                when Opcode.I32_LT_S then return "i32.lt_s"
+                when Opcode.I32_LT_U then return "i32.lt_u"
+                when Opcode.I32_GT_S then return "i32.gt_s"
+                when Opcode.I32_GT_U then return "i32.gt_u"
+                when Opcode.I32_LE_S then return "i32.le_s"
+                when Opcode.I32_LE_U then return "i32.le_u"
+                when Opcode.I32_GE_S then return "i32.ge_s"
+                when Opcode.I32_GE_U then return "i32.ge_u"
+                when Opcode.I64_EQZ then return "i64.eqz"
+                when Opcode.I64_EQ then return "i64.eq"
+                when Opcode.I64_NE then return "i64.ne"
+                when Opcode.I64_LT_S then return "i64.lt_s"
+                when Opcode.I64_LT_U then return "i64.lt_u"
+                when Opcode.I64_GT_S then return "i64.gt_s"
+                when Opcode.I64_GT_U then return "i64.gt_u"
+                when Opcode.I64_LE_S then return "i64.le_s"
+                when Opcode.I64_LE_U then return "i64.le_u"
+                when Opcode.I64_GE_S then return "i64.ge_s"
+                when Opcode.I64_GE_U then return "i64.ge_u"
+                when Opcode.F32_EQ then return "f32.eq"
+                when Opcode.F32_NE then return "f32.ne"
+                when Opcode.F32_LT then return "f32.lt"
+                when Opcode.F32_GT then return "f32.gt"
+                when Opcode.F32_LE then return "f32.le"
+                when Opcode.F32_GE then return "f32.ge"
+                when Opcode.F64_EQ then return "f64.eq"
+                when Opcode.F64_NE then return "f64.ne"
+                when Opcode.F64_LT then return "f64.lt"
+                when Opcode.F64_GT then return "f64.gt"
+                when Opcode.F64_LE then return "f64.le"
+                when Opcode.F64_GE then return "f64.ge"
+                when Opcode.I32_CLZ then return "i32.clz"
+                when Opcode.I64_CLZ then return "i64.clz"
+                when Opcode.I32_CTZ then return "i32.ctz"
+                when Opcode.I64_CTZ then return "i64.ctz"
+                when Opcode.I32_POPCNT then return "i32.popcnt"
+                when Opcode.I64_POPCNT then return "i64.popcnt"
+                when Opcode.I32_ADD then return "i32.add"
+                when Opcode.I64_ADD then return "i64.add"
+                when Opcode.I32_SUB then return "i32.sub"
+                when Opcode.I64_SUB then return "i64.sub"
+                when Opcode.I32_MUL then return "i32.mul"
+                when Opcode.I64_MUL then return "i64.mul"
+                when Opcode.I32_DIV_S then return "i32.div_s"
+                when Opcode.I32_DIV_U then return "i32.div_u"
+                when Opcode.I32_REM_S then return "i32.rem_s"
+                when Opcode.I32_REM_U then return "i32.rem_u"
+                when Opcode.I64_DIV_S then return "i64.div_s"
+                when Opcode.I64_DIV_U then return "i64.div_u"
+                when Opcode.I64_REM_S then return "i64.rem_s"
+                when Opcode.I64_REM_U then return "i64.rem_u"
+                when Opcode.I32_AND then return "i32.and"
+                when Opcode.I64_AND then return "i64.and"
+                when Opcode.I32_OR then return "i32.or"
+                when Opcode.I64_OR then return "i64.or"
+                when Opcode.I32_XOR then return "i32.xor"
+                when Opcode.I64_XOR then return "i64.xor"
+                when Opcode.I32_SHL then return "i32.shl"
+                when Opcode.I64_SHL then return "i64.shl"
+                when Opcode.I32_SHR_S then return "i32.shr_s"
+                when Opcode.I32_SHR_U then return "i32.shr_u"
+                when Opcode.I64_SHR_S then return "i64.shr_s"
+                when Opcode.I64_SHR_U then return "i64.shr_u"
+                when Opcode.I32_ROTL then return "i32.rotl"
+                when Opcode.I32_ROTR then return "i32.rotr"
+                when Opcode.I64_ROTL then return "i64.rotl"
+                when Opcode.I64_ROTR then return "i64.rotr"
+                when Opcode.F32_ABS then return "f32.abs"
+                when Opcode.F64_ABS then return "f64.abs"
+                when Opcode.F32_NEG then return "f32.neg"
+                when Opcode.F64_NEG then return "f64.neg"
+                when Opcode.F32_CEIL then return "f32.ceil"
+                when Opcode.F64_CEIL then return "f64.ceil"
+                when Opcode.F32_FLOOR then return "f32.floor"
+                when Opcode.F64_FLOOR then return "f64.floor"
+                when Opcode.F32_TRUNC then return "f32.trunc"
+                when Opcode.F64_TRUNC then return "f64.trunc"
+                when Opcode.F32_NEAREST then return "f32.nearest"
+                when Opcode.F64_NEAREST then return "f64.nearest"
+                when Opcode.F32_SQRT then return "f32.sqrt"
+                when Opcode.F64_SQRT then return "f64.sqrt"
+                when Opcode.F32_ADD then return "f32.add"
+                when Opcode.F64_ADD then return "f64.add"
+                when Opcode.F32_SUB then return "f32.sub"
+                when Opcode.F64_SUB then return "f64.sub"
+                when Opcode.F32_MUL then return "f32.mul"
+                when Opcode.F64_MUL then return "f64.mul"
+                when Opcode.F32_DIV then return "f32.div"
+                when Opcode.F64_DIV then return "f64.div"
+                when Opcode.F32_MIN then return "f32.min"
+                when Opcode.F64_MIN then return "f64.min"
+                when Opcode.F32_MAX then return "f32.max"
+                when Opcode.F64_MAX then return "f64.max"
+                when Opcode.F32_COPYSIGN then return "f32.copysign"
+                when Opcode.F64_COPYSIGN then return "f64.copysign"
+                when Opcode.I32_WRAP_I64 then return "i32.wrap_i64"
+                when Opcode.I32_TRUNC_F32_S then return "i32.trunc_f32_s"
+                when Opcode.I32_TRUNC_F32_U then return "i32.trunc_f32_u"
+                when Opcode.I32_TRUNC_F64_S then return "i32.trunc_f64_s"
+                when Opcode.I32_TRUNC_F64_U then return "i32.trunc_f64_u"
+                when Opcode.I64_EXTEND_I32_S then return "i64.extend_i32_s"
+                when Opcode.I64_EXTEND_I32_U then return "i64.extend_i32_u"
+                when Opcode.I64_TRUNC_F32_S then return "i64.trunc_f32_s"
+                when Opcode.I64_TRUNC_F32_U then return "i64.trunc_f32_u"
+                when Opcode.I64_TRUNC_F64_S then return "i64.trunc_f64_s"
+                when Opcode.I64_TRUNC_F64_U then return "i64.trunc_f64_u"
+                when Opcode.F32_CONVERT_I32_S then return "f32.convert_i32_s"
+                when Opcode.F32_CONVERT_I32_U then return "f32.convert_i32_u"
+                when Opcode.F32_CONVERT_I64_S then return "f32.convert_i64_s"
+                when Opcode.F32_CONVERT_I64_U then return "f32.convert_i64_u"
+                when Opcode.F32_DEMOTE_F64 then return "f32.demote_f64"
+                when Opcode.F64_CONVERT_I32_S then return "f64.convert_i32_s"
+                when Opcode.F64_CONVERT_I32_U then return "f64.convert_i32_u"
+                when Opcode.F64_CONVERT_I64_S then return "f64.convert_i64_s"
+                when Opcode.F64_CONVERT_I64_U then return "f64.convert_i64_u"
+                when Opcode.F64_PROMOTE_F32 then return "f64.promote_f32"
+                when Opcode.I32_REINTERPRET_F32 then return "i32.reinterpret_f32"
+                when Opcode.I64_REINTERPRET_F64 then return "i64.reinterpret_f64"
+                when Opcode.F32_REINTERPRET_I32 then return "f32.reinterpret_i32"
+                when Opcode.F64_REINTERPRET_I64 then return "f64.reinterpret_i64"
+                when Opcode.I32_EXTEND8_S then return "i32.extend8_s"
+                when Opcode.I32_EXTEND16_S then return "i32.extend16_s"
+                when Opcode.I64_EXTEND8_S then return "i64.extend8_s"
+                when Opcode.I64_EXTEND16_S then return "i64.extend16_s"
+                when Opcode.I64_EXTEND32_S then return "i64.extend32_s"
+                when Opcode.I32_TRUNC_SAT_F32_S then return "i32.trunc_sat_f32_s"
+                when Opcode.I32_TRUNC_SAT_F32_U then return "i32.trunc_sat_f32_u"
+                when Opcode.I32_TRUNC_SAT_F64_S then return "i32.trunc_sat_f64_s"
+                when Opcode.I32_TRUNC_SAT_F64_U then return "i32.trunc_sat_f64_u"
+                when Opcode.I64_TRUNC_SAT_F32_S then return "i64.trunc_sat_f32_s"
+                when Opcode.I64_TRUNC_SAT_F32_U then return "i64.trunc_sat_f32_u"
+                when Opcode.I64_TRUNC_SAT_F64_S then return "i64.trunc_sat_f64_s"
+                when Opcode.I64_TRUNC_SAT_F64_U then return "i64.trunc_sat_f64_u"
+                when Opcode.CALL_REF then return "call_ref"
+                when Opcode.RETURN_CALL_REF then return "return_call_ref"
+                when Opcode.TABLE_GET then return "table.get"
+                when Opcode.TABLE_SET then return "table.set"
+                when Opcode.REF_NULL then return "ref.null"
+                when Opcode.REF_IS_NULL then return "ref.is_null"
+                when Opcode.REF_FUNC then return "ref.func"
+                when Opcode.REF_EQ then return "ref.eq"
+                when Opcode.REF_AS_NON_NULL then return "ref.as_non_null"
+                when Opcode.BR_ON_NULL then return "br_on_null"
+                when Opcode.BR_ON_NON_NULL then return "br_on_non_null"
+                when Opcode.STRUCT_NEW then return "struct.new"
+                when Opcode.STRUCT_NEW_DEFAULT then return "struct.new_default"
+                when Opcode.STRUCT_GET then return "struct.get"
+                when Opcode.STRUCT_GET_S then return "struct.get_s"
+                when Opcode.STRUCT_GET_U then return "struct.get_u"
+                when Opcode.STRUCT_SET then return "struct.set"
+                when Opcode.ARRAY_NEW then return "array.new"
+                when Opcode.ARRAY_NEW_DEFAULT then return "array.new_default"
+                when Opcode.ARRAY_NEW_FIXED then return "array.new_fixed"
+                when Opcode.ARRAY_NEW_DATA then return "array.new_data"
+                when Opcode.ARRAY_NEW_ELEM then return "array.new_elem"
+                when Opcode.ARRAY_GET then return "array.get"
+                when Opcode.ARRAY_GET_S then return "array.get_s"
+                when Opcode.ARRAY_GET_U then return "array.get_u"
+                when Opcode.ARRAY_SET then return "array.set"
+                when Opcode.ARRAY_LEN then return "array.len"
+                when Opcode.ARRAY_FILL then return "array.fill"
+                when Opcode.ARRAY_COPY then return "array.copy"
+                when Opcode.ARRAY_INIT_DATA then return "array.init_data"
+                when Opcode.ARRAY_INIT_ELEM then return "array.init_elem"
+                when Opcode.REF_TEST then return "ref.test"
+                when Opcode.REF_TEST_NULL then return "ref.test"
+                when Opcode.REF_CAST then return "ref.cast"
+                when Opcode.REF_CAST_NULL then return "ref.cast"
+                when Opcode.BR_ON_CAST then return "br_on_cast"
+                when Opcode.BR_ON_CAST_FAIL then return "br_on_cast_fail"
+                when Opcode.ANY_CONVERT_EXTERN then return "any.convert_extern"
+                when Opcode.EXTERN_CONVERT_ANY then return "extern.convert_any"
+                when Opcode.REF_I31 then return "ref.i31"
+                when Opcode.I31_GET_S then return "i31.get_s"
+                else return "i31.get_u"
+            esac
+        si
+    si
+si

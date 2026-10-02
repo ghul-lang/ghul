@@ -30,6 +30,17 @@ namespace Wasm is
             _entries.add(NAMED_INDEX(index, name))
         si
 
+        // The name an index carries, or absence when it has none.
+        name_of(index: int) -> string? is
+            for entry in _entries do
+                if entry.index == index then
+                    return entry.name
+                fi
+            od
+
+            return null
+        si
+
         // The bytes the section is written as, which is what a module
         // carries behind the name it is filed under.
         bytes() -> ubyte[] is
@@ -47,6 +58,31 @@ namespace Wasm is
                 buffer.write_u32(entry.index)
                 buffer.write_name(entry.name)
             od
+        si
+
+        // Reads a name map back from the bytes `write` produces. Entries
+        // come back in the order they were written, which is the index
+        // order the format asks for.
+        of_bytes(bytes: ubyte[]) -> NAME_MAP static is
+            return of_cursor(_NAME_CURSOR(bytes))
+        si
+
+        // Reads a name map from a cursor shared with whatever encloses
+        // it, which is how a part of a section reads its own.
+        of_cursor(cursor: _NAME_CURSOR) -> NAME_MAP static is
+            let result = NAME_MAP()
+            let count = cursor.read_u32()
+            let i mut = 0
+
+            while i < count do
+                let index = cursor.read_u32()
+
+                result.add(index, cursor.read_name())
+
+                i = i + 1
+            od
+
+            return result
         si
     si
 
@@ -109,6 +145,12 @@ namespace Wasm is
             return ""
         si
 
+        // The function names, or absence when the section has none.
+        function_names() -> NAME_MAP? => _function_names
+
+        // The per-function local names, or absence when it has none.
+        local_maps() -> Collections.LIST[LOCAL_NAME_MAP]? => _local_names
+
         // The bytes the section is written as, which is what a module
         // carries behind the name it is filed under.
         bytes() -> ubyte[] is
@@ -117,6 +159,51 @@ namespace Wasm is
             write(buffer)
 
             return buffer.to_array()
+        si
+
+        // Reads a name section back from the bytes `write` produces, or
+        // from any section shaped as the format gives it: a run of
+        // subsections, each an identifier, a size and the part it
+        // introduces. Subsections the format gains later are skipped by
+        // their size, which is what the size is for.
+        of_bytes(bytes: ubyte[]) -> NAME_SECTION static is
+            let cursor = _NAME_CURSOR(bytes)
+            let result = NAME_SECTION()
+
+            while !cursor.at_end() do
+                let id = cursor.read_byte()
+                let part = cursor.read_bytes(cursor.read_u32())
+
+                if id == 0x00ub then
+                    result._module_name = _NAME_CURSOR(part).read_name()
+                elif id == 0x01ub then
+                    result._function_names = NAME_MAP.of_bytes(part)
+                elif id == 0x02ub then
+                    result._local_names = _read_local_maps(part)
+                fi
+            od
+
+            return result
+        si
+
+        // The local names of one subsection: a run of functions, each an
+        // index and a name map that runs to the next one, which is why
+        // the maps are read off the cursor the function indexes share.
+        _read_local_maps(bytes: ubyte[]) -> Collections.LIST[LOCAL_NAME_MAP] static is
+            let cursor = _NAME_CURSOR(bytes)
+            let maps = Collections.LIST[LOCAL_NAME_MAP]()
+            let count = cursor.read_u32()
+            let i mut = 0
+
+            while i < count do
+                let function_index = cursor.read_u32()
+
+                maps.add(LOCAL_NAME_MAP(function_index, NAME_MAP.of_cursor(cursor)))
+
+                i = i + 1
+            od
+
+            return maps
         si
 
         write(buffer: BYTE_BUFFER) is
@@ -166,6 +253,72 @@ namespace Wasm is
             buffer.write_byte(id)
             buffer.write_length(content.length())
             buffer.write_bytes(content.to_array())
+        si
+    si
+
+    // A reading cursor over a run of bytes, which is what the name
+    // section and its parts are read through: unsigned integers in
+    // LEB128, names as a length and that many UTF-8 bytes, and a run of
+    // a known size taken whole.
+    class _NAME_CURSOR is
+        _bytes: ubyte[]
+        _pos: int
+
+        init(bytes: ubyte[]) is
+            _bytes = bytes
+            _pos = 0
+        si
+
+        at_end() -> bool => _pos >= _bytes.count
+
+        read_byte() -> ubyte is
+            let byte = _bytes[_pos]
+
+            _pos = _pos + 1
+
+            return byte
+        si
+
+        read_u32() -> int is
+            let result mut = 0
+            let shift mut = 0
+
+            while shift < 35 do
+                let byte = cast int(read_byte())
+
+                result = result | ((byte & 0x7F) << shift)
+
+                if byte & 0x80 == 0 then
+                    return result
+                fi
+
+                shift = shift + 7
+            od
+
+            return result
+        si
+
+        read_name() -> string is
+            let length = read_u32()
+
+            return _text(read_bytes(length))
+        si
+
+        read_bytes(count: int) -> ubyte[] is
+            let result = Collections.LIST[ubyte]()
+            let i mut = 0
+
+            while i < count do
+                result.add(read_byte())
+
+                i = i + 1
+            od
+
+            return result.to_array()
+        si
+
+        _text(bytes: ubyte[]) -> string static is
+            return System.Text.UTF8Encoding().get_string(bytes)
         si
     si
 si

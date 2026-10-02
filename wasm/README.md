@@ -10,8 +10,7 @@ This folder is a plain library. It depends on nothing else in the compiler
 its own, which is why the WebAssembly backend will be able to be built
 against it one piece at a time.
 
-The `.wat` printer is not here yet. The legacy `try`, `catch` and
-`delegate` instructions are not planned at all, and neither are memories
+The legacy `try`, `catch` and `delegate` instructions are not planned at all, and neither are memories
 or data segments - though the two array instructions that name a data
 segment are, since an index into one is written the same way whatever
 holds the segment.
@@ -112,6 +111,31 @@ type the instruction produces; the immediate is the heap type alone, and
 whether the reference can be absent is in the opcode, which is why there
 are four of them rather than one. And `br_on_cast` takes the nullability
 of its two heap types in a flags byte ahead of the label, not in the types.
+
+## The `.wat` printer
+
+`wat_printer.ghul` prints a module as WebAssembly text format, in the
+flat form: one instruction a line, the structured instructions indented
+and closed by the `end` and `else` the binary spells with bytes. Folded
+form was considered and not taken - flat is what the standard tools
+print by default, which is what makes the output comparable against
+them at a glance.
+
+The parts are printed in the order the binary sections have them -
+types, imports, tables, tags, globals, exports, the start function, the
+element segments, and the functions last - which is what keeps the
+printing stable rather than merely correct. A final type with no
+supertypes prints as the plain type definition the text format
+abbreviates it to. Definitions an instruction can reach by index carry
+it as the `(;N;)` comment the standard tools print, and where the
+module carries a name section, its names are used: the module's own
+name after `module`, a function's after `func`, a local's after
+`local`, and a reference to a named function or local reads as the name
+rather than the index.
+
+The printed text is checked by reassembling it with a reference
+assembler and comparing against the bytes the writer produces, the same
+outside-the-suite check the engine run makes.
 
 ## The module matrix
 

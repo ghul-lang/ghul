@@ -1,0 +1,208 @@
+namespace Wasm.UnitTests is
+    use Collections.LIST
+
+    use Wasm.ARRAY_TYPE
+    use Wasm.AbstractHeapType
+    use Wasm.CUSTOM_SECTION
+    use Wasm.ElementMode
+    use Wasm.ELEMENT_SEGMENT
+    use Wasm.ExportKind
+    use Wasm.EXPORT
+    use Wasm.FIELD_TYPE
+    use Wasm.FUNC_TYPE
+    use Wasm.FUNCTION
+    use Wasm.GLOBAL
+    use Wasm.INSTRUCTION
+    use Wasm.I32_CONSTANT
+    use Wasm.LIMITS
+    use Wasm.MODULE
+    use Wasm.NAME_MAP
+    use Wasm.NAME_SECTION
+    use Wasm.NAMED_INDEX
+    use Wasm.NumericType
+    use Wasm.PackedType
+    use Wasm.STRUCT_TYPE
+    use Wasm.TABLE
+    use Wasm.VALUE_TYPE
+    use Wasm.WAT_PRINTER
+    use Wasm.Tests.MODULE_MATRIX
+
+    use TestClass = Microsoft.VisualStudio.TestTools.UnitTesting.TestClassAttribute
+    use Test = Microsoft.VisualStudio.TestTools.UnitTesting.TestMethodAttribute
+    use Assertions
+
+    // The printed text of small modules, compared a snapshot at a time.
+    // The printer's job is to be stable and readable rather than to
+    // exercise every syntactic option, and these are the spellings it
+    // has settled on.
+    @TestClass()
+    class WAT_PRINTER_TESTS is
+        init() is si
+
+        _printed(module: MODULE) -> string is
+            return WAT_PRINTER().print(module)
+        si
+
+        _run(instructions: INSTRUCTION[]) -> Collections.LIST[INSTRUCTION] static is
+            let result = Collections.LIST[INSTRUCTION]()
+
+            for instruction in instructions do
+                result.add(instruction)
+            od
+
+            return result
+        si
+
+        _i32(value: int) -> VALUE_TYPE static is
+            return VALUE_TYPE.of_numeric(NumericType.I32)
+        si
+
+        @Test()
+        print__an_empty_module__is_the_module_alone() is
+            are_equal("(module)\n", _printed(MODULE_MATRIX.by_name("empty")))
+        si
+
+        // Every kind of catch clause, which is the shape the binary
+        // writer's own tests pin: the same four functions, printed.
+        @Test()
+        print__the_exceptions_module__names_every_clause_kind() is
+            are_equal(
+                "(module\n"
+                "  (type (;0;) (func))\n"
+                "  (type (;1;) (func (param i32)))\n"
+                "  (type (;2;) (func (result i32 exnref)))\n"
+                "  (tag (;0;) (type 1))\n"
+                "  (func (;0;) (type 0)\n"
+                "    block (result i32)\n"
+                "      try_table (catch 0 0)\n"
+                "        i32.const 7\n"
+                "        throw 0\n"
+                "      end\n"
+                "      i32.const 0\n"
+                "    end\n"
+                "    drop\n"
+                "  )\n"
+                "  (func (;1;) (type 0)\n"
+                "    block (type 2)\n"
+                "      try_table (catch_ref 0 0)\n"
+                "        i32.const 7\n"
+                "        throw 0\n"
+                "      end\n"
+                "      i32.const 0\n"
+                "      ref.null exn\n"
+                "    end\n"
+                "    drop\n"
+                "    drop\n"
+                "  )\n"
+                "  (func (;2;) (type 0)\n"
+                "    block (result exnref)\n"
+                "      try_table (catch_all_ref 0)\n"
+                "        ref.null exn\n"
+                "        throw_ref\n"
+                "      end\n"
+                "      ref.null exn\n"
+                "    end\n"
+                "    drop\n"
+                "  )\n"
+                "  (func (;3;) (type 0)\n"
+                "    block\n"
+                "      try_table (catch_all 0)\n"
+                "        i32.const 7\n"
+                "        throw 0\n"
+                "      end\n"
+                "    end\n"
+                "  )\n"
+                ")\n",
+                _printed(MODULE_MATRIX.by_name("exceptions")))
+        si
+
+        @Test()
+        print__a_struct_and_an_array__are_the_types_they_hold() is
+            let module = MODULE()
+
+            module.add_type(STRUCT_TYPE([FIELD_TYPE(NumericType.I32, false)]))
+            module.add_type(ARRAY_TYPE(FIELD_TYPE.of_packed(PackedType.I16, true)))
+
+            are_equal(
+                "(module\n"
+                "  (type (;0;) (struct (field i32)))\n"
+                "  (type (;1;) (array (mut i16)))\n"
+                ")\n",
+                _printed(module))
+        si
+
+        @Test()
+        print__the_other_module_fields__are_each_in_their_own_form() is
+            let module = MODULE()
+
+            module.add_type(FUNC_TYPE([], []))
+            module.add_function(FUNCTION(0, [], _run([I32_CONSTANT(0)])))
+            module.add_global(GLOBAL(_i32(0), true, _run([I32_CONSTANT(7)])))
+            module.add_table(TABLE(VALUE_TYPE.of_abstract(AbstractHeapType.FUNC), LIMITS(1)))
+            module.add_export(EXPORT("run", ExportKind.FUNCTION, 0))
+            module.add_element_segment(ELEMENT_SEGMENT.of_functions(
+                ElementMode.ACTIVE, 0, _run([I32_CONSTANT(0)]), [0]))
+            module.set_start(0)
+
+            are_equal(
+                "(module\n"
+                "  (type (;0;) (func))\n"
+                "  (table (;0;) 1 funcref)\n"
+                "  (global (;0;) (mut i32) (i32.const 7))\n"
+                "  (export \"run\" (func 0))\n"
+                "  (start 0)\n"
+                "  (elem (i32.const 0) func 0)\n"
+                "  (func (;0;) (type 0)\n"
+                "    i32.const 0\n"
+                "  )\n"
+                ")\n",
+                _printed(module))
+        si
+
+        // Where the name section names things, the names replace the
+        // indices - on the definitions and on the references to them.
+        @Test()
+        print__a_named_module__uses_the_names_it_was_given() is
+            let module = MODULE()
+
+            module.add_type(FUNC_TYPE([], []))
+            module.add_function(FUNCTION(0, [_i32(0)], _run([])))
+
+            let functions = NAME_MAP()
+
+            functions.add(0, "run")
+
+            let locals = NAME_MAP()
+
+            locals.add(0, "count")
+
+            let names = NAME_SECTION()
+
+            names.with_module_name("example")
+            names.with_functions(functions)
+            names.add_locals(0, locals)
+
+            module.add_custom_section(CUSTOM_SECTION("name", names.bytes()))
+
+            are_equal(
+                "(module $example\n"
+                "  (type (;0;) (func))\n"
+                "  (func $run (type 0) (local $count i32))\n"
+                ")\n",
+                _printed(module))
+        si
+
+        // The matrix as a whole, which is the claim that the printer can
+        // say something about everything the library can build.
+        @Test()
+        print__every_module_in_the_matrix__is_the_text_of_a_module() is
+            for name in MODULE_MATRIX.names() do
+                let text = _printed(MODULE_MATRIX.by_name(name))
+
+                is_true(text.length >= "(module)\n".length)
+                is_true(text.starts_with("(module"))
+                is_true(text.ends_with(")\n"))
+            od
+        si
+    si
+si
