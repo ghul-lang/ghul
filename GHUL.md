@@ -2508,6 +2508,8 @@ let text = await IO.File.read_all_text_async(path, System.Threading.Cancellation
 
 `@IL.name("Name")` sets the name a function, method or property has in the compiled assembly, for a .NET library that finds members by name - Entity Framework Core, for example, looks for an `Id` property and a `DbSet` property named after the table. On a property it also names the accessors `get_Name` and `set_Name`; `@IL.name.read("...")` or `@IL.name.assign("...")` names one accessor on its own. The argument is a single string literal and cannot contain a quote. A type keeps its ghūl name in the compiled assembly, and `@IL.name` written on a class, struct, trait, union or enum is an error. The ghūl name is unchanged, so ghūl code still calls the member by the name it declares:
 
+Five `@IL` pragmas are acted on: `IL.name`, `IL.name.read`, `IL.name.assign`, `IL.output` and `IL.entrypoint`. Any other `IL.` pragma draws an `unknown-pragma` warning, since a misspelled or removed pragma is otherwise acted on as a built-in and silently does nothing:
+
 ```ghul
 class PRODUCT is
     @IL.name("Id")
