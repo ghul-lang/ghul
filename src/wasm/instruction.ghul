@@ -315,8 +315,10 @@ namespace Wasm is
         si
     si
 
-    // An opcode and the heap type a reference is made to, which is how
-    // `ref.null` names what it produces.
+    // An opcode and the heap type it names: what `ref.null` produces, and
+    // what `ref.test` and `ref.cast` test against. Whether the reference
+    // those last two are about can be absent is not in the heap type -
+    // it is in the opcode, which is why there are four of them.
     class HEAP_TYPE_INSTRUCTION: INSTRUCTION is
         _heap_type: HEAP_TYPE
 
@@ -332,43 +334,44 @@ namespace Wasm is
         si
     si
 
-    // An opcode and a reference type, which `ref.test` and `ref.cast`
-    // both take. The four spellings of each differ only in that type's
-    // own encoding, which the value type already decides.
-    class REFERENCE_TYPE_INSTRUCTION: INSTRUCTION is
-        _reference: VALUE_TYPE
-
-        init(opcode: Opcode, reference: VALUE_TYPE) is
-            self.opcode = opcode
-            _reference = reference
-        si
-
-        write(buffer: BYTE_BUFFER) is
-            super.write(buffer)
-
-            _reference.write(buffer)
-        si
-    si
-
-    // `br_on_cast` and `br_on_cast_fail` take a label and the two
-    // reference types that separate: the one tested, and the one left on
-    // the stack.
+    // `br_on_cast` and `br_on_cast_fail` take a pair of heap types and
+    // a label, and the nullability of each of the two goes in a flags
+    // byte ahead of the label rather than in the types themselves. The
+    // low bit is the source's and the next is the target's.
     class CAST_BRANCH_INSTRUCTION: INSTRUCTION is
         label: int
-        source: VALUE_TYPE
-        target: VALUE_TYPE
+        source: HEAP_TYPE
+        source_nullable: bool
+        target: HEAP_TYPE
+        target_nullable: bool
 
-        init(opcode: Opcode, label: int, source: VALUE_TYPE, target: VALUE_TYPE) is
+        init(
+            opcode: Opcode,
+            label: int,
+            source: HEAP_TYPE,
+            source_nullable: bool,
+            target: HEAP_TYPE,
+            target_nullable: bool
+        ) is
             self.opcode = opcode
             self.label = label
             self.source = source
+            self.source_nullable = source_nullable
             self.target = target
+            self.target_nullable = target_nullable
         si
 
         write(buffer: BYTE_BUFFER) is
             super.write(buffer)
 
+            let source_bit = if source_nullable then 0x01 else 0x00 fi
+            let target_bit = if target_nullable then 0x02 else 0x00 fi
+
+            let flags = source_bit + target_bit
+
+            buffer.write_u32(flags)
             buffer.write_u32(label)
+
             source.write(buffer)
             target.write(buffer)
         si
