@@ -38,7 +38,9 @@ namespace Wasm.Tests is
                 "i31-extern",
                 "element",
                 "rec-group",
-                "calls"
+                "calls",
+                "exceptions",
+                "name-section"
             ])
         si
 
@@ -63,6 +65,8 @@ namespace Wasm.Tests is
             if name =~ "element" then return element() fi
             if name =~ "rec-group" then return rec_group() fi
             if name =~ "calls" then return calls() fi
+            if name =~ "exceptions" then return exceptions() fi
+            if name =~ "name-section" then return name_section() fi
 
             throw System.Exception("no module named {name} in the matrix")
         si
@@ -83,6 +87,10 @@ namespace Wasm.Tests is
 
         f64() -> VALUE_TYPE static is
             return VALUE_TYPE.of_numeric(NumericType.F64)
+        si
+
+        exnref() -> VALUE_TYPE static is
+            return VALUE_TYPE.of_abstract(AbstractHeapType.EXN)
         si
 
         // The nullable reference to a heap type, which is the spelling a
@@ -745,10 +753,132 @@ namespace Wasm.Tests is
             return module
         si
 
+        // One function per kind of catch clause, each throwing the one
+        // tag and handling it with the kind it is named for.
+        //
+        // A clause's label counts the instructions around the
+        // `try_table`, not the `try_table` itself: label 0 is the block
+        // enclosing it. The handler that label names takes what the
+        // clause delivers in its results - the payload for `catch`, the
+        // payload and the exception reference for `catch_ref`, the
+        // reference alone for `catch_all_ref`, and nothing for
+        // `catch_all` - which is why the four handler blocks have four
+        // different result types.
+        exceptions() -> MODULE static is
+            let module = MODULE()
+
+            module.add_type(FUNC_TYPE([], []))
+
+            // A tag's signature is its payload alone, which is the
+            // parameters of the type it names and never its results.
+            module.add_type(FUNC_TYPE([i32()], []))
+
+            // The `catch_ref` handler takes two results, which is more
+            // than a block type's value-type spelling can say.
+            module.add_type(FUNC_TYPE([], [i32(), exnref()]))
+
+            module.add_tag(TAG(1))
+
+            module.add_function(FUNCTION(0, [], _seq([
+                BLOCK_INSTRUCTION(Opcode.BLOCK, BLOCK_TYPE.of_value(i32()),
+                    _seq([
+                        TRY_TABLE_INSTRUCTION(BLOCK_TYPE(),
+                            LIST[CATCH_CLAUSE]([
+                                CATCH_CLAUSE(CatchKind.CATCH, 0, 0)
+                            ]),
+                            _seq([
+                                I32_CONSTANT(7),
+                                THROW_INSTRUCTION(0)
+                            ])),
+                        I32_CONSTANT(0)
+                    ])),
+                SIMPLE_INSTRUCTION(Opcode.DROP)
+            ])))
+
+            module.add_function(FUNCTION(0, [], _seq([
+                BLOCK_INSTRUCTION(Opcode.BLOCK, BLOCK_TYPE.of_type_index(2),
+                    _seq([
+                        TRY_TABLE_INSTRUCTION(BLOCK_TYPE(),
+                            LIST[CATCH_CLAUSE]([
+                                CATCH_CLAUSE(CatchKind.CATCH_REF, 0, 0)
+                            ]),
+                            _seq([
+                                I32_CONSTANT(7),
+                                THROW_INSTRUCTION(0)
+                            ])),
+                        I32_CONSTANT(0),
+                        _exn_null()
+                    ])),
+                SIMPLE_INSTRUCTION(Opcode.DROP),
+                SIMPLE_INSTRUCTION(Opcode.DROP)
+            ])))
+
+            module.add_function(FUNCTION(0, [], _seq([
+                BLOCK_INSTRUCTION(Opcode.BLOCK, BLOCK_TYPE.of_value(exnref()),
+                    _seq([
+                        TRY_TABLE_INSTRUCTION(BLOCK_TYPE(),
+                            LIST[CATCH_CLAUSE]([
+                                CATCH_CLAUSE(CatchKind.CATCH_ALL_REF, 0, 0)
+                            ]),
+                            _seq([
+                                _exn_null(),
+                                SIMPLE_INSTRUCTION(Opcode.THROW_REF)
+                            ])),
+                        _exn_null()
+                    ])),
+                SIMPLE_INSTRUCTION(Opcode.DROP)
+            ])))
+
+            module.add_function(FUNCTION(0, [], _seq([
+                BLOCK_INSTRUCTION(Opcode.BLOCK, BLOCK_TYPE(),
+                    _seq([
+                        TRY_TABLE_INSTRUCTION(BLOCK_TYPE(),
+                            LIST[CATCH_CLAUSE]([
+                                CATCH_CLAUSE(CatchKind.CATCH_ALL, 0, 0)
+                            ]),
+                            _seq([
+                                I32_CONSTANT(7),
+                                THROW_INSTRUCTION(0)
+                            ]))
+                    ]))
+            ])))
+
+            return module
+        si
+
+        // The name section, attached to a module whose functions and
+        // locals are worth naming.
+        name_section() -> MODULE static is
+            let module = MODULE()
+
+            module.add_type(FUNC_TYPE([], []))
+
+            module.add_function(FUNCTION(0, [i32()], _seq([])))
+
+            let functions = NAME_MAP()
+            functions.add(0, "run")
+
+            let locals = NAME_MAP()
+            locals.add(0, "count")
+
+            module.add_custom_section(CUSTOM_SECTION(
+                "name", NAME_SECTION()
+                    .with_module_name("example")
+                    .with_functions(functions)
+                    .bytes()))
+
+            return module
+        si
+
         // --- the helpers the bodies above are written with ---
 
         _ref_null_of(type: AbstractHeapType) -> INSTRUCTION static is
             return HEAP_TYPE_INSTRUCTION(Opcode.REF_NULL, HEAP_TYPE.of_abstract(type))
+        si
+
+        _exn_null() -> INSTRUCTION static is
+            return HEAP_TYPE_INSTRUCTION(
+                Opcode.REF_NULL, HEAP_TYPE.of_abstract(AbstractHeapType.EXN))
         si
 
         _ref_func(index: int) -> INSTRUCTION static is

@@ -199,8 +199,17 @@ What the matrix covers, and why each module is there:
   needed.
 - `calls` - a direct call, one through a table and one through a reference
   read out of that table.
-- `typed-block` - a block whose signature takes an operand. Kept as its
-  own entry because the empty-bodied version of it validates the encoding
-  and not the program, which is an easy distinction to lose.
+- `exceptions` - one function per kind of `try_table` clause, each
+  throwing the one tag and handling it with the kind it is named for.
+  The tag's signature is its payload alone, which is the parameters of
+  the type it names and never its results. A clause's label counts the
+  instructions around the `try_table` rather than the `try_table`
+  itself - label 0 is the block enclosing it - and the handler it names
+  takes what the clause delivers in its results: the payload for
+  `catch`, the payload and the exception reference for `catch_ref`, the
+  reference alone for `catch_all_ref`, and nothing for `catch_all`.
+- `typed-block` - a block whose signature takes an operand, which the
+  block's body has to consume: an empty body leaves the operand on the
+  stack at the block's end, and that is not the block's fallthrough.
 
-The last engine run accepted all twenty.
+The last engine run accepted all twenty-two.

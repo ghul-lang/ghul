@@ -1,0 +1,104 @@
+namespace Wasm.UnitTests is
+    use Collections.LIST
+
+    use Wasm.BYTE_BUFFER
+    use Wasm.CATCH_CLAUSE
+    use Wasm.CatchKind
+    use Wasm.TAG
+    use Wasm.TRY_TABLE_INSTRUCTION
+    use Wasm.BLOCK_TYPE
+    use Wasm.INSTRUCTION
+    use Wasm.SIMPLE_INSTRUCTION
+    use Wasm.Opcode
+
+    use TestClass = Microsoft.VisualStudio.TestTools.UnitTesting.TestClassAttribute
+    use Test = Microsoft.VisualStudio.TestTools.UnitTesting.TestMethodAttribute
+    use Assertions
+
+    // A tag is an index and nothing else, so what these pin is the two
+    // places that index is written: the tag section, and the clauses of
+    // a handler.
+    @TestClass()
+    class TAG_TESTS is
+        init() is si
+
+        _encoded(clause: CATCH_CLAUSE) -> ubyte[] is
+            let buffer = BYTE_BUFFER()
+
+            clause.write(buffer)
+
+            return buffer.to_array()
+        si
+
+        _encoded_instruction(instruction: INSTRUCTION) -> ubyte[] is
+            let buffer = BYTE_BUFFER()
+
+            instruction.write(buffer)
+
+            return buffer.to_array()
+        si
+
+        @Test()
+        write__a_tag__is_a_reserved_byte_and_the_type() is
+            let buffer = BYTE_BUFFER()
+
+            TAG(3).write(buffer)
+
+            BYTES.are([0x00, 0x03], buffer.to_array())
+        si
+
+        @Test()
+        write__a_clause_naming_a_tag__is_the_kind_the_tag_and_the_label() is
+            BYTES.are(
+                [0x00, 0x02, 0x05],
+                _encoded(CATCH_CLAUSE(CatchKind.CATCH, 2, 5)))
+        si
+
+        @Test()
+        write__a_clause_carrying_the_exception__is_the_other_kind() is
+            BYTES.are(
+                [0x01, 0x02, 0x05],
+                _encoded(CATCH_CLAUSE(CatchKind.CATCH_REF, 2, 5)))
+        si
+
+        // The two clauses that take every exception name no tag, and the
+        // format writes them without one.
+        @Test()
+        write__a_clause_taking_every_exception__names_no_tag() is
+            BYTES.are([0x02, 0x05], _encoded(CATCH_CLAUSE(CatchKind.CATCH_ALL, 0, 5)))
+        si
+
+        @Test()
+        write__a_clause_taking_every_exception_and_the_reference__names_no_tag() is
+            BYTES.are([0x03, 0x05], _encoded(CATCH_CLAUSE(CatchKind.CATCH_ALL_REF, 0, 5)))
+        si
+
+        @Test()
+        write__a_handler__is_the_block_type_the_clauses_and_the_body() is
+            let clauses = LIST[CATCH_CLAUSE]()
+
+            clauses.add(CATCH_CLAUSE(CatchKind.CATCH, 0, 1))
+            clauses.add(CATCH_CLAUSE(CatchKind.CATCH_ALL_REF, 0, 0))
+
+            let body = LIST[INSTRUCTION]()
+            body.add(SIMPLE_INSTRUCTION(Opcode.NOP))
+
+            BYTES.are(
+                [0x1F, 0x40, 0x02, 0x00, 0x00, 0x01, 0x03, 0x00, 0x01, 0x0B],
+                _encoded_instruction(TRY_TABLE_INSTRUCTION(BLOCK_TYPE(), clauses, body)))
+        si
+
+        // A handler with no clauses catches nothing, and is written with
+        // an empty vector rather than none at all.
+        @Test()
+        write__a_handler_with_no_clauses__is_an_empty_vector() is
+            let body = LIST[INSTRUCTION]()
+            body.add(SIMPLE_INSTRUCTION(Opcode.NOP))
+
+            BYTES.are(
+                [0x1F, 0x40, 0x00, 0x01, 0x0B],
+                _encoded_instruction(TRY_TABLE_INSTRUCTION(
+                    BLOCK_TYPE(), LIST[CATCH_CLAUSE](), body)))
+        si
+    si
+si
