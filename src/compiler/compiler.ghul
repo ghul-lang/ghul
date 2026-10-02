@@ -235,11 +235,26 @@ namespace Compiler is
                         return
                     fi
 
+                    // A build that emits no assembly has no code generation
+                    // to support: `--type-check` on a wasm target is the
+                    // front end doing all it can until there is a backend.
+                    if !is_codegen_supported then
+                        // The whole-build hook runs once, so the error is
+                        // reported once however many files are compiled, and
+                        // the passes before this one have run, so their
+                        // diagnostics are reported alongside it.
+                        container.logger.error(
+                            Source.LOCATION.internal,
+                            "code generation for the wasm target is not supported")
+
+                        return
+                    fi
+
                     container.backend.begin_assembly()
                 si,
                 (source_file) -> bool => generate_il_pass(source_file),
                 () -> void is
-                    if !is_emitting_assembly then
+                    if !is_emitting_assembly \/ !is_codegen_supported then
                         return
                     fi
 
@@ -1828,8 +1843,15 @@ namespace Compiler is
             let flags = container.build_flags in
             flags.want_assembler \/ flags.want_executable
 
+        // Whether the build's target has a backend to generate code for.
+        // Every pass before generate-il runs either way, so a build that
+        // reaches the gate has already reported whatever the front end
+        // found in the sources.
+        is_codegen_supported: bool =>
+            container.build_flags.target == Target.DOTNET
+
         generate_il_pass(source_file: SOURCE_FILE) -> bool is
-            if is_emitting_assembly then
+            if is_emitting_assembly /\ is_codegen_supported then
                 let definition = source_file.definition
 
                 container
