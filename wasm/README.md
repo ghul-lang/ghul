@@ -50,6 +50,14 @@ holds the segment.
 - `export.ghul` — a name, a kind and an index.
 - `function.ghul` — a defined function: its signature index, its locals
   and its body. Also the run-length encoding of locals.
+- `tag.ghul` — an exception and the signature its payload is carried in;
+  the tag section is a list of them, and a tag import enters the same
+  index space ahead of them.
+- `catch.ghul` — which exceptions a `try_table` hands to which label, one
+  clause of a handler.
+- `name_section.ghul` — the module's own name and the names of its
+  functions and locals, as the custom section the format reserves them
+  for.
 - `custom_section.ghul` — a section under a name the specification does
   not define.
 - `module.ghul` — the module itself, and the index spaces its parts
@@ -60,15 +68,15 @@ holds the segment.
 ## The index spaces
 
 A module's imports and its definitions share an index space per kind: an
-imported function comes before every defined one, and the same for tables,
-globals and, later, tags. So an index written into an instruction, an
+imported function comes before every defined one, and the same for
+tables, globals and tags. So an index written into an instruction, an
 export or a start position is not the position in the module's own list
 but a position in that combined space.
 
-`MODULE.add_function` and `MODULE.add_global` hand back the index the
-entry takes in that space rather than its position in the list, so a
-caller building bodies in order does not have to add the imported count
-itself. Nothing is rewritten afterwards: an import added after a body was
+`MODULE.add_function`, `MODULE.add_global` and `MODULE.add_tag` hand
+back the index the entry takes in that space rather than its position in
+the list, so a caller building bodies in order does not have to add the
+imported count itself. Nothing is rewritten afterwards: an import added after a body was
 built changes what that body means, so a module is built imports first.
 
 ## Choices the specification leaves open
@@ -213,6 +221,9 @@ What the matrix covers, and why each module is there:
   takes what the clause delivers in its results: the payload for
   `catch`, the payload and the exception reference for `catch_ref`, the
   reference alone for `catch_all_ref`, and nothing for `catch_all`.
+- `name-section` - the names of the module, its functions and their
+  locals, attached to a module whose functions and locals are worth
+  naming.
 - `typed-block` - a block whose signature takes an operand, which the
   block's body has to consume: an empty body leaves the operand on the
   stack at the block's end, and that is not the block's fallthrough.
