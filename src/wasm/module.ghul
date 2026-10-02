@@ -1,0 +1,149 @@
+namespace Wasm is
+    // A module: its types, what it imports, what it defines, and what it
+    // exports.
+    //
+    // The lists are each the index space of one kind, and an import
+    // enters the space of the kind it brings in before every defined
+    // entry of that kind. The counts a caller needs to write an index
+    // are therefore the sizes of both lists, which is what
+    // `function_count` and `global_count` add up.
+    //
+    // Indices are left to the caller. Adding a function or a global
+    // hands back the index it took, which is enough to build the
+    // instruction bodies in order, but nothing is rewritten afterwards:
+    // an import added after a body was built changes what that body
+    // means.
+    class MODULE is
+        _types: Collections.LIST[FUNC_TYPE]
+        _imports: Collections.LIST[IMPORT]
+        _functions: Collections.LIST[FUNCTION]
+        _tables: Collections.LIST[TABLE]
+        _globals: Collections.LIST[GLOBAL]
+        _exports: Collections.LIST[EXPORT]
+        _custom_sections: Collections.LIST[CUSTOM_SECTION]
+
+        _start: int?
+
+        init() is
+            _types = Collections.LIST[FUNC_TYPE]()
+            _imports = Collections.LIST[IMPORT]()
+            _functions = Collections.LIST[FUNCTION]()
+            _tables = Collections.LIST[TABLE]()
+            _globals = Collections.LIST[GLOBAL]()
+            _exports = Collections.LIST[EXPORT]()
+            _custom_sections = Collections.LIST[CUSTOM_SECTION]()
+        si
+
+        // The index a signature already written at describes, or the one
+        // it is written at now. Two signatures that take and return the
+        // same types are one entry, so a module that reaches for the
+        // same shape twice gets the same index back.
+        add_type(type: FUNC_TYPE) -> int is
+            let i mut = 0
+
+            while i < _types.count do
+                if _types[i].matches(type) then
+                    return i
+                fi
+
+                i = i + 1
+            od
+
+            let index = _types.count
+
+            _types.add(type)
+
+            return index
+        si
+
+        types() -> Collections.List[FUNC_TYPE] => _types
+
+        add_import(imported: IMPORT) -> int is
+            let index = _imports.count
+
+            _imports.add(imported)
+
+            return index
+        si
+
+        imports() -> Collections.List[IMPORT] => _imports
+
+        // The index the function takes in the function index space,
+        // which counts the imported functions ahead of the defined ones.
+        add_function(function: FUNCTION) -> int is
+            let index = _functions.count
+
+            _functions.add(function)
+
+            return _imports_of(ImportKind.FUNCTION) + index
+        si
+
+        functions() -> Collections.List[FUNCTION] => _functions
+
+        // The index the table takes in the table index space, which
+        // counts the imported tables ahead of the defined ones.
+        add_table(table: TABLE) -> int is
+            let index = _tables.count
+
+            _tables.add(table)
+
+            return _imports_of(ImportKind.TABLE) + index
+        si
+
+        tables() -> Collections.List[TABLE] => _tables
+
+        add_global(global: GLOBAL) -> int is
+            let index = _globals.count
+
+            _globals.add(global)
+
+            return _imports_of(ImportKind.GLOBAL) + index
+        si
+
+        globals() -> Collections.List[GLOBAL] => _globals
+
+        add_export(exported: EXPORT) is
+            _exports.add(exported)
+        si
+
+        exports() -> Collections.List[EXPORT] => _exports
+
+        // The function the module starts at, or nothing when it names
+        // none.
+        start() -> int? => _start
+
+        set_start(index: int) is
+            _start = index
+        si
+
+        add_custom_section(section: CUSTOM_SECTION) is
+            _custom_sections.add(section)
+        si
+
+        custom_sections() -> Collections.List[CUSTOM_SECTION] => _custom_sections
+
+        function_count() -> int is
+            return _imports_of(ImportKind.FUNCTION) + _functions.count
+        si
+
+        global_count() -> int is
+            return _imports_of(ImportKind.GLOBAL) + _globals.count
+        si
+
+        table_count() -> int is
+            return _imports_of(ImportKind.TABLE) + _tables.count
+        si
+
+        _imports_of(kind: ImportKind) -> int is
+            let count mut = 0
+
+            for imported in _imports do
+                if imported.kind == kind then
+                    count = count + 1
+                fi
+            od
+
+            return count
+        si
+    si
+si

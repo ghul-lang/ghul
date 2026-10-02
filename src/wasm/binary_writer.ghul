@@ -1,0 +1,183 @@
+namespace Wasm is
+    // Writes a module as the binary format.
+    //
+    // The sections go out in the order the specification fixes, which
+    // is not the order they are most naturally built in: the code
+    // section is last of all the ones this writer knows, behind the
+    // start section, even though the bodies are what the module is for.
+    //
+    // A section with nothing in it is left out rather than written
+    // empty, which keeps the bytes a small module has down to the ones
+    // it means.
+    class BINARY_WRITER is
+        init() is si
+
+        write(module: MODULE) -> ubyte[] is
+            let buffer = BYTE_BUFFER()
+
+            _write_preamble(buffer)
+            _write_type_section(buffer, module)
+            _write_import_section(buffer, module)
+            _write_function_section(buffer, module)
+            _write_table_section(buffer, module)
+            _write_global_section(buffer, module)
+            _write_export_section(buffer, module)
+            _write_start_section(buffer, module)
+            _write_code_section(buffer, module)
+
+            _write_custom_sections(buffer, module)
+
+            return buffer.to_array()
+        si
+
+        // The magic number and the format version, which every module
+        // opens with and which are the same bytes for every version so
+        // far.
+        _write_preamble(buffer: BYTE_BUFFER) is
+            buffer.write_bytes([0x00ub, 0x61ub, 0x73ub, 0x6Dub])
+            buffer.write_bytes([0x01ub, 0x00ub, 0x00ub, 0x00ub])
+        si
+
+        _write_type_section(buffer: BYTE_BUFFER, module: MODULE) is
+            let types = module.types()
+
+            if types.count > 0 then
+                let content = BYTE_BUFFER()
+
+                content.write_length(types.count)
+
+                for type in types do
+                    type.write(content)
+                od
+
+                _write_section(buffer, 0x01ub, content)
+            fi
+        si
+
+        _write_import_section(buffer: BYTE_BUFFER, module: MODULE) is
+            let imports = module.imports()
+
+            if imports.count > 0 then
+                let content = BYTE_BUFFER()
+
+                content.write_length(imports.count)
+
+                for imported in imports do
+                    imported.write(content)
+                od
+
+                _write_section(buffer, 0x02ub, content)
+            fi
+        si
+
+        // Which signature each defined function has. It is a vector of
+        // type indices rather than of signatures, and carries no body.
+        _write_function_section(buffer: BYTE_BUFFER, module: MODULE) is
+            let functions = module.functions()
+
+            if functions.count > 0 then
+                let content = BYTE_BUFFER()
+
+                content.write_length(functions.count)
+
+                for function in functions do
+                    content.write_u32(function.type_index())
+                od
+
+                _write_section(buffer, 0x03ub, content)
+            fi
+        si
+
+        _write_table_section(buffer: BYTE_BUFFER, module: MODULE) is
+            let tables = module.tables()
+
+            if tables.count > 0 then
+                let content = BYTE_BUFFER()
+
+                content.write_length(tables.count)
+
+                for table in tables do
+                    table.write(content)
+                od
+
+                _write_section(buffer, 0x04ub, content)
+            fi
+        si
+
+        _write_global_section(buffer: BYTE_BUFFER, module: MODULE) is
+            let globals = module.globals()
+
+            if globals.count > 0 then
+                let content = BYTE_BUFFER()
+
+                content.write_length(globals.count)
+
+                for global in globals do
+                    global.write(content)
+                od
+
+                _write_section(buffer, 0x06ub, content)
+            fi
+        si
+
+        _write_export_section(buffer: BYTE_BUFFER, module: MODULE) is
+            let exports = module.exports()
+
+            if exports.count > 0 then
+                let content = BYTE_BUFFER()
+
+                content.write_length(exports.count)
+
+                for exported in exports do
+                    exported.write(content)
+                od
+
+                _write_section(buffer, 0x07ub, content)
+            fi
+        si
+
+        _write_start_section(buffer: BYTE_BUFFER, module: MODULE) is
+            if module.start()? then
+                let content = BYTE_BUFFER()
+
+                content.write_u32(module.start()!)
+
+                _write_section(buffer, 0x08ub, content)
+            fi
+        si
+
+        _write_code_section(buffer: BYTE_BUFFER, module: MODULE) is
+            let functions = module.functions()
+
+            if functions.count > 0 then
+                let content = BYTE_BUFFER()
+
+                content.write_length(functions.count)
+
+                for function in functions do
+                    function.write(content)
+                od
+
+                _write_section(buffer, 0x0Aub, content)
+            fi
+        si
+
+        _write_custom_sections(buffer: BYTE_BUFFER, module: MODULE) is
+            for section in module.custom_sections() do
+                let content = BYTE_BUFFER()
+
+                section.write(content)
+
+                _write_section(buffer, 0x00ub, content)
+            od
+        si
+
+        // A section is its identifier, the length of everything after
+        // it, and that everything.
+        _write_section(buffer: BYTE_BUFFER, id: ubyte, content: BYTE_BUFFER) is
+            buffer.write_byte(id)
+            buffer.write_length(content.length())
+            buffer.write_bytes(content.to_array())
+        si
+    si
+si

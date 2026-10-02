@@ -1,0 +1,257 @@
+namespace Wasm is
+    // One instruction of a function body or a constant expression.
+    //
+    // An instruction is an opcode and whatever immediate that opcode
+    // takes, so the classes differ by immediate rather than by meaning:
+    // most are the opcode alone, and the rest are an opcode and one
+    // index, an opcode and a literal, or a structured body.
+    //
+    // Writing an instruction is writing its opcode, which every one of
+    // them starts with. `write` does that, and a subclass with an
+    // immediate calls it and writes the immediate after.
+    class INSTRUCTION abstract is
+        opcode: Opcode
+
+        write(buffer: BYTE_BUFFER) is
+            write_opcode(buffer, opcode)
+        si
+    si
+
+    // An opcode with nothing behind it, which is the large majority of
+    // them.
+    class SIMPLE_INSTRUCTION: INSTRUCTION is
+        init(opcode: Opcode) is
+            self.opcode = opcode
+        si
+    si
+
+    // An opcode and one index: a local, a global, a label or a function.
+    class INDEX_INSTRUCTION: INSTRUCTION is
+        index: int
+
+        init(opcode: Opcode, index: int) is
+            self.opcode = opcode
+            self.index = index
+        si
+
+        write(buffer: BYTE_BUFFER) is
+            super.write(buffer)
+
+            buffer.write_u32(index)
+        si
+    si
+
+    // A constant of one of the four types that carry a literal.
+    class CONSTANT_INSTRUCTION: INSTRUCTION is
+        init(opcode: Opcode) is
+            self.opcode = opcode
+        si
+    si
+
+    class I32_CONSTANT: CONSTANT_INSTRUCTION is
+        value: int
+
+        init(value: int) is
+            super.init(Opcode.I32_CONST)
+            self.value = value
+        si
+
+        write(buffer: BYTE_BUFFER) is
+            super.write(buffer)
+
+            buffer.write_i32(value)
+        si
+    si
+
+    class I64_CONSTANT: CONSTANT_INSTRUCTION is
+        value: long
+
+        init(value: long) is
+            super.init(Opcode.I64_CONST)
+            self.value = value
+        si
+
+        write(buffer: BYTE_BUFFER) is
+            super.write(buffer)
+
+            buffer.write_i64(value)
+        si
+    si
+
+    class F32_CONSTANT: CONSTANT_INSTRUCTION is
+        value: single
+
+        init(value: single) is
+            super.init(Opcode.F32_CONST)
+            self.value = value
+        si
+
+        write(buffer: BYTE_BUFFER) is
+            super.write(buffer)
+
+            buffer.write_f32(value)
+        si
+    si
+
+    class F64_CONSTANT: CONSTANT_INSTRUCTION is
+        value: double
+
+        init(value: double) is
+            super.init(Opcode.F64_CONST)
+            self.value = value
+        si
+
+        write(buffer: BYTE_BUFFER) is
+            super.write(buffer)
+
+            buffer.write_f64(value)
+        si
+    si
+
+    // `br_table` takes every label a branch can take, in order, and the
+    // one it takes when none of them matched. The vector is the labels
+    // alone; the default follows it rather than being counted in it.
+    class BR_TABLE_INSTRUCTION: INSTRUCTION is
+        _labels: int[]
+        _default: int
+
+        init(labels: int[], default_label: int) is
+            self.opcode = Opcode.BR_TABLE
+            _labels = labels
+            _default = default_label
+        si
+
+        write(buffer: BYTE_BUFFER) is
+            super.write(buffer)
+
+            buffer.write_length(_labels.count)
+
+            for label in _labels do
+                buffer.write_u32(label)
+            od
+
+            buffer.write_u32(_default)
+        si
+    si
+
+    // The type the callee has to have, and the table it is read from.
+    // The table index is written even when it is zero, which is what
+    // makes the instruction longer than the module it is in.
+    class CALL_INDIRECT_INSTRUCTION: INSTRUCTION is
+        type_index: int
+        table_index: int
+
+        init(type_index: int, table_index: int) is
+            self.opcode = Opcode.CALL_INDIRECT
+            self.type_index = type_index
+            self.table_index = table_index
+        si
+
+        write(buffer: BYTE_BUFFER) is
+            super.write(buffer)
+
+            buffer.write_u32(type_index)
+            buffer.write_u32(table_index)
+        si
+    si
+
+    // `select` picks one of two values of a type it infers from the
+    // values themselves, which has to be a numeric or vector type. The
+    // typed form says what the type is, and is what lets `select` work
+    // over a reference type.
+    class TYPED_SELECT_INSTRUCTION: INSTRUCTION is
+        _type: ValueType
+
+        init(type: ValueType) is
+            self.opcode = Opcode.SELECT_T
+            _type = type
+        si
+
+        write(buffer: BYTE_BUFFER) is
+            super.write(buffer)
+
+            buffer.write_length(1)
+            write_value_type(buffer, _type)
+        si
+    si
+
+    // A structured block. The body is written as its own run of
+    // instructions between the block type and the `end` that closes it.
+    class BLOCK_INSTRUCTION: INSTRUCTION is
+        _block_type: BLOCK_TYPE
+        _body: Collections.List[INSTRUCTION]
+
+        init(
+            opcode: Opcode,
+            block_type: BLOCK_TYPE,
+            body: Collections.List[INSTRUCTION]
+        ) is
+            self.opcode = opcode
+            _block_type = block_type
+            _body = body
+        si
+
+        write(buffer: BYTE_BUFFER) is
+            super.write(buffer)
+
+            _block_type.write(buffer)
+
+            write_instructions(buffer, _body)
+            buffer.write_byte(cast ubyte(Opcode.END))
+        si
+    si
+
+    // `if` has two bodies rather than one, since the `else` it may carry
+    // sits between them and a block with no else has none to write.
+    class IF_INSTRUCTION: INSTRUCTION is
+        _block_type: BLOCK_TYPE
+        _then: Collections.List[INSTRUCTION]
+        _otherwise: Collections.List[INSTRUCTION]
+
+        init(
+            block_type: BLOCK_TYPE,
+            then_branch: Collections.List[INSTRUCTION],
+            else_branch: Collections.List[INSTRUCTION]
+        ) is
+            self.opcode = Opcode.IF
+            _block_type = block_type
+            _then = then_branch
+            _otherwise = else_branch
+        si
+
+        write(buffer: BYTE_BUFFER) is
+            super.write(buffer)
+
+            _block_type.write(buffer)
+
+            write_instructions(buffer, _then)
+
+            if _otherwise.count > 0 then
+                buffer.write_byte(cast ubyte(Opcode.ELSE))
+
+                write_instructions(buffer, _otherwise)
+            fi
+
+            buffer.write_byte(cast ubyte(Opcode.END))
+        si
+    si
+
+    // A run of instructions, which is a function body, a block body or
+    // the initialiser of a global.
+    write_instructions(buffer: BYTE_BUFFER, instructions: Collections.Iterable[INSTRUCTION]) is
+        for instruction in instructions do
+            instruction.write(buffer)
+        od
+    si
+
+    // An opcode in the `0xFC00` range is two bytes, a prefix and the
+    // member's own value after it.
+    write_opcode(buffer: BYTE_BUFFER, opcode: Opcode) is
+        if opcode >= Opcode.I32_TRUNC_SAT_F32_S then
+            buffer.write_byte(0xFCub)
+            buffer.write_u32(cast int(opcode) - 0xFC00)
+        else
+            buffer.write_byte(cast ubyte(opcode))
+        fi
+    si
+si

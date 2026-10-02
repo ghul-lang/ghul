@@ -1,0 +1,89 @@
+namespace Wasm.UnitTests is
+    use Collections.LIST
+
+    use Wasm.BYTE_BUFFER
+    use Wasm.FUNC_TYPE
+    use Wasm.FUNCTION
+    use Wasm.ValueType
+
+    use TestClass = Microsoft.VisualStudio.TestTools.UnitTesting.TestClassAttribute
+    use Test = Microsoft.VisualStudio.TestTools.UnitTesting.TestMethodAttribute
+
+    // Locals are written as runs of one type rather than one type each,
+    // which is the only part of a code entry where the bytes are not a
+    // direct rendering of what the model holds.
+    @TestClass()
+    class FUNCTION_TESTS is
+        init() is si
+
+        _encoded_locals(locals: ValueType[]) -> ubyte[] is
+            let buffer = BYTE_BUFFER()
+
+            Wasm.write_locals(buffer, locals)
+
+            return buffer.to_array()
+        si
+
+        _encoded(function: FUNCTION) -> ubyte[] is
+            let buffer = BYTE_BUFFER()
+
+            function.write(buffer)
+
+            return buffer.to_array()
+        si
+
+        @Test()
+        locals__none__is_a_zero_count() is
+            BYTES.are([0x00], _encoded_locals([]))
+        si
+
+        @Test()
+        locals__one__is_one_count_one_run() is
+            BYTES.are([0x01, 0x01, 0x7F], _encoded_locals([ValueType.I32]))
+        si
+
+        @Test()
+        locals__three_of_a_kind__is_one_run_of_three() is
+            BYTES.are(
+                [0x01, 0x03, 0x7F],
+                _encoded_locals([ValueType.I32, ValueType.I32, ValueType.I32]))
+        si
+
+        @Test()
+        locals__of_different_kinds__is_one_run_each() is
+            BYTES.are(
+                [0x03, 0x01, 0x7F, 0x01, 0x7E, 0x01, 0x7F],
+                _encoded_locals([ValueType.I32, ValueType.I64, ValueType.I32]))
+        si
+
+        // A run is counted wherever it starts, not only at the first
+        // local, so a run of two after a different kind is its own entry.
+        @Test()
+        locals__a_run_after_another_kind__is_counted_separately() is
+            BYTES.are(
+                [0x02, 0x01, 0x7E, 0x02, 0x7F],
+                _encoded_locals([
+                    ValueType.I64, ValueType.I32, ValueType.I32]))
+        si
+
+        // A code entry is its own length, and the length counts the
+        // locals and the body but not itself.
+        @Test()
+        write__empty_body__is_a_zero_local_count_and_an_end() is
+            BYTES.are(
+                [0x02, 0x00, 0x0B],
+                _encoded(FUNCTION(0, [], LIST[Wasm.INSTRUCTION]())))
+        si
+
+        @Test()
+        write__a_body__has_its_length_first() is
+            BYTES.are(
+                [0x05, 0x00, 0x41, 0x01, 0x1A, 0x0B],
+                _encoded(FUNCTION(
+                    0,
+                    [],
+                    LIST[Wasm.INSTRUCTION](
+                        [I32_CONSTANT(1), SIMPLE_INSTRUCTION(Opcode.DROP)]))))
+        si
+    si
+si

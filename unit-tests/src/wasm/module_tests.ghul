@@ -1,0 +1,229 @@
+namespace Wasm.UnitTests is
+    use Collections.LIST
+
+    use Wasm.BINARY_WRITER
+    use Wasm.FUNC_TYPE
+    use Wasm.FUNCTION
+    use Wasm.GLOBAL
+    use Wasm.GLOBAL_IMPORT
+    use Wasm.INSTRUCTION
+    use Wasm.LIMITS
+    use Wasm.MODULE
+    use Wasm.TABLE
+    use Wasm.TABLE_IMPORT
+    use Wasm.ValueType
+    use Wasm.ExportKind
+
+    use TestClass = Microsoft.VisualStudio.TestTools.UnitTesting.TestClassAttribute
+    use Test = Microsoft.VisualStudio.TestTools.UnitTesting.TestMethodAttribute
+    use Assertions
+
+    // Whole modules, pinned byte for byte. A module whose bytes are
+    // wrong in a way no single encoding test would show up is exactly
+    // what these are for: the sections have to come out in the order the
+    // specification fixes, and every length has to count what follows
+    // it.
+    @TestClass()
+    class MODULE_TESTS is
+        init() is si
+
+        _new_module() -> MODULE is
+            return MODULE()
+        si
+
+        _body(instructions: INSTRUCTION[]) -> LIST[INSTRUCTION] is
+            let result = LIST[INSTRUCTION]()
+
+            for instruction in instructions do
+                result.add(instruction)
+            od
+
+            return result
+        si
+
+        @Test()
+        write__a_module_with_nothing_in_it__is_the_preamble_alone() is
+            BYTES.are(
+                [0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00],
+                BINARY_WRITER().write(_new_module()))
+        si
+
+        // A section with nothing in it is left out rather than written
+        // with a zero length, so an empty module is eight bytes.
+        @Test()
+        write__an_empty_section__is_not_written_at_all() is
+            are_equal(8, BINARY_WRITER().write(_new_module()).count)
+        si
+
+        @Test()
+        write__a_start_function__is_the_sections_in_specification_order() is
+            let module = _new_module()
+
+            module.add_type(FUNC_TYPE([], []))
+
+            module.add_function(FUNCTION(
+                0,
+                [],
+                _body([SIMPLE_INSTRUCTION(Opcode.NOP)])))
+
+            module.add_export(EXPORT("run", ExportKind.FUNCTION, 0))
+            module.set_start(0)
+
+            BYTES.are(
+                [
+                    0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00,
+                    // type: one entry, no parameters, no results
+                    0x01, 0x04, 0x01, 0x60, 0x00, 0x00,
+                    // function: one entry, of type zero
+                    0x03, 0x02, 0x01, 0x00,
+                    // export: one entry named run, a function, index zero
+                    0x07, 0x07, 0x01, 0x03, 0x72, 0x75, 0x6E, 0x00, 0x00,
+                    // start: function zero
+                    0x08, 0x01, 0x00,
+                    // code: one entry, whose own length is three -
+                    // no locals, a nop and the end
+                    0x0A, 0x05, 0x01, 0x03, 0x00, 0x01, 0x0B
+                ],
+                BINARY_WRITER().write(module))
+        si
+
+        @Test()
+        write__imports_a_table_and_a_global__writes_each_section() is
+            let module = _new_module()
+
+            module.add_type(FUNC_TYPE([], []))
+            module.add_type(FUNC_TYPE([ValueType.I32], [ValueType.I32]))
+
+            module.add_import(FUNCTION_IMPORT("env", "f", 1))
+            module.add_table(TABLE(ValueType.FUNCREF, LIMITS(1)))
+
+            module.add_global(GLOBAL(
+                ValueType.I32,
+                true,
+                _body([I32_CONSTANT(7)])))
+
+            module.add_export(EXPORT("g", ExportKind.GLOBAL, 0))
+            module.add_export(EXPORT("t", ExportKind.TABLE, 0))
+
+            module.add_function(FUNCTION(
+                0,
+                [ValueType.I32, ValueType.I32],
+                _body([
+                    INDEX_INSTRUCTION(Opcode.LOCAL_GET, 0),
+                    INDEX_INSTRUCTION(Opcode.CALL, 0),
+                    SIMPLE_INSTRUCTION(Opcode.DROP)
+                ])))
+
+            module.set_start(1)
+
+            BYTES.are(
+                [
+                    0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00,
+                    // type: two entries
+                    0x01, 0x09, 0x02, 0x60, 0x00, 0x00, 0x60, 0x01, 0x7F, 0x01, 0x7F,
+                    // import: one entry, env.f, a function of type one
+                    0x02, 0x09, 0x01, 0x03, 0x65, 0x6E, 0x76, 0x01, 0x66, 0x00, 0x01,
+                    // function: one entry, of type zero
+                    0x03, 0x02, 0x01, 0x00,
+                    // table: one entry, funcref, no maximum, minimum one
+                    0x04, 0x04, 0x01, 0x70, 0x00, 0x01,
+                    // global: one entry, a mutable i32 set to seven
+                    0x06, 0x06, 0x01, 0x7F, 0x01, 0x41, 0x07, 0x0B,
+                    // export: g as a global, t as a table
+                    0x07, 0x09, 0x02, 0x01, 0x67, 0x03, 0x00, 0x01, 0x74, 0x01, 0x00,
+                    // start: the defined function, which is index one
+                    0x08, 0x01, 0x01,
+                    // code: one entry, whose own length is nine
+                    0x0A, 0x0B, 0x01, 0x09, 0x01, 0x02, 0x7F,
+                    0x20, 0x00, 0x10, 0x00, 0x1A, 0x0B
+                ],
+                BINARY_WRITER().write(module))
+        si
+
+        @Test()
+        add_type__the_same_shape_twice__is_one_entry() is
+            let module = _new_module()
+
+            module.add_type(FUNC_TYPE([ValueType.I32], [ValueType.I32]))
+
+            are_equal(0, module.add_type(FUNC_TYPE([ValueType.I32], [ValueType.I32])))
+            are_equal(1, module.types().count)
+        si
+
+        @Test()
+        add_type__a_different_shape__is_a_new_entry() is
+            let module = _new_module()
+
+            module.add_type(FUNC_TYPE([ValueType.I32], []))
+            module.add_type(FUNC_TYPE([ValueType.I64], []))
+
+            are_equal(1, module.add_type(FUNC_TYPE([ValueType.I64], [])))
+            are_equal(2, module.types().count)
+        si
+
+        @Test()
+        add_type__the_arity_differing__is_a_new_entry() is
+            let module = _new_module()
+
+            module.add_type(FUNC_TYPE([], []))
+
+            are_equal(1, module.add_type(FUNC_TYPE([ValueType.I32], [])))
+            are_equal(2, module.add_type(FUNC_TYPE(
+                [ValueType.I32, ValueType.I64], [])))
+            are_equal(3, module.types().count)
+        si
+
+        @Test()
+        add_type__the_result_types_differing__is_a_new_entry() is
+            let module = _new_module()
+
+            module.add_type(FUNC_TYPE([], [ValueType.I32]))
+            module.add_type(FUNC_TYPE([], [ValueType.I64]))
+
+            are_equal(1, module.add_type(FUNC_TYPE([], [ValueType.I64])))
+        si
+
+        // An imported function comes before every defined one, so the
+        // index a defined function takes counts it.
+        @Test()
+        add_function__with_an_imported_function__is_its_index_after_the_import() is
+            let module = _new_module()
+
+            module.add_type(FUNC_TYPE([], []))
+            module.add_import(FUNCTION_IMPORT("env", "f", 0))
+
+            are_equal(1, module.add_function(FUNCTION(0, [], _body([]))))
+            are_equal(2, module.function_count())
+        si
+
+        // A table shares its index space the way a function does, so a
+        // `call_indirect` naming table one does not read the import.
+        @Test()
+        add_table__with_an_imported_table__is_its_index_after_the_import() is
+            let module = _new_module()
+
+            module.add_import(TABLE_IMPORT(
+                "env", "t", TABLE(ValueType.FUNCREF, LIMITS(1))))
+
+            are_equal(1, module.add_table(TABLE(ValueType.FUNCREF, LIMITS(2))))
+            are_equal(2, module.table_count())
+        si
+
+        @Test()
+        add_table__with_no_imports__is_its_own_index() is
+            let module = _new_module()
+
+            are_equal(0, module.add_table(TABLE(ValueType.FUNCREF, LIMITS(1))))
+            are_equal(1, module.table_count())
+        si
+
+        @Test()
+        add_function__with_no_imports__is_its_own_index() is
+            let module = _new_module()
+
+            module.add_type(FUNC_TYPE([], []))
+
+            are_equal(0, module.add_function(FUNCTION(0, [], _body([]))))
+        si
+    si
+si

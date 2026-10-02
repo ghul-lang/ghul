@@ -1,0 +1,118 @@
+namespace Wasm is
+    use System.BitConverter
+
+    // The bytes a module is assembled in, and the primitive encodings
+    // the specification defines in terms of them.
+    //
+    // A section's length is written before its contents, so writing one
+    // means encoding its contents into a buffer of their own and
+    // copying those bytes in behind the length. `append` is how.
+    class BYTE_BUFFER is
+        _bytes: Collections.LIST[ubyte]
+
+        init() is
+            _bytes = Collections.LIST[ubyte]()
+        si
+
+        length() -> int => _bytes.count
+
+        write_byte(value: ubyte) is
+            _bytes.add(value)
+        si
+
+        write_bytes(values: ubyte[]) is
+            for value in values do
+                _bytes.add(value)
+            od
+        si
+
+        append(other: BYTE_BUFFER) is
+            _bytes.add_range(other._bytes)
+        si
+
+        to_array() -> ubyte[] => _bytes.to_array()
+
+        // The unsigned LEB128 encoding of a 32-bit or 64-bit value. A
+        // negative argument is the whole width's bit pattern rather than
+        // an error, which is what a caller reading a 32-bit index out of
+        // a 64-bit register wants.
+        write_u32(value: int) is
+            _write_unsigned(cast long(value) & 0xFFFFFFFFL)
+        si
+
+        write_u64(value: long) is
+            _write_unsigned(value)
+        si
+
+        // The signed LEB128 encoding, where the sign bit of the last
+        // septet has to agree with the value's, which is what lets the
+        // encoding stop there.
+        write_i32(value: int) is
+            write_i64(cast long(value))
+        si
+
+        write_i64(value: long) is
+            let remaining mut = value
+
+            while true do
+                let septet = cast int(remaining & 0x7FL)
+
+                remaining = remaining >> 7
+
+                if remaining == 0L /\ (septet & 0x40) == 0 then
+                    write_byte(cast ubyte(septet))
+                    return
+                elif remaining == -1L /\ (septet & 0x40) != 0 then
+                    write_byte(cast ubyte(septet))
+                    return
+                fi
+
+                write_byte(cast ubyte(septet | 0x80))
+            od
+        si
+
+        // A float is its IEEE 754 bits, little-endian, and not an
+        // integer encoding of them.
+        write_f32(value: single) is
+            _write_bits(cast long(BitConverter.single_to_int32_bits(value)), 4)
+        si
+
+        write_f64(value: double) is
+            _write_bits(BitConverter.double_to_int64_bits(value), 8)
+        si
+
+        // A name is its UTF-8 encoding behind its byte count, and the
+        // byte count is not its character count.
+        write_name(value: string) is
+            let bytes = System.Text.Encoding.utf8.get_bytes(value)
+
+            write_u32(bytes.count)
+            write_bytes(bytes)
+        si
+
+        // A vector is its element count followed by its elements.
+        write_length(count: int) is
+            write_u32(count)
+        si
+
+        _write_unsigned(value: long) is
+            let remaining mut = value
+
+            while (remaining >>> 7) != 0L do
+                write_byte(cast ubyte((remaining & 0x7FL) | 0x80L))
+                remaining = remaining >>> 7
+            od
+
+            write_byte(cast ubyte(remaining & 0x7FL))
+        si
+
+        _write_bits(bits: long, count: int) is
+            let remaining mut = bits
+
+            for i in 1::count do
+                write_byte(cast ubyte(remaining & 0xFFL))
+                remaining = remaining >> 8
+            od
+        si
+    si
+si

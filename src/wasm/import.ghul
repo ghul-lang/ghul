@@ -1,0 +1,90 @@
+namespace Wasm is
+    // What kind of thing an import brings in, which is the byte the
+    // specification encodes the kind as.
+    enum ImportKind is
+        FUNCTION = 0x00,
+        TABLE = 0x01,
+        MEMORY = 0x02,
+        GLOBAL = 0x03,
+        TAG = 0x04
+    si
+
+    // An import: a module and a name in it, what kind of thing is named,
+    // and the descriptor that kind calls for.
+    //
+    // An imported function, table or global comes before every defined
+    // one of its kind in that kind's index space, so an index a caller
+    // writes has to count them. The module owns both lists.
+    //
+    // Writing the module, the name and the kind is the same for every
+    // import, and only the descriptor after them differs.
+    class IMPORT abstract is
+        module: string
+        name: string
+        kind: ImportKind
+
+        init(module: string, name: string, kind: ImportKind) is
+            self.module = module
+            self.name = name
+            self.kind = kind
+        si
+
+        write(buffer: BYTE_BUFFER) is
+            buffer.write_name(module)
+            buffer.write_name(name)
+            buffer.write_byte(cast ubyte(kind))
+        si
+    si
+
+    class FUNCTION_IMPORT: IMPORT is
+        type_index: int
+
+        init(module: string, name: string, type_index: int) is
+            super.init(module, name, ImportKind.FUNCTION)
+            self.type_index = type_index
+        si
+
+        write(buffer: BYTE_BUFFER) is
+            super.write(buffer)
+
+            buffer.write_u32(type_index)
+        si
+    si
+
+    class TABLE_IMPORT: IMPORT is
+        table: TABLE
+
+        init(module: string, name: string, table: TABLE) is
+            super.init(module, name, ImportKind.TABLE)
+            self.table = table
+        si
+
+        write(buffer: BYTE_BUFFER) is
+            super.write(buffer)
+
+            table.write(buffer)
+        si
+    si
+
+    // A global's descriptor is its type and whether it can be assigned,
+    // which is all of it: an imported global is whatever the exporting
+    // module already holds, so there is no initialiser here.
+    class GLOBAL_IMPORT: IMPORT is
+        value_type: ValueType
+        is_mutable: bool
+
+        init(module: string, name: string, value_type: ValueType, is_mutable: bool) is
+            super.init(module, name, ImportKind.GLOBAL)
+            self.value_type = value_type
+            self.is_mutable = is_mutable
+        si
+
+        write(buffer: BYTE_BUFFER) is
+            super.write(buffer)
+
+            write_value_type(buffer, value_type)
+
+            buffer.write_byte(if is_mutable then 0x01ub else 0x00ub fi)
+        si
+    si
+si
