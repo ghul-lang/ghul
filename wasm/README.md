@@ -149,15 +149,20 @@ remembering to write a module for it.
 
 `tests/matrix_tests.ghul` writes every module of the matrix and checks the
 preamble, which is what the suite can do on its own. Whether the bytes are
-ones an engine accepts is checked while the tests are written, by handing
-each module's bytes to Node's `WebAssembly.validate` - the writer's output
-goes to a file, and the file to
+ones an engine accepts is the job of `tests/engine-check.sh`, which dumps
+every module of the matrix and hands each to every engine it can find:
+Node's `WebAssembly.validate`, and Wasmtime's `compile` with exceptions and
+garbage collection enabled when it is on the `PATH`. Neither engine is a
+build dependency, so the run is not part of the suite; it is run while the
+tests are written and its result recorded in the pull request. A module an
+engine rejects is wrong, however carefully the encoding was reasoned about.
 
-    node -e "const b=require('fs').readFileSync(process.argv[1]); console.log(WebAssembly.validate(b))" module.wasm
-
-Node is not a build dependency, so that run is not part of the suite. A
-module the engine rejects is wrong, however carefully the encoding was
-reasoned about.
+Two engines are worth running because each has caught what the other read
+past. Node's validator is the strict one on encoding shapes - it rejects
+the short form of a field's mutability byte, which the format permits -
+and Wasmtime carries the fuller instruction set, which is what confirmed
+the four `try_table` clause kinds and the reference instructions end to
+end.
 
 What the matrix covers, and why each module is there:
 
