@@ -10,65 +10,24 @@ This folder is a plain library. It depends on nothing else in the compiler
 its own, which is why the WebAssembly backend will be able to be built
 against it one piece at a time.
 
-The exception handling instructions and the `.wat` printer are not here
-yet. The legacy `try`, `catch` and `delegate` instructions are not planned
-at all, and neither are memories or data segments - though the two array
-instructions that name a data segment are, since an index into one is
-written the same way whatever holds the segment.
-
-## Files
-
-- `byte_buffer.ghul` — the bytes a module is assembled in, and the
-  primitive encodings: unsigned and signed LEB128 for 32- and 64-bit
-  values, `f32` and `f64` as their bits little-endian, names behind
-  their UTF-8 byte count, and vector lengths.
-- `value_type.ghul` — the types a function can take and return and a
-  local or global can hold: a scalar or vector type, which is a byte, or a
-  reference, which is a marker and a heap type.
-- `heap_type.ghul` — what a reference points at: one of the abstract heap
-  types, or an index into the type section.
-- `field_type.ghul` — what a struct field or an array element holds,
-  which is any value type — so a struct can point at another struct — or
-  one of the two packed types, and whether it can be assigned through.
-- `composite_type.ghul` — what a declared type is made of: a function
-  signature, a struct's fields, or an array's element type.
-- `sub_type.ghul` — a composite type, whether it is closed, and the
-  declared types it is a subtype of.
-- `type_entry.ghul` — one entry of the type section: a single type, or a
-  recursion group of types that may name each other.
-- `element_segment.ghul` — a run of values for a table, or a run of
-  function indices to be resolved into them.
-- `block_type.ghul` — what a `block`, `loop` or `if` produces.
-- `opcode.ghul` — every opcode, at the byte or bytes the specification
-  gives it.
-- `instruction.ghul` — the instruction classes, which differ by the
-  immediate they carry rather than by meaning.
-- `limits.ghul` — a minimum size and, where one is given, a maximum.
-- `table.ghul` — a table of references of one type.
-- `global.ghul` — a global variable and its constant expression.
-- `import.ghul` — the module, name, kind and descriptor an import is.
-- `export.ghul` — a name, a kind and an index.
-- `function.ghul` — a defined function: its signature index, its locals
-  and its body. Also the run-length encoding of locals.
-- `custom_section.ghul` — a section under a name the specification does
-  not define.
-- `module.ghul` — the module itself, and the index spaces its parts
-  share.
-- `binary_writer.ghul` — writes a module out, its sections in the order
-  the specification fixes.
+The `.wat` printer is not here yet. The legacy `try`, `catch` and
+`delegate` instructions are not planned at all, and neither are memories
+or data segments - though the two array instructions that name a data
+segment are, since an index into one is written the same way whatever
+holds the segment.
 
 ## The index spaces
 
 A module's imports and its definitions share an index space per kind: an
-imported function comes before every defined one, and the same for tables,
-globals and, later, tags. So an index written into an instruction, an
+imported function comes before every defined one, and the same for
+tables, globals and tags. So an index written into an instruction, an
 export or a start position is not the position in the module's own list
 but a position in that combined space.
 
-`MODULE.add_function` and `MODULE.add_global` hand back the index the
-entry takes in that space rather than its position in the list, so a
-caller building bodies in order does not have to add the imported count
-itself. Nothing is rewritten afterwards: an import added after a body was
+`MODULE.add_function`, `MODULE.add_global` and `MODULE.add_tag` hand
+back the index the entry takes in that space rather than its position in
+the list, so a caller building bodies in order does not have to add the
+imported count itself. Nothing is rewritten afterwards: an import added after a body was
 built changes what that body means, so a module is built imports first.
 
 ## Choices the specification leaves open
@@ -142,10 +101,9 @@ to another struct, and a recursion group whose two members hold a reference
 to each other. Two more cover `ref.test` and `ref.cast`, and a cast
 branch.
 
-`call_indirect` is the one instruction no engine here could be asked
-about. The specification types it as taking a function reference, and the
-engine available types it as taking an index, so a module using it is the
-one that could not be validated.
+`call_indirect` takes an index into the table it calls through, which is
+how the engines available read it, and the `calls` module is the one that
+exercises it against an engine.
 
 Two things that check turned up are worth recording, because in both the
 instruction index writes the *type* an instruction produces where a reader
@@ -154,3 +112,69 @@ type the instruction produces; the immediate is the heap type alone, and
 whether the reference can be absent is in the opcode, which is why there
 are four of them rather than one. And `br_on_cast` takes the nullability
 of its two heap types in a flags byte ahead of the label, not in the types.
+
+## The module matrix
+
+`tests/matrix.ghul` holds the whole modules the library is checked
+against: one named method each, building a module of one shape. The
+per-class tests pin exact bytes for the encodings and for small modules;
+the matrix is for the other claim, that the bytes the writer produces are
+the bytes an engine accepts, and it holds every shape the library can
+produce so that adding one means adding a method here rather than
+remembering to write a module for it.
+
+`tests/matrix_tests.ghul` writes every module of the matrix and checks the
+preamble, which is what the suite can do on its own. Whether the bytes are
+ones an engine accepts is checked while the tests are written, by handing
+each module's bytes to Node's `WebAssembly.validate` - the writer's output
+goes to a file, and the file to
+
+    node -e "const b=require('fs').readFileSync(process.argv[1]); console.log(WebAssembly.validate(b))" module.wasm
+
+Node is not a build dependency, so that run is not part of the suite. A
+module the engine rejects is wrong, however carefully the encoding was
+reasoned about.
+
+What the matrix covers, and why each module is there:
+
+- `empty`, `start` - the preamble alone, and the smallest module that
+  names a function, exports it and starts at it.
+- `imports`, `globals`, `tables` - one import of each kind, and the index
+  spaces the defined entries then join. `tables` names the second table of
+  a shared index space, which is the case a table index gets wrong.
+- `control` - the three block types, a branch to each, and a branch table.
+  The block typed by a signature is there because a block like that has to
+  consume its operand in its own body: an empty body leaves the operand on
+  the stack at the end, and that is a program that does not validate
+  rather than an encoding that is wrong.
+- `numeric-i32` to `numeric-f64`, `conversions` - one function per opcode
+  of each family, so an engine has read every numeric opcode the library
+  can emit, and the conversions with the constant each one reads.
+- `struct`, `array` - the reads and writes of both composite shapes,
+  including the packed fields, which are the ones that reach the
+  sign- and zero-extending instructions.
+- `references`, `cast-branches`, `i31-extern` - making and testing
+  references, comparing two, the four tests and casts, the branches that
+  carry a reference, the i31 instructions and the extern conversions.
+- `element` - all eight forms of element segment, which is every
+  combination of mode, element type and table the format gives a form to.
+- `rec-group` - two types that name each other, which is what a recursion
+  group is for and what two groups of unrelated types would not have
+  needed.
+- `calls` - a direct call, one through a table and one through a reference
+  read out of that table.
+- `exceptions` - one function per kind of `try_table` clause, each
+  throwing the one tag and handling it with the kind it is named for.
+  The tag's signature is its payload alone, which is the parameters of
+  the type it names and never its results. A clause's label counts the
+  instructions around the `try_table` rather than the `try_table`
+  itself - label 0 is the block enclosing it - and the handler it names
+  takes what the clause delivers in its results: the payload for
+  `catch`, the payload and the exception reference for `catch_ref`, the
+  reference alone for `catch_all_ref`, and nothing for `catch_all`.
+- `name-section` - the names of the module, its functions and their
+  locals, attached to a module whose functions and locals are worth
+  naming.
+- `typed-block` - a block whose signature takes an operand, which the
+  block's body has to consume: an empty body leaves the operand on the
+  stack at the block's end, and that is not the block's fallthrough.

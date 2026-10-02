@@ -1,0 +1,171 @@
+namespace Wasm is
+    // A name and the index it names, which is one entry of a name map.
+    class NAMED_INDEX is
+        index: int
+        name: string
+
+        init(index: int, name: string) is
+            self.index = index
+            self.name = name
+        si
+    si
+
+    // The names of one index space, in increasing index order.
+    class NAME_MAP is
+        _entries: Collections.LIST[NAMED_INDEX]
+
+        init() is
+            _entries = Collections.LIST[NAMED_INDEX]()
+        si
+
+        init(entries: NAMED_INDEX[]) is
+            _entries = Collections.LIST[NAMED_INDEX]()
+
+            for entry in entries do
+                _entries.add(entry)
+            od
+        si
+
+        add(index: int, name: string) is
+            _entries.add(NAMED_INDEX(index, name))
+        si
+
+        // The bytes the section is written as, which is what a module
+        // carries behind the name it is filed under.
+        bytes() -> ubyte[] is
+            let buffer = BYTE_BUFFER()
+
+            write(buffer)
+
+            return buffer.to_array()
+        si
+
+        write(buffer: BYTE_BUFFER) is
+            buffer.write_length(_entries.count)
+
+            for entry in _entries do
+                buffer.write_u32(entry.index)
+                buffer.write_name(entry.name)
+            od
+        si
+    si
+
+    // The names of the locals of one function, which is a name map and
+    // the function it belongs to.
+    class LOCAL_NAME_MAP is
+        function_index: int
+        locals: NAME_MAP
+
+        init(function_index: int, locals: NAME_MAP) is
+            self.function_index = function_index
+            self.locals = locals
+        si
+    si
+
+    // The name section: the module's own name, the names of its
+    // functions and the names of their locals.
+    //
+    // It is a custom section rather than a section of its own, so a
+    // reader that does not know the name skips it and loses nothing but
+    // the names. The three parts are optional and written in the order
+    // of the identifiers the format gives them, which is the order a
+    // reader expects them in.
+    class NAME_SECTION is
+        _module_name: string?
+        _function_names: NAME_MAP?
+        _local_names: Collections.LIST[LOCAL_NAME_MAP]?
+
+        init() is si
+
+        // Each part is set on the section rather than replacing it, so
+        // that a section carrying all three is built by chaining.
+        with_module_name(name: string) -> NAME_SECTION is
+            _module_name = name
+
+            return self
+        si
+
+        with_functions(function_names: NAME_MAP) -> NAME_SECTION is
+            _function_names = function_names
+
+            return self
+        si
+
+        add_locals(function_index: int, locals: NAME_MAP) -> NAME_SECTION is
+            if !(_local_names?) then
+                _local_names = Collections.LIST[LOCAL_NAME_MAP]()
+            fi
+
+            _local_names!.add(LOCAL_NAME_MAP(function_index, locals))
+
+            return self
+        si
+
+        module_name() -> string is
+            if let name = _module_name then
+                return name
+            fi
+
+            return ""
+        si
+
+        // The bytes the section is written as, which is what a module
+        // carries behind the name it is filed under.
+        bytes() -> ubyte[] is
+            let buffer = BYTE_BUFFER()
+
+            write(buffer)
+
+            return buffer.to_array()
+        si
+
+        write(buffer: BYTE_BUFFER) is
+            if let name = _module_name then
+                _write_subsection(buffer, 0x00ub, name)
+            fi
+
+            if let names = _function_names then
+                _write_subsection(buffer, 0x01ub, names)
+            fi
+
+            if let locals = _local_names then
+                _write_subsection(buffer, 0x02ub, locals)
+            fi
+        si
+
+        _write_subsection(buffer: BYTE_BUFFER, id: ubyte, name: string) is
+            let content = BYTE_BUFFER()
+
+            content.write_name(name)
+
+            buffer.write_byte(id)
+            buffer.write_length(content.length())
+            buffer.write_bytes(content.to_array())
+        si
+
+        _write_subsection(buffer: BYTE_BUFFER, id: ubyte, writable: NAME_MAP) is
+            let content = BYTE_BUFFER()
+
+            writable.write(content)
+
+            buffer.write_byte(id)
+            buffer.write_length(content.length())
+            buffer.write_bytes(content.to_array())
+        si
+
+        _write_subsection(buffer: BYTE_BUFFER, id: ubyte, maps: Collections.LIST[LOCAL_NAME_MAP]) is
+            let content = BYTE_BUFFER()
+
+            content.write_length(maps.count)
+
+            for map in maps do
+                content.write_u32(map.function_index)
+                map.locals.write(content)
+            od
+
+            buffer.write_byte(id)
+            buffer.write_length(content.length())
+            buffer.write_bytes(content.to_array())
+        si
+    si
+si
