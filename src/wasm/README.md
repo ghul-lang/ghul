@@ -136,18 +136,15 @@ to another struct, and a recursion group whose two members hold a reference
 to each other. Two more cover `ref.test` and `ref.cast`, and a cast
 branch.
 
+`call_indirect` is the one instruction no engine here could be asked
+about. The specification types it as taking a function reference, and the
+engine available types it as taking an index, so a module using it is the
+one that could not be validated.
+
 Two things that check turned up are worth recording, because in both the
 instruction index writes the *type* an instruction produces where a reader
 can take it for the immediate it takes. `ref.test (ref null ht)` is the
 type the instruction produces; the immediate is the heap type alone, and
 whether the reference can be absent is in the opcode, which is why there
 are four of them rather than one. And `br_on_cast` takes the nullability
-of its two heap types in a flags byte ahead of the label, not in the types
-themselves.The garbage collection modules are checked the same way, and the engine
-available is behind the specification in two places. `ref.test` and
-`ref.cast` take a reference type, and this engine reads that marker as a
-bare heap type; `call_indirect` takes a function reference, and this engine
-types it as taking an index. Both are the forms the specification gives, so
-the modules exercising them are the two an engine here rejects, and the
-other six — a struct, a field read and write, an array, an array of a
-fixed length, a null reference, and a recursion group — are accepted.
+of its two heap types in a flags byte ahead of the label, not in the types.
