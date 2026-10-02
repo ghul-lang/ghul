@@ -2,11 +2,17 @@ namespace Wasm is
     // A module: its types, what it imports, what it defines, and what it
     // exports.
     //
-    // The lists are each the index space of one kind, and an import
-    // enters the space of the kind it brings in before every defined
-    // entry of that kind. The counts a caller needs to write an index
-    // are therefore the sizes of both lists, which is what
-    // `function_count` and `global_count` add up.
+    // Except for the type section, the lists are each the index space of
+    // one kind, and an import enters the space of the kind it brings in
+    // before every defined entry of that kind. The counts a caller needs
+    // to write an index are therefore the sizes of both lists, which is
+    // what `function_count` and `global_count` add up.
+    //
+    // The type section is the exception. Its list holds the entries as
+    // they are written, and a recursion group is one entry declaring one
+    // type per member, so the index a type takes is not the position of
+    // the entry declaring it. Every `add` hands back the index rather
+    // than the position, and `type_count` is what the two agree on.
     //
     // Indices are left to the caller. Adding a function or a global
     // hands back the index it took, which is enough to build the
@@ -45,17 +51,19 @@ namespace Wasm is
         si
 
         add_sub_type(sub_type: SUB_TYPE) -> int is
+            let index mut = 0
             let i mut = 0
 
             while i < _types.count do
-                if _types[i].matches(TYPE_ENTRY(sub_type)) then
-                    return i
+                let entry = _types[i]
+
+                if entry.matches(TYPE_ENTRY(sub_type)) then
+                    return index
                 fi
 
+                index = index + entry.type_count()
                 i = i + 1
             od
-
-            let index = _types.count
 
             _types.add(TYPE_ENTRY(sub_type))
 
@@ -67,11 +75,24 @@ namespace Wasm is
         // those after it, so nothing is added while its own types are
         // being built.
         add_rec_group(group: Collections.List[SUB_TYPE]) -> int is
-            let index = _types.count
+            let index = type_count()
 
             _types.add(TYPE_ENTRY.of_rec_group(group))
 
             return index
+        si
+
+        // The number of types the type section declares, which is not the
+        // number of entries in it: a recursion group is one entry and
+        // declares one type per member.
+        type_count() -> int is
+            let count mut = 0
+
+            for entry in _types do
+                count = count + entry.type_count()
+            od
+
+            return count
         si
 
         add_element_segment(segment: ELEMENT_SEGMENT) is
