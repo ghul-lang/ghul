@@ -2517,6 +2517,8 @@ class PRODUCT is
 si
 ```
 
+Five `@IL` pragmas are acted on: `IL.name`, `IL.name.read`, `IL.name.assign`, `IL.output` and `IL.entrypoint`. Any other `IL.` pragma draws an `unknown-pragma` warning, since a misspelled or removed pragma is otherwise acted on as a built-in and silently does nothing.
+
 A pragma whose name doesn't match a compiler built-in is taken to name a .NET **attribute**, and emits the attribute on whatever it's written against: a class, trait, struct, union, variant, or enum; a function or method; a field or property; or a single parameter in a function or method's parameter list, including a lambda literal's. The `Foo` short form resolves to `FooAttribute` when no plain `Foo` exists, in a `use` clause as well as in the pragma — so `use System.Obsolete` brings `System.ObsoleteAttribute` into scope, and `use Marker = System.Obsolete` brings it in as `Marker`. Arguments are positional, named (`name = value`), array-valued, or `typeof`:
 
 ```ghul
