@@ -1,22 +1,108 @@
 namespace Wasm is
-    // The types a function can take and return, and a local or a global
-    // can hold. The member value is the byte the specification encodes
-    // the type as, which is not an enumeration of its own: the byte for
-    // a reference type is also a valid single byte in other positions,
-    // and the GC types added later continue the space rather than
-    // replacing it.
-    enum ValueType is
+    // The types the specification names rather than numbers. A value type
+    // is one of these, or a reference to a declared type.
+    enum NumericType is
         I32 = 0x7F,
         I64 = 0x7E,
         F32 = 0x7D,
         F64 = 0x7C,
-        V128 = 0x7B,
-        FUNCREF = 0x70,
-        EXTERNREF = 0x6F
+        V128 = 0x7B
     si
 
-    // A value type is a single byte.
-    write_value_type(buffer: BYTE_BUFFER, type: ValueType) is
-        buffer.write_byte(cast ubyte(type))
+    // A value type: one of the scalar or vector types, which is a byte of
+    // its own, or a reference, which is a marker and a heap type.
+    //
+    // The nullable reference to an abstract heap type is that byte alone,
+    // and that is the whole of what the shorter encoding means. Anything
+    // else - a non-nullable reference, or any reference to a declared
+    // type - carries a marker byte and then the heap type, so that a
+    // declared type's index can never be read as one of those bytes.
+    class VALUE_TYPE is
+        _numeric: NumericType?
+        _nullable: bool
+        _heap_type: HEAP_TYPE?
+
+        init() is si
+
+        of_numeric(type: NumericType) -> VALUE_TYPE static is
+            let result = VALUE_TYPE()
+
+            result._numeric = type
+
+            return result
+        si
+
+        of_reference(heap_type: HEAP_TYPE, nullable: bool) -> VALUE_TYPE static is
+            let result = VALUE_TYPE()
+
+            result._nullable = nullable
+            result._heap_type = heap_type
+
+            return result
+        si
+
+        of_abstract(type: AbstractHeapType) -> VALUE_TYPE static is
+            return of_reference(HEAP_TYPE.of_abstract(type), true)
+        si
+
+        of_type_index(index: int, nullable: bool) -> VALUE_TYPE static is
+            return of_reference(HEAP_TYPE.of_type_index(index), nullable)
+        si
+
+        write(buffer: BYTE_BUFFER) is
+            if let type = _numeric then
+                buffer.write_byte(cast ubyte(type))
+            elif let heap_type = _heap_type then
+                if !_nullable then
+                    buffer.write_byte(0x64ub)
+                elif !heap_type.is_abstract() then
+                    buffer.write_byte(0x63ub)
+                fi
+
+                heap_type.write(buffer)
+            fi
+        si
+
+        matches(other: VALUE_TYPE) -> bool is
+            if _numeric? != other._numeric? then
+                return false
+            elif _numeric? then
+                return _numeric =~ other._numeric
+            fi
+
+            if _nullable != other._nullable then
+                return false
+            elif let heap_type = _heap_type then
+                return heap_type.matches(other._heap_type!)
+            fi
+
+            return other._heap_type == null
+        si
+    si
+
+    write_value_types(buffer: BYTE_BUFFER, types: VALUE_TYPE[]) is
+        buffer.write_length(types.count)
+
+        for type in types do
+            type.write(buffer)
+        od
+    si
+
+    same_value_types(one: VALUE_TYPE[], other: VALUE_TYPE[]) -> bool is
+        if one.count != other.count then
+            return false
+        fi
+
+        let i mut = 0
+
+        while i < one.count do
+            if !one[i].matches(other[i]) then
+                return false
+            fi
+
+            i = i + 1
+        od
+
+        return true
     si
 si

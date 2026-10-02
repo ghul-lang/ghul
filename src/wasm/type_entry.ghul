@@ -1,0 +1,75 @@
+namespace Wasm is
+    // One entry of the type section. It is either a single type, or a
+    // recursion group: a run of types that may each name another's index
+    // in the same run, which is what a self-referential type needs.
+    //
+    // The two are told apart by a marker byte, so a single type is
+    // written as itself and a group is written as the byte and the run.
+    class TYPE_ENTRY is
+        _single: SUB_TYPE
+        _rec_group: Collections.List[SUB_TYPE]?
+
+        init(sub_type: SUB_TYPE) is
+            _single = sub_type
+        si
+
+        of_rec_group(group: Collections.List[SUB_TYPE]) -> TYPE_ENTRY static is
+            let result = TYPE_ENTRY(group[0])
+
+            result._rec_group = group
+
+            return result
+        si
+
+        is_rec_group() -> bool => _rec_group?
+
+        // The types this entry declares, in the order they take their
+        // indices.
+        types() -> Collections.List[SUB_TYPE] is
+            if let group = _rec_group then
+                return group
+            fi
+
+            return Collections.LIST[SUB_TYPE]([_single])
+        si
+
+        write(buffer: BYTE_BUFFER) is
+            if let group = _rec_group then
+                buffer.write_byte(0x4Eub)
+
+                buffer.write_length(group.count)
+
+                for sub_type in group do
+                    sub_type.write(buffer)
+                od
+            else
+                _single.write(buffer)
+            fi
+        si
+
+        matches(other: TYPE_ENTRY) -> bool is
+            if is_rec_group() != other.is_rec_group() then
+                return false
+            fi
+
+            let mine = types()
+            let theirs = other.types()
+
+            if mine.count != theirs.count then
+                return false
+            fi
+
+            let i mut = 0
+
+            while i < mine.count do
+                if !mine[i].matches(theirs[i]) then
+                    return false
+                fi
+
+                i = i + 1
+            od
+
+            return true
+        si
+    si
+si

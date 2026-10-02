@@ -10,9 +10,11 @@ This folder is a plain library. It depends on nothing else in the compiler
 its own, which is why the WebAssembly backend will be able to be built
 against it one piece at a time.
 
-The garbage collection types and instructions, the exception handling
-instructions and the `.wat` printer are not here yet. The legacy `try`,
-`catch` and `delegate` instructions are not planned at all.
+The exception handling instructions and the `.wat` printer are not here
+yet. The legacy `try`, `catch` and `delegate` instructions are not planned
+at all, and neither are memories or data segments - though the two array
+instructions that name a data segment are, since an index into one is
+written the same way whatever holds the segment.
 
 ## Files
 
@@ -21,14 +23,25 @@ instructions and the `.wat` printer are not here yet. The legacy `try`,
   values, `f32` and `f64` as their bits little-endian, names behind
   their UTF-8 byte count, and vector lengths.
 - `value_type.ghul` — the types a function can take and return and a
-  local or global can hold, as the single byte each is encoded as.
+  local or global can hold: a scalar or vector type, which is a byte, or a
+  reference, which is a marker and a heap type.
+- `heap_type.ghul` — what a reference points at: one of the abstract heap
+  types, or an index into the type section.
+- `field_type.ghul` — what a struct field or an array element holds,
+  including the two packed types, and whether it can be assigned through.
+- `composite_type.ghul` — what a declared type is made of: a function
+  signature, a struct's fields, or an array's element type.
+- `sub_type.ghul` — a composite type, whether it is closed, and the
+  declared types it is a subtype of.
+- `type_entry.ghul` — one entry of the type section: a single type, or a
+  recursion group of types that may name each other.
+- `element_segment.ghul` — a run of values for a table, or a run of
+  function indices to be resolved into them.
 - `block_type.ghul` — what a `block`, `loop` or `if` produces.
 - `opcode.ghul` — every opcode, at the byte or bytes the specification
   gives it.
 - `instruction.ghul` — the instruction classes, which differ by the
   immediate they carry rather than by meaning.
-- `func_type.ghul` — a function's signature, and whether two signatures
-  are the same shape.
 - `limits.ghul` — a minimum size and, where one is given, a maximum.
 - `table.ghul` — a table of references of one type.
 - `global.ghul` — a global variable and its constant expression.
@@ -81,10 +94,21 @@ read from and the module does not validate. Element segments, which fill
 a table in, come with the garbage collection types.
 
 **Function types are deduplicated by shape.** `MODULE.add_type` hands back
-the index an identical signature was already written at, so a module that
+the index an identical type was already written at, so a module that
 reaches for the same shape twice gets the same index. The comparison is
-over the parameter and result types themselves, never over a rendering of
-them.
+over the types themselves, never over a rendering of them. A recursion
+group is never deduplicated: the group is what a type inside it may name,
+which is not the same thing as its shape.
+
+**A field's mutability byte is always written.** The format leaves it out
+for a field that cannot be assigned through. That is one byte per
+immutable field, and an engine rejects the omission, so it is written
+either way.
+
+**A `sub` with no supertypes is written as a `sub`.** The marker, not the
+length of the supertype list, is what makes a type open, and an open type
+with no supertypes is how a base type other types are declared as subtypes
+of is written.
 
 ## Testing
 
@@ -97,8 +121,17 @@ two arrays differ.
 Writing a module the specification accepts and writing one an engine
 accepts are the same claim, so the whole modules were also checked with
 Node's `WebAssembly.validate` while they were written: the empty module,
-both whole-module fixtures, and one module per numeric opcode, so that
+the whole-module fixtures, and one module per numeric opcode, so that
 every opcode the enum names is covered by a module a real engine accepted.
 That check is not part of the suite — Node is not a build dependency — and
 it is what caught the `br_table` vector counting its default label as one
-of its entries.
+of its entries, and the short form of a `const` field being rejected.
+
+The garbage collection modules are checked the same way, and the engine
+available is behind the specification in two places. `ref.test` and
+`ref.cast` take a reference type, and this engine reads that marker as a
+bare heap type; `call_indirect` takes a function reference, and this engine
+types it as taking an index. Both are the forms the specification gives, so
+the modules exercising them are the two an engine here rejects, and the
+other six — a struct, a field read and write, an array, an array of a
+fixed length, a null reference, and a recursion group — are accepted.

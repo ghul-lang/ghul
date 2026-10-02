@@ -1,0 +1,118 @@
+namespace Wasm is
+    // What a declared type is made of: a function signature, a struct's
+    // fields, or an array's element type. Each is a marker byte and then
+    // its own shape, and each writes the marker for itself.
+    class COMPOSITE_TYPE abstract is
+        write(buffer: BYTE_BUFFER)
+
+        // Whether two composite types declare the same thing. Each of
+        // the three answers for itself, and there is no fourth.
+        matches(other: COMPOSITE_TYPE) -> bool => false
+    si
+
+    class FUNC_TYPE: COMPOSITE_TYPE is
+        _parameters: VALUE_TYPE[]
+        _results: VALUE_TYPE[]
+
+        init(parameters: VALUE_TYPE[], results: VALUE_TYPE[]) is
+            _parameters = parameters
+            _results = results
+        si
+
+        parameters() -> VALUE_TYPE[] => _parameters
+
+        results() -> VALUE_TYPE[] => _results
+
+        write(buffer: BYTE_BUFFER) is
+            // The byte that says what follows is a function type, as
+            // against a struct or an array in the type section.
+            buffer.write_byte(0x60ub)
+
+            write_value_types(buffer, _parameters)
+            write_value_types(buffer, _results)
+        si
+
+        // Two signatures are the same when they take and return the same
+        // types in the same order, which is what lets a module reuse the
+        // entry an earlier signature was written at.
+        matches(other: COMPOSITE_TYPE) -> bool is
+            if let function = cast FUNC_TYPE?(other) then
+                let parameters_match =
+                    same_value_types(_parameters, function._parameters)
+
+                let results_match = same_value_types(_results, function._results)
+
+                return parameters_match /\ results_match
+            fi
+
+            return false
+        si
+    si
+
+    class STRUCT_TYPE: COMPOSITE_TYPE is
+        _fields: FIELD_TYPE[]
+
+        init(fields: FIELD_TYPE[]) is
+            _fields = fields
+        si
+
+        fields() -> FIELD_TYPE[] => _fields
+
+        write(buffer: BYTE_BUFFER) is
+            buffer.write_byte(0x5Fub)
+
+            buffer.write_length(_fields.count)
+
+            for one in _fields do
+                one.write(buffer)
+            od
+        si
+
+        matches(other: COMPOSITE_TYPE) -> bool is
+            if let structure = cast STRUCT_TYPE?(other) then
+                if _fields.count != structure._fields.count then
+                    return false
+                fi
+
+                let i mut = 0
+
+                while i < _fields.count do
+                    if !_fields[i].matches(structure._fields[i]) then
+                        return false
+                    fi
+
+                    i = i + 1
+                od
+
+                return true
+            fi
+
+            return false
+        si
+    si
+
+    class ARRAY_TYPE: COMPOSITE_TYPE is
+        _element: FIELD_TYPE
+
+        init(element: FIELD_TYPE) is
+            _element = element
+        si
+
+        element() -> FIELD_TYPE => _element
+
+        write(buffer: BYTE_BUFFER) is
+            buffer.write_byte(0x5Eub)
+
+            _element.write(buffer)
+        si
+
+        matches(other: COMPOSITE_TYPE) -> bool is
+            if let array = cast ARRAY_TYPE?(other) then
+                return _element.matches(array._element)
+            fi
+
+            return false
+        si
+    si
+
+si

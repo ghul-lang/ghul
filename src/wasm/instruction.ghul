@@ -160,9 +160,9 @@ namespace Wasm is
     // typed form says what the type is, and is what lets `select` work
     // over a reference type.
     class TYPED_SELECT_INSTRUCTION: INSTRUCTION is
-        _type: ValueType
+        _type: VALUE_TYPE
 
-        init(type: ValueType) is
+        init(type: VALUE_TYPE) is
             self.opcode = Opcode.SELECT_T
             _type = type
         si
@@ -171,7 +171,7 @@ namespace Wasm is
             super.write(buffer)
 
             buffer.write_length(1)
-            write_value_type(buffer, _type)
+            _type.write(buffer)
         si
     si
 
@@ -236,6 +236,144 @@ namespace Wasm is
         si
     si
 
+
+    // An opcode and a type index. Most of the structured types are
+    // constructed, read and written through their type index alone, and
+    // `call_ref` names a signature the same way.
+    class TYPE_INSTRUCTION: INSTRUCTION is
+        type_index: int
+
+        init(opcode: Opcode, type_index: int) is
+            self.opcode = opcode
+            self.type_index = type_index
+        si
+
+        write(buffer: BYTE_BUFFER) is
+            super.write(buffer)
+
+            buffer.write_u32(type_index)
+        si
+    si
+
+    // An opcode, a type index, and a second index into it: a field of a
+    // struct, or a data or element segment an array is built from.
+    class TYPE_FIELD_INSTRUCTION: INSTRUCTION is
+        type_index: int
+        field_index: int
+
+        init(opcode: Opcode, type_index: int, field_index: int) is
+            self.opcode = opcode
+            self.type_index = type_index
+            self.field_index = field_index
+        si
+
+        write(buffer: BYTE_BUFFER) is
+            super.write(buffer)
+
+            buffer.write_u32(type_index)
+            buffer.write_u32(field_index)
+        si
+    si
+
+    // An opcode, a type index, and a count - which for `array.new_fixed`
+    // is the length of the array being built.
+    class TYPE_LENGTH_INSTRUCTION: INSTRUCTION is
+        type_index: int
+        length: int
+
+        init(opcode: Opcode, type_index: int, length: int) is
+            self.opcode = opcode
+            self.type_index = type_index
+            self.length = length
+        si
+
+        write(buffer: BYTE_BUFFER) is
+            super.write(buffer)
+
+            buffer.write_u32(type_index)
+            buffer.write_u32(length)
+        si
+    si
+
+    // `array.copy` names both the type it writes and the type it reads,
+    // which need not be the same.
+    class TWO_TYPE_INSTRUCTION: INSTRUCTION is
+        target_type_index: int
+        source_type_index: int
+
+        init(opcode: Opcode, target_type_index: int, source_type_index: int) is
+            self.opcode = opcode
+            self.target_type_index = target_type_index
+            self.source_type_index = source_type_index
+        si
+
+        write(buffer: BYTE_BUFFER) is
+            super.write(buffer)
+
+            buffer.write_u32(target_type_index)
+            buffer.write_u32(source_type_index)
+        si
+    si
+
+    // An opcode and the heap type a reference is made to, which is how
+    // `ref.null` names what it produces.
+    class HEAP_TYPE_INSTRUCTION: INSTRUCTION is
+        _heap_type: HEAP_TYPE
+
+        init(opcode: Opcode, heap_type: HEAP_TYPE) is
+            self.opcode = opcode
+            _heap_type = heap_type
+        si
+
+        write(buffer: BYTE_BUFFER) is
+            super.write(buffer)
+
+            _heap_type.write(buffer)
+        si
+    si
+
+    // An opcode and a reference type, which `ref.test` and `ref.cast`
+    // both take. The four spellings of each differ only in that type's
+    // own encoding, which the value type already decides.
+    class REFERENCE_TYPE_INSTRUCTION: INSTRUCTION is
+        _reference: VALUE_TYPE
+
+        init(opcode: Opcode, reference: VALUE_TYPE) is
+            self.opcode = opcode
+            _reference = reference
+        si
+
+        write(buffer: BYTE_BUFFER) is
+            super.write(buffer)
+
+            _reference.write(buffer)
+        si
+    si
+
+    // `br_on_cast` and `br_on_cast_fail` take a label and the two
+    // reference types that separate: the one tested, and the one left on
+    // the stack.
+    class CAST_BRANCH_INSTRUCTION: INSTRUCTION is
+        label: int
+        source: VALUE_TYPE
+        target: VALUE_TYPE
+
+        init(opcode: Opcode, label: int, source: VALUE_TYPE, target: VALUE_TYPE) is
+            self.opcode = opcode
+            self.label = label
+            self.source = source
+            self.target = target
+        si
+
+        write(buffer: BYTE_BUFFER) is
+            super.write(buffer)
+
+            buffer.write_u32(label)
+            source.write(buffer)
+            target.write(buffer)
+        si
+    si
+
     // A run of instructions, which is a function body, a block body or
     // the initialiser of a global.
     write_instructions(buffer: BYTE_BUFFER, instructions: Collections.Iterable[INSTRUCTION]) is
@@ -244,14 +382,16 @@ namespace Wasm is
         od
     si
 
-    // An opcode in the `0xFC00` range is two bytes, a prefix and the
+    // An opcode at `0xFB00` or above is two bytes, a prefix and the
     // member's own value after it.
     write_opcode(buffer: BYTE_BUFFER, opcode: Opcode) is
-        if opcode >= Opcode.I32_TRUNC_SAT_F32_S then
-            buffer.write_byte(0xFCub)
-            buffer.write_u32(cast int(opcode) - 0xFC00)
+        let value = cast int(opcode)
+
+        if value >= 0xFB00 then
+            buffer.write_byte(cast ubyte(value >> 8))
+            buffer.write_u32(value & 0xFF)
         else
-            buffer.write_byte(cast ubyte(opcode))
+            buffer.write_byte(cast ubyte(value))
         fi
     si
 si
