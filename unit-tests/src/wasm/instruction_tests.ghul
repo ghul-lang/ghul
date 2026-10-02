@@ -1,0 +1,180 @@
+namespace Wasm.UnitTests is
+    use Collections.LIST
+
+    use Wasm.BLOCK_TYPE
+    use Wasm.BYTE_BUFFER
+    use Wasm.INSTRUCTION
+
+    use TestClass = Microsoft.VisualStudio.TestTools.UnitTesting.TestClassAttribute
+    use Test = Microsoft.VisualStudio.TestTools.UnitTesting.TestMethodAttribute
+
+    // Each instruction shape against the bytes it encodes to. The
+    // opcodes themselves are the specification's, so what these pin is
+    // the immediate behind each one and the order it is written in.
+    @TestClass()
+    class INSTRUCTION_TESTS is
+        init() is si
+
+        _encoded(instruction: INSTRUCTION) -> ubyte[] is
+            let buffer = BYTE_BUFFER()
+
+            instruction.write(buffer)
+
+            return buffer.to_array()
+        si
+
+        _body(instructions: INSTRUCTION[]) -> LIST[INSTRUCTION] is
+            let result = LIST[INSTRUCTION]()
+
+            for instruction in instructions do
+                result.add(instruction)
+            od
+
+            return result
+        si
+
+        @Test()
+        simple__one_byte_opcode__is_the_opcode() is
+            BYTES.are([0x01], _encoded(SIMPLE_INSTRUCTION(Opcode.NOP)))
+        si
+
+        @Test()
+        simple__unreachable__is_byte_zero() is
+            BYTES.are([0x00], _encoded(SIMPLE_INSTRUCTION(Opcode.UNREACHABLE)))
+        si
+
+        @Test()
+        simple__arithmetic__is_the_opcode() is
+            BYTES.are([0x6A], _encoded(SIMPLE_INSTRUCTION(Opcode.I32_ADD)))
+        si
+
+        // An opcode in the FC range is a prefix and then the opcode, so
+        // it is two bytes where every other one is one.
+        @Test()
+        simple__opcode_in_the_FC_range__is_a_prefix_then_the_opcode() is
+            BYTES.are(
+                [0xFC, 0x07],
+                _encoded(SIMPLE_INSTRUCTION(Opcode.I64_TRUNC_SAT_F64_U)))
+        si
+
+        @Test()
+        indexed__zero_index__is_the_opcode_then_a_zero() is
+            BYTES.are([0x20, 0x00], _encoded(INDEX_INSTRUCTION(Opcode.LOCAL_GET, 0)))
+        si
+
+        @Test()
+        indexed__index_above_one_octet__is_a_leb128() is
+            BYTES.are([0x10, 0x82, 0x01], _encoded(INDEX_INSTRUCTION(Opcode.CALL, 130)))
+        si
+
+        @Test()
+        i32_constant__zero__is_the_opcode_then_the_value() is
+            BYTES.are([0x41, 0x00], _encoded(I32_CONSTANT(0)))
+        si
+
+        @Test()
+        i32_constant__negative_one__is_one_septic() is
+            BYTES.are([0x41, 0x7F], _encoded(I32_CONSTANT(-1)))
+        si
+
+        @Test()
+        i64_constant__negative_one__is_one_septic() is
+            BYTES.are([0x42, 0x7F], _encoded(I64_CONSTANT(-1L)))
+        si
+
+        @Test()
+        f32_constant__is_the_opcode_then_four_bytes() is
+            BYTES.are([0x43, 0x00, 0x00, 0x80, 0x3F], _encoded(F32_CONSTANT(1.0s)))
+        si
+
+        @Test()
+        f64_constant__is_the_opcode_then_eight_bytes() is
+            BYTES.are(
+                [0x44, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xF0, 0x3F],
+                _encoded(F64_CONSTANT(1.0)))
+        si
+
+        // The vector counts the labels alone. The default follows it
+        // rather than being the last entry of it.
+        @Test()
+        br_table__labels__are_the_vector_and_the_default_follows_it() is
+            BYTES.are([0x0E, 0x02, 0x00, 0x01, 0x02], _encoded(BR_TABLE_INSTRUCTION([0, 1], 2)))
+        si
+
+        @Test()
+        br_table__no_labels__is_an_empty_vector_then_the_default() is
+            BYTES.are([0x0E, 0x00, 0x02], _encoded(BR_TABLE_INSTRUCTION([], 2)))
+        si
+
+        @Test()
+        call_indirect__is_the_opcode_then_a_type_and_a_table() is
+            BYTES.are([0x11, 0x01, 0x00], _encoded(CALL_INDIRECT_INSTRUCTION(1, 0)))
+        si
+
+        @Test()
+        select__untyped__is_the_opcode_alone() is
+            BYTES.are([0x1B], _encoded(SIMPLE_INSTRUCTION(Opcode.SELECT)))
+        si
+
+        @Test()
+        select__typed__is_the_opcode_then_a_vector_of_one_type() is
+            BYTES.are(
+                [0x1C, 0x01, 0x7F],
+                _encoded(TYPED_SELECT_INSTRUCTION(ValueType.I32)))
+        si
+
+        @Test()
+        block__empty__is_the_opcode_the_block_type_and_an_end() is
+            BYTES.are(
+                [0x02, 0x40, 0x0B],
+                _encoded(BLOCK_INSTRUCTION(Opcode.BLOCK, BLOCK_TYPE(), _body([]))))
+        si
+
+        @Test()
+        block__a_body__sits_between_the_block_type_and_the_end() is
+            BYTES.are(
+                [0x02, 0x40, 0x01, 0x0B],
+                _encoded(BLOCK_INSTRUCTION(
+                    Opcode.BLOCK,
+                    BLOCK_TYPE(),
+                    _body([SIMPLE_INSTRUCTION(Opcode.NOP)]))))
+        si
+
+        @Test()
+        loop__is_the_loop_opcode() is
+            BYTES.are(
+                [0x03, 0x40, 0x0B],
+                _encoded(BLOCK_INSTRUCTION(Opcode.LOOP, BLOCK_TYPE(), _body([]))))
+        si
+
+        // An `if` with no else arm writes no `else` byte, since the
+        // branch that skips the arm is what reaches the `end`.
+        @Test()
+        if__no_else_branch__has_no_else_byte() is
+            BYTES.are(
+                [0x04, 0x40, 0x01, 0x0B],
+                _encoded(IF_INSTRUCTION(
+                    BLOCK_TYPE(),
+                    _body([SIMPLE_INSTRUCTION(Opcode.NOP)]),
+                    _body([]))))
+        si
+
+        @Test()
+        if__an_else_branch__sits_between_an_else_and_the_end() is
+            BYTES.are(
+                [0x04, 0x40, 0x01, 0x05, 0x01, 0x0B],
+                _encoded(IF_INSTRUCTION(
+                    BLOCK_TYPE(),
+                    _body([SIMPLE_INSTRUCTION(Opcode.NOP)]),
+                    _body([SIMPLE_INSTRUCTION(Opcode.NOP)]))))
+        si
+
+        @Test()
+        if__a_result_type__is_the_block_type() is
+            BYTES.are(
+                [0x04, 0x7F, 0x0B],
+                _encoded(IF_INSTRUCTION(
+                    BLOCK_TYPE.of_value(ValueType.I32), _body([]), _body([]))))
+        si
+    si
+si

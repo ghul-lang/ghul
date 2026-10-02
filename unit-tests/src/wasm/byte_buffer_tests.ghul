@@ -1,0 +1,161 @@
+namespace Wasm.UnitTests is
+    use Wasm.BYTE_BUFFER
+
+    use TestClass = Microsoft.VisualStudio.TestTools.UnitTesting.TestClassAttribute
+    use Test = Microsoft.VisualStudio.TestTools.UnitTesting.TestMethodAttribute
+    use Assertions
+
+    // Every primitive the binary format defines in terms of bytes, pinned
+    // against the bytes a real engine reads. The LEB128 cases are the
+    // ones where a straightforward loop goes wrong: the boundaries at
+    // which another septet is needed, and the sign bit of the last one.
+    @TestClass()
+    class BYTE_BUFFER_TESTS is
+        init() is si
+
+        _encoded(write: (BYTE_BUFFER) -> void) -> ubyte[] is
+            let buffer = BYTE_BUFFER()
+
+            write(buffer)
+
+            return buffer.to_array()
+        si
+
+        @Test()
+        write_u32__zero__writes_one_byte() is
+            BYTES.are([0x00], _encoded(b => b.write_u32(0)))
+        si
+
+        @Test()
+        write_u32__last_value_in_one_septic__writes_it() is
+            BYTES.are([0x7F], _encoded(b => b.write_u32(127)))
+        si
+
+        @Test()
+        write_u32__first_value_needing_two_septics__writes_two() is
+            BYTES.are([0x80, 0x01], _encoded(b => b.write_u32(128)))
+        si
+
+        @Test()
+        write_u32__negative__writes_the_whole_width() is
+            BYTES.are([0xFF, 0xFF, 0xFF, 0xFF, 0x0F], _encoded(b => b.write_u32(-1)))
+        si
+
+        @Test()
+        write_u32__largest_32_bit_value__writes_five_septics() is
+            BYTES.are(
+                [0xFF, 0xFF, 0xFF, 0xFF, 0x07],
+                _encoded(b => b.write_u32(0x7FFFFFFF)))
+        si
+
+        @Test()
+        write_u32__bit_pattern_of_negative_one__writes_five_septics() is
+            BYTES.are(
+                [0x80, 0x80, 0x80, 0x80, 0x08],
+                _encoded(b => b.write_u32(cast int(0x80000000u))))
+        si
+
+        @Test()
+        write_i32__minus_one__writes_one_septic() is
+            BYTES.are([0x7F], _encoded(b => b.write_i32(-1)))
+        si
+
+        // -64 is the last value whose septet carries the sign bit, so
+        // nothing more follows it.
+        @Test()
+        write_i32__minus_sixty_four__writes_one_septic() is
+            BYTES.are([0x40], _encoded(b => b.write_i32(-64)))
+        si
+
+        // -65 has the same septet but a shifted value that is no longer
+        // -1, so it cannot stop there.
+        @Test()
+        write_i32__minus_sixty_five__writes_two_septics() is
+            BYTES.are([0xBF, 0x7F], _encoded(b => b.write_i32(-65)))
+        si
+
+        @Test()
+        write_i32__sixty_four__writes_two_septics() is
+            BYTES.are([0xC0, 0x00], _encoded(b => b.write_i32(64)))
+        si
+
+        @Test()
+        write_i32__one_hundred_and_twenty_seven__writes_two_septics() is
+            BYTES.are([0xFF, 0x00], _encoded(b => b.write_i32(127)))
+        si
+
+        @Test()
+        write_i32__largest_32_bit_value__writes_five_septics() is
+            BYTES.are(
+                [0xFF, 0xFF, 0xFF, 0xFF, 0x07],
+                _encoded(b => b.write_i32(0x7FFFFFFF)))
+        si
+
+        @Test()
+        write_i32__most_negative_32_bit_value__writes_five_septics() is
+            BYTES.are(
+                [0x80, 0x80, 0x80, 0x80, 0x78],
+                _encoded(b => b.write_i32(cast int(0x80000000u))))
+        si
+
+        @Test()
+        write_u64__minus_one__writes_ten_septics() is
+            BYTES.are(
+                [0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x01],
+                _encoded(b => b.write_u64(-1L)))
+        si
+
+        @Test()
+        write_i64__largest_64_bit_value__writes_ten_septics() is
+            BYTES.are(
+                [0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00],
+                _encoded(b => b.write_i64(0x7FFFFFFFFFFFFFFFL)))
+        si
+
+        @Test()
+        write_i64__most_negative_64_bit_value__writes_ten_septics() is
+            BYTES.are(
+                [0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x7F],
+                _encoded(b => b.write_i64(-9223372036854775807L - 1L)))
+        si
+
+        // A float is its bits little-endian, which is the reverse of the
+        // order they read in.
+        @Test()
+        write_f32__one__writes_the_bits_little_endian() is
+            BYTES.are([0x00, 0x00, 0x80, 0x3F], _encoded(b => b.write_f32(1.0s)))
+        si
+
+        @Test()
+        write_f32__negative_zero__writes_the_bits_little_endian() is
+            BYTES.are([0x00, 0x00, 0x00, 0x80], _encoded(b => b.write_f32(-0.0s)))
+        si
+
+        @Test()
+        write_f64__one__writes_the_bits_little_endian() is
+            BYTES.are(
+                [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xF0, 0x3F],
+                _encoded(b => b.write_f64(1.0)))
+        si
+
+        // A name is length-prefixed by its byte count rather than by its
+        // character count, which is where a name outside ASCII differs
+        // from its length.
+        @Test()
+        write_name__ascii__writes_the_byte_count_first() is
+            BYTES.are([0x03, 0x61, 0x64, 0x64], _encoded(b => b.write_name("add")))
+        si
+
+        @Test()
+        write_name__empty__writes_a_zero_count() is
+            BYTES.are([0x00], _encoded(b => b.write_name("")))
+        si
+
+        @Test()
+        write_name__outside_ascii__counts_bytes_not_characters() is
+            BYTES.are(
+                [0x02, 0xC3, 0xA9],
+                _encoded(b => b.write_name("é")))
+        si
+    si
+si
