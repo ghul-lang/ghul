@@ -28,7 +28,8 @@ written the same way whatever holds the segment.
 - `heap_type.ghul` — what a reference points at: one of the abstract heap
   types, or an index into the type section.
 - `field_type.ghul` — what a struct field or an array element holds,
-  including the two packed types, and whether it can be assigned through.
+  which is any value type — so a struct can point at another struct — or
+  one of the two packed types, and whether it can be assigned through.
 - `composite_type.ghul` — what a declared type is made of: a function
   signature, a struct's fields, or an array's element type.
 - `sub_type.ghul` — a composite type, whether it is closed, and the

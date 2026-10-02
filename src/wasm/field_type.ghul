@@ -1,28 +1,44 @@
 namespace Wasm is
-    // What a struct field or an array element holds, which is a value
-    // type or one of the two packed types. A packed type has no value
-    // type spelling of its own: it is read and written through the
-    // instructions that sign or zero extend it.
-    enum StorageType is
-        I32 = 0x7F,
-        I64 = 0x7E,
-        F32 = 0x7D,
-        F64 = 0x7C,
-        V128 = 0x7B,
-        FUNCREF = 0x70,
-        EXTERNREF = 0x6F,
+    // The two types that have no value type spelling of their own, read
+    // and written through the instructions that sign or zero extend
+    // them. A field may hold one; a signature may not.
+    enum PackedType is
         I8 = 0x78,
         I16 = 0x77
     si
 
-    // A storage type and whether it can be assigned through.
+    // What a struct field or an array element holds, and whether it can
+    // be assigned through.
+    //
+    // A field holds any value type, which is what lets a struct point at
+    // another struct or array and an array hold references to declared
+    // types, or a reference of either nullability. The two packed types
+    // are the exception: they are neither, and have a byte of their own.
     class FIELD_TYPE is
-        _storage: StorageType
+        _value: VALUE_TYPE?
+        _packed: PackedType?
         _mutable: bool
 
-        init(storage: StorageType, mutable: bool) is
-            _storage = storage
+        init(type: NumericType, mutable: bool) is
+            _value = VALUE_TYPE.of_numeric(type)
             _mutable = mutable
+        si
+
+        of_reference(reference: VALUE_TYPE, mutable: bool) -> FIELD_TYPE static is
+            let result = FIELD_TYPE(NumericType.I32, mutable)
+
+            result._value = reference
+
+            return result
+        si
+
+        of_packed(packed: PackedType, mutable: bool) -> FIELD_TYPE static is
+            let result = FIELD_TYPE(NumericType.I32, mutable)
+
+            result._value = null
+            result._packed = packed
+
+            return result
         si
 
         // The mutability byte is written whether or not the field can be
@@ -31,12 +47,27 @@ namespace Wasm is
         // the omission is not accepted everywhere, and a module an
         // engine rejects is not one worth a byte.
         write(buffer: BYTE_BUFFER) is
-            buffer.write_byte(cast ubyte(_storage))
+            if let packed = _packed then
+                buffer.write_byte(cast ubyte(packed))
+            else
+                _value!.write(buffer)
+            fi
+
             buffer.write_byte(if _mutable then 0x01ub else 0x00ub fi)
         si
 
         matches(other: FIELD_TYPE) -> bool is
-            return _storage == other._storage /\ _mutable == other._mutable
+            if _mutable != other._mutable then
+                return false
+            fi
+
+            if let packed = _packed then
+                return other._packed =~ packed
+            elif other._packed? then
+                return false
+            fi
+
+            return _value!.matches(other._value!)
         si
     si
 si
