@@ -1,0 +1,81 @@
+namespace IR.Emitter is
+    use Collections.LIST
+
+    use Semantic.Types.Type
+
+    // The custom attributes the assembly itself carries.
+    class CIL_ASSEMBLY_ATTRIBUTES is
+        init() is si
+
+        // Each attribute requested for the assembly that matched a
+        // constructor taking only strings.
+        gen_requested(emitter: SRM_ASSEMBLY_EMITTER, info: Semantic.DotNet.ASSEMBLY_INFO) static is
+            let string_type = IoC.CONTAINER.instance.innate_symbol_lookup.get_string_type()
+
+            for attribute in info.resolved do
+                let argument_types = LIST[Type]()
+
+                for _ in attribute.arguments do
+                    argument_types.add(string_type)
+                od
+
+                emitter.add_named_attribute(
+                    emitter.assembly_handle,
+                    attribute.assembly_name,
+                    attribute.name,
+                    argument_types,
+                    SRM_ATTRIBUTE_BLOB_ENCODER.encode_string_arguments(attribute.arguments))
+            od
+        si
+
+        // What a REPL cell's assembly carries so the session hangs
+        // together: the marker that makes it recognisable as a cell to the
+        // cells after it, and, for each earlier cell it references, the
+        // attribute that lets the runtime give it the access the compiler
+        // already allows.
+        gen_session_cell(
+            emitter: SRM_ASSEMBLY_EMITTER,
+            submission_name: string?,
+            assemblies: Semantic.DotNet.ASSEMBLIES
+        ) static is
+            let string_type = IoC.CONTAINER.instance.innate_symbol_lookup.get_string_type()
+
+            if let name = submission_name then
+                emitter.add_named_attribute(
+                    emitter.assembly_handle,
+                    "System.Runtime",
+                    Semantic.DotNet.SESSION_CELL_MARKER.ATTRIBUTE_NAME,
+                    LIST[Type]([string_type, string_type]),
+                    SRM_ATTRIBUTE_BLOB_ENCODER.encode_string_arguments(
+                        LIST[string]([Semantic.DotNet.SESSION_CELL_MARKER.KEY, name])))
+            fi
+
+            let cells = assemblies.session_cell_names
+
+            if cells.count == 0 then
+                return
+            fi
+
+            let access_attribute_name = Semantic.DotNet.SESSION_CELL_ATTRIBUTES.ACCESS_ATTRIBUTE_NAME
+
+            // Declared by the runtime; one too old to declare it leaves
+            // the cells to what the runtime allows without it.
+            let access_type = assemblies.find_type(access_attribute_name)
+
+            if !access_type? then
+                return
+            fi
+
+            let access_assembly = access_type.assembly.get_name().name ?? "ghul-runtime"
+
+            for cell in cells do
+                emitter.add_named_attribute(
+                    emitter.assembly_handle,
+                    access_assembly,
+                    access_attribute_name,
+                    LIST[Type]([string_type]),
+                    SRM_ATTRIBUTE_BLOB_ENCODER.encode_string_arguments(LIST[string]([cell])))
+            od
+        si
+    si
+si
