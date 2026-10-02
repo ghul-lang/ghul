@@ -1,0 +1,149 @@
+namespace Wasm.UnitTests is
+    use Collections.LIST
+
+    use Wasm.ARRAY_TYPE
+    use Wasm.BYTE_BUFFER
+    use Wasm.FIELD_TYPE
+    use Wasm.FUNC_TYPE
+    use Wasm.STRUCT_TYPE
+    use Wasm.NumericType
+    use Wasm.PackedType
+    use Wasm.TYPE_ENTRY
+    use Wasm.SUB_TYPE
+
+    use TestClass = Microsoft.VisualStudio.TestTools.UnitTesting.TestClassAttribute
+    use Test = Microsoft.VisualStudio.TestTools.UnitTesting.TestMethodAttribute
+    use Assertions
+
+    // The three shapes a declared type can be made of, the three ways a
+    // type says what it is a subtype of, and the recursion group that
+    // lets a type name itself.
+    @TestClass()
+    class COMPOSITE_TYPE_TESTS is
+        init() is si
+
+        _encoded(writes: (BYTE_BUFFER) -> void) -> ubyte[] is
+            let buffer = BYTE_BUFFER()
+
+            writes(buffer)
+
+            return buffer.to_array()
+        si
+
+        _field(storage: NumericType) -> FIELD_TYPE is
+            return FIELD_TYPE(storage, false)
+        si
+
+        @Test()
+        func__no_parameters_and_no_results__is_a_marker_and_two_zeroes() is
+            BYTES.are(
+                [0x60, 0x00, 0x00],
+                _encoded(b => FUNC_TYPE([], []).write(b)))
+        si
+
+        @Test()
+        func__parameters_and_results__counts_each_run() is
+            BYTES.are(
+                [0x60, 0x01, 0x7F, 0x01, 0x7E],
+                _encoded(b => FUNC_TYPE(
+                    [VALUE_TYPES.i32()], [VALUE_TYPES.i64()]).write(b)))
+        si
+
+        @Test()
+        struct__one_field__is_a_marker_a_count_and_the_field() is
+            BYTES.are(
+                [0x5F, 0x01, 0x7F, 0x00],
+                _encoded(b => STRUCT_TYPE([_field(NumericType.I32)]).write(b)))
+        si
+
+        @Test()
+        struct__a_mutable_packed_field__carries_the_marker() is
+            BYTES.are(
+                [0x5F, 0x01, 0x78, 0x01],
+                _encoded(b => STRUCT_TYPE(
+                    [FIELD_TYPE.of_packed(PackedType.I8, true)]).write(b)))
+        si
+
+        @Test()
+        array__its_element__is_a_marker_and_one_field() is
+            BYTES.are(
+                [0x5E, 0x7E, 0x00],
+                _encoded(b => ARRAY_TYPE(_field(NumericType.I64)).write(b)))
+        si
+
+        // A composite type with no supertypes is a closed type, and the
+        // format writes that without saying so.
+        @Test()
+        sub__no_supertypes__is_the_composite_type_alone() is
+            BYTES.are(
+                [0x60, 0x00, 0x00],
+                _encoded(b => SUB_TYPE(FUNC_TYPE([], [])).write(b)))
+        si
+
+        @Test()
+        sub__open_with_supertypes__is_a_marker_then_the_indices() is
+            BYTES.are(
+                [0x50, 0x02, 0x00, 0x01, 0x5E, 0x7F, 0x00],
+                _encoded(b => SUB_TYPE(
+                    ARRAY_TYPE(_field(NumericType.I32)), false, [0, 1]).write(b)))
+        si
+
+        @Test()
+        sub__final_with_supertypes__is_the_other_marker() is
+            BYTES.are(
+                [0x4F, 0x01, 0x00, 0x5E, 0x7F, 0x00],
+                _encoded(b => SUB_TYPE(
+                    ARRAY_TYPE(_field(NumericType.I32)), true, [0]).write(b)))
+        si
+
+        @Test()
+        entry__a_single_type__is_written_as_itself() is
+            BYTES.are(
+                [0x60, 0x00, 0x00],
+                _encoded(b => TYPE_ENTRY(SUB_TYPE(FUNC_TYPE([], []))).write(b)))
+        si
+
+        @Test()
+        entry__a_group__is_a_marker_and_a_count() is
+            BYTES.are(
+                [0x4E, 0x02, 0x5E, 0x7F, 0x00, 0x5E, 0x7E, 0x00],
+                _encoded(b => TYPE_ENTRY.of_rec_group(LIST[SUB_TYPE]([
+                    SUB_TYPE(ARRAY_TYPE(_field(NumericType.I32))),
+                    SUB_TYPE(ARRAY_TYPE(_field(NumericType.I64)))
+                ])).write(b)))
+        si
+
+        @Test()
+        matches__a_composite_of_another_kind__is_not_the_same() is
+            is_false(FUNC_TYPE([], []).matches(STRUCT_TYPE([])))
+        si
+
+        @Test()
+        matches__two_structs_with_the_same_fields__are_the_same() is
+            is_true(
+                STRUCT_TYPE([_field(NumericType.I32)])
+                    .matches(STRUCT_TYPE([_field(NumericType.I32)])))
+        si
+
+        @Test()
+        matches__a_field_differing_in_mutability__is_not_the_same() is
+            is_false(
+                STRUCT_TYPE([FIELD_TYPE(NumericType.I32, false)])
+                    .matches(STRUCT_TYPE([FIELD_TYPE(NumericType.I32, true)])))
+        si
+
+        @Test()
+        matches__two_signatures_with_the_same_types__are_the_same() is
+            is_true(
+                FUNC_TYPE([VALUE_TYPES.i32()], [])
+                    .matches(FUNC_TYPE([VALUE_TYPES.i32()], [])))
+        si
+
+        @Test()
+        matches__an_arity_differing__is_not_the_same() is
+            is_false(
+                FUNC_TYPE([VALUE_TYPES.i32()], [])
+                    .matches(FUNC_TYPE([VALUE_TYPES.i32(), VALUE_TYPES.i32()], [])))
+        si
+    si
+si

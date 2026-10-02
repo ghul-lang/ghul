@@ -1,0 +1,152 @@
+namespace Wasm is
+    // What an element segment is for: filling a table at a point, sitting
+    // ready to be copied from, or declaring functions a table may
+    // reference without filling anything.
+    enum ElementMode is
+        PASSIVE,
+        DECLARATIVE,
+        ACTIVE
+    si
+
+    // A run of values for a table, or a run of function indices to be
+    // resolved into them.
+    //
+    // The specification gives eight forms rather than one per
+    // combination, because two of them leave out both the table and the
+    // element type. Those two are an active segment on the first table
+    // whose elements are function references, and leaving the element
+    // type out fixes it at `funcref` - which is only right when that is
+    // what the segment holds. An active segment on the first table of
+    // anything else has to name its table after all.
+    class ELEMENT_SEGMENT is
+        _mode: ElementMode
+        _by_function: bool
+        _table_index: int
+        _offset: Collections.List[INSTRUCTION]
+        _reference: VALUE_TYPE
+        _function_indices: int[]
+        _expressions: Collections.List[Collections.List[INSTRUCTION]]
+
+        init() is si
+
+        // A run of function indices, which is how a table of function
+        // references is most often filled.
+        of_functions(
+            mode: ElementMode,
+            table_index: int,
+            offset: Collections.List[INSTRUCTION],
+            function_indices: int[]
+        ) -> ELEMENT_SEGMENT static is
+            let result = ELEMENT_SEGMENT()
+
+            result._mode = mode
+            result._by_function = true
+            result._table_index = table_index
+            result._reference = VALUE_TYPE.of_abstract(AbstractHeapType.FUNC)
+            result._offset = offset
+            result._function_indices = function_indices
+
+            return result
+        si
+
+        // A run of constant expressions, each producing one value of the
+        // segment's element type.
+        of_expressions(
+            mode: ElementMode,
+            table_index: int,
+            offset: Collections.List[INSTRUCTION],
+            reference: VALUE_TYPE,
+            expressions: Collections.List[Collections.List[INSTRUCTION]]
+        ) -> ELEMENT_SEGMENT static is
+            let result = ELEMENT_SEGMENT()
+
+            result._mode = mode
+            result._table_index = table_index
+            result._offset = offset
+            result._reference = reference
+            result._expressions = expressions
+
+            return result
+        si
+
+        write(buffer: BYTE_BUFFER) is
+            // The two forms that leave the table out are the two that
+            // leave the element type with it.
+            let on_first_table = _elides_table_and_type()
+
+            buffer.write_byte(_form(on_first_table))
+
+            if _mode == ElementMode.ACTIVE then
+                if !on_first_table then
+                    buffer.write_u32(_table_index)
+                fi
+
+                write_instructions(buffer, _offset)
+                buffer.write_byte(cast ubyte(Opcode.END))
+            fi
+
+            // The forms that leave the table out leave the element type
+            // with it, and a run of function indices carries the element
+            // kind rather than a type.
+            if !on_first_table then
+                if _by_function then
+                    buffer.write_byte(0x00ub)
+                else
+                    _reference.write(buffer)
+                fi
+            fi
+
+            if _by_function then
+                buffer.write_length(_function_indices.count)
+
+                for index in _function_indices do
+                    buffer.write_u32(index)
+                od
+            else
+                buffer.write_length(_expressions.count)
+
+                for expression in _expressions do
+                    write_instructions(buffer, expression)
+                    buffer.write_byte(cast ubyte(Opcode.END))
+                od
+            fi
+        si
+
+        // Whether this is one of the two forms that name neither the
+        // table nor the element type: an active segment on the first
+        // table whose elements are function references.
+        _elides_table_and_type() -> bool is
+            if _mode != ElementMode.ACTIVE then
+                return false
+            elif _table_index != 0 then
+                return false
+            fi
+
+            return _by_function \/ _holds_func_references()
+        si
+
+        _holds_func_references() -> bool is
+            return _reference.matches(VALUE_TYPE.of_abstract(AbstractHeapType.FUNC))
+        si
+
+        _form(on_first_table: bool) -> ubyte is
+            if _by_function then
+                if _mode == ElementMode.ACTIVE then
+                    return if on_first_table then 0x00ub else 0x02ub fi
+                elif _mode == ElementMode.PASSIVE then
+                    return 0x01ub
+                fi
+
+                return 0x03ub
+            fi
+
+            if _mode == ElementMode.ACTIVE then
+                return if on_first_table then 0x04ub else 0x06ub fi
+            elif _mode == ElementMode.PASSIVE then
+                return 0x05ub
+            fi
+
+            return 0x07ub
+        si
+    si
+si

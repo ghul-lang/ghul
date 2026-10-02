@@ -11,7 +11,13 @@ namespace Wasm.UnitTests is
     use Wasm.MODULE
     use Wasm.TABLE
     use Wasm.TABLE_IMPORT
-    use Wasm.ValueType
+    use Wasm.ELEMENT_SEGMENT
+    use Wasm.ElementMode
+    use Wasm.STRUCT_TYPE
+    use Wasm.SUB_TYPE
+    use Wasm.FIELD_TYPE
+    use Wasm.NumericType
+    use Wasm.VALUE_TYPE
     use Wasm.ExportKind
 
     use TestClass = Microsoft.VisualStudio.TestTools.UnitTesting.TestClassAttribute
@@ -92,13 +98,13 @@ namespace Wasm.UnitTests is
             let module = _new_module()
 
             module.add_type(FUNC_TYPE([], []))
-            module.add_type(FUNC_TYPE([ValueType.I32], [ValueType.I32]))
+            module.add_type(FUNC_TYPE([VALUE_TYPES.i32()], [VALUE_TYPES.i32()]))
 
             module.add_import(FUNCTION_IMPORT("env", "f", 1))
-            module.add_table(TABLE(ValueType.FUNCREF, LIMITS(1)))
+            module.add_table(TABLE(VALUE_TYPES.func_ref(), LIMITS(1)))
 
             module.add_global(GLOBAL(
-                ValueType.I32,
+                VALUE_TYPES.i32(),
                 true,
                 _body([I32_CONSTANT(7)])))
 
@@ -107,7 +113,7 @@ namespace Wasm.UnitTests is
 
             module.add_function(FUNCTION(
                 0,
-                [ValueType.I32, ValueType.I32],
+                [VALUE_TYPES.i32(), VALUE_TYPES.i32()],
                 _body([
                     INDEX_INSTRUCTION(Opcode.LOCAL_GET, 0),
                     INDEX_INSTRUCTION(Opcode.CALL, 0),
@@ -140,13 +146,169 @@ namespace Wasm.UnitTests is
                 BINARY_WRITER().write(module))
         si
 
+        // The elements follow the start function and precede the code,
+        // which is where their identifiers put them among the sections
+        // the format fixes an order for.
+        @Test()
+        write__an_element_segment__sits_after_the_start_and_before_the_code() is
+            let module = _new_module()
+
+            module.add_type(FUNC_TYPE([], []))
+
+            module.add_table(TABLE(VALUE_TYPES.func_ref(), LIMITS(1)))
+
+            module.add_function(FUNCTION(0, [], _body([])))
+
+            module.add_export(EXPORT("t", ExportKind.TABLE, 0))
+
+            module.add_element_segment(ELEMENT_SEGMENT.of_functions(
+                ElementMode.ACTIVE,
+                0,
+                _body([I32_CONSTANT(0)]),
+                [0]))
+
+            module.set_start(0)
+
+            BYTES.are(
+                [
+                    0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00,
+                    // type: one entry, no parameters and no results
+                    0x01, 0x04, 0x01, 0x60, 0x00, 0x00,
+                    // function: one entry, of type zero
+                    0x03, 0x02, 0x01, 0x00,
+                    // table: one entry of funcref, no maximum, minimum one
+                    0x04, 0x04, 0x01, 0x70, 0x00, 0x01,
+                    // export: t, a table, index zero
+                    0x07, 0x05, 0x01, 0x01, 0x74, 0x01, 0x00,
+                    // start: function zero
+                    0x08, 0x01, 0x00,
+                    // element: one segment, the first form - an offset
+                    // of zero and a run of one function index
+                    0x09, 0x07, 0x01, 0x00, 0x41, 0x00, 0x0B, 0x01, 0x00,
+                    // code: one entry of two bytes - no locals and the end
+                    0x0A, 0x04, 0x01, 0x02, 0x00, 0x0B
+                ],
+                BINARY_WRITER().write(module))
+        si
+
+        // A type is a subtype of another only when the one it is a
+        // subtype of was written as open, so the marker is what decides.
+        @Test()
+        add_sub_type__an_open_type_with_no_supertypes__is_one_entry() is
+            let module = _new_module()
+
+            module.add_sub_type(SUB_TYPE(
+                STRUCT_TYPE([]), false, []))
+
+            are_equal(1, module.add_sub_type(SUB_TYPE(
+                STRUCT_TYPE([]), false, [0])))
+
+            are_equal(2, module.types().count)
+        si
+
+        @Test()
+        add_sub_type__the_same_shape_twice__is_one_entry() is
+            let module = _new_module()
+
+            module.add_sub_type(SUB_TYPE(STRUCT_TYPE([]), false, []))
+
+            are_equal(
+                0, module.add_sub_type(SUB_TYPE(STRUCT_TYPE([]), false, [])))
+        si
+
+        @Test()
+        add_sub_type__open_and_closed_are_not_the_same_entry() is
+            let module = _new_module()
+
+            module.add_sub_type(SUB_TYPE(STRUCT_TYPE([]), false, []))
+            module.add_sub_type(SUB_TYPE(STRUCT_TYPE([]), true, []))
+
+            are_equal(2, module.types().count)
+        si
+
+        // The reason a group exists: a type inside it naming another's
+        // index, which is what a self-referential type needs and what
+        // two groups of unrelated types would not have needed.
+        @Test()
+        add_rec_group__a_type_naming_another_in_the_same_group__is_written() is
+            let module = _new_module()
+
+            let group = Collections.LIST[SUB_TYPE]()
+
+            group.add(SUB_TYPE(STRUCT_TYPE([
+                FIELD_TYPE.of_reference(VALUE_TYPES.ref_to(1), false)
+            ])))
+
+            group.add(SUB_TYPE(STRUCT_TYPE([
+                FIELD_TYPE.of_reference(VALUE_TYPES.ref_to(0), false)
+            ])))
+
+            module.add_rec_group(group)
+
+            BYTES.are(
+                [
+                    0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00,
+                    // a group of two, each holding a reference to the other
+                    0x01, 0x0D, 0x01, 0x4E, 0x02,
+                    0x5F, 0x01, 0x64, 0x01, 0x00,
+                    0x5F, 0x01, 0x64, 0x00, 0x00
+                ],
+                BINARY_WRITER().write(module))
+        si
+
+        @Test()
+        add_rec_group__is_always_a_new_entry() is
+            let module = _new_module()
+
+            // Two distinct types, so that the two entries ahead of the
+            // group are two rather than one after deduplication.
+            module.add_type(STRUCT_TYPE([FIELD_TYPE(NumericType.I32, false)]))
+            module.add_type(STRUCT_TYPE([FIELD_TYPE(NumericType.I64, false)]))
+
+            are_equal(
+                2, module.add_rec_group(Collections.LIST[SUB_TYPE]([
+                    SUB_TYPE(STRUCT_TYPE([]))])))
+        si
+
+        // A recursion group is one entry declaring one type per member,
+        // so a type added after it is written later than its index and
+        // takes one counting each member.
+        @Test()
+        add_type__after_a_group_of_two__is_two_beyond_the_start() is
+            let module = _new_module()
+
+            are_equal(0, module.add_rec_group(Collections.LIST[SUB_TYPE]([
+                SUB_TYPE(STRUCT_TYPE([FIELD_TYPE(NumericType.I32, false)])),
+                SUB_TYPE(STRUCT_TYPE([FIELD_TYPE(NumericType.I64, false)]))
+            ])))
+
+            are_equal(2, module.add_type(FUNC_TYPE([], [])))
+            are_equal(3, module.type_count())
+            are_equal(2, module.types().count)
+        si
+
+        @Test()
+        add_type__matching_a_type_before_a_group__is_that_types_index() is
+            let module = _new_module()
+
+            module.add_type(STRUCT_TYPE([FIELD_TYPE(NumericType.I32, false)]))
+
+            module.add_rec_group(Collections.LIST[SUB_TYPE]([
+                SUB_TYPE(STRUCT_TYPE([FIELD_TYPE(NumericType.I64, false)])),
+                SUB_TYPE(STRUCT_TYPE([FIELD_TYPE(NumericType.I32, false)]))
+            ]))
+
+            are_equal(
+                0, module.add_type(STRUCT_TYPE([FIELD_TYPE(NumericType.I32, false)])))
+        si
+
         @Test()
         add_type__the_same_shape_twice__is_one_entry() is
             let module = _new_module()
 
-            module.add_type(FUNC_TYPE([ValueType.I32], [ValueType.I32]))
+            module.add_type(FUNC_TYPE([VALUE_TYPES.i32()], [VALUE_TYPES.i32()]))
 
-            are_equal(0, module.add_type(FUNC_TYPE([ValueType.I32], [ValueType.I32])))
+            are_equal(0, module.add_type(FUNC_TYPE([VALUE_TYPES.i32()], [VALUE_TYPES.i32()])))
             are_equal(1, module.types().count)
         si
 
@@ -154,10 +316,10 @@ namespace Wasm.UnitTests is
         add_type__a_different_shape__is_a_new_entry() is
             let module = _new_module()
 
-            module.add_type(FUNC_TYPE([ValueType.I32], []))
-            module.add_type(FUNC_TYPE([ValueType.I64], []))
+            module.add_type(FUNC_TYPE([VALUE_TYPES.i32()], []))
+            module.add_type(FUNC_TYPE([VALUE_TYPES.i64()], []))
 
-            are_equal(1, module.add_type(FUNC_TYPE([ValueType.I64], [])))
+            are_equal(1, module.add_type(FUNC_TYPE([VALUE_TYPES.i64()], [])))
             are_equal(2, module.types().count)
         si
 
@@ -167,9 +329,9 @@ namespace Wasm.UnitTests is
 
             module.add_type(FUNC_TYPE([], []))
 
-            are_equal(1, module.add_type(FUNC_TYPE([ValueType.I32], [])))
+            are_equal(1, module.add_type(FUNC_TYPE([VALUE_TYPES.i32()], [])))
             are_equal(2, module.add_type(FUNC_TYPE(
-                [ValueType.I32, ValueType.I64], [])))
+                [VALUE_TYPES.i32(), VALUE_TYPES.i64()], [])))
             are_equal(3, module.types().count)
         si
 
@@ -177,10 +339,10 @@ namespace Wasm.UnitTests is
         add_type__the_result_types_differing__is_a_new_entry() is
             let module = _new_module()
 
-            module.add_type(FUNC_TYPE([], [ValueType.I32]))
-            module.add_type(FUNC_TYPE([], [ValueType.I64]))
+            module.add_type(FUNC_TYPE([], [VALUE_TYPES.i32()]))
+            module.add_type(FUNC_TYPE([], [VALUE_TYPES.i64()]))
 
-            are_equal(1, module.add_type(FUNC_TYPE([], [ValueType.I64])))
+            are_equal(1, module.add_type(FUNC_TYPE([], [VALUE_TYPES.i64()])))
         si
 
         // An imported function comes before every defined one, so the
@@ -203,9 +365,9 @@ namespace Wasm.UnitTests is
             let module = _new_module()
 
             module.add_import(TABLE_IMPORT(
-                "env", "t", TABLE(ValueType.FUNCREF, LIMITS(1))))
+                "env", "t", TABLE(VALUE_TYPES.func_ref(), LIMITS(1))))
 
-            are_equal(1, module.add_table(TABLE(ValueType.FUNCREF, LIMITS(2))))
+            are_equal(1, module.add_table(TABLE(VALUE_TYPES.func_ref(), LIMITS(2))))
             are_equal(2, module.table_count())
         si
 
@@ -213,7 +375,7 @@ namespace Wasm.UnitTests is
         add_table__with_no_imports__is_its_own_index() is
             let module = _new_module()
 
-            are_equal(0, module.add_table(TABLE(ValueType.FUNCREF, LIMITS(1))))
+            are_equal(0, module.add_table(TABLE(VALUE_TYPES.func_ref(), LIMITS(1))))
             are_equal(1, module.table_count())
         si
 
