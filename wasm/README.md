@@ -154,3 +154,53 @@ type the instruction produces; the immediate is the heap type alone, and
 whether the reference can be absent is in the opcode, which is why there
 are four of them rather than one. And `br_on_cast` takes the nullability
 of its two heap types in a flags byte ahead of the label, not in the types.
+
+## The module matrix
+
+`tests/matrix.ghul` holds the whole modules the library is checked
+against: one named method each, building a module of one shape. The
+per-class tests pin exact bytes for the encodings and for small modules;
+the matrix is for the other claim, that the bytes the writer produces are
+the bytes an engine accepts, and it holds every shape the library can
+produce so that adding one means adding a method here rather than
+remembering to write a module for it.
+
+`tests/matrix_tests.ghul` writes every module of the matrix and checks the
+preamble, which is what the suite can do on its own. Whether the bytes are
+ones an engine accepts is checked with Node's `WebAssembly.validate` while
+the tests are written, and the result is recorded in the pull request;
+Node is not a build dependency, so that run is not part of the suite.
+
+What the matrix covers, and why each module is there:
+
+- `empty`, `start` - the preamble alone, and the smallest module that
+  names a function, exports it and starts at it.
+- `imports`, `globals`, `tables` - one import of each kind, and the index
+  spaces the defined entries then join. `tables` names the second table of
+  a shared index space, which is the case a table index gets wrong.
+- `control` - the three block types, a branch to each, and a branch table.
+  The block typed by a signature is there because a block like that has to
+  consume its operand in its own body: an empty body leaves the operand on
+  the stack at the end, and that is a program that does not validate
+  rather than an encoding that is wrong.
+- `numeric-i32` to `numeric-f64`, `conversions` - one function per opcode
+  of each family, so an engine has read every numeric opcode the library
+  can emit, and the conversions with the constant each one reads.
+- `struct`, `array` - the reads and writes of both composite shapes,
+  including the packed fields, which are the ones that reach the
+  sign- and zero-extending instructions.
+- `references`, `cast-branches`, `i31-extern` - making and testing
+  references, comparing two, the four tests and casts, the branches that
+  carry a reference, the i31 instructions and the extern conversions.
+- `element` - all eight forms of element segment, which is every
+  combination of mode, element type and table the format gives a form to.
+- `rec-group` - two types that name each other, which is what a recursion
+  group is for and what two groups of unrelated types would not have
+  needed.
+- `calls` - a direct call, one through a table and one through a reference
+  read out of that table.
+- `typed-block` - a block whose signature takes an operand. Kept as its
+  own entry because the empty-bodied version of it validates the encoding
+  and not the program, which is an easy distinction to lose.
+
+The last engine run accepted all twenty.

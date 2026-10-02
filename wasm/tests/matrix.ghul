@@ -1,0 +1,790 @@
+namespace Wasm.Tests is
+    use Collections.LIST
+
+    // The whole modules the suite checks against a real engine, one named
+    // method each.
+    //
+    // This is the one place a whole module is built. The per-class tests
+    // pin exact bytes for the encodings and for small modules; the matrix
+    // exists for the other claim, that the bytes a writer produces are the
+    // bytes an engine accepts, and it holds every shape the library can
+    // produce so that adding one means adding a method here rather than
+    // remembering to write a module for it.
+    //
+    // A method builds its module and returns it. Writing the bytes is the
+    // writer's job, and which engine they are handed to is the test run's,
+    // so nothing here touches either.
+    class MODULE_MATRIX is
+        // The modules of the matrix, by the name the tests and the
+        // README know them by.
+        names() -> LIST[string] static is
+            return LIST[string]([
+                "empty",
+                "typed-block",
+                "start",
+                "imports",
+                "globals",
+                "tables",
+                "control",
+                "numeric-i32",
+                "numeric-i64",
+                "numeric-f32",
+                "numeric-f64",
+                "conversions",
+                "struct",
+                "array",
+                "references",
+                "cast-branches",
+                "i31-extern",
+                "element",
+                "rec-group",
+                "calls"
+            ])
+        si
+
+        by_name(name: string) -> MODULE static is
+            if name =~ "empty" then return empty() fi
+            if name =~ "typed-block" then return typed_block() fi
+            if name =~ "start" then return start() fi
+            if name =~ "imports" then return imports() fi
+            if name =~ "globals" then return globals() fi
+            if name =~ "tables" then return tables() fi
+            if name =~ "control" then return control() fi
+            if name =~ "numeric-i32" then return numeric_i32() fi
+            if name =~ "numeric-i64" then return numeric_i64() fi
+            if name =~ "numeric-f32" then return numeric_f32() fi
+            if name =~ "numeric-f64" then return numeric_f64() fi
+            if name =~ "conversions" then return conversions() fi
+            if name =~ "struct" then return struct_type() fi
+            if name =~ "array" then return array_type() fi
+            if name =~ "references" then return references() fi
+            if name =~ "cast-branches" then return cast_branches() fi
+            if name =~ "i31-extern" then return i31_extern() fi
+            if name =~ "element" then return element() fi
+            if name =~ "rec-group" then return rec_group() fi
+            if name =~ "calls" then return calls() fi
+
+            throw System.Exception("no module named {name} in the matrix")
+        si
+
+        // --- helpers the module bodies read better with ---
+
+        i32() -> VALUE_TYPE static is
+            return VALUE_TYPE.of_numeric(NumericType.I32)
+        si
+
+        i64() -> VALUE_TYPE static is
+            return VALUE_TYPE.of_numeric(NumericType.I64)
+        si
+
+        f32() -> VALUE_TYPE static is
+            return VALUE_TYPE.of_numeric(NumericType.F32)
+        si
+
+        f64() -> VALUE_TYPE static is
+            return VALUE_TYPE.of_numeric(NumericType.F64)
+        si
+
+        // The nullable reference to a heap type, which is the spelling a
+        // table's element type and a function's parameter take.
+        ref_of(type: AbstractHeapType) -> VALUE_TYPE static is
+            return VALUE_TYPE.of_abstract(type)
+        si
+
+        // A reference to the declared type at an index.
+        ref_to(index: int) -> VALUE_TYPE static is
+            return VALUE_TYPE.of_type_index(index, false)
+        si
+
+        nullable_ref_to(index: int) -> VALUE_TYPE static is
+            return VALUE_TYPE.of_type_index(index, true)
+        si
+
+        _seq(instructions: INSTRUCTION[]) -> LIST[INSTRUCTION] static is
+            let result = LIST[INSTRUCTION]()
+
+            for instruction in instructions do
+                result.add(instruction)
+            od
+
+            return result
+        si
+
+        _ref_null(index: int) -> INSTRUCTION static is
+            return HEAP_TYPE_INSTRUCTION(Opcode.REF_NULL, HEAP_TYPE.of_type_index(index))
+        si
+
+        // --- the modules ---
+
+        // A block whose signature takes an operand, which the block's own
+        // body has to consume: an empty body leaves the operand on the
+        // stack at the end, and that is not the block's fallthrough.
+        typed_block() -> MODULE static is
+            let module = MODULE()
+
+            module.add_type(FUNC_TYPE([], []))
+            module.add_type(FUNC_TYPE([i32()], []))
+
+            module.add_function(FUNCTION(0, [i32()], _seq([
+                LOCAL_GET(0),
+                BLOCK_INSTRUCTION(Opcode.BLOCK, BLOCK_TYPE.of_type_index(1),
+                    _seq([SIMPLE_INSTRUCTION(Opcode.DROP)]))
+            ])))
+
+            return module
+        si
+
+        // The preamble and nothing else, which is what a module with no
+        // types, no imports and no code is.
+        empty() -> MODULE static is
+            return MODULE()
+        si
+
+        // One function of no parameters and no results, exported and
+        // named as the start.
+        start() -> MODULE static is
+            let module = MODULE()
+
+            module.add_type(FUNC_TYPE([], []))
+            module.add_function(FUNCTION(0, [], _seq([
+                SIMPLE_INSTRUCTION(Opcode.NOP)
+            ])))
+            module.add_export(EXPORT("run", ExportKind.FUNCTION, 0))
+            module.set_start(0)
+
+            return module
+        si
+
+        // One of each kind the library imports, which fixes the index
+        // spaces the defined entries then join.
+        imports() -> MODULE static is
+            let module = MODULE()
+
+            module.add_type(FUNC_TYPE([i32()], []))
+            module.add_type(FUNC_TYPE([], []))
+
+            module.add_import(FUNCTION_IMPORT("env", "log", 0))
+            module.add_import(TABLE_IMPORT(
+                "env", "table", TABLE(ref_of(AbstractHeapType.FUNC), LIMITS(1))))
+            module.add_import(GLOBAL_IMPORT("env", "offset", i32(), false))
+
+            return module
+        si
+
+        // Globals of both mutabilities, one read and one written.
+        globals() -> MODULE static is
+            let module = MODULE()
+
+            module.add_type(FUNC_TYPE([], []))
+
+            module.add_global(GLOBAL(
+                i32(), false, _seq([I32_CONSTANT(7)])))
+            module.add_global(GLOBAL(
+                i64(), true, _seq([I64_CONSTANT(0L)])))
+
+            module.add_function(FUNCTION(0, [], _seq([
+                INDEX_INSTRUCTION(Opcode.GLOBAL_GET, 1),
+                SIMPLE_INSTRUCTION(Opcode.DROP)
+            ])))
+
+            return module
+        si
+
+        // A declared table and an imported one, since the two share an
+        // index space and the instruction here names the second.
+        tables() -> MODULE static is
+            let module = MODULE()
+
+            module.add_type(FUNC_TYPE([], []))
+
+            module.add_import(TABLE_IMPORT(
+                "env", "imported", TABLE(ref_of(AbstractHeapType.FUNC), LIMITS(1))))
+
+            module.add_table(TABLE(ref_of(AbstractHeapType.FUNC), LIMITS(1, 4)))
+
+            module.add_function(FUNCTION(0, [], _seq([
+                I32_CONSTANT(0),
+                INDEX_INSTRUCTION(Opcode.TABLE_GET, 1),
+                SIMPLE_INSTRUCTION(Opcode.DROP)
+            ])))
+
+            return module
+        si
+
+        // Structured control with each of the three block types, a branch
+        // to each, and a branch table.
+        control() -> MODULE static is
+            let module = MODULE()
+
+            module.add_type(FUNC_TYPE([], []))
+            module.add_type(FUNC_TYPE([i32()], []))
+
+            module.add_function(FUNCTION(0, [i32()], _seq([
+                BLOCK_INSTRUCTION(Opcode.BLOCK, BLOCK_TYPE(), _seq([
+                    BLOCK_INSTRUCTION(Opcode.BLOCK, BLOCK_TYPE(), _seq([
+                        INDEX_INSTRUCTION(Opcode.LOCAL_GET, 0),
+                        I32_CONSTANT(0),
+                        BR_TABLE_INSTRUCTION([0], 1)
+                    ])),
+                    BLOCK_INSTRUCTION(
+                        Opcode.BLOCK,
+                        BLOCK_TYPE.of_value(i32()),
+                        _seq([I32_CONSTANT(1)])),
+                    SIMPLE_INSTRUCTION(Opcode.DROP)
+                ])),
+                BLOCK_INSTRUCTION(Opcode.LOOP, BLOCK_TYPE(), _seq([])),
+                LOCAL_GET(0),
+                IF_INSTRUCTION(
+                    BLOCK_TYPE.of_value(i32()),
+                    _seq([I32_CONSTANT(2)]),
+                    _seq([I32_CONSTANT(3)])),
+                SIMPLE_INSTRUCTION(Opcode.DROP),
+                LOCAL_GET(0),
+                SIMPLE_INSTRUCTION(Opcode.DROP)
+            ])))
+
+            return module
+        si
+
+        // One function per instruction of a numeric family, each taking
+        // its operands as constants and dropping its result, so that an
+        // engine has validated every opcode in the family.
+        //
+        // The operand counts differ, so the bodies are spelled out rather
+        // than generated: an opcode that takes two operands is given two
+        // constants, and one that takes none is given none.
+        _numeric(family: string) -> MODULE static is
+            let module = MODULE()
+
+            module.add_type(FUNC_TYPE([], []))
+
+            if family =~ "i32" then
+                for each in _I32_BINARY do
+                    module.add_function(FUNCTION(0, [], _seq([
+                        I32_CONSTANT(1), I32_CONSTANT(2), each,
+                        SIMPLE_INSTRUCTION(Opcode.DROP)
+                    ])))
+                od
+
+                for each in _I32_UNARY do
+                    module.add_function(FUNCTION(0, [], _seq([
+                        I32_CONSTANT(1), each, SIMPLE_INSTRUCTION(Opcode.DROP)
+                    ])))
+                od
+
+                return module
+            fi
+
+            if family =~ "i64" then
+                for each in _I64_BINARY do
+                    module.add_function(FUNCTION(0, [], _seq([
+                        I64_CONSTANT(1L), I64_CONSTANT(2L), each,
+                        SIMPLE_INSTRUCTION(Opcode.DROP)
+                    ])))
+                od
+
+                for each in _I64_UNARY do
+                    module.add_function(FUNCTION(0, [], _seq([
+                        I64_CONSTANT(1L), each, SIMPLE_INSTRUCTION(Opcode.DROP)
+                    ])))
+                od
+
+                return module
+            fi
+
+            if family =~ "f32" then
+                for each in _F32_BINARY do
+                    module.add_function(FUNCTION(0, [], _seq([
+                        F32_CONSTANT(1.5s), F32_CONSTANT(2.5s), each,
+                        SIMPLE_INSTRUCTION(Opcode.DROP)
+                    ])))
+                od
+
+                for each in _F32_UNARY do
+                    module.add_function(FUNCTION(0, [], _seq([
+                        F32_CONSTANT(1.5s), each, SIMPLE_INSTRUCTION(Opcode.DROP)
+                    ])))
+                od
+
+                return module
+            fi
+
+            for each in _F64_BINARY do
+                module.add_function(FUNCTION(0, [], _seq([
+                    F64_CONSTANT(1.5), F64_CONSTANT(2.5), each,
+                    SIMPLE_INSTRUCTION(Opcode.DROP)
+                ])))
+            od
+
+            for each in _F64_UNARY do
+                module.add_function(FUNCTION(0, [], _seq([
+                    F64_CONSTANT(1.5), each, SIMPLE_INSTRUCTION(Opcode.DROP)
+                ])))
+            od
+
+            return module
+        si
+
+        numeric_i32() -> MODULE static is
+            return _numeric("i32")
+        si
+
+        numeric_i64() -> MODULE static is
+            return _numeric("i64")
+        si
+
+        numeric_f32() -> MODULE static is
+            return _numeric("f32")
+        si
+
+        numeric_f64() -> MODULE static is
+            return _numeric("f64")
+        si
+
+        // Every conversion from one type to another, each read off a
+        // constant and dropped.
+        conversions() -> MODULE static is
+            let module = MODULE()
+
+            module.add_type(FUNC_TYPE([], []))
+
+            for each in _CONVERSIONS do
+                module.add_function(FUNCTION(0, [], _seq([each])))
+            od
+
+            return module
+        si
+
+        // --- the opcode tables ---
+
+        _I32_BINARY: INSTRUCTION[] static is
+            return [
+                SIMPLE_INSTRUCTION(Opcode.I32_ADD), SIMPLE_INSTRUCTION(Opcode.I32_SUB),
+                SIMPLE_INSTRUCTION(Opcode.I32_MUL), SIMPLE_INSTRUCTION(Opcode.I32_DIV_S),
+                SIMPLE_INSTRUCTION(Opcode.I32_DIV_U), SIMPLE_INSTRUCTION(Opcode.I32_REM_S),
+                SIMPLE_INSTRUCTION(Opcode.I32_REM_U), SIMPLE_INSTRUCTION(Opcode.I32_AND),
+                SIMPLE_INSTRUCTION(Opcode.I32_OR), SIMPLE_INSTRUCTION(Opcode.I32_XOR),
+                SIMPLE_INSTRUCTION(Opcode.I32_SHL), SIMPLE_INSTRUCTION(Opcode.I32_SHR_S),
+                SIMPLE_INSTRUCTION(Opcode.I32_SHR_U), SIMPLE_INSTRUCTION(Opcode.I32_ROTL),
+                SIMPLE_INSTRUCTION(Opcode.I32_ROTR),
+                SIMPLE_INSTRUCTION(Opcode.I32_EQ), SIMPLE_INSTRUCTION(Opcode.I32_NE),
+                SIMPLE_INSTRUCTION(Opcode.I32_LT_S), SIMPLE_INSTRUCTION(Opcode.I32_LT_U),
+                SIMPLE_INSTRUCTION(Opcode.I32_GT_S), SIMPLE_INSTRUCTION(Opcode.I32_GT_U),
+                SIMPLE_INSTRUCTION(Opcode.I32_LE_S), SIMPLE_INSTRUCTION(Opcode.I32_LE_U),
+                SIMPLE_INSTRUCTION(Opcode.I32_GE_S), SIMPLE_INSTRUCTION(Opcode.I32_GE_U)
+            ]
+        si
+
+        _I32_UNARY: INSTRUCTION[] static is
+            return [
+                SIMPLE_INSTRUCTION(Opcode.I32_EQZ), SIMPLE_INSTRUCTION(Opcode.I32_CLZ),
+                SIMPLE_INSTRUCTION(Opcode.I32_CTZ), SIMPLE_INSTRUCTION(Opcode.I32_POPCNT),
+                SIMPLE_INSTRUCTION(Opcode.I32_EXTEND8_S), SIMPLE_INSTRUCTION(Opcode.I32_EXTEND16_S)
+            ]
+        si
+
+        _I64_BINARY: INSTRUCTION[] static is
+            return [
+                SIMPLE_INSTRUCTION(Opcode.I64_ADD), SIMPLE_INSTRUCTION(Opcode.I64_SUB),
+                SIMPLE_INSTRUCTION(Opcode.I64_MUL), SIMPLE_INSTRUCTION(Opcode.I64_DIV_S),
+                SIMPLE_INSTRUCTION(Opcode.I64_DIV_U), SIMPLE_INSTRUCTION(Opcode.I64_REM_S),
+                SIMPLE_INSTRUCTION(Opcode.I64_REM_U), SIMPLE_INSTRUCTION(Opcode.I64_AND),
+                SIMPLE_INSTRUCTION(Opcode.I64_OR), SIMPLE_INSTRUCTION(Opcode.I64_XOR),
+                SIMPLE_INSTRUCTION(Opcode.I64_SHL), SIMPLE_INSTRUCTION(Opcode.I64_SHR_S),
+                SIMPLE_INSTRUCTION(Opcode.I64_SHR_U), SIMPLE_INSTRUCTION(Opcode.I64_ROTL),
+                SIMPLE_INSTRUCTION(Opcode.I64_ROTR),
+                SIMPLE_INSTRUCTION(Opcode.I64_EQ), SIMPLE_INSTRUCTION(Opcode.I64_NE),
+                SIMPLE_INSTRUCTION(Opcode.I64_LT_S), SIMPLE_INSTRUCTION(Opcode.I64_LT_U),
+                SIMPLE_INSTRUCTION(Opcode.I64_GT_S), SIMPLE_INSTRUCTION(Opcode.I64_GT_U),
+                SIMPLE_INSTRUCTION(Opcode.I64_LE_S), SIMPLE_INSTRUCTION(Opcode.I64_LE_U),
+                SIMPLE_INSTRUCTION(Opcode.I64_GE_S), SIMPLE_INSTRUCTION(Opcode.I64_GE_U)
+            ]
+        si
+
+        _I64_UNARY: INSTRUCTION[] static is
+            return [
+                SIMPLE_INSTRUCTION(Opcode.I64_EQZ), SIMPLE_INSTRUCTION(Opcode.I64_CLZ),
+                SIMPLE_INSTRUCTION(Opcode.I64_CTZ), SIMPLE_INSTRUCTION(Opcode.I64_POPCNT),
+                SIMPLE_INSTRUCTION(Opcode.I64_EXTEND8_S),
+                SIMPLE_INSTRUCTION(Opcode.I64_EXTEND16_S),
+                SIMPLE_INSTRUCTION(Opcode.I64_EXTEND32_S)
+            ]
+        si
+
+        _F32_BINARY: INSTRUCTION[] static is
+            return [
+                SIMPLE_INSTRUCTION(Opcode.F32_ADD), SIMPLE_INSTRUCTION(Opcode.F32_SUB),
+                SIMPLE_INSTRUCTION(Opcode.F32_MUL), SIMPLE_INSTRUCTION(Opcode.F32_DIV),
+                SIMPLE_INSTRUCTION(Opcode.F32_MIN), SIMPLE_INSTRUCTION(Opcode.F32_MAX),
+                SIMPLE_INSTRUCTION(Opcode.F32_COPYSIGN),
+                SIMPLE_INSTRUCTION(Opcode.F32_EQ), SIMPLE_INSTRUCTION(Opcode.F32_NE),
+                SIMPLE_INSTRUCTION(Opcode.F32_LT), SIMPLE_INSTRUCTION(Opcode.F32_GT),
+                SIMPLE_INSTRUCTION(Opcode.F32_LE), SIMPLE_INSTRUCTION(Opcode.F32_GE)
+            ]
+        si
+
+        _F32_UNARY: INSTRUCTION[] static is
+            return [
+                SIMPLE_INSTRUCTION(Opcode.F32_ABS), SIMPLE_INSTRUCTION(Opcode.F32_NEG),
+                SIMPLE_INSTRUCTION(Opcode.F32_CEIL), SIMPLE_INSTRUCTION(Opcode.F32_FLOOR),
+                SIMPLE_INSTRUCTION(Opcode.F32_TRUNC), SIMPLE_INSTRUCTION(Opcode.F32_NEAREST),
+                SIMPLE_INSTRUCTION(Opcode.F32_SQRT)
+            ]
+        si
+
+        _F64_BINARY: INSTRUCTION[] static is
+            return [
+                SIMPLE_INSTRUCTION(Opcode.F64_ADD), SIMPLE_INSTRUCTION(Opcode.F64_SUB),
+                SIMPLE_INSTRUCTION(Opcode.F64_MUL), SIMPLE_INSTRUCTION(Opcode.F64_DIV),
+                SIMPLE_INSTRUCTION(Opcode.F64_MIN), SIMPLE_INSTRUCTION(Opcode.F64_MAX),
+                SIMPLE_INSTRUCTION(Opcode.F64_COPYSIGN),
+                SIMPLE_INSTRUCTION(Opcode.F64_EQ), SIMPLE_INSTRUCTION(Opcode.F64_NE),
+                SIMPLE_INSTRUCTION(Opcode.F64_LT), SIMPLE_INSTRUCTION(Opcode.F64_GT),
+                SIMPLE_INSTRUCTION(Opcode.F64_LE), SIMPLE_INSTRUCTION(Opcode.F64_GE)
+            ]
+        si
+
+        _F64_UNARY: INSTRUCTION[] static is
+            return [
+                SIMPLE_INSTRUCTION(Opcode.F64_ABS), SIMPLE_INSTRUCTION(Opcode.F64_NEG),
+                SIMPLE_INSTRUCTION(Opcode.F64_CEIL), SIMPLE_INSTRUCTION(Opcode.F64_FLOOR),
+                SIMPLE_INSTRUCTION(Opcode.F64_TRUNC), SIMPLE_INSTRUCTION(Opcode.F64_NEAREST),
+                SIMPLE_INSTRUCTION(Opcode.F64_SQRT)
+            ]
+        si
+
+        // A conversion reads its operand off a constant of the type it
+        // converts from, so the constant travels with the opcode.
+        _CONVERSIONS: INSTRUCTION[] static is
+            return [
+                _from(I32_CONSTANT(1), Opcode.I32_EXTEND8_S),
+                _from(I32_CONSTANT(1), Opcode.I64_EXTEND_I32_S),
+                _from(I64_CONSTANT(1L), Opcode.I32_WRAP_I64),
+                _from(I64_CONSTANT(1L), Opcode.I64_EXTEND8_S),
+                _from(I64_CONSTANT(1L), Opcode.I64_EXTEND32_S),
+                _from(F32_CONSTANT(1.5s), Opcode.I32_TRUNC_F32_S),
+                _from(F32_CONSTANT(1.5s), Opcode.I32_TRUNC_F32_U),
+                _from(F32_CONSTANT(1.5s), Opcode.I64_TRUNC_F32_S),
+                _from(F32_CONSTANT(1.5s), Opcode.I64_TRUNC_F32_U),
+                _from(F32_CONSTANT(1.5s), Opcode.I32_TRUNC_SAT_F32_S),
+                _from(F32_CONSTANT(1.5s), Opcode.I32_TRUNC_SAT_F32_U),
+                _from(F32_CONSTANT(1.5s), Opcode.I64_TRUNC_SAT_F32_S),
+                _from(F32_CONSTANT(1.5s), Opcode.I64_TRUNC_SAT_F32_U),
+                _from(F64_CONSTANT(1.5), Opcode.I32_TRUNC_F64_S),
+                _from(F64_CONSTANT(1.5), Opcode.I32_TRUNC_F64_U),
+                _from(F64_CONSTANT(1.5), Opcode.I64_TRUNC_F64_S),
+                _from(F64_CONSTANT(1.5), Opcode.I64_TRUNC_F64_U),
+                _from(F64_CONSTANT(1.5), Opcode.I32_TRUNC_SAT_F64_S),
+                _from(F64_CONSTANT(1.5), Opcode.I32_TRUNC_SAT_F64_U),
+                _from(F64_CONSTANT(1.5), Opcode.I64_TRUNC_SAT_F64_S),
+                _from(F64_CONSTANT(1.5), Opcode.I64_TRUNC_SAT_F64_U),
+                _from(I32_CONSTANT(1), Opcode.F32_CONVERT_I32_S),
+                _from(I32_CONSTANT(1), Opcode.F32_CONVERT_I32_U),
+                _from(I64_CONSTANT(1L), Opcode.F32_CONVERT_I64_S),
+                _from(I64_CONSTANT(1L), Opcode.F32_CONVERT_I64_U),
+                _from(F64_CONSTANT(1.5), Opcode.F32_DEMOTE_F64),
+                _from(I32_CONSTANT(1), Opcode.F64_CONVERT_I32_S),
+                _from(I32_CONSTANT(1), Opcode.F64_CONVERT_I32_U),
+                _from(I64_CONSTANT(1L), Opcode.F64_CONVERT_I64_S),
+                _from(I64_CONSTANT(1L), Opcode.F64_CONVERT_I64_U),
+                _from(F32_CONSTANT(1.5s), Opcode.F64_PROMOTE_F32),
+                _from(F32_CONSTANT(1.5s), Opcode.I32_REINTERPRET_F32),
+                _from(F64_CONSTANT(1.5), Opcode.I64_REINTERPRET_F64),
+                _from(I32_CONSTANT(1), Opcode.F32_REINTERPRET_I32),
+                _from(I64_CONSTANT(1L), Opcode.F64_REINTERPRET_I64)
+            ]
+        si
+
+        // One conversion: its constant, then the opcode that reads it.
+        _from(operand: INSTRUCTION, opcode: Opcode) -> INSTRUCTION static is
+            return BLOCK_INSTRUCTION(Opcode.BLOCK, BLOCK_TYPE(), _seq([
+                operand, SIMPLE_INSTRUCTION(opcode), SIMPLE_INSTRUCTION(Opcode.DROP)
+            ]))
+        si
+
+        // A struct of three fields of different shapes, and every read
+        // and write the struct instructions make on it.
+        struct_type() -> MODULE static is
+            let module = MODULE()
+
+            module.add_sub_type(SUB_TYPE(STRUCT_TYPE([
+                FIELD_TYPE(NumericType.I32, true),
+                FIELD_TYPE.of_packed(PackedType.I8, false),
+                FIELD_TYPE.of_reference(nullable_ref_to(0), true)
+            ]), false, []))
+
+            module.add_type(FUNC_TYPE([], []))
+
+            module.add_function(FUNCTION(1, [], _seq([
+                I32_CONSTANT(1),
+                I32_CONSTANT(2),
+                _ref_null(0),
+                TYPE_INSTRUCTION(Opcode.STRUCT_NEW, 0),
+                SIMPLE_INSTRUCTION(Opcode.DROP),
+                TYPE_INSTRUCTION(Opcode.STRUCT_NEW_DEFAULT, 0),
+                TYPE_FIELD_INSTRUCTION(Opcode.STRUCT_GET, 0, 0),
+                SIMPLE_INSTRUCTION(Opcode.DROP),
+                TYPE_INSTRUCTION(Opcode.STRUCT_NEW_DEFAULT, 0),
+                I32_CONSTANT(0),
+                TYPE_FIELD_INSTRUCTION(Opcode.STRUCT_SET, 0, 0)
+            ])))
+
+            return module
+        si
+
+        // An array of packed and of plain elements, built four ways and
+        // read two.
+        array_type() -> MODULE static is
+            let module = MODULE()
+
+            module.add_sub_type(SUB_TYPE(
+                ARRAY_TYPE(FIELD_TYPE(NumericType.I32, true)), false, []))
+            module.add_sub_type(SUB_TYPE(
+                ARRAY_TYPE(FIELD_TYPE.of_packed(PackedType.I16, false)), false, []))
+            module.add_type(FUNC_TYPE([], []))
+
+            module.add_function(FUNCTION(2, [], _seq([
+                I32_CONSTANT(0), I32_CONSTANT(3),
+                TYPE_INSTRUCTION(Opcode.ARRAY_NEW, 0),
+                SIMPLE_INSTRUCTION(Opcode.DROP),
+                I32_CONSTANT(3),
+                TYPE_INSTRUCTION(Opcode.ARRAY_NEW_DEFAULT, 0),
+                SIMPLE_INSTRUCTION(Opcode.DROP),
+                I32_CONSTANT(1), I32_CONSTANT(2), I32_CONSTANT(3),
+                TYPE_LENGTH_INSTRUCTION(Opcode.ARRAY_NEW_FIXED, 0, 3),
+                SIMPLE_INSTRUCTION(Opcode.DROP),
+                I32_CONSTANT(9), I32_CONSTANT(2),
+                TYPE_INSTRUCTION(Opcode.ARRAY_NEW, 1),
+                I32_CONSTANT(0),
+                TYPE_INSTRUCTION(Opcode.ARRAY_GET_U, 1),
+                SIMPLE_INSTRUCTION(Opcode.DROP),
+                I32_CONSTANT(0),
+                TYPE_INSTRUCTION(Opcode.ARRAY_NEW_DEFAULT, 0),
+                SIMPLE_INSTRUCTION(Opcode.ARRAY_LEN),
+                SIMPLE_INSTRUCTION(Opcode.DROP)
+            ])))
+
+            return module
+        si
+
+        // The reference instructions that do not name a declared type:
+        // making one, testing it for absence, comparing two, and the
+        // extern boundary conversions.
+        references() -> MODULE static is
+            let module = MODULE()
+
+            module.add_type(FUNC_TYPE([], []))
+
+            module.add_function(FUNCTION(0, [], _seq([
+                _ref_null_of(AbstractHeapType.ANY),
+                SIMPLE_INSTRUCTION(Opcode.REF_IS_NULL),
+                SIMPLE_INSTRUCTION(Opcode.DROP),
+                _ref_null_of(AbstractHeapType.EQ),
+                _ref_null_of(AbstractHeapType.EQ),
+                SIMPLE_INSTRUCTION(Opcode.REF_EQ),
+                SIMPLE_INSTRUCTION(Opcode.DROP),
+                _ref_null_of(AbstractHeapType.EXTERN),
+                SIMPLE_INSTRUCTION(Opcode.ANY_CONVERT_EXTERN),
+                SIMPLE_INSTRUCTION(Opcode.EXTERN_CONVERT_ANY),
+                SIMPLE_INSTRUCTION(Opcode.DROP)
+            ])))
+
+            return module
+        si
+
+        cast_branches() -> MODULE static is
+            let module = MODULE()
+
+            module.add_sub_type(SUB_TYPE(
+                STRUCT_TYPE([FIELD_TYPE(NumericType.I32, true)]), false, []))
+            module.add_type(FUNC_TYPE(
+                [nullable_ref_to(0)], [nullable_ref_to(0)]))
+
+            module.add_function(FUNCTION(1, [], _seq([
+                LOCAL_GET(0),
+                CAST_BRANCH_INSTRUCTION(
+                    Opcode.BR_ON_CAST, 0,
+                    HEAP_TYPE.of_abstract(AbstractHeapType.ANY), true,
+                    HEAP_TYPE.of_type_index(0), true),
+                SIMPLE_INSTRUCTION(Opcode.DROP),
+                LOCAL_GET(0),
+                REF_TEST(HEAP_TYPE.of_type_index(0), true),
+                SIMPLE_INSTRUCTION(Opcode.DROP),
+                LOCAL_GET(0),
+                REF_TEST(HEAP_TYPE.of_type_index(0), false),
+                SIMPLE_INSTRUCTION(Opcode.DROP),
+                LOCAL_GET(0),
+                REF_CAST(HEAP_TYPE.of_type_index(0), true)
+            ])))
+
+            return module
+        si
+
+        i31_extern() -> MODULE static is
+            let module = MODULE()
+
+            module.add_type(FUNC_TYPE([], []))
+
+            module.add_function(FUNCTION(0, [], _seq([
+                I32_CONSTANT(3),
+                SIMPLE_INSTRUCTION(Opcode.REF_I31),
+                SIMPLE_INSTRUCTION(Opcode.I31_GET_S),
+                SIMPLE_INSTRUCTION(Opcode.DROP),
+                I32_CONSTANT(3),
+                SIMPLE_INSTRUCTION(Opcode.REF_I31),
+                SIMPLE_INSTRUCTION(Opcode.I31_GET_U),
+                SIMPLE_INSTRUCTION(Opcode.DROP),
+                _ref_null_of(AbstractHeapType.EXTERN),
+                SIMPLE_INSTRUCTION(Opcode.ANY_CONVERT_EXTERN),
+                SIMPLE_INSTRUCTION(Opcode.EXTERN_CONVERT_ANY),
+                SIMPLE_INSTRUCTION(Opcode.DROP)
+            ])))
+
+            return module
+        si
+
+        // All eight forms of element segment, which is every combination
+        // of mode, element type and table the format gives a form to.
+        element() -> MODULE static is
+            let module = MODULE()
+
+            module.add_type(FUNC_TYPE([], []))
+
+            module.add_table(TABLE(ref_of(AbstractHeapType.FUNC), LIMITS(1)))
+            module.add_table(TABLE(ref_of(AbstractHeapType.FUNC), LIMITS(1)))
+
+            module.add_function(FUNCTION(0, [], _body_of_table(1)))
+            module.add_function(FUNCTION(0, [], _body_of_table(1)))
+
+            let offset = _seq([I32_CONSTANT(0)])
+
+            module.add_element_segment(ELEMENT_SEGMENT.of_functions(
+                ElementMode.ACTIVE, 0, offset, [0, 1]))
+            module.add_element_segment(ELEMENT_SEGMENT.of_functions(
+                ElementMode.PASSIVE, 0, _seq([]), [1]))
+            module.add_element_segment(ELEMENT_SEGMENT.of_functions(
+                ElementMode.ACTIVE, 1, offset, [0]))
+            module.add_element_segment(ELEMENT_SEGMENT.of_functions(
+                ElementMode.DECLARATIVE, 0, _seq([]), [0]))
+
+            let one_ref = LIST[LIST[INSTRUCTION]]([
+                _seq([_ref_func(0)])
+            ])
+
+            module.add_element_segment(ELEMENT_SEGMENT.of_expressions(
+                ElementMode.ACTIVE, 0, offset,
+                ref_of(AbstractHeapType.FUNC), one_ref))
+            module.add_element_segment(ELEMENT_SEGMENT.of_expressions(
+                ElementMode.PASSIVE, 0, _seq([]),
+                ref_of(AbstractHeapType.FUNC), one_ref))
+            module.add_element_segment(ELEMENT_SEGMENT.of_expressions(
+                ElementMode.ACTIVE, 1, offset,
+                ref_of(AbstractHeapType.FUNC), one_ref))
+            module.add_element_segment(ELEMENT_SEGMENT.of_expressions(
+                ElementMode.DECLARATIVE, 0, _seq([]),
+                ref_of(AbstractHeapType.FUNC), one_ref))
+
+            return module
+        si
+
+        // Two types that name each other, which is what a recursion group
+        // is for, and a function that builds one of them.
+        rec_group() -> MODULE static is
+            let module = MODULE()
+
+            let group = LIST[SUB_TYPE]()
+
+            group.add(SUB_TYPE(STRUCT_TYPE([
+                FIELD_TYPE.of_reference(nullable_ref_to(1), true)
+            ]), false, []))
+
+            group.add(SUB_TYPE(STRUCT_TYPE([
+                FIELD_TYPE.of_reference(ref_to(0), false),
+                FIELD_TYPE.of_packed(PackedType.I8, true)
+            ])))
+
+            module.add_rec_group(group)
+            module.add_type(FUNC_TYPE([], []))
+
+            module.add_function(FUNCTION(2, [], _seq([
+                _ref_null(0),
+                SIMPLE_INSTRUCTION(Opcode.REF_AS_NON_NULL),
+                I32_CONSTANT(0),
+                TYPE_INSTRUCTION(Opcode.STRUCT_NEW, 1),
+                SIMPLE_INSTRUCTION(Opcode.DROP)
+            ])))
+
+            return module
+        si
+
+        // The calls: direct, through a table, and through a reference
+        // read out of that table.
+        calls() -> MODULE static is
+            let module = MODULE()
+
+            module.add_type(FUNC_TYPE([], []))
+
+            module.add_table(TABLE(ref_of(AbstractHeapType.FUNC), LIMITS(1)))
+
+            module.add_function(FUNCTION(0, [], _seq([SIMPLE_INSTRUCTION(Opcode.NOP)])))
+            module.add_function(FUNCTION(0, [], _seq([
+                I32_CONSTANT(0),
+                CALL_INDIRECT_INSTRUCTION(0, 0)
+            ])))
+            module.add_function(FUNCTION(0, [], _seq([
+                I32_CONSTANT(0),
+                INDEX_INSTRUCTION(Opcode.TABLE_GET, 0),
+                HEAP_TYPE_INSTRUCTION(
+                    Opcode.REF_CAST_NULL, HEAP_TYPE.of_type_index(0)),
+                TYPE_INSTRUCTION(Opcode.CALL_REF, 0)
+            ])))
+
+            module.add_element_segment(ELEMENT_SEGMENT.of_functions(
+                ElementMode.ACTIVE, 0, _seq([I32_CONSTANT(0)]), [0]))
+
+            return module
+        si
+
+        // --- the helpers the bodies above are written with ---
+
+        _ref_null_of(type: AbstractHeapType) -> INSTRUCTION static is
+            return HEAP_TYPE_INSTRUCTION(Opcode.REF_NULL, HEAP_TYPE.of_abstract(type))
+        si
+
+        _ref_func(index: int) -> INSTRUCTION static is
+            return INDEX_INSTRUCTION(Opcode.REF_FUNC, index)
+        si
+
+        LOCAL_GET(index: int) -> INSTRUCTION static is
+            return INDEX_INSTRUCTION(Opcode.LOCAL_GET, index)
+        si
+
+        GLOBAL_GET(index: int) -> INSTRUCTION static is
+            return INDEX_INSTRUCTION(Opcode.GLOBAL_GET, index)
+        si
+
+        // A body that reads an element out of a table and drops it,
+        // which is what gives a function a reason to hold a local of a
+        // reference type.
+        _body_of_table(table: int) -> LIST[INSTRUCTION] static is
+            return _seq([
+                I32_CONSTANT(0),
+                INDEX_INSTRUCTION(Opcode.TABLE_GET, table),
+                SIMPLE_INSTRUCTION(Opcode.DROP)
+            ])
+        si
+
+        REF_TEST(type: HEAP_TYPE, nullable: bool) -> INSTRUCTION static is
+            return HEAP_TYPE_INSTRUCTION(
+                if nullable then Opcode.REF_TEST_NULL else Opcode.REF_TEST fi,
+                type)
+        si
+
+        REF_CAST(type: HEAP_TYPE, nullable: bool) -> INSTRUCTION static is
+            return HEAP_TYPE_INSTRUCTION(
+                if nullable then Opcode.REF_CAST_NULL else Opcode.REF_CAST fi,
+                type)
+        si
+
+si
+si
