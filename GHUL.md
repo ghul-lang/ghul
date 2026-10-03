@@ -2519,6 +2519,8 @@ si
 
 Five `@IL` pragmas are acted on: `IL.name`, `IL.name.read`, `IL.name.assign`, `IL.output` and `IL.entrypoint`. Any other `IL.` pragma draws an `unknown-pragma` warning, since a misspelled or removed pragma is otherwise acted on as a built-in and silently does nothing.
 
+`@intrinsic("operation")` marks a declaration as providing a compiler intrinsic: a call to it lowers to an operation of the compiler rather than to the method emitted there. It exists for the runtime and core libraries, which provide the intrinsics every compilation reflects. The operation is named by the pragma alone, so a library for a target with no assemblies to carry attributes can still mark what it declares. Where the compilation's reference set holds the runtime's `Ghul.Internal.INTRINSIC_ATTRIBUTE` — .NET, where other compilations read the marker back by reflecting the emitted assembly — the pragma is emitted as that attribute; where nothing holds it, nothing is emitted. The attribute type itself stays unnameable from source, as `Ghul.Internal` always is.
+
 A pragma whose name doesn't match a compiler built-in is taken to name a .NET **attribute**, and emits the attribute on whatever it's written against: a class, trait, struct, union, variant, or enum; a function or method; a field or property; or a single parameter in a function or method's parameter list, including a lambda literal's. The `Foo` short form resolves to `FooAttribute` when no plain `Foo` exists, in a `use` clause as well as in the pragma — so `use System.Obsolete` brings `System.ObsoleteAttribute` into scope, and `use Marker = System.Obsolete` brings it in as `Marker`. Arguments are positional, named (`name = value`), array-valued, or `typeof`:
 
 ```ghul

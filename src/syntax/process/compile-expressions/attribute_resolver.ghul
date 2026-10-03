@@ -46,7 +46,8 @@ namespace Syntax.Process is
             name =~ "precedence" \/
             name =~ "entry" \/
             name =~ "suppress" \/
-            name =~ "equality"
+            name =~ "equality" \/
+            name =~ "intrinsic"
 
         resolve(pragma: Trees.Pragmas.PRAGMA, target: Semantic.Symbols.Symbol?) is
             let name = pragma.name.to_string()
@@ -101,6 +102,23 @@ namespace Syntax.Process is
                 return
             fi
 
+            // `intrinsic` is the compiler's own spelling of the intrinsic
+            // marker. The operation it names is recorded from the pragma
+            // whatever the target; where this compilation's reference set
+            // holds Ghul.Internal.INTRINSIC_ATTRIBUTE — .NET, whose
+            // reflected compilations read the marker back — the pragma is
+            // emitted as that attribute, and where nothing holds it, it
+            // emits nothing.
+            if name =~ "intrinsic" then
+                let intrinsic_attribute = _intrinsic_attribute()
+
+                if intrinsic_attribute? then
+                    _record_attribute(pragma, target, intrinsic_attribute)
+                fi
+
+                return
+            fi
+
             if is_built_in(name) then
                 return
             fi
@@ -112,6 +130,18 @@ namespace Syntax.Process is
                 return
             fi
 
+            _record_attribute(pragma, target, attribute_type)
+        si
+
+        // Resolves the pragma's arguments against the attribute type's
+        // constructor and records the attribute on the target, shared by
+        // the ordinary pragma-as-attribute path and the `intrinsic`
+        // spelling.
+        _record_attribute(
+            pragma: Trees.Pragmas.PRAGMA,
+            target: Semantic.Symbols.Symbol,
+            attribute_type: Semantic.Symbols.Classy
+        ) is
             let positional = gather_positional_arguments(pragma)
 
             let constructor = resolve_constructor(pragma, attribute_type, positional)
@@ -193,6 +223,27 @@ namespace Syntax.Process is
             fi
 
             return _obsolete
+        si
+
+        _intrinsic_attribute_resolved: bool
+        _intrinsic_attribute_symbol: Semantic.Symbols.Classy?
+
+        // Resolved through the symbol table rather than the scope: the
+        // namespace is deliberately unnameable from source, so no `use`
+        // can import it, and the table holds the type whether or not the
+        // compilation names it. Null where the reference set carries no
+        // runtime to declare it.
+        _intrinsic_attribute() -> Semantic.Symbols.Classy? is
+            if !_intrinsic_attribute_resolved then
+                _intrinsic_attribute_resolved = true
+
+                _intrinsic_attribute_symbol =
+                    cast Semantic.Symbols.Classy?(
+                        IoC.CONTAINER.instance.dotnet_symbol_table.value
+                            .get_symbol("Ghul.Internal.INTRINSIC_ATTRIBUTE"))
+            fi
+
+            return _intrinsic_attribute_symbol
         si
 
         // ObsoleteAttribute's arguments, in constructor order: a message,
