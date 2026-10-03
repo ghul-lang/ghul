@@ -1,0 +1,379 @@
+namespace Semantic.Lookups is
+    use Source.LOCATION
+
+    use Collections.LIST
+    use Collections.List
+
+    use Types
+
+    // The built-in types as symbols constructed in code, for a target
+    // that loads no assemblies. The scalars, `object`, `string` and the
+    // generic families the language itself defines are declared into
+    // `Ghul.Intrinsics` — the namespace every compilation imports — so
+    // ordinary name resolution finds them with no resolver changes.
+    // Their members are not constructed here: the core library supplies
+    // those, and the find-only types (`Exception`, `Iterable`, the task
+    // types) are looked up in what the compilation declares, answering
+    // absent when the library has not declared them yet.
+    class CONSTRUCTED_INNATE_SYMBOL_LOOKUP(
+        _symbol_table: Semantic.SYMBOL_TABLE,
+        _namespaces: Semantic.NAMESPACES,
+        _source: GHUL_INNATE_TYPE_LOOKUP
+    ): InnateSymbolLookup is
+        _object_type: Type
+        _string_type: Type
+        _bigint_type: Type
+        _value_type: Type
+        _nullable: Semantic.Symbols.Classy
+
+        init(..) is
+            let intrinsics = _materialize_intrinsics_namespace()
+
+            _declare_scalars(intrinsics)
+            _declare_families(intrinsics)
+
+            _object_type = Types.NAMED(_declare_class(intrinsics, "object"))
+            _string_type = Types.NAMED(_declare_class(intrinsics, "string"))
+            _bigint_type = Types.NAMED(_declare_struct(intrinsics, "bigint", null))
+
+            // The value-type base is constructed rather than declared:
+            // no program names it, and the compiler needs it before any
+            // source could have declared it.
+            _value_type =
+                Types.NAMED(
+                    cast Semantic.Symbols.Classy?(
+                        Symbols.CLASS(
+                            LOCATION.internal,
+                            LOCATION.internal,
+                            intrinsics,
+                            "ValueType",
+                            LIST[string](),
+                            intrinsics))!)
+
+            // `T?` over a value type has no user-spellable name, so the
+            // carrier is constructed against the namespace without being
+            // declared into it: reachable from here, invisible to name
+            // resolution.
+            _nullable =
+                cast Semantic.Symbols.Classy?(
+                    Symbols.STRUCT(
+                        LOCATION.internal,
+                        LOCATION.internal,
+                        intrinsics,
+                        "NULLABLE",
+                        LIST[string](["T"]),
+                        intrinsics))!
+        si
+
+        // `Ghul.Intrinsics` exists before any source is read: the
+        // ambient `use` every namespace block gets resolves against it,
+        // and the scalars have to be findable before the first
+        // signature is resolved.
+        _materialize_intrinsics_namespace() -> Semantic.Symbols.NAMESPACE is
+            let global =
+                cast Semantic.Symbols.NAMESPACE?(_symbol_table.global_scope)!
+
+            let ghul = _namespaces.find_or_add_namespace("Ghul", ".Ghul", true)
+
+            if global.find_direct("Ghul") == null then
+                global.declare_namespace(LOCATION.internal, "Ghul", ghul, null)
+            fi
+
+            let intrinsics = _namespaces.find_or_add_namespace("Intrinsics", ".Ghul.Intrinsics", true)
+
+            if ghul.find_direct("Intrinsics") == null then
+                ghul.declare_namespace(LOCATION.internal, "Intrinsics", intrinsics, null)
+            fi
+
+            intrinsics.mark_implicitly_imported()
+
+            return intrinsics
+        si
+
+        _declare_scalars(intrinsics: Semantic.Symbols.NAMESPACE) is
+            _declare_struct(intrinsics, "void", Symbols.BuiltInType.VOID)
+            _declare_struct(intrinsics, "bool", Symbols.BuiltInType.BOOL)
+            _declare_struct(intrinsics, "char", Symbols.BuiltInType.CHAR)
+            _declare_struct(intrinsics, "byte", Symbols.BuiltInType.BYTE)
+            _declare_struct(intrinsics, "ubyte", Symbols.BuiltInType.UBYTE)
+            _declare_struct(intrinsics, "short", Symbols.BuiltInType.SHORT)
+            _declare_struct(intrinsics, "ushort", Symbols.BuiltInType.USHORT)
+            _declare_struct(intrinsics, "int", Symbols.BuiltInType.INT)
+            _declare_struct(intrinsics, "uint", Symbols.BuiltInType.UINT)
+            _declare_struct(intrinsics, "long", Symbols.BuiltInType.LONG)
+            _declare_struct(intrinsics, "ulong", Symbols.BuiltInType.ULONG)
+            _declare_struct(intrinsics, "word", Symbols.BuiltInType.WORD)
+            _declare_struct(intrinsics, "uword", Symbols.BuiltInType.UWORD)
+            _declare_struct(intrinsics, "single", Symbols.BuiltInType.SINGLE)
+            _declare_struct(intrinsics, "double", Symbols.BuiltInType.DOUBLE)
+            _declare_struct(intrinsics, "decimal", null)
+        si
+
+        _declare_families(intrinsics: Semantic.Symbols.NAMESPACE) is
+            for i in 1::8 do
+                _declare_with_arity(intrinsics, "TUPLE_{i}", i, true)
+            od
+
+            for i in 0::16 do
+                _declare_with_arity(intrinsics, "FUNCTION_{i}", i + 1, false)
+            od
+
+            for i in 0::16 do
+                _declare_with_arity(intrinsics, "ACTION_{i}", i, false)
+            od
+
+            // The three shapes the runtime's own intrinsics declare in
+            // source; under this target nothing declares them, so the
+            // carrier symbols are constructed here for the lookups
+            // below to specialise.
+            intrinsics.declare_trait(
+                LOCATION.internal,
+                LOCATION.internal,
+                "ARRAY",
+                LIST[string](["E"]),
+                intrinsics,
+                null)
+
+            _declare_with_arity(intrinsics, "REFERENCE", 1, true)
+            _declare_with_arity(intrinsics, "POINTER", 1, true)
+        si
+
+        _type_argument_names(arity: int) -> List[string] is
+            let result = LIST[string](arity)
+
+            for i in 1..arity do
+                result.add("T{i}")
+            od
+
+            return result
+        si
+
+        _declare_with_arity(intrinsics: Semantic.Symbols.NAMESPACE, name: string, arity: int, want_struct: bool) is
+            let arguments = _type_argument_names(arity)
+
+            if want_struct then
+                intrinsics.declare_struct(
+                    LOCATION.internal, LOCATION.internal, name, arguments, intrinsics, null)
+            else
+                intrinsics.declare_class(
+                    LOCATION.internal, LOCATION.internal, name, arguments, intrinsics, null)
+            fi
+        si
+
+        _declare_struct(
+            intrinsics: Semantic.Symbols.NAMESPACE,
+            name: string,
+            built_in: Symbols.BuiltInType?) -> Semantic.Symbols.STRUCT is
+            let result =
+                cast Semantic.Symbols.STRUCT?(
+                    intrinsics.declare_struct(
+                        LOCATION.internal,
+                        LOCATION.internal,
+                        name,
+                        LIST[string](),
+                        intrinsics,
+                        null))!
+
+            if let marker = built_in then
+                result.built_in_type = marker
+            fi
+
+            return result
+        si
+
+        _declare_class(intrinsics: Semantic.Symbols.NAMESPACE, name: string) -> Semantic.Symbols.CLASS is
+            return
+                cast Semantic.Symbols.CLASS?(
+                    intrinsics.declare_class(
+                        LOCATION.internal,
+                        LOCATION.internal,
+                        name,
+                        LIST[string](),
+                        intrinsics,
+                        null))!
+        si
+
+        // The types this compilation declares, searched by qualified
+        // name. A find-only type the library has not declared yet
+        // answers absent, which is what lets the library start as
+        // stubs.
+        _find_declared(qualified_name: string) -> Type? is
+            let parts = LIST[string]()
+
+            for part in _split(qualified_name, '.') do
+                parts.add(part)
+            od
+
+            let scope: Semantic.Scope? mut = _symbol_table.global_scope
+
+            while parts.count > 0 /\ scope? do
+                let name = parts[0]
+                parts.remove_at(0)
+
+                let found = scope.find_direct(name)
+
+                if !found? then
+                    return null
+                fi
+
+                scope = cast Semantic.Scope?(found)
+            od
+
+            if let reached = scope then
+                if let symbol = cast Semantic.Symbols.Classy?(reached) then
+                    return Types.NAMED(symbol)
+                fi
+            fi
+
+            return null
+        si
+
+        _split(text: string, separator: char) -> List[string] is
+            let result = LIST[string]()
+
+            let current = System.Text.StringBuilder()
+
+            for c in text do
+                if c == separator then
+                    result.add("{current}")
+                    current.clear()
+                else
+                    current.append(c)
+                fi
+            od
+
+            result.add("{current}")
+
+            return result
+        si
+
+        _required(what: string) -> Type is
+            throw System.Exception("the core library does not declare {what}")
+        si
+
+        get_enum_type() -> Type => _required("the enum base type")
+        get_tuple_type(types: List[Type], names: List[string?]?) -> Type => _source.get_tuple_type(types, names)
+        get_function_type(types: List[Type]) -> Type => _source.get_function_type(types)
+        get_function_type(types: List[Type], is_pure: bool) -> Type => _source.get_function_type(types, is_pure)
+        get_array_type(type: Type) -> Type => _source.get_array_type(type)
+        get_optional_type(type: Type) -> Type => Types.NULLABLE(LOCATION.internal, _nullable, LIST[Type]([type]))
+
+        get_maybe_type(type: Type) -> Type? is
+            if let maybe = _find_declared("Ghul.MAYBE") then
+                if let classy = cast Semantic.Symbols.Classy?(maybe.symbol) then
+                    return Types.GENERIC(LOCATION.internal, classy, LIST[Type]([type]))
+                fi
+            fi
+
+            return null
+        si
+
+        get_equality_comparer_type(type: Type) -> Type? => null
+        get_list_type(type: Type) -> Type? => null
+
+        get_pointer_type(type: Type) -> Type => _source.get_pointer_type(type)
+        get_reference_type(type: Type) -> Type => _source.get_reference_type(type)
+
+        get_bool_type() -> Type => _source.get_bool_type()
+        get_char_type() -> Type => _source.get_char_type()
+        get_byte_type() -> Type => _source.get_byte_type()
+        get_ubyte_type() -> Type => _source.get_ubyte_type()
+        get_short_type() -> Type => _source.get_short_type()
+        get_ushort_type() -> Type => _source.get_ushort_type()
+        get_int_type() -> Type => _source.get_int_type()
+        get_uint_type() -> Type => _source.get_uint_type()
+        get_long_type() -> Type => _source.get_long_type()
+        get_ulong_type() -> Type => _source.get_ulong_type()
+        get_word_type() -> Type => _source.get_word_type()
+        get_uword_type() -> Type => _source.get_uword_type()
+        get_single_type() -> Type => _source.get_single_type()
+        get_double_type() -> Type => _source.get_double_type()
+        get_decimal_type() -> Type => _source.get_decimal_type()
+        get_bigint_type() -> Type => _bigint_type
+        get_void_type() -> Type => _source.get_void_type()
+        get_object_type() -> Type => _object_type
+        get_value_type() -> Type => _value_type
+        get_string_type() -> Type => _string_type
+
+        get_exception_type() -> Type is
+            if let found = _find_declared("Ghul.Exception") then
+                return found
+            fi
+
+            return _required("Ghul.Exception")
+        si
+
+        get_invalid_cast_exception_type() -> Type is
+            if let found = _find_declared("Ghul.InvalidCastException") then
+                return found
+            fi
+
+            return _required("Ghul.InvalidCastException")
+        si
+
+        get_overflow_exception_type() -> Type is
+            if let found = _find_declared("Ghul.OverflowException") then
+                return found
+            fi
+
+            return _required("Ghul.OverflowException")
+        si
+
+        get_type_type() -> Type => _required("the type of a typeof")
+        get_unspecialized_iterable_type() -> Type => _required("Collections.Iterable")
+        get_unspecialized_list_type() -> Type => _required("Collections.List")
+        get_unspecialized_mutable_list_type() -> Type => _required("Collections.LIST")
+
+        get_int_range_types() -> (exclusive: Type, inclusive: Type)? => null
+
+        get_unspecialized_iterator_type() -> Type => _required("Collections.Iterator")
+        get_unspecialized_pipe_type() -> Type? => _find_declared("Ghul.Pipes.Pipe")
+        get_unspecialized_task_type() -> Type? => null
+
+        get_interpolated_string_handler_type() -> Type => _required("the interpolated string handler")
+
+        get_idisposable_type() -> Type is
+            if let found = _find_declared("Ghul.Disposable") then
+                return found
+            fi
+
+            return _required("Ghul.Disposable")
+        si
+
+        get_multicast_delegate_type() -> Type? => null
+
+        get_box_type(type: Type) -> Type is
+            if let box = _find_declared("Ghul.BOX") then
+                if let classy = cast Semantic.Symbols.Classy?(box.symbol) then
+                    return Types.GENERIC(LOCATION.internal, classy, LIST[Type]([type]))
+                fi
+            fi
+
+            return _required("Ghul.BOX")
+        si
+
+        get_range_type() -> Type => _required("the range type")
+        get_int_range_type() -> Type => _required("Ghul.INT_RANGE")
+        get_int_range_inclusive_type() -> Type => _required("Ghul.INT_RANGE_INCLUSIVE")
+
+        get_slice_functions() -> Semantic.Symbols.FUNCTION_GROUP? => _source.slice_functions
+        get_join_functions() -> Semantic.Symbols.FUNCTION_GROUP? => _source.join_functions
+        get_display_functions() -> Semantic.Symbols.FUNCTION_GROUP? => _source.display_functions
+        get_render_elements_functions() -> Semantic.Symbols.FUNCTION_GROUP? => _source.render_elements_functions
+        get_pipes_fusion_functions() -> Collections.MAP[Semantic.Symbols.Symbol, string] => _source.fusion_functions
+        get_pipes_unbounded_sources() -> Collections.SET[Semantic.Symbols.Symbol] => _source.unbounded_sources
+
+        is_pipes_function(function: Semantic.Symbols.Function) -> bool => _source.is_pipes_function(function)
+        stops_early(function: Semantic.Symbols.Function) -> bool => false
+        reads_whole_source(function: Semantic.Symbols.Function) -> bool => false
+        holds_resource(function: Semantic.Symbols.Function) -> bool => false
+
+        get_task_type(type: Type) -> Type? => null
+        get_void_task_type() -> Type? => null
+        get_async_task_method_builder_type(type: Type) -> Type? => null
+        get_async_task_method_builder_void_type() -> Type? => null
+        get_async_state_machine_interface_type() -> Type? => null
+        get_notify_completion_type() -> Type? => null
+        get_critical_notify_completion_type() -> Type? => null
+    si
+si
