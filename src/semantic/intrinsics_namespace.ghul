@@ -1,0 +1,50 @@
+namespace Semantic is
+    use Source.LOCATION
+
+    // Materialises `Ghul.Intrinsics` before any pass runs, so the
+    // ambient `use` every namespace block carries resolves against a
+    // namespace that already exists rather than one something else has
+    // to create in time. Where the reference set or the compilation's
+    // own sources provide it, this changes nothing; only a compilation
+    // where nothing else does — no assemblies, or none carrying the
+    // namespace — gets one here. On .NET the assembly import adds to it
+    // rather than creating it; under a target that loads no assemblies,
+    // the built-in types are declared into it directly. Runs again
+    // after clear_symbols, which drops the namespace symbols with
+    // everything else.
+    class INTRINSICS_NAMESPACE is
+        materialise(symbol_table: SYMBOL_TABLE, namespaces: NAMESPACES) static is
+            let global =
+                cast Symbols.NAMESPACE?(symbol_table.global_scope)
+
+            if !global? then
+                return
+            fi
+
+            let ghul = namespaces.find_or_add_namespace("Ghul", ".Ghul", false)
+
+            if global.find_direct("Ghul") == null then
+                global.declare_namespace(LOCATION.internal, "Ghul", ghul, null)
+            fi
+
+            // Enter Ghul while creating Intrinsics, so the nested
+            // namespace's enclosing scope is its parent — the chain a
+            // name resolved inside it walks up is Ghul.Intrinsics ->
+            // Ghul -> global, the same chain a source declaration of
+            // the pair produces.
+            let mark = symbol_table.mark_scope_stack()
+
+            symbol_table.enter_scope(ghul)
+
+            let intrinsics = namespaces.find_or_add_namespace("Intrinsics", ".Ghul.Intrinsics", false)
+
+            if ghul.find_direct("Intrinsics") == null then
+                ghul.declare_namespace(LOCATION.internal, "Intrinsics", intrinsics, null)
+            fi
+
+            symbol_table.release_scope_stack(mark)
+
+            intrinsics.mark_implicitly_imported()
+        si
+    si
+si
