@@ -30,10 +30,15 @@ namespace Semantic.Lookups is
         init(..) is
             let intrinsics = _intrinsics_namespace()
 
+            // Declared before the families, whose parameters take it as
+            // their implicit ancestor.
+            let object_class = _declare_class(intrinsics, "object")
+            object_class.mark_is_object()
+            _object_type = Types.NAMED(object_class)
+
             _declare_scalars(intrinsics)
             _declare_families(intrinsics)
 
-            _object_type = Types.NAMED(_declare_class(intrinsics, "object"))
             _string_type = Types.NAMED(_declare_class(intrinsics, "string"))
             _bigint_type = Types.NAMED(_declare_struct(intrinsics, "bigint", null))
 
@@ -131,13 +136,16 @@ namespace Semantic.Lookups is
             // source; under this target nothing declares them, so the
             // carrier symbols are constructed here for the lookups
             // below to specialise.
-            intrinsics.declare_trait(
-                LOCATION.internal,
-                LOCATION.internal,
-                "ARRAY",
-                LIST[string](["E"]),
-                intrinsics,
-                null)
+            _declare_type_arguments(
+                cast Semantic.Symbols.Classy?(
+                    intrinsics.declare_trait(
+                        LOCATION.internal,
+                        LOCATION.internal,
+                        "ARRAY",
+                        LIST[string](["E"]),
+                        intrinsics,
+                        null)),
+                LIST[string](["E"]))
 
             _declare_with_arity(intrinsics, "REFERENCE", 1, true)
             _declare_with_arity(intrinsics, "POINTER", 1, true)
@@ -157,12 +165,40 @@ namespace Semantic.Lookups is
             let arguments = _type_argument_names(arity)
 
             if want_struct then
-                intrinsics.declare_struct(
-                    LOCATION.internal, LOCATION.internal, name, arguments, intrinsics, null)
+                _declare_type_arguments(
+                    cast Semantic.Symbols.Classy?(
+                        intrinsics.declare_struct(
+                            LOCATION.internal, LOCATION.internal, name, arguments, intrinsics, null)),
+                    arguments)
             else
-                intrinsics.declare_class(
-                    LOCATION.internal, LOCATION.internal, name, arguments, intrinsics, null)
+                _declare_type_arguments(
+                    cast Semantic.Symbols.Classy?(
+                        intrinsics.declare_class(
+                            LOCATION.internal, LOCATION.internal, name, arguments, intrinsics, null)),
+                    arguments)
             fi
+        si
+
+        // A source-declared type's parameters are declared into its own
+        // scope, which is what makes them visible inside a `partial`
+        // block that reopens it, and take `object` as their implicit
+        // ancestor, which is what makes them assignable to it. The
+        // constructed families are reopened the same way by the core
+        // library, so their parameters need the same declaration.
+        _declare_type_arguments(type: Semantic.Symbols.Classy?, arguments: List[string]) is
+            if !type? then
+                return
+            fi
+
+            let ancestors = LIST[Type]()
+            ancestors.add(_object_type)
+            let index mut = 0
+
+            for name in arguments do
+                let argument = type.declare_type(LOCATION.internal, name, index, null)
+                argument.set_ancestor_types(ancestors)
+                index = index + 1
+            od
         si
 
         _declare_struct(
