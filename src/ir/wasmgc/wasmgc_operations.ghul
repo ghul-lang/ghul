@@ -1,0 +1,240 @@
+namespace IR.WasmGC is
+    use Wasm.INSTRUCTION
+    use Wasm.SIMPLE_INSTRUCTION
+    use Wasm.I32_CONSTANT
+    use Wasm.Opcode
+    use Wasm.NumericType
+
+    use Collections.LIST
+
+    // How the WasmGC backend encodes the target-neutral operations.
+    class WASMGC_OPERATIONS is
+        // The instruction for a binary arithmetic or bitwise operation on
+        // two values of `type`, or null where wasm has none: there is no
+        // floating remainder, and the bitwise operations are integer
+        // only. NEGATE and COMPLEMENT take one operand and are encoded by
+        // the lowering.
+        arithmetic(operation: ArithmeticOperation, type: NumericType) -> Opcode? static =>
+            case type
+            when NumericType.I32 then _i32_arithmetic(operation)
+            when NumericType.I64 then _i64_arithmetic(operation)
+            when NumericType.F32 then _f32_arithmetic(operation)
+            when NumericType.F64 then _f64_arithmetic(operation)
+            else null
+            esac
+
+        _i32_arithmetic(operation: ArithmeticOperation) -> Opcode? static =>
+            case operation
+            when ArithmeticOperation.ADD then Opcode.I32_ADD
+            when ArithmeticOperation.SUBTRACT then Opcode.I32_SUB
+            when ArithmeticOperation.MULTIPLY then Opcode.I32_MUL
+            when ArithmeticOperation.DIVIDE then Opcode.I32_DIV_S
+            when ArithmeticOperation.DIVIDE_UNSIGNED then Opcode.I32_DIV_U
+            when ArithmeticOperation.REMAINDER then Opcode.I32_REM_S
+            when ArithmeticOperation.REMAINDER_UNSIGNED then Opcode.I32_REM_U
+            when ArithmeticOperation.AND then Opcode.I32_AND
+            when ArithmeticOperation.OR then Opcode.I32_OR
+            when ArithmeticOperation.XOR then Opcode.I32_XOR
+            when ArithmeticOperation.SHIFT_LEFT then Opcode.I32_SHL
+            when ArithmeticOperation.SHIFT_RIGHT then Opcode.I32_SHR_S
+            when ArithmeticOperation.SHIFT_RIGHT_UNSIGNED then Opcode.I32_SHR_U
+            else null
+            esac
+
+        _i64_arithmetic(operation: ArithmeticOperation) -> Opcode? static =>
+            case operation
+            when ArithmeticOperation.ADD then Opcode.I64_ADD
+            when ArithmeticOperation.SUBTRACT then Opcode.I64_SUB
+            when ArithmeticOperation.MULTIPLY then Opcode.I64_MUL
+            when ArithmeticOperation.DIVIDE then Opcode.I64_DIV_S
+            when ArithmeticOperation.DIVIDE_UNSIGNED then Opcode.I64_DIV_U
+            when ArithmeticOperation.REMAINDER then Opcode.I64_REM_S
+            when ArithmeticOperation.REMAINDER_UNSIGNED then Opcode.I64_REM_U
+            when ArithmeticOperation.AND then Opcode.I64_AND
+            when ArithmeticOperation.OR then Opcode.I64_OR
+            when ArithmeticOperation.XOR then Opcode.I64_XOR
+            when ArithmeticOperation.SHIFT_LEFT then Opcode.I64_SHL
+            when ArithmeticOperation.SHIFT_RIGHT then Opcode.I64_SHR_S
+            when ArithmeticOperation.SHIFT_RIGHT_UNSIGNED then Opcode.I64_SHR_U
+            else null
+            esac
+
+        _f32_arithmetic(operation: ArithmeticOperation) -> Opcode? static =>
+            case operation
+            when ArithmeticOperation.ADD then Opcode.F32_ADD
+            when ArithmeticOperation.SUBTRACT then Opcode.F32_SUB
+            when ArithmeticOperation.MULTIPLY then Opcode.F32_MUL
+            when ArithmeticOperation.DIVIDE then Opcode.F32_DIV
+            else null
+            esac
+
+        _f64_arithmetic(operation: ArithmeticOperation) -> Opcode? static =>
+            case operation
+            when ArithmeticOperation.ADD then Opcode.F64_ADD
+            when ArithmeticOperation.SUBTRACT then Opcode.F64_SUB
+            when ArithmeticOperation.MULTIPLY then Opcode.F64_MUL
+            when ArithmeticOperation.DIVIDE then Opcode.F64_DIV
+            else null
+            esac
+
+        // The comparison of two values of `type`, and whether its answer
+        // is then negated. An unsigned integer comparison orders by
+        // magnitude. An unsigned floating comparison answers true when
+        // the operands are unordered, which is the negation of the
+        // ordered comparison of the opposite sense.
+        comparison(comparison: Comparison, type: NumericType, is_unsigned: bool) -> (opcode: Opcode, negates: bool)? static is
+            if type == NumericType.F32 \/ type == NumericType.F64 then
+                return _float_comparison(comparison, type == NumericType.F64, is_unsigned)
+            fi
+
+            let wide = type == NumericType.I64
+
+            return
+                case comparison
+                when Comparison.EQUAL then (if wide then Opcode.I64_EQ else Opcode.I32_EQ fi, false)
+                when Comparison.NOT_EQUAL then (if wide then Opcode.I64_NE else Opcode.I32_NE fi, false)
+                when Comparison.LESS then (_integer(wide, is_unsigned, Opcode.I32_LT_S, Opcode.I32_LT_U, Opcode.I64_LT_S, Opcode.I64_LT_U), false)
+                when Comparison.LESS_OR_EQUAL then (_integer(wide, is_unsigned, Opcode.I32_LE_S, Opcode.I32_LE_U, Opcode.I64_LE_S, Opcode.I64_LE_U), false)
+                when Comparison.GREATER then (_integer(wide, is_unsigned, Opcode.I32_GT_S, Opcode.I32_GT_U, Opcode.I64_GT_S, Opcode.I64_GT_U), false)
+                when Comparison.GREATER_OR_EQUAL then (_integer(wide, is_unsigned, Opcode.I32_GE_S, Opcode.I32_GE_U, Opcode.I64_GE_S, Opcode.I64_GE_U), false)
+                esac
+        si
+
+        _integer(wide: bool, is_unsigned: bool, i32_s: Opcode, i32_u: Opcode, i64_s: Opcode, i64_u: Opcode) -> Opcode static =>
+            if wide then
+                if is_unsigned then i64_u else i64_s fi
+            else
+                if is_unsigned then i32_u else i32_s fi
+            fi
+
+        _float_comparison(comparison: Comparison, wide: bool, unordered: bool) -> (opcode: Opcode, negates: bool) static is
+            if !unordered then
+                return
+                    case comparison
+                    when Comparison.EQUAL then (if wide then Opcode.F64_EQ else Opcode.F32_EQ fi, false)
+                    when Comparison.NOT_EQUAL then (if wide then Opcode.F64_NE else Opcode.F32_NE fi, false)
+                    when Comparison.LESS then (if wide then Opcode.F64_LT else Opcode.F32_LT fi, false)
+                    when Comparison.LESS_OR_EQUAL then (if wide then Opcode.F64_LE else Opcode.F32_LE fi, false)
+                    when Comparison.GREATER then (if wide then Opcode.F64_GT else Opcode.F32_GT fi, false)
+                    when Comparison.GREATER_OR_EQUAL then (if wide then Opcode.F64_GE else Opcode.F32_GE fi, false)
+                    esac
+            fi
+
+            return
+                case comparison
+                when Comparison.EQUAL then (if wide then Opcode.F64_NE else Opcode.F32_NE fi, true)
+                when Comparison.NOT_EQUAL then (if wide then Opcode.F64_NE else Opcode.F32_NE fi, false)
+                when Comparison.LESS then (if wide then Opcode.F64_GE else Opcode.F32_GE fi, true)
+                when Comparison.LESS_OR_EQUAL then (if wide then Opcode.F64_GT else Opcode.F32_GT fi, true)
+                when Comparison.GREATER then (if wide then Opcode.F64_LE else Opcode.F32_LE fi, true)
+                when Comparison.GREATER_OR_EQUAL then (if wide then Opcode.F64_LT else Opcode.F32_LT fi, true)
+                esac
+        si
+
+        // The comparison a conditional exit tests, as one of the six
+        // comparisons and whether it orders unsigned (or, between
+        // floating values, answers true for unordered operands). Z and
+        // NZ test a single operand and are encoded by the lowering.
+        branch_comparison(condition: BRANCH) -> (comparison: Comparison, is_unsigned: bool)? static =>
+            case condition
+            when BRANCH.EQ then (Comparison.EQUAL, false)
+            when BRANCH.NE then (Comparison.NOT_EQUAL, true)
+            when BRANCH.GE then (Comparison.GREATER_OR_EQUAL, false)
+            when BRANCH.GEU then (Comparison.GREATER_OR_EQUAL, true)
+            when BRANCH.GT then (Comparison.GREATER, false)
+            when BRANCH.GTU then (Comparison.GREATER, true)
+            when BRANCH.LE then (Comparison.LESS_OR_EQUAL, false)
+            when BRANCH.LEU then (Comparison.LESS_OR_EQUAL, true)
+            when BRANCH.LT then (Comparison.LESS, false)
+            when BRANCH.LTU then (Comparison.LESS, true)
+            else null
+            esac
+
+        // Brings a value of a narrow kind, held in an i32, back into its
+        // range: sign-extended for a signed kind and masked for an
+        // unsigned one, which is what CIL's narrowing conversions and
+        // narrow stores do.
+        normalise(scalar: Scalar) -> LIST[INSTRUCTION] static is
+            let result = LIST[INSTRUCTION]()
+
+            case scalar
+            when Scalar.INT8 then
+                result.add(SIMPLE_INSTRUCTION(Opcode.I32_EXTEND8_S))
+            when Scalar.INT16 then
+                result.add(SIMPLE_INSTRUCTION(Opcode.I32_EXTEND16_S))
+            when Scalar.UINT8, Scalar.BOOL then
+                result.add(I32_CONSTANT(0xFF))
+                result.add(SIMPLE_INSTRUCTION(Opcode.I32_AND))
+            when Scalar.UINT16, Scalar.CHAR then
+                result.add(I32_CONSTANT(0xFFFF))
+                result.add(SIMPLE_INSTRUCTION(Opcode.I32_AND))
+            else
+                result
+            esac
+
+            return result
+        si
+
+        // A conversion of a value of kind `from` to kind `to`. `from` is
+        // null where the source is not a scalar (an enum), which is held
+        // as a signed i32.
+        //
+        // Floating values convert to integers saturating, as .NET does
+        // since .NET 9, and a narrow target is then brought into range.
+        conversion(from: Scalar?, to: Scalar) -> LIST[INSTRUCTION] static is
+            let result = LIST[INSTRUCTION]()
+
+            let source = if let f = from then WASMGC_TYPES.numeric(f) else NumericType.I32 fi
+            let source_unsigned = if let f = from then WASMGC_TYPES.is_unsigned(f) else false fi
+            let target = WASMGC_TYPES.numeric(to)
+            let target_unsigned = WASMGC_TYPES.is_unsigned(to)
+
+            let opcode = _change(source, source_unsigned, target, target_unsigned)
+
+            if let op = opcode then
+                result.add(SIMPLE_INSTRUCTION(op))
+            fi
+
+            if WASMGC_TYPES.is_narrow(to) then
+                result.add_range(normalise(to))
+            fi
+
+            return result
+        si
+
+        // The one instruction that moves a value between wasm types, or
+        // null where both kinds share one.
+        _change(source: NumericType, source_unsigned: bool, target: NumericType, target_unsigned: bool) -> Opcode? static =>
+            case target
+            when NumericType.I32 then
+                case source
+                when NumericType.I64 then Opcode.I32_WRAP_I64
+                when NumericType.F32 then if target_unsigned then Opcode.I32_TRUNC_SAT_F32_U else Opcode.I32_TRUNC_SAT_F32_S fi
+                when NumericType.F64 then if target_unsigned then Opcode.I32_TRUNC_SAT_F64_U else Opcode.I32_TRUNC_SAT_F64_S fi
+                else null
+                esac
+            when NumericType.I64 then
+                case source
+                when NumericType.I32 then if source_unsigned then Opcode.I64_EXTEND_I32_U else Opcode.I64_EXTEND_I32_S fi
+                when NumericType.F32 then if target_unsigned then Opcode.I64_TRUNC_SAT_F32_U else Opcode.I64_TRUNC_SAT_F32_S fi
+                when NumericType.F64 then if target_unsigned then Opcode.I64_TRUNC_SAT_F64_U else Opcode.I64_TRUNC_SAT_F64_S fi
+                else null
+                esac
+            when NumericType.F32 then
+                case source
+                when NumericType.I32 then if source_unsigned then Opcode.F32_CONVERT_I32_U else Opcode.F32_CONVERT_I32_S fi
+                when NumericType.I64 then if source_unsigned then Opcode.F32_CONVERT_I64_U else Opcode.F32_CONVERT_I64_S fi
+                when NumericType.F64 then Opcode.F32_DEMOTE_F64
+                else null
+                esac
+            when NumericType.F64 then
+                case source
+                when NumericType.I32 then if source_unsigned then Opcode.F64_CONVERT_I32_U else Opcode.F64_CONVERT_I32_S fi
+                when NumericType.I64 then if source_unsigned then Opcode.F64_CONVERT_I64_U else Opcode.F64_CONVERT_I64_S fi
+                when NumericType.F32 then Opcode.F64_PROMOTE_F32
+                else null
+                esac
+            else null
+            esac
+    si
+si

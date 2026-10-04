@@ -1,0 +1,817 @@
+namespace IR.WasmGC is
+    use Wasm.INSTRUCTION
+    use Wasm.SIMPLE_INSTRUCTION
+    use Wasm.INDEX_INSTRUCTION
+    use Wasm.I32_CONSTANT
+    use Wasm.I64_CONSTANT
+    use Wasm.F32_CONSTANT
+    use Wasm.F64_CONSTANT
+    use Wasm.BLOCK_INSTRUCTION
+    use Wasm.BLOCK_TYPE
+    use Wasm.VALUE_TYPE
+    use Wasm.NumericType
+    use Wasm.Opcode
+
+    use Collections.LIST
+    use Collections.MAP
+
+    use Semantic.Types.Type
+    use Semantic.Symbols.Function
+
+    use Values.Value
+
+    // Lowers the IR values of one function body to wasm instructions.
+    //
+    // Structured control flow maps directly: a REGION is a `block`, a
+    // LOOP is a `loop` inside a `block`, a BREAK branches to the block
+    // and a CONTINUE to the loop. Branch depths count the blocks open
+    // between an exit and its target, so they are found from the nodes
+    // open when the exit is lowered.
+    //
+    // A value the lowering does not handle yet is recorded rather than
+    // thrown, once for each kind of construct, so a build reports
+    // everything a body uses that the target cannot generate.
+    class WASMGC_LOWERING: Values.Visitor is
+        _function_indices: MAP[Function, int]
+
+        _parameter_count: int
+        _locals: MAP[LOCAL, int]
+        _local_types: LIST[VALUE_TYPE]
+
+        _bodies: LIST[LIST[INSTRUCTION]]
+
+        // The labels open at the point being lowered, innermost last:
+        // each structured node's block, and a loop's own `loop` after
+        // it, which is where a CONTINUE goes.
+        _labels: LIST[(node: Values.Breakable, is_loop_head: bool)]
+
+        _unsupported: LIST[string]
+
+        unsupported: Collections.List[string] => _unsupported
+
+        local_types: LIST[VALUE_TYPE] => _local_types
+
+        init(function_indices: MAP[Function, int], parameter_count: int) is
+            _function_indices = function_indices
+            _parameter_count = parameter_count
+
+            _locals = MAP[LOCAL, int]()
+            _local_types = LIST[VALUE_TYPE]()
+            _bodies = LIST[LIST[INSTRUCTION]]()
+            _labels = LIST[(node: Values.Breakable, is_loop_head: bool)]()
+            _unsupported = LIST[string]()
+        si
+
+        // Lowers a whole body, answering its instructions.
+        lower(values: Collections.Iterable[Value]) -> LIST[INSTRUCTION] is
+            _begin()
+
+            for value in values do
+                gen(value)
+            od
+
+            return _end()
+        si
+
+        gen(value: Value?) is
+            if value? then
+                value.accept(self)
+            fi
+        si
+
+        _begin() is
+            _bodies.add(LIST[INSTRUCTION]())
+        si
+
+        _end() -> LIST[INSTRUCTION] is
+            let body = _bodies[_bodies.count - 1]
+
+            _bodies.remove_at(_bodies.count - 1)
+
+            return body
+        si
+
+        _emit(instruction: INSTRUCTION) is
+            _bodies[_bodies.count - 1].add(instruction)
+        si
+
+        _emit(opcode: Opcode) is
+            _emit(SIMPLE_INSTRUCTION(opcode))
+        si
+
+        _emit_all(instructions: Collections.Iterable[INSTRUCTION]) is
+            for instruction in instructions do
+                _emit(instruction)
+            od
+        si
+
+        _report(construct: string) is
+            for reported in _unsupported do
+                if reported =~ construct then
+                    return
+                fi
+            od
+
+            _unsupported.add(construct)
+        si
+
+        // The wasm type a value of `type` is held in, or null where it
+        // is not a scalar the target can hold yet.
+        _value_type(type: Type?) -> VALUE_TYPE? is
+            if let scalar = WASMGC_TYPES.scalar(type) then
+                return WASMGC_TYPES.value_type(scalar)
+            fi
+
+            return null
+        si
+
+        _numeric(type: Type?) -> NumericType? is
+            if let scalar = WASMGC_TYPES.scalar(type) then
+                return WASMGC_TYPES.numeric(scalar)
+            fi
+
+            return null
+        si
+
+        // Brings a value stored into a slot of a narrow kind back into
+        // range, as a CIL store into a narrow local or argument does.
+        _normalise_for(type: Type?) is
+            if let scalar = WASMGC_TYPES.scalar(type) then
+                if WASMGC_TYPES.is_narrow(scalar) then
+                    _emit_all(WASMGC_OPERATIONS.normalise(scalar))
+                fi
+            fi
+        si
+
+        // The index of `local`, numbered after the parameters the first
+        // time it is seen.
+        _local(local: LOCAL) -> int is
+            let index mut = 0
+
+            if _locals.try_get_value(local, index ref) then
+                return index
+            fi
+
+            index = _parameter_count + _local_types.count
+
+            _locals[local] = index
+
+            if let type = _value_type(local.type) then
+                _local_types.add(type)
+            else
+                _report("a local of type {local.type}")
+
+                _local_types.add(VALUE_TYPE.of_numeric(NumericType.I32))
+            fi
+
+            return index
+        si
+
+        _zero(type: Type?) is
+            case _numeric(type)
+            when NumericType.I64 then _emit(I64_CONSTANT(0L))
+            when NumericType.F32 then _emit(F32_CONSTANT(0.0s))
+            when NumericType.F64 then _emit(F64_CONSTANT(0.0))
+            when NumericType.I32 then _emit(I32_CONSTANT(0))
+            else _report("the default value of {type}")
+            esac
+        si
+
+        // The argument position `symbol` is declared at in the function
+        // that owns it.
+        _argument_index(symbol: Semantic.Symbols.Symbol) -> int? is
+            if let function = cast Function?(symbol.owner) then
+                let names = function.argument_names
+
+                for i in 0..names.count do
+                    if names[i] =~ symbol.name then
+                        return i
+                    fi
+                od
+            fi
+
+            return null
+        si
+
+        _lower_all(values: Collections.Iterable[Value]) is
+            for value in values do
+                gen(value)
+            od
+        si
+
+        // The arguments of a call, each brought into the range of the
+        // parameter it is passed to.
+        _lower_arguments(function: Function, arguments: Collections.List[Value]) is
+            let parameters = function.arguments
+
+            for i in 0..arguments.count do
+                gen(arguments[i])
+
+                if i < parameters.count then
+                    _normalise_for(parameters[i])
+                fi
+            od
+        si
+
+        _call(function: Function, arguments: Collections.List[Value]) is
+            let index mut = 0
+
+            if !_function_indices.try_get_value(function, index ref) then
+                _report("a call to {function.name}, which has no body on this target")
+                return
+            fi
+
+            _lower_arguments(function, arguments)
+
+            _emit(INDEX_INSTRUCTION(Opcode.CALL, index))
+        si
+
+        visit_value(value: Value) is
+            _report("{value.get_type().name}")
+        si
+
+        visit_address_of_value(value: Value) is
+            _report("the address of {value.get_type().name}")
+        si
+
+        visit(number: Values.Literal.NUMBER) is
+            case number.constant
+            when i4: Values.Literal.CONSTANT.I4 then _emit(I32_CONSTANT(i4.value))
+            when i8: Values.Literal.CONSTANT.I8 then _emit(I64_CONSTANT(i8.value))
+            when r4: Values.Literal.CONSTANT.R4 then _emit(F32_CONSTANT(r4.value))
+            when r8: Values.Literal.CONSTANT.R8 then _emit(F64_CONSTANT(r8.value))
+            esac
+
+            if let to = number.narrowing then
+                let from =
+                    case number.constant
+                    when _: Values.Literal.CONSTANT.I4 then Scalar.INT32
+                    when _: Values.Literal.CONSTANT.I8 then Scalar.INT64
+                    when _: Values.Literal.CONSTANT.R4 then Scalar.FLOAT32
+                    when _: Values.Literal.CONSTANT.R8 then Scalar.FLOAT64
+                    esac
+
+                _emit_all(WASMGC_OPERATIONS.conversion(from, to))
+            fi
+        si
+
+        visit(string: Values.Literal.STRING) is _report("a string literal") si
+        visit(decimal: Values.Literal.DECIMAL) is _report("a decimal literal") si
+        visit(bigint: Values.Literal.BIGINT) is _report("a bigint literal") si
+
+        visit(load: Values.Load.SYMBOL) is _report("a load of {load.symbol.name}") si
+        visit_address(load: Values.Load.SYMBOL) is _report("the address of {load.symbol.name}") si
+        visit(load: Values.Load.INSTANCE_FIELD) is _report("a field load") si
+        visit_address(load: Values.Load.INSTANCE_FIELD) is _report("the address of a field") si
+        visit(load: Values.Load.STATIC_ANONYMOUS_FUNCTION) is _report("a function value") si
+        visit(load: Values.Load.GLOBAL_ANONYMOUS_FUNCTION) is _report("a function value") si
+        visit(load: Values.Load.INSTANCE_ANONYMOUS_FUNCTION) is _report("a function value") si
+
+        visit(load: Values.Load.TEMP) is
+            _emit(INDEX_INSTRUCTION(Opcode.LOCAL_GET, _local(load.local)))
+        si
+
+        visit_address(load: Values.Load.TEMP) is _report("the address of a local") si
+        visit(load: Values.Load.STATIC_FIELD) is _report("a static field load") si
+        visit_address(load: Values.Load.STATIC_FIELD) is _report("the address of a static field") si
+        visit(load: Values.Load.GLOBAL_FIELD) is _report("a global variable") si
+        visit_address(load: Values.Load.GLOBAL_FIELD) is _report("the address of a global variable") si
+
+        visit(load: Values.Load.LOCAL_ARGUMENT) is
+            let symbol = load.symbol
+
+            if Values.state_machine_field_for(symbol)? then
+                _report("a generator or asynchronous function's argument")
+            elif let packed_local = Values.packed_parameter_local_for(symbol) then
+                _emit(INDEX_INSTRUCTION(Opcode.LOCAL_GET, _local(packed_local)))
+            elif let index = _argument_index(symbol) then
+                _emit(INDEX_INSTRUCTION(Opcode.LOCAL_GET, index))
+            else
+                _report("an argument of another function")
+            fi
+        si
+
+        visit_address(load: Values.Load.LOCAL_ARGUMENT) is _report("the address of an argument") si
+
+        visit(load: Values.Load.LOCAL_VARIABLE) is
+            if Values.state_machine_field_for(load.symbol)? then
+                _report("a generator or asynchronous function's local")
+            elif let variable = cast Semantic.Symbols.Variable?(load.symbol) then
+                _emit(INDEX_INSTRUCTION(Opcode.LOCAL_GET, _local(variable.ir_local)))
+            else
+                _report("a load of {load.symbol.name}")
+            fi
+        si
+
+        visit_address(load: Values.Load.LOCAL_VARIABLE) is _report("the address of a local") si
+
+        visit(load: Values.Load.ARGUMENT) is
+            if load.function.is_emitted_with_receiver then
+                _report("an instance method's argument")
+            else
+                _emit(INDEX_INSTRUCTION(Opcode.LOCAL_GET, load.index))
+            fi
+        si
+
+        visit(load: Values.Load.RECEIVER) is _report("an instance method's receiver") si
+
+        // A composite value's structured expansion is lowered as any
+        // other structured IR is.
+        visit(composite: Values.Composite) is
+            _lower_all(composite.expand().values)
+        si
+
+        visit_address(coalesce: Values.COALESCE_LOAD) is _report("the address of a coalesced load") si
+
+        visit(launch: Values.ASYNC_METHOD_LAUNCH) is _report("an asynchronous function") si
+        visit(completion: Values.ASYNC_COMPLETION) is _report("an asynchronous function") si
+        visit(completed: Values.COMPLETED_TASK_LIKE) is _report("an asynchronous function") si
+        visit(suspend: Values.AWAIT_SUSPEND) is _report("await") si
+        visit(step: Values.AWAIT_SUSPEND_STEP) is _report("await") si
+
+        visit(max_stack: Values.MAX_STACK) is si
+
+        visit(equality: Values.REFERENCE_EQUALITY) is _report("reference equality") si
+        visit(construct: Values.CONSTRUCT_MAYBE) is _report("an optional value") si
+        visit(stack_top: Values.STACK_TOP) is _report("STACK_TOP") si
+        visit(stack_top: Values.STACK_TOP_ADDRESS) is _report("STACK_TOP_ADDRESS") si
+        visit_address(stack_top: Values.STACK_TOP_ADDRESS) is _report("STACK_TOP_ADDRESS") si
+
+        visit(block: Values.BLOCK) is
+            assert !block.is_emitted else "block value already emitted"
+
+            block.is_emitted = true
+
+            _lower_all(block.values)
+        si
+
+        visit(block: Values.DUMMY_BLOCK) is
+            throw System.InvalidOperationException("dummy block generated, created at: {block.location} because: {block.why}")
+        si
+
+        visit(self_load: Values.Load.REFERENCE_SELF) is _report("self") si
+        visit_address(self_load: Values.Load.REFERENCE_SELF) is _report("self") si
+        visit(self_load: Values.Load.OUTER_SELF) is _report("self") si
+        visit_address(self_load: Values.Load.OUTER_SELF) is _report("self") si
+        visit(self_load: Values.Load.VALUE_SELF) is _report("self") si
+        visit_address(self_load: Values.Load.VALUE_SELF) is _report("self") si
+        visit(runtime: Values.RUNTIME) is _report("a runtime operation") si
+        visit(creation: Values.CREATE_UNIT_VARIANT_INSTANCE) is _report("a union") si
+
+        visit(dummy: Values.DUMMY) is
+            IoC.CONTAINER.instance.logger.poison(dummy.location, "generated dummy value: {dummy.type} from {dummy.location}")
+        si
+
+        visit(type_expression: Values.TYPE_EXPRESSION) is
+            IoC.CONTAINER.instance.logger.poison(type_expression.location, "generated type expression: {type_expression.type} from {type_expression.location}")
+        si
+
+        visit(store: Values.Need.STORE) is
+            assert false else "unresolved need store"
+        si
+
+        visit(store: Values.Store.INDIRECT) is _report("a store through a reference") si
+
+        visit(wrapper: Values.TYPE_WRAPPER) is
+            gen(wrapper.value)
+        si
+
+        visit_address(wrapper: Values.TYPE_WRAPPER) is _report("the address of a value") si
+
+        visit(wrapper: Values.WRAPPER) is
+            assert wrapper.value? else "generate wrapper without value"
+
+            gen(wrapper.value)
+        si
+
+        visit_address(wrapper: Values.WRAPPER) is _report("the address of a value") si
+        visit(wrap: Values.WRAP_OPTIONAL) is _report("an optional value") si
+
+        visit(projection: Values.NARROW_PROJECT) is
+            gen(projection.projected)
+        si
+
+        visit(view: Values.NARROW_VIEW) is
+            gen(view.underlying)
+        si
+
+        visit_address(view: Values.NARROW_VIEW) is _report("the address of a value") si
+
+        // An `@IL.output` region names CIL the build emits, and there is
+        // none on this target.
+        visit(enter: Values.ENTER_FILE) is si
+        visit(leave: Values.LEAVE_FILE) is si
+
+        visit(closure: Values.MAKE_CLOSURE) is _report("a function value") si
+
+        visit(address: Values.ARRAY_ELEMENT_ADDRESS) is _report("an array") si
+        visit_address(address: Values.ARRAY_ELEMENT_ADDRESS) is _report("an array") si
+        visit(array: Values.NEW_ARRAY) is _report("an array") si
+        visit(store: Values.STORE_ARRAY_ELEMENT) is _report("an array") si
+        visit(sequence: Values.SEQUENCE) is _report("an array literal") si
+
+        visit(compare: Values.COMPARE_ORDER_TO_ZERO) is
+            gen(compare.value)
+
+            _emit(I32_CONSTANT(0))
+            _compare(compare.comparison, NumericType.I32, false)
+        si
+
+        visit(receiver: Values.CONSTRAINED) is _report("a constrained call") si
+        visit(arithmetic: Values.DECIMAL_ARITHMETIC) is _report("decimal arithmetic") si
+        visit(compare: Values.DECIMAL_COMPARE) is _report("decimal arithmetic") si
+        visit(convert: Values.DECIMAL_CONVERT) is _report("a decimal conversion") si
+        visit(equality: Values.EQUALITY_COMPARISON) is _report("an equality comparison") si
+        visit(test: Values.HAS_VALUE) is _report("an optional value") si
+        visit(check: Values.REFERENCE_NULL_CHECK) is _report("a null check") si
+
+        visit(conversion: Values.SCALAR_CONVERSION) is
+            gen(conversion.converted)
+        si
+
+        visit(declaration: Values.DECLARE_LOCAL) is
+            _local(declaration.local)
+        si
+
+        visit(store: Values.STORE_TEMP) is
+            _normalise_for(store.local.type)
+            _emit(INDEX_INSTRUCTION(Opcode.LOCAL_SET, _local(store.local)))
+        si
+
+        visit(tee: Values.TEE_TEMP) is
+            gen(tee.value)
+
+            _normalise_for(tee.local.type)
+            _emit(INDEX_INSTRUCTION(Opcode.LOCAL_TEE, _local(tee.local)))
+        si
+
+        visit(discard: Values.DISCARD) is
+            if let value = discard.value then
+                gen(value)
+
+                if WASMGC_TYPES.is_void(value.type) then
+                    return
+                fi
+            fi
+
+            _emit(Opcode.DROP)
+        si
+
+        visit(thrown: Values.THROW) is _report("throw") si
+
+        visit(ret: Values.RET) is
+            _emit(Opcode.RETURN)
+        si
+
+        visit(default_return: Values.DEFAULT_RETURN) is
+            if !WASMGC_TYPES.is_void(default_return.type) then
+                _zero(default_return.type)
+            fi
+        si
+
+        visit(default_value: Values.DEFAULT) is
+            _zero(default_value.type)
+        si
+
+        visit_address(default_value: Values.DEFAULT) is _report("the address of a default value") si
+        visit(deref: Values.DEREF) is _report("a reference") si
+        visit_address(deref: Values.DEREF) is _report("a reference") si
+        visit(address: Values.ADDRESS) is _report("a reference") si
+        visit_address(address: Values.ADDRESS) is _report("a reference") si
+
+        visit(steps: Values.STEPS) is
+            _lower_all(steps.steps)
+        si
+
+        visit(decrement: Values.DECREMENT) is _report("decrement") si
+        visit(increment: Values.POST_INCREMENT) is _report("increment") si
+        visit(decrement: Values.PRE_DECREMENT) is _report("decrement") si
+        visit(repack: Values.TUPLE_REPACK) is _report("a tuple") si
+
+        visit(spilled: Values.SPILLED_SUBJECT) is
+            _emit(INDEX_INSTRUCTION(Opcode.LOCAL_SET, _local(spilled.temp)))
+
+            gen(spilled.built)
+        si
+
+        visit(null_value: Values.NULL) is _report("null") si
+        visit(box: Values.BOX) is _report("boxing") si
+        visit(unbox: Values.UNBOX) is _report("unboxing") si
+        visit(conversion: Values.CAST) is _report("a reference cast") si
+        visit(test: Values.ISA) is _report("a type test") si
+        visit(type_of: Values.TYPEOF) is _report("typeof") si
+        visit(tuple: Values.TUPLE) is _report("a tuple") si
+        visit(construction: Values.NEW) is _report("an object construction") si
+
+        visit(negation: Values.NOT) is
+            gen(negation.value)
+
+            _emit(Opcode.I32_EQZ)
+        si
+
+        visit(arithmetic: Values.ARITHMETIC) is
+            let numeric = _numeric(arithmetic.type)
+
+            if !numeric? then
+                _report("arithmetic on {arithmetic.type}")
+                return
+            fi
+
+            let operation = arithmetic.operation
+
+            if operation == ArithmeticOperation.NEGATE then
+                _negate(arithmetic.operands[0], numeric)
+            elif operation == ArithmeticOperation.COMPLEMENT then
+                _complement(arithmetic.operands[0], numeric)
+            elif let opcode = WASMGC_OPERATIONS.arithmetic(operation, numeric) then
+                gen(arithmetic.operands[0])
+                gen(arithmetic.operands[1])
+
+                // A shift count is an int whatever the shifted value is,
+                // and a 64-bit shift takes its count as an i64.
+                if numeric == NumericType.I64 /\ _is_shift(operation) /\ _numeric(arithmetic.operands[1].type) =~ NumericType.I32 then
+                    _emit(Opcode.I64_EXTEND_I32_U)
+                fi
+
+                _emit(opcode)
+            else
+                _report("{operation} on {arithmetic.type}")
+            fi
+        si
+
+        _is_shift(operation: ArithmeticOperation) -> bool =>
+            operation == ArithmeticOperation.SHIFT_LEFT \/
+            operation == ArithmeticOperation.SHIFT_RIGHT \/
+            operation == ArithmeticOperation.SHIFT_RIGHT_UNSIGNED
+
+        // Wasm has no integer negation: an integer is subtracted from
+        // zero, and a floating value has its sign flipped.
+        _negate(operand: Value, type: NumericType) is
+            case type
+            when NumericType.I32 then
+                _emit(I32_CONSTANT(0))
+                gen(operand)
+                _emit(Opcode.I32_SUB)
+            when NumericType.I64 then
+                _emit(I64_CONSTANT(0L))
+                gen(operand)
+                _emit(Opcode.I64_SUB)
+            when NumericType.F32 then
+                gen(operand)
+                _emit(Opcode.F32_NEG)
+            when NumericType.F64 then
+                gen(operand)
+                _emit(Opcode.F64_NEG)
+            else
+                _report("negation of {type}")
+            esac
+        si
+
+        // Wasm has no bitwise not: every bit is flipped by an exclusive
+        // or with all ones.
+        _complement(operand: Value, type: NumericType) is
+            gen(operand)
+
+            case type
+            when NumericType.I32 then
+                _emit(I32_CONSTANT(-1))
+                _emit(Opcode.I32_XOR)
+            when NumericType.I64 then
+                _emit(I64_CONSTANT(-1L))
+                _emit(Opcode.I64_XOR)
+            else
+                _report("complement of {type}")
+            esac
+        si
+
+        visit(compare: Values.COMPARE) is
+            let numeric = _numeric(compare.left.type)
+
+            if !numeric? then
+                _report("a comparison of {compare.left.type}")
+                return
+            fi
+
+            gen(compare.left)
+            gen(compare.right)
+
+            _compare(compare.comparison, numeric, compare.is_unsigned)
+        si
+
+        _compare(comparison: Comparison, type: NumericType, is_unsigned: bool) is
+            if let (opcode, negates) = WASMGC_OPERATIONS.comparison(comparison, type, is_unsigned) then
+                _emit(opcode)
+
+                if negates then
+                    _emit(Opcode.I32_EQZ)
+                fi
+            else
+                _report("a comparison of {type}")
+            fi
+        si
+
+        visit(convert: Values.CONVERT) is
+            gen(convert.value)
+
+            _emit_all(WASMGC_OPERATIONS.conversion(convert.from, convert.to))
+        si
+
+        visit(node: Values.Breakable) is
+            assert node.is_closed else "structured node generated before it was closed"
+
+            if let region: Values.REGION = node then
+                _lower_region(region)
+            elif let loop: Values.LOOP = node then
+                _lower_loop(loop)
+            elif isa Values.TRY(node) then
+                _report("try")
+            else
+                _report("a generator or asynchronous function")
+            fi
+        si
+
+        _lower_region(region: Values.REGION) is
+            _labels.add((region, false))
+            _begin()
+
+            _lower_all(region.body.values)
+
+            let body = _end()
+            _labels.remove_at(_labels.count - 1)
+
+            _emit(BLOCK_INSTRUCTION(Opcode.BLOCK, BLOCK_TYPE(), body))
+        si
+
+        // `block (loop body (br 0))`: the end of the body goes round
+        // again, a BREAK leaves the block, and a CONTINUE branches to the
+        // loop, which starts it again.
+        _lower_loop(loop: Values.LOOP) is
+            _labels.add((loop, false))
+            _begin()
+
+            _labels.add((loop, true))
+            _begin()
+
+            _lower_all(loop.body.values)
+
+            _emit(INDEX_INSTRUCTION(Opcode.BR, 0))
+
+            let body = _end()
+            _labels.remove_at(_labels.count - 1)
+
+            _emit(BLOCK_INSTRUCTION(Opcode.LOOP, BLOCK_TYPE(), body))
+
+            let outer = _end()
+            _labels.remove_at(_labels.count - 1)
+
+            _emit(BLOCK_INSTRUCTION(Opcode.BLOCK, BLOCK_TYPE(), outer))
+        si
+
+        // How many labels lie between the point being lowered and the
+        // target: the label a branch instruction names.
+        _depth(target: Values.Breakable, is_loop_head: bool) -> int? is
+            let i mut = _labels.count - 1
+
+            while i >= 0 do
+                let label = _labels[i]
+
+                if label.node == target /\ label.is_loop_head == is_loop_head then
+                    return _labels.count - 1 - i
+                fi
+
+                i = i - 1
+            od
+
+            return null
+        si
+
+        visit(exit: Values.Exit) is
+            let is_continue = isa Values.CONTINUE(exit)
+
+            let depth = _depth(exit.target, is_continue)
+
+            if !depth? then
+                _report("an exit from a construct the lowering does not handle")
+                return
+            fi
+
+            if exit.condition == BRANCH.ALWAYS then
+                _emit(INDEX_INSTRUCTION(Opcode.BR, depth))
+                return
+            fi
+
+            if !_test(exit.condition, exit.operands) then
+                return
+            fi
+
+            _emit(INDEX_INSTRUCTION(Opcode.BR_IF, depth))
+        si
+
+        // Leaves an i32 on the stack that is nonzero when `condition`
+        // holds of `operands`. False where it cannot.
+        _test(condition: BRANCH, operands: Collections.List[Value]) -> bool is
+            let numeric = _numeric(operands[0].type)
+
+            if !numeric? then
+                _report("a condition on {operands[0].type}")
+                return false
+            fi
+
+            _lower_all(operands)
+
+            if condition == BRANCH.Z \/ condition == BRANCH.NZ then
+                case numeric
+                when NumericType.I32 then
+                    if condition == BRANCH.Z then
+                        _emit(Opcode.I32_EQZ)
+                    fi
+                when NumericType.I64 then
+                    _emit(Opcode.I64_EQZ)
+
+                    if condition == BRANCH.NZ then
+                        _emit(Opcode.I32_EQZ)
+                    fi
+                else
+                    _report("a condition on {operands[0].type}")
+                    return false
+                esac
+
+                return true
+            fi
+
+            if let (comparison, is_unsigned) = WASMGC_OPERATIONS.branch_comparison(condition) then
+                _compare(comparison, numeric, is_unsigned)
+
+                return true
+            fi
+
+            _report("the condition {condition}")
+
+            return false
+        si
+
+        visit(dispatch: Values.DISPATCH) is _report("a generator or asynchronous function") si
+        visit(resume: Values.RESUME_POINT) is _report("a generator or asynchronous function") si
+
+        visit(call: Values.Call.GLOBAL) is
+            _call(call.function, call.arguments)
+        si
+
+        // A static method takes no receiver, so it is called as a
+        // global function is.
+        visit(call: Values.Call.STATIC) is
+            if call.constrained_receiver? then
+                _report("a constrained call")
+            else
+                _call(call.function, call.arguments)
+            fi
+        si
+
+        visit(call: Values.Call.STRUCT) is _report("a struct method call") si
+        visit(call: Values.Call.INSTANCE) is _report("an instance method call") si
+        visit(call: Values.Call.CLOSURE) is _report("a function value call") si
+
+        visit(call: Values.Call.INNATE) is
+            if !call.is_lowered then
+                gen(call.lower())
+            fi
+        si
+
+        visit(store: Values.Store.SYMBOL) is _report("a store to {store.symbol.name}") si
+
+        visit(store: Values.Store.LOCAL_VARIABLE) is
+            if Values.state_machine_field_for(store.symbol)? then
+                _report("a generator or asynchronous function's local")
+            elif let variable = cast Semantic.Symbols.Variable?(store.symbol) then
+                gen(store.value)
+
+                _normalise_for(variable.ir_local.type)
+                _emit(INDEX_INSTRUCTION(Opcode.LOCAL_SET, _local(variable.ir_local)))
+            else
+                _report("a store to {store.symbol.name}")
+            fi
+        si
+
+        visit(store: Values.Store.LOCAL_ARGUMENT) is
+            let symbol = store.symbol
+
+            if Values.state_machine_field_for(symbol)? then
+                _report("a generator or asynchronous function's argument")
+            elif let packed_local = Values.packed_parameter_local_for(symbol) then
+                gen(store.value)
+                _emit(INDEX_INSTRUCTION(Opcode.LOCAL_SET, _local(packed_local)))
+            elif let index = _argument_index(symbol) then
+                gen(store.value)
+
+                _normalise_for(symbol.type)
+                _emit(INDEX_INSTRUCTION(Opcode.LOCAL_SET, index))
+            else
+                _report("a store to an argument of another function")
+            fi
+        si
+
+        visit(store: Values.Store.STATIC_FIELD) is _report("a static field store") si
+        visit(store: Values.Store.GLOBAL_FIELD) is _report("a global variable") si
+        visit(store: Values.Store.INSTANCE_FIELD) is _report("a field store") si
+    si
+si

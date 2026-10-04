@@ -1,0 +1,202 @@
+namespace IR.WasmGC is
+    use IO.File
+
+    use Wasm.MODULE
+    use Wasm.FUNCTION
+    use Wasm.FUNC_TYPE
+    use Wasm.VALUE_TYPE
+    use Wasm.EXPORT
+    use Wasm.ExportKind
+    use Wasm.NAME_MAP
+    use Wasm.NAME_SECTION
+    use Wasm.CUSTOM_SECTION
+    use Wasm.BINARY_WRITER
+    use Wasm.WAT_PRINTER
+
+    use Collections.LIST
+    use Collections.MAP
+    use Collections.STACK
+
+    use Semantic.Symbols.Symbol
+    use Semantic.Symbols.Classy
+    use Semantic.Symbols.Function
+
+    use Values.Value
+
+    // Writes the program as a WebAssembly module using the GC proposal.
+    //
+    // Wasm numbers every function and type before a body can name one,
+    // so each body is kept as it is finished and lowered only once the
+    // last has been handed over, in `end_assembly`.
+    class WASMGC_BACKEND: Backend is
+        _bodies: LIST[(function: Function, values: LIST[Value])]
+        _enclosing: STACK[LIST[Value]?]
+        _current: LIST[Value]?
+
+        _entry_point: Function?
+        _module: MODULE?
+
+        init() is
+            _bodies = LIST[(function: Function, values: LIST[Value])]()
+            _enclosing = STACK[LIST[Value]?]()
+        si
+
+        install(module_name: string, module_version: string, want_library: bool) is
+            reset()
+        si
+
+        reset() is
+            _bodies.clear()
+            _enclosing.clear()
+            _current = null
+            _entry_point = null
+            _module = null
+        si
+
+        begin_assembly() is si
+
+        end_assembly() is
+            _module = _build_module()
+        si
+
+        // The driver refuses resources before a wasm module is written.
+        add_resource(name: string, content: ubyte[]) is si
+
+        // Writes the module to `path`, and its text form where the build
+        // asks for one.
+        write(path: string) is
+            let module = _module
+
+            if !module? then
+                return
+            fi
+
+            File.write_all_bytes(path, BINARY_WRITER().write(module))
+
+            if let wat_path = IoC.CONTAINER.instance.build_flags.wat_output then
+                File.write_all_text(wat_path, WAT_PRINTER().print(module))
+            fi
+        si
+
+        begin_body() is
+            _enclosing.push(_current)
+            _current = LIST[Value]()
+        si
+
+        begin_body(member: Symbol) is
+            begin_body()
+        si
+
+        write(value: Value) is
+            _current!.add(value)
+        si
+
+        finish_body(function: Function) is
+            _bodies.add((function, _current!))
+        si
+
+        finish_frame_member_body(frame: Classy, member: FrameMember) is
+            _report(frame.location, "a generator or asynchronous function")
+        si
+
+        finish_unit_variant_initializer(variant: Classy) is
+            _report(variant.location, "a union")
+        si
+
+        end_body() is
+            assert _enclosing.count > 0 else "body ended without one begun"
+
+            _current = _enclosing.pop()
+        si
+
+        abandon_bodies() is
+            _enclosing.clear()
+            _current = null
+        si
+
+        has_unit_variant_instance(variant: Classy) -> bool => false
+
+        mark_entry_point(function: Function) is
+            _entry_point = function
+        si
+
+        _report(location: Source.LOCATION, construct: string) is
+            IoC.CONTAINER.instance.logger.error(
+                location,
+                "code generation for {construct} is not supported on the wasm target")
+        si
+
+        // Numbers every kept function, then lowers each body against
+        // those numbers.
+        _build_module() -> MODULE is
+            let module = MODULE()
+
+            let indices = MAP[Function, int]()
+
+            for i in 0.._bodies.count do
+                indices[_bodies[i].function] = i
+            od
+
+            let names = NAME_MAP()
+
+            for i in 0.._bodies.count do
+                let (function, values) = _bodies[i]
+
+                module.add_function(_build_function(module, function, values, indices))
+
+                names.add(i, function.qualified_name)
+            od
+
+            if let entry = _entry_point then
+                let index mut = 0
+
+                if indices.try_get_value(entry, index ref) then
+                    module.add_export(EXPORT("_start", ExportKind.FUNCTION, index))
+                fi
+            fi
+
+            module.add_custom_section(
+                CUSTOM_SECTION("name", NAME_SECTION().with_functions(names).bytes()))
+
+            return module
+        si
+
+        _build_function(module: MODULE, function: Function, values: LIST[Value], indices: MAP[Function, int]) -> FUNCTION is
+            let parameters = LIST[VALUE_TYPE]()
+
+            if function.is_emitted_with_receiver then
+                _report(function.location, "an instance method")
+            fi
+
+            for argument in function.arguments do
+                if let scalar = WASMGC_TYPES.scalar(argument) then
+                    parameters.add(WASMGC_TYPES.value_type(scalar))
+                else
+                    _report(function.location, "an argument of type {argument}")
+                fi
+            od
+
+            let results = LIST[VALUE_TYPE]()
+
+            if !WASMGC_TYPES.is_void(function.return_type) then
+                if let scalar = WASMGC_TYPES.scalar(function.return_type) then
+                    results.add(WASMGC_TYPES.value_type(scalar))
+                else
+                    _report(function.location, "a result of type {function.return_type}")
+                fi
+            fi
+
+            let lowering = WASMGC_LOWERING(indices, parameters.count)
+
+            let body = lowering.lower(values)
+
+            for construct in lowering.unsupported do
+                _report(function.location, construct)
+            od
+
+            let type_index = module.add_type(FUNC_TYPE(parameters.to_array(), results.to_array()))
+
+            return FUNCTION(type_index, lowering.local_types.to_array(), body)
+        si
+    si
+si
