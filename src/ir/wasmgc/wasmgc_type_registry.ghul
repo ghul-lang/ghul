@@ -141,6 +141,7 @@ namespace IR.WasmGC is
 
         // Whether each struct is read-only, inferred once.
         _read_only: MAP[WASMGC_CLASS, bool]
+        _cells: Collections.SET[IR.LOCAL]
         _descriptor_globals: MAP[WASMGC_CLASS, int]
         _unit_variant_globals: MAP[WASMGC_CLASS, int]
         _classes_by_index: MAP[int, WASMGC_CLASS]
@@ -225,6 +226,7 @@ namespace IR.WasmGC is
             _namespace_globals = MAP[Symbol, (index: int, type: VALUE_TYPE)]()
 
             _boxed = MAP[WASMGC_CLASS, Type]()
+            _cells = Collections.SET[IR.LOCAL]()
             _static_constructors = MAP[WASMGC_CLASS, (constructor: WASMGC_FUNCTION, initialised: int)]()
 
             _arrays = MAP[WASMGC_CLASS, Type]()
@@ -1394,6 +1396,20 @@ namespace IR.WasmGC is
                 return WASMGC_TYPES.value_type(scalar)
             fi
 
+
+            // A reference to a scalar is the box, the cell, the scalar
+            // lives in, and a reference to a struct the struct's own box.
+            if let reference: Semantic.Types.REFERENCE = type then
+                let element = reference.arguments[0]
+
+                if let index = box_index(element) then
+                    return VALUE_TYPE.of_type_index(index, true)
+                elif let held = struct_of(element) then
+                    return VALUE_TYPE.of_type_index(type_index(held)!, true)
+                fi
+
+                return null
+            fi
             // A value-type optional is a reference to the box of its value,
             // null where it is absent, as boxing it on .NET gives.
             if type.is_optional /\ type.is_value_type then
@@ -1572,6 +1588,19 @@ namespace IR.WasmGC is
 
             return null
         si
+
+        /// Records that `local` has its address taken, so it lives in a
+        /// cell, a box of its own, for its whole life.
+        ///
+        /// - local: the local whose address is taken
+        mark_cell(local: IR.LOCAL) is
+            _cells.add(local)
+        si
+
+        /// Whether `local` lives in a cell.
+        ///
+        /// - local: the local to ask about
+        is_cell(local: IR.LOCAL) -> bool => _cells.contains(local)
 
         /// The struct type a value of the scalar `type` is boxed in, or null
         /// where `type` is not a scalar.
