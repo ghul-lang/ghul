@@ -1046,12 +1046,17 @@ namespace IR.WasmGC is
 
         // The text of `value`: a string as itself, anything else through
         // its `to_string`. A value whose type has no `to_string` of its own
-        // is displayed by its members on .NET, which this target cannot do
-        // yet, so it is reported rather than given different text.
+        // is displayed through the core library's `$`, so it reaches here
+        // only where the library declares none, and is reported rather
+        // than given different text.
         _text_of(value: Value) -> Value is
-            if WASMGC_TYPES.is_string(value.type) then
+            // Under a type parameter the instantiation decides: generic code
+            // is compiled once per instantiation, so the type is known here.
+            let type = _specialize(value.type)
+
+            if WASMGC_TYPES.is_string(type) then
                 return value
-            elif let to_string = _method(value.type, "to_string", 0) then
+            elif let to_string = _method(type, "to_string", 0) then
                 if let owner: Semantic.Symbols.Classy = to_string.owner /\ owner.is_object then
                     _report("an interpolated value whose type has no to_string of its own")
 
@@ -1099,7 +1104,6 @@ namespace IR.WasmGC is
                 return false
             fi
 
-            let strings = _strings
             let name = operation
 
             if name =~ "object.get_type" then
@@ -1110,6 +1114,13 @@ namespace IR.WasmGC is
 
                 return true
             fi
+
+            if name =~ "object.display" then
+                _lower_display(arguments)
+                return true
+            fi
+
+            let strings = _strings
 
             // Discovery runs before the strings exist, and only needs
             // what the arguments reach.
@@ -1867,6 +1878,8 @@ namespace IR.WasmGC is
         // can read an operand its enclosing construct left on the stack:
         // the member call a coalescing access makes reads its receiver there.
         _box(value: Value, box_type: WASMGC_CLASS, index: int) is
+            _registry.note_boxed(box_type)
+
             gen(value)
 
             let held = _temp(_value_type(value.type)!)
@@ -1906,6 +1919,11 @@ namespace IR.WasmGC is
 
                 _emit(HEAP_TYPE_INSTRUCTION(Opcode.REF_CAST, HEAP_TYPE.of_type_index(_registry.type_index(held)!)))
                 _copy_if_mutable(unbox.type)
+            elif let index = _optional_box_index(unbox.type) then
+                // A present value-type optional is the box itself.
+                gen(unbox.value)
+
+                _emit(HEAP_TYPE_INSTRUCTION(Opcode.REF_CAST_NULL, HEAP_TYPE.of_type_index(index)))
             elif let held = _optional_struct_of(unbox.type) then
                 gen(unbox.value)
 
@@ -1945,7 +1963,7 @@ namespace IR.WasmGC is
                 return
             fi
 
-            let target = _registry.type_index(_specialize(conversion.type))
+            let target = _registry.type_index(_specialize(conversion.type)) ?? _optional_box_index(conversion.type)
 
             if !target? then
                 if _is_unchecked_widening(conversion.type) then
@@ -2132,6 +2150,16 @@ namespace IR.WasmGC is
                 return value
             elif mode == Values.TypeTestOperandMode.BOX /\ _registry.box_index(_specialize(value.type))? then
                 return Values.TYPE_TEST_OPERAND.operand(value)
+            fi
+
+            return null
+        si
+
+        // The box a value-type optional over a scalar is held as, or null
+        // where `type` is not one.
+        _optional_box_index(type: Type?) -> int? is
+            if let optional = _specialize(type) /\ optional.is_optional /\ optional.is_value_type then
+                return _registry.box_index(optional.optional_inner_type)
             fi
 
             return null
@@ -2477,6 +2505,19 @@ namespace IR.WasmGC is
 
         visit(convert: Values.CONVERT) is
             gen(convert.value)
+
+            // A conversion from a reference is an unboxing: the value held
+            // as an object is the box of a scalar of the target type.
+            if !convert.from? /\ _top?.heap_type()? then
+                if let index = _registry.box_index(_specialize(convert.type)) then
+                    _emit(HEAP_TYPE_INSTRUCTION(Opcode.REF_CAST, HEAP_TYPE.of_type_index(index)))
+                    _emit(TYPE_FIELD_INSTRUCTION(Opcode.STRUCT_GET, index, WASMGC_TYPE_REGISTRY.BOX_VALUE))
+                else
+                    _report("unboxing a {convert.type}")
+                fi
+
+                return
+            fi
 
             _emit_all(WASMGC_OPERATIONS.conversion(convert.from, convert.to))
         si
@@ -3156,6 +3197,45 @@ namespace IR.WasmGC is
             _emit(HEAP_TYPE_INSTRUCTION(Opcode.REF_CAST, HEAP_TYPE.of_type_index(vtable_type)))
             _emit(TYPE_FIELD_INSTRUCTION(Opcode.STRUCT_GET, vtable_type, slot.index))
             _emit(TYPE_INSTRUCTION(Opcode.CALL_REF, slot.signature))
+        si
+
+        // Writes a value for display through the displayer its descriptor
+        // holds, answering whether it has one.
+        _lower_display(arguments: Collections.List[Value]) is
+            if let state_class = _registry.class_of(_specialize(arguments[1].type)) then
+                _registry.note_display(state_class)
+            fi
+
+            let value = _temp(_registry.object_reference)
+            let state = _temp(_registry.object_reference)
+            let displayer = _temp(VALUE_TYPE.of_abstract(AbstractHeapType.FUNC))
+            let signature = _registry.display_signature
+
+            gen(arguments[0])
+            _coerce_top(_registry.object_reference)
+            _emit(INDEX_INSTRUCTION(Opcode.LOCAL_TEE, value))
+            _load_descriptor()
+            _emit(TYPE_FIELD_INSTRUCTION(Opcode.STRUCT_GET, WASMGC_TYPE_REGISTRY.DESCRIPTOR_TYPE_INDEX, WASMGC_TYPE_REGISTRY.DESCRIPTOR_DISPLAY))
+            _emit(INDEX_INSTRUCTION(Opcode.LOCAL_SET, displayer))
+
+            gen(arguments[1])
+            _coerce_top(_registry.object_reference)
+            _emit(INDEX_INSTRUCTION(Opcode.LOCAL_SET, state))
+
+            _emit(INDEX_INSTRUCTION(Opcode.LOCAL_GET, displayer))
+            _emit(Opcode.REF_IS_NULL)
+            _emit(
+                IF_INSTRUCTION(
+                    BLOCK_TYPE.of_value(VALUE_TYPE.of_numeric(NumericType.I32)),
+                    [I32_CONSTANT(0)]: INSTRUCTION,
+                    [
+                        INDEX_INSTRUCTION(Opcode.LOCAL_GET, value),
+                        INDEX_INSTRUCTION(Opcode.LOCAL_GET, state),
+                        INDEX_INSTRUCTION(Opcode.LOCAL_GET, displayer),
+                        HEAP_TYPE_INSTRUCTION(Opcode.REF_CAST, HEAP_TYPE.of_type_index(signature)),
+                        TYPE_INSTRUCTION(Opcode.CALL_REF, signature),
+                        I32_CONSTANT(1)
+                    ]: INSTRUCTION))
         si
 
         // Reads the descriptor of the object on the stack, which traps
