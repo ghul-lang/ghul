@@ -154,10 +154,10 @@ ones an engine accepts is the job of `tests/engine-check.sh`, which dumps
 every module of the matrix and hands each to every engine it can find:
 Node's `WebAssembly.validate`, and Wasmtime's `compile` with exceptions and
 garbage collection enabled when it is on the `PATH`. Neither engine is a
-build dependency, so the run is not part of `dotnet test`; it is run
-while the tests are written and its result recorded in the pull request.
-The script fails when it finds no engine at all, and `WASM_ENGINES` names
-engines that must be present (`WASM_ENGINES=node`), so a missing engine
+build dependency, so the run is not part of `dotnet test`. CI runs the
+script after the library's unit tests, with Node installed and
+`WASM_ENGINES=node`. The script fails when it finds no engine at all, and
+`WASM_ENGINES` names engines that must be present, so a missing engine
 fails the run instead of passing it by checking nothing. A module an
 engine rejects is wrong, however carefully the encoding was reasoned
 about.
