@@ -38,6 +38,7 @@ namespace IR.WasmGC is
         _numbering: WASMGC_FUNCTION_NUMBERING
         _registry: WASMGC_TYPE_REGISTRY
         _imports: WASMGC_IMPORTS
+        _strings: WASMGC_STRINGS?
 
         // An instance method's receiver is its parameter 0, so its
         // declared arguments start at 1.
@@ -100,7 +101,31 @@ namespace IR.WasmGC is
             function: Function,
             parameter_types: Collections.List[VALUE_TYPE]
         ) is
+            init(numbering, registry, imports, null, function, parameter_types)
+        si
+
+        /// Lowers a body of `function` that can use strings.
+        ///
+        /// - numbering: the function indices, which a call numbers the function
+        ///   it reaches with
+        /// - registry: the program's struct types and globals
+        /// - imports: the module's imports, which a call to a host
+        ///   operation is a call of
+        /// - strings: the string literals and helper functions, or null
+        ///   where the program has no string type
+        /// - parameter_types: the types of the function's parameters, the
+        ///   receiver first where it takes one
+        init(
+            numbering: WASMGC_FUNCTION_NUMBERING,
+            registry: WASMGC_TYPE_REGISTRY,
+            imports: WASMGC_IMPORTS,
+            strings: WASMGC_STRINGS?,
+            function: Function,
+            parameter_types: Collections.List[VALUE_TYPE]
+        ) is
             init(numbering, registry, imports, parameter_types)
+
+            _strings = strings
 
             _receiver_offset = if function.is_emitted_with_receiver then 1 else 0 fi
             _return_type = function.return_type
@@ -404,7 +429,13 @@ namespace IR.WasmGC is
             fi
         si
 
-        visit(string: Values.Literal.STRING) is _report("a string literal") si
+        visit(string: Values.Literal.STRING) is
+            if let strings = _strings then
+                _emit(INDEX_INSTRUCTION(Opcode.GLOBAL_GET, strings.literal(string.value)))
+            else
+                _report("a string literal")
+            fi
+        si
         visit(decimal: Values.Literal.DECIMAL) is _report("a decimal literal") si
         visit(bigint: Values.Literal.BIGINT) is _report("a bigint literal") si
 
@@ -588,7 +619,79 @@ namespace IR.WasmGC is
         visit_address(self_load: Values.Load.OUTER_SELF) is _report("self") si
         visit(self_load: Values.Load.VALUE_SELF) is _report("self") si
         visit_address(self_load: Values.Load.VALUE_SELF) is _report("self") si
-        visit(runtime: Values.RUNTIME) is _report("a runtime operation") si
+        visit(runtime: Values.RUNTIME) is
+            let strings = _strings
+
+            if !strings? then
+                _report("a runtime operation")
+                return
+            fi
+
+            case runtime.operation
+            when IR.RuntimeOperation.STRINGS_EQUAL then
+                _call_string_helper(strings.equals_function, strings, runtime.operands)
+
+            when IR.RuntimeOperation.CONCAT_STRINGS then
+                _call_string_helper(strings.concat_function, strings, runtime.operands)
+
+            else
+                _report("the runtime operation {runtime.operation}")
+            esac
+        si
+
+        _call_string_helper(index: int, strings: WASMGC_STRINGS, arguments: Collections.List[Value]) is
+            for argument in arguments do
+                gen(argument)
+                _coerce_top(strings.string_reference)
+            od
+
+            _emit(INDEX_INSTRUCTION(Opcode.CALL, index))
+        si
+
+        // The operations the core library declares on strings and objects
+        // that read their representation, which no ghūl code can reach.
+        _lower_representation(call: Values.Call.INNATE) -> bool is
+            let strings = _strings
+
+            if !strings? then
+                return false
+            fi
+
+            let name = call.innate_name
+            let string_type = strings.string_type_index
+            let chars = _registry.chars_type_index
+
+            if name =~ "string.length" then
+                gen(call.arguments[0])
+                _coerce_top(strings.string_reference)
+                _emit(TYPE_FIELD_INSTRUCTION(Opcode.STRUCT_GET, string_type, WASMGC_TYPE_REGISTRY.STRING_CHARS))
+                _emit(Opcode.ARRAY_LEN)
+            elif name =~ "string.char_at" then
+                gen(call.arguments[0])
+                _coerce_top(strings.string_reference)
+                _emit(TYPE_FIELD_INSTRUCTION(Opcode.STRUCT_GET, string_type, WASMGC_TYPE_REGISTRY.STRING_CHARS))
+                gen(call.arguments[1])
+                _emit(TYPE_INSTRUCTION(Opcode.ARRAY_GET_U, chars))
+            elif name =~ "string.concat" then
+                _call_string_helper(strings.concat_function, strings, call.arguments)
+            elif name =~ "object.type_name" then
+                _emit(INDEX_INSTRUCTION(Opcode.GLOBAL_GET, _registry.string_descriptor_global!))
+                _emit(I32_CONSTANT(0))
+                gen(call.arguments[0])
+                _coerce_top(_registry.object_reference)
+                _emit(TYPE_FIELD_INSTRUCTION(Opcode.STRUCT_GET, WASMGC_TYPE_REGISTRY.OBJECT_TYPE_INDEX, 0))
+                _emit(
+                    TYPE_FIELD_INSTRUCTION(
+                        Opcode.STRUCT_GET,
+                        WASMGC_TYPE_REGISTRY.DESCRIPTOR_TYPE_INDEX,
+                        WASMGC_TYPE_REGISTRY.DESCRIPTOR_NAME))
+                _emit(TYPE_INSTRUCTION(Opcode.STRUCT_NEW, string_type))
+            else
+                return false
+            fi
+
+            return true
+        si
         visit(creation: Values.CREATE_UNIT_VARIANT_INSTANCE) is _report("a union") si
 
         visit(dummy: Values.DUMMY) is
@@ -1246,6 +1349,8 @@ namespace IR.WasmGC is
         visit(call: Values.Call.INNATE) is
             if WASMGC_IMPORTS.is_host(call.innate_name) then
                 _call_host(call.innate_name, call.arguments)
+            elif _lower_representation(call) then
+                return
             elif !call.is_lowered then
                 gen(call.lower())
             fi

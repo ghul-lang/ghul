@@ -185,6 +185,13 @@ namespace IR.WasmGC is
 
             let numbering = WASMGC_FUNCTION_NUMBERING(imports.count, f => bodies.contains_key(f))
 
+            let strings =
+                if registry.string_type_index? then
+                    WASMGC_STRINGS(module, registry, numbering)
+                else
+                    null
+                fi
+
             // An executable compiles what its entry point reaches; a library
             // compiles everything, since anything can be called from outside.
             if let entry = _entry_point then
@@ -203,10 +210,12 @@ namespace IR.WasmGC is
 
                 numbering.place(
                     instance,
-                    _build_function(module, registry, imports, function, bodies[function], numbering))
+                    _build_function(module, registry, imports, strings, function, bodies[function], numbering))
 
                 names.add(index, function.qualified_name)
             od
+
+            strings?.finish()
 
             numbering.add_to(module)
 
@@ -229,8 +238,9 @@ namespace IR.WasmGC is
             let container = IoC.CONTAINER.instance
 
             let object = cast Classy?(container.innate_symbol_lookup.get_object_type().symbol)!
+            let string_type = cast Classy?(container.innate_symbol_lookup.get_string_type().symbol)
 
-            let registry = WASMGC_TYPE_REGISTRY(module, object)
+            let registry = WASMGC_TYPE_REGISTRY(module, object, string_type)
 
             registry.build(container.symbol_table.global_scope)
 
@@ -287,6 +297,7 @@ namespace IR.WasmGC is
             module: MODULE,
             registry: WASMGC_TYPE_REGISTRY,
             imports: WASMGC_IMPORTS,
+            strings: WASMGC_STRINGS?,
             function: Function,
             values: LIST[Value],
             numbering: WASMGC_FUNCTION_NUMBERING
@@ -320,7 +331,7 @@ namespace IR.WasmGC is
                 fi
             fi
 
-            let lowering = WASMGC_LOWERING(numbering, registry, imports, function, parameters)
+            let lowering = WASMGC_LOWERING(numbering, registry, imports, strings, function, parameters)
 
             let body = lowering.lower(values)
 
