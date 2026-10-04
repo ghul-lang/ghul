@@ -1,0 +1,104 @@
+namespace Analysis.Tests is
+    use IO.File;
+
+    use Analysis.Protocol.ANALYSER_PROCESS;
+    use Analysis.Protocol.Response;
+
+    use TestClass = Microsoft.VisualStudio.TestTools.UnitTesting.TestClassAttribute;
+    use Test = Microsoft.VisualStudio.TestTools.UnitTesting.TestMethodAttribute;
+    use Assertions;
+
+    // A renamed core type is offered where its new name puts it, and not
+    // where its old name did: the old name still resolves, but it is not
+    // a name to write.
+    @TestClass()
+    class CORE_TYPE_NAMES_COMPLETION_TESTS is
+        init() is si
+
+        load() -> string is
+            let path = fixture_path("core-type-names-completion/core-type-names-completion.ghul");
+            assert File.exists(path) else "fixture not copied to test output: {path}";
+            return File.read_all_text(path);
+        si
+
+        complete(analyser: ANALYSER_PROCESS, line: int, column: int) -> Collections.SET[string] is
+            analyser.send_completion("core-type-names-completion.ghul", line, column);
+
+            let response = analyser.read_query_response();
+
+            assert isa Response.COMPLETION(response) else "expected COMPLETION response";
+
+            let names = Collections.SET[string]();
+
+            for item in response.items do
+                names.add(item.name);
+            od
+
+            return names;
+        si
+
+        opened() -> ANALYSER_PROCESS is
+            let analyser = ANALYSER_PROCESS();
+
+            analyser.send_edit("core-type-names-completion.ghul", load());
+
+            let diagnostics = analyser.read_response();
+            assert isa Response.DIAGNOSTICS(diagnostics) else "expected DIAGNOSTICS response";
+
+            return analyser;
+        si
+
+        @Test()
+        system_does_not_offer_a_renamed_type() is
+            let use analyser = opened();
+
+            let names = complete(analyser, 10, 20)
+
+            is_false(names.contains("Exception"), "Exception is offered under Ghul, not System")
+            is_false(names.contains("Math"), "Math is offered under Ghul, not System")
+            is_true(names.contains("DateTime"), "expected DateTime, which keeps its name")
+        si
+
+        @Test()
+        ghul_offers_the_renamed_types() is
+            let use analyser = opened();
+
+            let names = complete(analyser, 11, 18)
+
+            is_true(names.contains("Exception"), "expected Exception under Ghul")
+            is_true(names.contains("InvalidOperationException"), "expected InvalidOperationException under Ghul")
+            is_true(names.contains("Math"), "expected Math under Ghul")
+            is_true(names.contains("RANDOM"), "expected RANDOM under Ghul")
+        si
+
+        @Test()
+        text_offers_the_string_builder() is
+            let use analyser = opened();
+
+            let names = complete(analyser, 12, 18)
+
+            is_true(names.contains("STRING_BUILDER"), "expected STRING_BUILDER under Text")
+            is_false(names.contains("Encoding"), "Encoding stays under System.Text")
+        si
+
+        @Test()
+        system_text_keeps_everything_but_the_string_builder() is
+            let use analyser = opened();
+
+            let names = complete(analyser, 13, 25)
+
+            is_false(names.contains("StringBuilder"), "StringBuilder is offered under Text")
+            is_true(names.contains("Encoding"), "expected Encoding, which keeps its name")
+        si
+
+        @Test()
+        collections_offers_the_pair_under_its_new_name() is
+            let use analyser = opened();
+
+            let names = complete(analyser, 14, 25)
+
+            is_true(names.contains("KEY_VALUE_PAIR"), "expected KEY_VALUE_PAIR under Collections")
+            is_false(names.contains("KeyValuePair"), "KeyValuePair is offered as KEY_VALUE_PAIR")
+        si
+    si
+si
