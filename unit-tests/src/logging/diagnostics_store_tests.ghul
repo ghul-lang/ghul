@@ -805,5 +805,52 @@ namespace Logging.UnitTests is
                 "an environment error must outlive the speculation that triggered it:\n{written}"
             )
         si
+
+        // Every pass over every file fails the same way when a built-in type
+        // is missing, so however often it is caught the file reports it
+        // once, as an error at its first character.
+        @Test()
+        exception__records_a_missing_built_in_once_per_file_as_an_error() is
+            let store = DIAGNOSTICS_STORE()
+
+            store.exception(loc("a.ghul", 3), Logging.MissingBuiltInException("void"), "pass one")
+            store.exception(loc("a.ghul", 7), Logging.MissingBuiltInException("int"), "pass two")
+
+            let reported = LIST[DIAGNOSTIC_MESSAGE](store.diagnostics_for("a.ghul"))
+
+            are_equal(1, reported.count, "a file must report its missing built-in once")
+            are_equal(Logging.DiagnosticSeverity.ERROR, reported[0].severity, "a missing built-in must be an error")
+            are_equal(Logging.MissingBuiltInException.CODE, reported[0].code ?? "", "a missing built-in must carry its code")
+            are_equal(1, reported[0].location.start_line, "a missing built-in is reported on the first line")
+            are_equal(1, reported[0].location.start_column, "a missing built-in is reported at the first column")
+        si
+
+        // A speculation the failure escapes is never released, so the error
+        // goes to the base state, where nothing rolls it back.
+        @Test()
+        exception__records_a_missing_built_in_outside_any_speculation() is
+            let store = DIAGNOSTICS_STORE()
+
+            store.speculate()
+
+            store.exception(loc("a.ghul", 3), Logging.MissingBuiltInException("void"), "pass one")
+
+            let _ = store.roll_back()
+
+            are_equal(1, LIST[DIAGNOSTIC_MESSAGE](store.diagnostics_for("a.ghul")).count, "rolling back must not lose the error")
+        si
+
+        // Any other exception keeps its own severity.
+        @Test()
+        exception__leaves_another_exception_as_it_was() is
+            let store = DIAGNOSTICS_STORE()
+
+            store.exception(loc("a.ghul", 3), System.InvalidOperationException("broken"), "pass one")
+
+            let reported = LIST[DIAGNOSTIC_MESSAGE](store.diagnostics_for("a.ghul"))
+
+            are_equal(1, reported.count)
+            are_equal(Logging.DiagnosticSeverity.EXCEPTION, reported[0].severity)
+        si
     si
 si
