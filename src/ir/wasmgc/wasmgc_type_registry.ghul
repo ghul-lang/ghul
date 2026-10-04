@@ -148,6 +148,15 @@ namespace IR.WasmGC is
 
         _static_constructors: MAP[WASMGC_CLASS, (constructor: WASMGC_FUNCTION, initialised: int)]
 
+        // Each array type the program uses, with its element type. An
+        // array type is numbered as a class under the root, but every array
+        // whose elements are held the same way shares one struct type, so
+        // an array of a class is usable where an array of its superclass
+        // is expected.
+        _arrays: MAP[WASMGC_CLASS, Type]
+        _array_storages: Collections.SET[int]
+        _array_storage_types: MAP[int, int]
+
         _unsupported: LIST[(location: LOCATION, construct: string)]
 
         _dispatch: WASMGC_DISPATCH
@@ -208,6 +217,10 @@ namespace IR.WasmGC is
 
             _boxed = MAP[WASMGC_CLASS, Type]()
             _static_constructors = MAP[WASMGC_CLASS, (constructor: WASMGC_FUNCTION, initialised: int)]()
+
+            _arrays = MAP[WASMGC_CLASS, Type]()
+            _array_storages = Collections.SET[int]()
+            _array_storage_types = MAP[int, int]()
 
             _unsupported = LIST[(location: LOCATION, construct: string)]()
 
@@ -358,6 +371,10 @@ namespace IR.WasmGC is
                 return null
             fi
 
+            if let array = array_of(type) then
+                return array
+            fi
+
             let symbol = type.symbol
 
             if let generic: GENERIC = symbol then
@@ -395,9 +412,19 @@ namespace IR.WasmGC is
                 _numbering.add(box, object)
             od
 
+            for (array, _) in _arrays do
+                _numbering.add(array, object)
+            od
+
             _numbering.number()
 
-            let ordered = _numbering.in_order()
+            let ordered = LIST[WASMGC_CLASS]()
+
+            for type in _numbering.in_order() do
+                if !is_array(type) then
+                    ordered.add(type)
+                fi
+            od
 
             for i in 0..ordered.count do
                 _type_indices[ordered[i]] = OBJECT_TYPE_INDEX + i
@@ -427,6 +454,8 @@ namespace IR.WasmGC is
 
             group.add(SUB_TYPE(_closure_struct(), true, [OBJECT_TYPE_INDEX]))
 
+            _add_array_types(group)
+
             group.add_range(_dispatch.plan(ordered, DESCRIPTOR_TYPE_INDEX + group.count))
 
             let first = _module.add_rec_group(group)
@@ -435,6 +464,12 @@ namespace IR.WasmGC is
 
             for type in ordered do
                 _add_descriptor_global(type)
+            od
+
+            // An array's descriptor refers to its element's, so the arrays'
+            // are added after every class's.
+            for (array, _) in _arrays do
+                _add_descriptor_global(array)
             od
 
             _closure_descriptor = LIST[INSTRUCTION]()
@@ -469,9 +504,13 @@ namespace IR.WasmGC is
                 _fill_descriptor(type)
             od
 
-            // A function value is numbered after every class, so no class
-            // or trait test matches one.
-            let closure_id = _ordered.count
+            for (array, element) in _arrays do
+                _fill_array_descriptor(array, element)
+            od
+
+            // A function value is numbered after every class and array type,
+            // so no class or trait test matches one.
+            let closure_id = _numbering.last_descendant(_object!) + 1
 
             _closure_descriptor.add(I32_CONSTANT(closure_id))
             _closure_descriptor.add(I32_CONSTANT(closure_id))
@@ -654,6 +693,221 @@ namespace IR.WasmGC is
                     // value itself.
                     return WASMGC_TYPES.value_type(scalar)
                 fi
+            fi
+
+            return null
+        si
+
+        /// The array type `type` is, added while discovering. Null where
+        /// `type` is not an array, or where its elements are of a type the
+        /// target cannot hold yet.
+        array_of(type: Type?) -> WASMGC_CLASS? is
+            let generic = cast GENERIC?(type?.symbol)
+
+            if !generic? then
+                return null
+            fi
+
+            let definition = cast Classy?(generic.unspecialized_symbol)
+
+            let arguments = type!.arguments
+
+            if !definition? \/ definition != _array_definition \/ arguments.count != 1 then
+                return null
+            fi
+
+            let element = arguments[0]
+
+            if element.is_type_variable then
+                return null
+            fi
+
+            let storage = _array_storage(element)
+
+            if !storage? then
+                return null
+            fi
+
+            let map = MAP[Symbol, Type]()
+
+            for (parameter, argument) in generic.type_map do
+                if parameter.owner == definition then
+                    map[parameter] = argument
+                fi
+            od
+
+            let key = WASMGC_CLASS(definition, LIST[Type]([element]), map)
+
+            if _arrays.contains_key(key) then
+                return key
+            fi
+
+            if _is_built then
+                return null
+            fi
+
+            _arrays[key] = element
+            _array_storages.add(storage)
+
+            return key
+        si
+
+        // The generic definition every array type is an instance of.
+        _array_definition: Classy? =>
+            cast Classy?(
+                cast GENERIC?(
+                    IoC.CONTAINER.instance.innate_symbol_lookup.get_array_type(
+                        IoC.CONTAINER.instance.innate_symbol_lookup.get_int_type()).symbol)?.unspecialized_symbol)
+
+        /// Whether `type` is an array type.
+        is_array(type: WASMGC_CLASS) -> bool => _arrays.contains_key(type)
+
+        /// The element type of the array type `type`.
+        array_element(type: WASMGC_CLASS) -> Type => _arrays[type]
+
+        /// The struct type an array of `type` is held in, the array type its
+        /// elements are held in, and the type of an element as held: a
+        /// scalar as itself, and any reference as a reference to the root.
+        array_storage(type: WASMGC_CLASS) -> (struct_index: int, data_index: int, element: VALUE_TYPE) is
+            let storage = _array_storage(_arrays[type])!
+            let element = _array_storage_value_type(storage)
+
+            if discovering then
+                return (OBJECT_TYPE_INDEX, OBJECT_TYPE_INDEX, element)
+            fi
+
+            let struct_index = _array_storage_types[storage]
+
+            return (struct_index, struct_index + 1, element)
+        si
+
+        /// Whether storing a reference into an array of `type` has to check
+        /// that the array was made for it: an array of a class with no
+        /// subclasses can only be an array of exactly that class.
+        array_store_is_checked(type: WASMGC_CLASS) -> bool is
+            let element = _arrays[type]
+
+            if WASMGC_TYPES.scalar(element)? then
+                return false
+            fi
+
+            if let held = class_of(element) /\ _type_indices.contains_key(held) then
+                return _numbering.has_children(held)
+            fi
+
+            return true
+        si
+
+        // How the elements of an array of `element` are held: one of the
+        // four numeric types, or a reference. Null where the target cannot
+        // hold an `element`.
+        _array_storage(element: Type) -> int? is
+            let value_type = value_type(element)
+
+            if !value_type? then
+                return null
+            fi
+
+            if let numeric = value_type.numeric() then
+                return
+                    case numeric
+                    when NumericType.I32 then 0
+                    when NumericType.I64 then 1
+                    when NumericType.F32 then 2
+                    when NumericType.F64 then 3
+                    else null
+                    esac
+            fi
+
+            return 4
+        si
+
+        _array_storage_value_type(storage: int) -> VALUE_TYPE =>
+            case storage
+            when 0 then VALUE_TYPE.of_numeric(NumericType.I32)
+            when 1 then VALUE_TYPE.of_numeric(NumericType.I64)
+            when 2 then VALUE_TYPE.of_numeric(NumericType.F32)
+            when 3 then VALUE_TYPE.of_numeric(NumericType.F64)
+            else object_reference
+            esac
+
+        // For each way of holding elements the program's arrays use, a
+        // final struct under the root holding the descriptor, the elements
+        // and the element descriptor, then the mutable array of the
+        // elements.
+        _add_array_types(group: LIST[SUB_TYPE]) is
+            for storage in 0::4 do
+                if !_array_storages.contains(storage) then
+                    continue
+                fi
+
+                let struct_index = DESCRIPTOR_TYPE_INDEX + group.count
+                let element = _array_storage_value_type(storage)
+
+                _array_storage_types[storage] = struct_index
+
+                // The element descriptor is held by each array rather than
+                // its descriptor, whose vtable slot holds the root's vtable.
+                group.add(
+                    SUB_TYPE(
+                        STRUCT_TYPE([
+                            FIELD_TYPE.of_reference(VALUE_TYPE.of_type_index(DESCRIPTOR_TYPE_INDEX, false), false),
+                            FIELD_TYPE.of_reference(VALUE_TYPE.of_type_index(struct_index + 1, false), false),
+                            FIELD_TYPE.of_reference(VALUE_TYPE.of_type_index(DESCRIPTOR_TYPE_INDEX, true), false)
+                        ]),
+                        true,
+                        [OBJECT_TYPE_INDEX]))
+
+                let element_field =
+                    if let numeric = element.numeric() then
+                        FIELD_TYPE(numeric, true)
+                    else
+                        FIELD_TYPE.of_reference(element, true)
+                    fi
+
+                group.add(SUB_TYPE(ARRAY_TYPE(element_field), true, []))
+            od
+
+            for (array, element) in _arrays do
+                _type_indices[array] = _array_storage_types[_array_storage(element)!]
+            od
+        si
+
+        // An array answers the root's methods, so its vtable is the root's.
+        _fill_array_descriptor(array: WASMGC_CLASS, element: Type) is
+            let initialiser = _initialisers[array]
+
+            initialiser.add(I32_CONSTANT(_numbering.id(array)))
+            initialiser.add(I32_CONSTANT(_numbering.last_descendant(array)))
+            initialiser.add(INDEX_INSTRUCTION(Opcode.GLOBAL_GET, _descriptor_globals[_object!]))
+            initialiser.add_range(chars_of("{element}[]"))
+
+            if let vtable = _dispatch.vtable(_object!, _functions!) then
+                initialiser.add_range(vtable)
+            else
+                initialiser.add(HEAP_TYPE_INSTRUCTION(Opcode.REF_NULL, HEAP_TYPE.of_abstract(AbstractHeapType.STRUCT)))
+            fi
+
+            initialiser.add(TYPE_INSTRUCTION(Opcode.STRUCT_NEW, DESCRIPTOR_TYPE_INDEX))
+        si
+
+        /// The global holding the descriptor of the class the elements of
+        /// an array of `type` are made to hold, which a store into the
+        /// array is checked against, or null where no check is needed: the
+        /// elements are scalars, or of a trait, or of the root.
+        array_element_descriptor(type: WASMGC_CLASS) -> int? is
+            if discovering then
+                return null
+            fi
+
+            let element = _arrays[type]
+
+            if WASMGC_TYPES.scalar(element)? then
+                return null
+            fi
+
+            if let element_class = class_of(element) /\ element_class != _object /\ _descriptor_globals.contains_key(element_class) then
+                return _descriptor_globals[element_class]
             fi
 
             return null
