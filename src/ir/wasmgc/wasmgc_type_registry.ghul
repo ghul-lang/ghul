@@ -1400,13 +1400,6 @@ namespace IR.WasmGC is
         _field_value_type(`field: Field, owner: WASMGC_CLASS?) -> VALUE_TYPE is
             let type = if let o = owner then o.specialize(`field.type) else `field.type fi
 
-            // A field of the type of `null` itself, as a tuple literal's
-            // element has before the tuple converts to the type it goes
-            // into, holds nothing but null, which any reference can.
-            if isa Semantic.Types.NULL(type) then
-                return object_reference
-            fi
-
             if let value_type = value_type(type) then
                 return value_type
             fi
@@ -1671,14 +1664,6 @@ namespace IR.WasmGC is
             else HEAP_TYPE_INSTRUCTION(Opcode.REF_NULL, value_type.heap_type()!)
             esac
 
-        /// The type a parameter of `type` is held in: as `value_type`
-        /// answers, except that a parameter of the type of `null` itself,
-        /// as a constructor instantiated at a tuple literal's null element
-        /// has, is held as the root, since it only ever receives a
-        /// reference.
-        parameter_value_type(type: Type?) -> VALUE_TYPE? =>
-            if isa Semantic.Types.NULL(type) then object_reference else value_type(type) fi
-
         /// The type a value of `type` is held in, or null where the target
         /// cannot hold it yet. A declared class is a reference to its
         /// struct; `object` and a trait are references to the root. `type`
@@ -1695,6 +1680,14 @@ namespace IR.WasmGC is
             // An enum is held as its underlying int, as its members are.
             if WASMGC_TYPES.is_enum(type) then
                 return VALUE_TYPE.of_numeric(NumericType.I32)
+            fi
+
+            // The type of `null` itself, such as a tuple literal's element
+            // before the tuple converts to the type it goes into, holds
+            // nothing but null: the bottom reference, which goes wherever a
+            // reference does.
+            if isa Semantic.Types.NULL(type) then
+                return VALUE_TYPE.of_abstract(Wasm.AbstractHeapType.NONE)
             fi
 
             // A reference to a scalar is the box, the cell, the scalar
@@ -1841,6 +1834,11 @@ namespace IR.WasmGC is
         /// without a cast: the same type, or a class derived from it.
         is_held_as(held: HEAP_TYPE, expected: HEAP_TYPE) -> bool is
             if held.matches(expected) then
+                return true
+            fi
+
+            // The bottom reference, which only null has, is held as any.
+            if held.matches(HEAP_TYPE.of_abstract(Wasm.AbstractHeapType.NONE)) then
                 return true
             fi
 
