@@ -738,6 +738,8 @@ namespace Logging is
         _base_state: DIAGNOSTICS_STATE
         _suppressed_codes: Collections.SET[string]
         _suppression_regions: SUPPRESSION_REGIONS
+        _is_quiet_file: ((string) -> bool)?
+        _quiet_by_file: Collections.MAP[string, bool]
         _all_warnings_are_errors: bool
         _error_codes: Collections.SET[string]
         _hint_codes: Collections.SET[string]
@@ -791,6 +793,7 @@ namespace Logging is
             _suppressed_codes.add("redundant-semicolon")
 
             _suppression_regions = SUPPRESSION_REGIONS()
+            _quiet_by_file = Collections.MAP[string, bool]()
             _error_codes = Collections.SET[string]()
             _hint_codes = Collections.SET[string]()
             _info_codes = Collections.SET[string]()
@@ -853,6 +856,32 @@ namespace Logging is
 
         is_suppressed(code: string?) -> bool =>
             code? /\ _suppressed_codes.contains(code)
+
+        set_quiet_files(is_quiet: (string) -> bool) is
+            _is_quiet_file = is_quiet
+            _quiet_by_file.clear()
+        si
+
+        _is_quiet(location: LOCATION) -> bool is
+            let is_quiet_file = _is_quiet_file
+
+            if !is_quiet_file? then
+                return false
+            fi
+
+            let path = location.file_name
+            let known: bool mut
+
+            if _quiet_by_file.try_get_value(path, known ref) then
+                return known
+            fi
+
+            let result = is_quiet_file(path)
+
+            _quiet_by_file[path] = result
+
+            return result
+        si
 
         set_all_warnings_are_errors(value: bool) is
             _all_warnings_are_errors = value
@@ -1103,6 +1132,10 @@ namespace Logging is
         si
 
         warn(location: LOCATION, message: string) is
+            if _is_quiet(location) then
+                return
+            fi
+
             let severity =
                 if _all_warnings_are_errors then
                     DiagnosticSeverity.ERROR
@@ -1113,6 +1146,10 @@ namespace Logging is
         si
 
         warn(location: LOCATION, code: string, message: string) is
+            if _is_quiet(location) then
+                return
+            fi
+
             if is_suppressed(code, location) then
                 return
             fi
@@ -1149,6 +1186,10 @@ namespace Logging is
         si
 
         warn(location: LOCATION, code: string, message: string, related_location: LOCATION, related_message: string) is
+            if _is_quiet(location) then
+                return
+            fi
+
             let related = LIST[RELATED_LOCATION]()
 
             related.add(RELATED_LOCATION(related_location, related_message))
@@ -1157,6 +1198,10 @@ namespace Logging is
         si
 
         warn(location: LOCATION, code: string, message: string, related: LIST[RELATED_LOCATION]) is
+            if _is_quiet(location) then
+                return
+            fi
+
             if is_suppressed(code, location) then
                 // Suppressed: the plain coded route drops it, exactly as
                 // it would without a related location.
@@ -1205,10 +1250,18 @@ namespace Logging is
         si
 
         info(location: LOCATION, message: string) is
+            if _is_quiet(location) then
+                return
+            fi
+
             top.add_diagnostic_message(location.file_name, DIAGNOSTIC_MESSAGE(is_analysis, is_compile_expressions, DiagnosticSeverity.INFO, location, message))
         si
 
         info(location: LOCATION, code: string, message: string) is
+            if _is_quiet(location) then
+                return
+            fi
+
             if is_suppressed(code, location) then
                 return
             fi
@@ -1217,10 +1270,18 @@ namespace Logging is
         si
 
         hint(location: LOCATION, message: string) is
+            if _is_quiet(location) then
+                return
+            fi
+
             top.add_diagnostic_message(location.file_name, DIAGNOSTIC_MESSAGE(is_analysis, is_compile_expressions, DiagnosticSeverity.HINT, location, message))
         si
 
         hint(location: LOCATION, code: string, message: string) is
+            if _is_quiet(location) then
+                return
+            fi
+
             if is_suppressed(code, location) then
                 return
             fi
@@ -1229,6 +1290,10 @@ namespace Logging is
         si
 
         hint(location: LOCATION, code: string, message: string, related_location: LOCATION, related_message: string) is
+            if _is_quiet(location) then
+                return
+            fi
+
             if is_suppressed(code, location) then
                 return
             fi
