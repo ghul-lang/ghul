@@ -60,14 +60,45 @@ namespace Syntax.Process is
                 else
                     tuple.elements.expressions[0].clear_expected_type()
                 fi
-            elif let tuple.expected_type? /\ expected_type.is_value_tuple then
-                for (element, type) in tuple.elements |> zip(expected_type.arguments) do
+            elif let expected_tuple = _expected_tuple(tuple) then
+                for (element, type) in tuple.elements |> zip(expected_tuple.arguments) do
                     element.set_expected_type(type, tuple.expected_type_error_message)
                 od
             else
                 for element in tuple.elements do
                     element.clear_expected_type()
                 od
+            fi
+
+            return false
+        si
+
+        // The tuple type the literal's context expects, where it expects one:
+        // an optional tuple context expects the tuple it holds, which the
+        // literal is then wrapped in.
+        _expected_tuple(tuple: Trees.Expressions.TUPLE) -> Type? is
+            if let expected = tuple.expected_type then
+                let unwrapped = expected.optional_inner_type ?? expected
+
+                if unwrapped.is_value_tuple then
+                    return unwrapped
+                fi
+            fi
+
+            return null
+        si
+
+        // Whether the literal's context expects a settled type that is not a
+        // tuple, such as `object`: no type it could take would give a bare
+        // `null` element a type, and a tuple holding an element of no type
+        // has no runtime representation.
+        _expects_other_than_tuple(tuple: Trees.Expressions.TUPLE) -> bool is
+            if let expected = tuple.expected_type then
+                let unwrapped = expected.optional_inner_type ?? expected
+
+                return
+                    unwrapped.is_settled /\ !unwrapped.is_type_variable /\
+                    !unwrapped.is_value_type /\ !unwrapped.is_value_tuple /\ !isa Semantic.Types.TUPLE(unwrapped)
             fi
 
             return false
@@ -92,8 +123,8 @@ namespace Syntax.Process is
             let element_constraints: Collections.List[Type]? mut = null
             let expected_type_error_message: string? mut = null
 
-            if let tuple.expected_type? /\ expected_type.is_value_tuple then
-                element_constraints = expected_type.arguments
+            if let expected_tuple = _expected_tuple(tuple) then
+                element_constraints = expected_tuple.arguments
                 expected_type_error_message = tuple.expected_type_error_message
             fi
 
@@ -124,6 +155,8 @@ namespace Syntax.Process is
                     "a tuple literal cannot have more than {Semantic.Lookups.INNATE_TYPE_LIMITS.MAX_TUPLE_ELEMENTS} elements")
                 return
             fi
+
+            let is_null_unreachable = _expects_other_than_tuple(tuple)
 
             let seen_any_named mut = false
 
@@ -193,6 +226,11 @@ namespace Syntax.Process is
 
                                 types.add(type)
                                 values.add(_value_boxer.box_if_needed(init_value, type))
+                            elif is_null_unreachable /\ isa Semantic.Types.NULL(element.initializer!.value!.type) then
+                                _logger.error(element.initializer!.location, "cannot infer type here")
+
+                                values.add(IR.Values.DUMMY(Semantic.Types.ERROR(), element.location))
+                                types.add(Semantic.Types.ERROR())
                             else
                                 let init_value = element.initializer!.value!
                                 types.add(init_value.type!)
@@ -240,6 +278,11 @@ namespace Syntax.Process is
 
                         types.add(type)
                         values.add(_value_boxer.box_if_needed(v_value, type))
+                    elif is_null_unreachable /\ isa Semantic.Types.NULL(v_value.type) then
+                        _logger.error(v.location, "cannot infer type here")
+
+                        values.add(IR.Values.DUMMY(Semantic.Types.ERROR(), v.location))
+                        types.add(Semantic.Types.ERROR())
                     else
                         types.add(v_value.type!)
                         values.add(v_value)
