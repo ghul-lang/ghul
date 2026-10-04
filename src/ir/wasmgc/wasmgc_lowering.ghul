@@ -230,6 +230,26 @@ namespace IR.WasmGC is
 
                 _top_value = value
                 _top_cast = null
+
+                _unbox_narrowed(value)
+            fi
+        si
+
+        // A load flow analysis has narrowed from a reference to a scalar or
+        // an enum still reads the reference, which holds the value in a
+        // box: the value is read out of the box.
+        _unbox_narrowed(value: Value) is
+            if _registry.discovering \/ !isa Values.Load.SYMBOL(value) then
+                return
+            fi
+
+            // Only a reference held as the root can hold a box: a cell
+            // holding a local is read through by the load itself.
+            if let index = _registry.box_index(_specialize(value.type)), heap_type = _top?.heap_type() /\ heap_type.matches(_registry.object_reference.heap_type()!) then
+                _emit(HEAP_TYPE_INSTRUCTION(Opcode.REF_CAST, HEAP_TYPE.of_type_index(index)))
+                _emit(TYPE_FIELD_INSTRUCTION(Opcode.STRUCT_GET, index, WASMGC_TYPE_REGISTRY.BOX_VALUE))
+
+                _top_cast = _value_type(value.type)
             fi
         si
 
