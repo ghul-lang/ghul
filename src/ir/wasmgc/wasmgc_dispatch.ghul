@@ -549,14 +549,15 @@ namespace IR.WasmGC is
         si
 
         // The method a call to `selector` on an instance of `type` runs:
-        // the nearest one up the class chain that overrides it, else a
-        // trait's default.
+        // the nearest one up the class chain that overrides it, or that
+        // implements it by name and signature where it is a trait method,
+        // else a trait's default.
         _implementation(type: WASMGC_CLASS, selector: Function) -> WASMGC_FUNCTION? is
             let current: WASMGC_CLASS? mut = type
 
             while current? do
                 for method in _methods(current.definition) do
-                    if _is_dispatched(method) /\ _overrides(method, selector) then
+                    if _is_dispatched(method) /\ (_overrides(method, selector) \/ _implements_by_signature(method, selector)) then
                         return WASMGC_FUNCTION(method, current.type_map)
                     fi
                 od
@@ -573,6 +574,33 @@ namespace IR.WasmGC is
             od
 
             return null
+        si
+
+        // Whether `method` implements the trait method `selector` because
+        // its name and signature are the same, as .NET binds an interface
+        // method to a class's, where the compiler recorded it overriding
+        // another trait's method of the same shape instead: one class
+        // method satisfies every trait that declares it. A parameter of the
+        // selector that is a type parameter matches whatever is given.
+        _implements_by_signature(method: Function, selector: Function) -> bool is
+            if !(cast Classy?(selector.owner)?.is_trait ?? false) \/ method.name !~ selector.name \/ !method.is_instance then
+                return false
+            fi
+
+            let mine = method.arguments
+            let theirs = selector.arguments
+
+            if mine.count != theirs.count then
+                return false
+            fi
+
+            for i in 0..mine.count do
+                if !theirs[i].is_type_variable /\ (!mine[i].matches(theirs[i]) \/ !theirs[i].matches(mine[i])) then
+                    return false
+                fi
+            od
+
+            return true
         si
 
         _overrides(method: Function, target: Function) -> bool is
