@@ -129,6 +129,8 @@ namespace IR.WasmGC is
                 fi
             od
 
+            _close_over_variance()
+
             for (trait_type, classes) in _trait_classes do
                 _plan_selectors(trait_type, classes)
             od
@@ -374,6 +376,74 @@ namespace IR.WasmGC is
             _traits[key] = key
 
             return key
+        si
+
+        // Each trait instance the program uses takes, as its implementors,
+        // the classes implementing any instance of the same trait that
+        // converts to it under the trait's declared variance, so a value
+        // reached through a variant instantiation dispatches and tests as
+        // it does on .NET. A row entry for the variant instance calls the
+        // same compiled member as the instance the class implements.
+        _close_over_variance() is
+            let implemented = LIST[WASMGC_CLASS](_trait_classes.keys)
+
+            for used in LIST[WASMGC_CLASS](_traits.values) do
+                for trait_type in implemented do
+                    if trait_type != used /\ trait_type.definition == used.definition /\ _converts_by_variance(trait_type, used) then
+                        if !_trait_classes.contains_key(used) then
+                            _trait_classes[used] = LIST[WASMGC_CLASS]()
+                        fi
+
+                        let classes = _trait_classes[used]
+
+                        for type in _trait_classes[trait_type] do
+                            if !classes.contains(type) then
+                                classes.add(type)
+                                _class_traits[type].add(used)
+                            fi
+                        od
+                    fi
+                od
+            od
+        si
+
+        // Whether the trait instance `from` converts to `to`, an instance of
+        // the same trait: each type argument is the same, or, where the
+        // parameter is declared `out` or `in` and both arguments are
+        // reference types, a subtype or a supertype of `to`'s.
+        _converts_by_variance(from: WASMGC_CLASS, to: WASMGC_CLASS) -> bool is
+            if from.arguments.count != to.arguments.count then
+                return false
+            fi
+
+            for i in 0..from.arguments.count do
+                let source = from.arguments[i]
+                let target = to.arguments[i]
+
+                if source.is_assignable_from(target) /\ target.is_assignable_from(source) then
+                    continue
+                fi
+
+                if source.is_value_type \/ target.is_value_type then
+                    return false
+                fi
+
+                let variance = from.definition.get_argument_variance(i)
+
+                if variance == Semantic.Types.TypeVariance.COVARIANT then
+                    if !target.is_assignable_from(source) then
+                        return false
+                    fi
+                elif variance == Semantic.Types.TypeVariance.CONTRAVARIANT then
+                    if !source.is_assignable_from(target) then
+                        return false
+                    fi
+                else
+                    return false
+                fi
+            od
+
+            return true
         si
 
         // Every trait instance a class implements, through its own

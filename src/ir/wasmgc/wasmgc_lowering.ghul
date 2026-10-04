@@ -1873,6 +1873,14 @@ namespace IR.WasmGC is
                 return
             fi
 
+            // Array types sharing a struct type are told apart by class
+            // number, as a trait's implementors are.
+            if let array = _registry.array_of(_specialize(conversion.type)) then
+                _cast_to_trait(value, _registry.array_class_ids(array), conversion.faults_on_failure)
+                _emit(HEAP_TYPE_INSTRUCTION(Opcode.REF_CAST_NULL, HEAP_TYPE.of_type_index(_registry.array_storage(array).struct_index)))
+                return
+            fi
+
             if let held = _optional_struct_of(conversion.type) then
                 _cast_to_optional_struct(value, held, conversion.faults_on_failure)
                 return
@@ -1988,7 +1996,11 @@ namespace IR.WasmGC is
                 return
             fi
 
-            if let target = _registry.type_index(_specialize(test.isa_type)) then
+            if let array = _registry.array_of(_specialize(test.isa_type)) then
+                gen(value)
+
+                _test_class_ids(_registry.array_class_ids(array))
+            elif let target = _registry.type_index(_specialize(test.isa_type)) then
                 gen(value)
 
                 _emit(HEAP_TYPE_INSTRUCTION(Opcode.REF_TEST, HEAP_TYPE.of_type_index(target)))
@@ -2991,6 +3003,14 @@ namespace IR.WasmGC is
 
             if _registry.discovering then
                 _registry.note_dispatched(function)
+
+                // The trait instance the call goes through, and the one
+                // declaring the member, are known to the planner, which
+                // gives each the implementors of its variant instances.
+                if let trait_type = _trait_instance(function.owner) then
+                    dispatch.selector_of(cast Function?(function.root_specialized_from)!, trait_type)
+                fi
+
                 gen(call.from)
                 _lower_all(call.arguments)
                 return
