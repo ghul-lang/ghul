@@ -337,12 +337,32 @@ namespace IR.WasmGC is
         visit(stack_top: Values.STACK_TOP_ADDRESS) is _report("STACK_TOP_ADDRESS") si
         visit_address(stack_top: Values.STACK_TOP_ADDRESS) is _report("STACK_TOP_ADDRESS") si
 
+        // An `if` or `case` that produces a value is a block whose last
+        // value is the region its arms leave, each carrying the value it
+        // produces, so that region's wasm block results in the type the
+        // block produces.
         visit(block: Values.BLOCK) is
             assert !block.is_emitted else "block value already emitted"
 
             block.is_emitted = true
 
-            _lower_all(block.values)
+            let values = block.values
+
+            for i in 0..values.count do
+                let value = values[i]
+
+                if i == values.count - 1 /\ !WASMGC_TYPES.is_void(block.type) /\ isa Values.REGION(value) then
+                    let result = _value_type(block.type)
+
+                    if !result? then
+                        _report("a value of type {block.type}")
+                    fi
+
+                    _lower_region(cast Values.REGION(value), result)
+                else
+                    gen(value)
+                fi
+            od
         si
 
         visit(block: Values.DUMMY_BLOCK) is
@@ -620,7 +640,7 @@ namespace IR.WasmGC is
             assert node.is_closed else "structured node generated before it was closed"
 
             if let region: Values.REGION = node then
-                _lower_region(region)
+                _lower_region(region, null)
             elif let loop: Values.LOOP = node then
                 _lower_loop(loop)
             elif isa Values.TRY(node) then
@@ -630,17 +650,30 @@ namespace IR.WasmGC is
             fi
         si
 
-        _lower_region(region: Values.REGION) is
+        _lower_region(region: Values.REGION, result: VALUE_TYPE?) is
             _labels.add((region, false))
             _begin()
 
-            _lower_all(region.body.values)
+            let values = region.body.values
+
+            _lower_all(values)
+
+            // A region that produces a value is left only by its arms,
+            // each of which breaks out carrying it, so the end of its
+            // last arm does not fall through. Wasm takes the end of a
+            // block to be reachable, so it is told.
+            if result? /\ values.count > 0 /\ isa Values.Breakable(values[values.count - 1]) then
+                _emit(Opcode.UNREACHABLE)
+            fi
 
             let body = _end()
             _labels.remove_at(_labels.count - 1)
 
-            _emit(BLOCK_INSTRUCTION(Opcode.BLOCK, BLOCK_TYPE(), body))
+            _emit(BLOCK_INSTRUCTION(Opcode.BLOCK, _block_type(result), body))
         si
+
+        _block_type(result: VALUE_TYPE?) -> BLOCK_TYPE =>
+            if let type = result then BLOCK_TYPE.of_value(type) else BLOCK_TYPE() fi
 
         // `block (loop body (br 0))`: the end of the body goes round
         // again, a BREAK leaves the block, and a CONTINUE branches to the
