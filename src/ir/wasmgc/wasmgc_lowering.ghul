@@ -827,8 +827,10 @@ namespace IR.WasmGC is
         visit(closure: Values.MAKE_CLOSURE) is
             let function = closure.function
 
-            if closure.is_virtual /\ !function.has_no_overriders then
-                _report("a function value of an overridden method")
+            let is_virtual = closure.is_virtual /\ !function.has_no_overriders
+
+            if is_virtual /\ _is_trait_method(function) then
+                _report("a function value of a trait method")
                 return
             fi
 
@@ -847,7 +849,21 @@ namespace IR.WasmGC is
             fi
 
             let discards_result = _discards_result(closure.type, function)
-            let thunk = _registry.closure_thunk(signature, instance, discards_result, _numbering)
+
+            let thunk mut = 0
+
+            if !is_virtual then
+                thunk = _registry.closure_thunk(signature, instance, discards_result, _numbering)
+            elif _registry.discovering then
+                _registry.note_dispatched(function)
+            elif let slot = _registry.dispatch.slot_of(instance) then
+                _registry.dispatch.use_slot(slot, _numbering)
+
+                thunk = _registry.closure_virtual_thunk(signature, slot, function.arguments.count, discards_result, _numbering)
+            else
+                _report("a function value of an overridden method")
+                return
+            fi
 
             _emit(INDEX_INSTRUCTION(Opcode.GLOBAL_GET, _registry.closure_descriptor_global))
             _emit(INDEX_INSTRUCTION(Opcode.REF_FUNC, thunk))

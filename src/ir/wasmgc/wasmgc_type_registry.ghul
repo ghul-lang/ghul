@@ -14,6 +14,7 @@ namespace IR.WasmGC is
     use Wasm.INSTRUCTION
     use Wasm.INDEX_INSTRUCTION
     use Wasm.TYPE_INSTRUCTION
+    use Wasm.TYPE_FIELD_INSTRUCTION
     use Wasm.HEAP_TYPE_INSTRUCTION
     use Wasm.I32_CONSTANT
     use Wasm.I64_CONSTANT
@@ -563,6 +564,48 @@ namespace IR.WasmGC is
                 od
 
                 body.add(INDEX_INSTRUCTION(Opcode.CALL, numbering.indexed(function)!))
+
+                if discards_result then
+                    body.add(Wasm.SIMPLE_INSTRUCTION(Opcode.DROP))
+                fi
+
+                return Wasm.FUNCTION(signature, [], body)
+            si)
+
+            _closure_thunks.add(index)
+
+            return index
+        si
+
+        /// The thunk a function value of `signature` holding an overridden
+        /// method calls, reserved in `numbering`. It calls through the
+        /// receiver's vtable at `slot`, so the value runs whichever override
+        /// the receiver has. Nothing is reserved while discovering.
+        closure_virtual_thunk(signature: int, slot: WASMGC_SLOT, argument_count: int, discards_result: bool, numbering: WASMGC_FUNCTION_NUMBERING) -> int is
+            if discovering then
+                return 0
+            fi
+
+            let registry = self
+
+            let index = numbering.reserve(() is
+                let body = LIST[INSTRUCTION]()
+
+                let vtable_type = registry.dispatch.vtable_type(slot.owner)!
+
+                body.add(INDEX_INSTRUCTION(Opcode.LOCAL_GET, 0))
+                body.add(HEAP_TYPE_INSTRUCTION(Opcode.REF_CAST_NULL, HEAP_TYPE.of_type_index(registry.type_index(slot.owner)!)))
+
+                for i in 0..argument_count do
+                    body.add(INDEX_INSTRUCTION(Opcode.LOCAL_GET, i + 1))
+                od
+
+                body.add(INDEX_INSTRUCTION(Opcode.LOCAL_GET, 0))
+                body.add(TYPE_FIELD_INSTRUCTION(Opcode.STRUCT_GET, OBJECT_TYPE_INDEX, 0))
+                body.add(TYPE_FIELD_INSTRUCTION(Opcode.STRUCT_GET, DESCRIPTOR_TYPE_INDEX, DESCRIPTOR_VTABLE))
+                body.add(HEAP_TYPE_INSTRUCTION(Opcode.REF_CAST, HEAP_TYPE.of_type_index(vtable_type)))
+                body.add(TYPE_FIELD_INSTRUCTION(Opcode.STRUCT_GET, vtable_type, slot.index))
+                body.add(TYPE_INSTRUCTION(Opcode.CALL_REF, slot.signature))
 
                 if discards_result then
                     body.add(Wasm.SIMPLE_INSTRUCTION(Opcode.DROP))
