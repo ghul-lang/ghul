@@ -1,0 +1,189 @@
+namespace Source.UnitTests is
+    use IO.Path
+
+    use TestClass = Microsoft.VisualStudio.TestTools.UnitTesting.TestClassAttribute
+    use Test = Microsoft.VisualStudio.TestTools.UnitTesting.TestMethodAttribute
+    use Assertions
+
+    // SOURCE_LIBRARIES answers which library a source file belongs to from
+    // the --library-source declarations, and applies the include-once rule
+    // for a library declared twice under different roots.
+    @TestClass()
+    class SOURCE_LIBRARIES_TESTS is
+        init() is si
+
+        // A root, resolved as the registry resolves it, so a test's
+        // spellings follow the platform's separator conventions.
+        root(path: string) -> string => Path.get_full_path(path)
+
+        file(path: string) -> string => Path.get_full_path(path)
+
+        @Test()
+        a_file_under_a_declared_root_belongs_to_that_library() is
+            let libraries = SOURCE_LIBRARIES()
+
+            libraries.add("testlib", "1.0.0", "/sources/testlib")
+
+            let library = libraries.library_for(file("/sources/testlib/src/lib.ghul"))
+
+            if let found: SOURCE_LIBRARY = library then
+                are_equal("testlib", found.name)
+                are_equal("1.0.0", found.version)
+            else
+                fail("expected the file to belong to testlib")
+            fi
+        si
+
+        @Test()
+        a_file_outside_every_root_belongs_to_no_library() is
+            let libraries = SOURCE_LIBRARIES()
+
+            libraries.add("testlib", "1.0.0", "/sources/testlib")
+
+            is_null(
+                libraries.library_for(file("/sources/program/main.ghul")),
+                "the program's own file"
+            )
+        si
+
+        @Test()
+        a_sibling_directory_whose_name_extends_the_root_is_not_under_it() is
+            let libraries = SOURCE_LIBRARIES()
+
+            libraries.add("testlib", "1.0.0", "/sources/lib")
+
+            is_null(
+                libraries.library_for(file("/sources/library/lib.ghul")),
+                "/lib beside /library"
+            )
+        si
+
+        @Test()
+        a_relative_root_resolves_against_the_working_directory() is
+            let libraries = SOURCE_LIBRARIES()
+
+            libraries.add("testlib", "1.0.0", "relative/lib")
+
+            let library = libraries.library_for(
+                file(Path.combine(Path.get_full_path("relative/lib"), "lib.ghul"))
+            )
+
+            if let found: SOURCE_LIBRARY = library then
+                are_equal(root("relative/lib"), found.root)
+            else
+                fail("expected the file to belong to testlib")
+            fi
+        si
+
+        @Test()
+        a_second_root_of_the_same_library_is_skipped() is
+            let libraries = SOURCE_LIBRARIES()
+
+            is_null(libraries.add("testlib", "1.0.0", "/cache/first/testlib"))
+            is_null(libraries.add("testlib", "1.0.0", "/cache/second/testlib"))
+
+            is_false(
+                libraries.is_skipped(file("/cache/first/testlib/lib.ghul")),
+                "the first root is compiled"
+            )
+            is_true(
+                libraries.is_skipped(file("/cache/second/testlib/lib.ghul")),
+                "the second root is skipped"
+            )
+        si
+
+        @Test()
+        a_file_under_a_skipped_root_still_belongs_to_the_library() is
+            let libraries = SOURCE_LIBRARIES()
+
+            libraries.add("testlib", "1.0.0", "/cache/first/testlib")
+            libraries.add("testlib", "1.0.0", "/cache/second/testlib")
+
+            let library = libraries.library_for(file("/cache/second/testlib/lib.ghul"))
+
+            if let found: SOURCE_LIBRARY = library then
+                are_equal("testlib", found.name)
+                are_equal("1.0.0", found.version)
+            else
+                fail("expected the file to belong to testlib")
+            fi
+        si
+
+        @Test()
+        the_same_declaration_written_twice_records_nothing_new() is
+            let libraries = SOURCE_LIBRARIES()
+
+            is_null(libraries.add("testlib", "1.0.0", "/sources/testlib"))
+            is_null(libraries.add("testlib", "1.0.0", "/sources/testlib"))
+
+            is_false(libraries.is_skipped(file("/sources/testlib/lib.ghul")))
+        si
+
+        @Test()
+        the_same_name_at_two_versions_is_an_error_naming_both() is
+            let libraries = SOURCE_LIBRARIES()
+
+            is_null(libraries.add("testlib", "1.0.0", "/sources/testlib"))
+
+            are_equal(
+                "library testlib included at versions 1.0.0 and 2.0.0",
+                libraries.add("testlib", "2.0.0", "/other/testlib")
+            )
+        si
+
+        @Test()
+        a_conflicting_version_records_nothing() is
+            let libraries = SOURCE_LIBRARIES()
+
+            libraries.add("testlib", "1.0.0", "/sources/testlib")
+            libraries.add("testlib", "2.0.0", "/other/testlib")
+
+            is_null(
+                libraries.library_for(file("/other/testlib/lib.ghul")),
+                "the conflicting root is not recorded"
+            )
+            is_false(libraries.is_skipped(file("/other/testlib/lib.ghul")))
+        si
+
+        @Test()
+        a_root_inside_another_declaration_root_is_an_overlap_error() is
+            let libraries = SOURCE_LIBRARIES()
+
+            libraries.add("outer", "1.0.0", "/sources/outer")
+
+            are_equal(
+                "library roots {root("/sources/outer")} and {root("/sources/outer/inner")} overlap",
+                libraries.add("inner", "1.0.0", "/sources/outer/inner")
+            )
+        si
+
+        @Test()
+        a_root_containing_another_declaration_root_is_an_overlap_error() is
+            let libraries = SOURCE_LIBRARIES()
+
+            libraries.add("inner", "1.0.0", "/sources/outer/inner")
+
+            are_equal(
+                "library roots {root("/sources/outer/inner")} and {root("/sources/outer")} overlap",
+                libraries.add("outer", "1.0.0", "/sources/outer")
+            )
+        si
+
+        @Test()
+        two_libraries_at_the_same_root_is_an_overlap_error() is
+            let libraries = SOURCE_LIBRARIES()
+
+            libraries.add("first", "1.0.0", "/sources/shared")
+
+            are_equal(
+                "library roots {root("/sources/shared")} and {root("/sources/shared")} overlap",
+                libraries.add("second", "1.0.0", "/sources/shared")
+            )
+        si
+
+        @Test()
+        a_root_is_not_under_itself() is
+            is_false(SOURCE_LIBRARY.is_under(root("/sources/lib"), root("/sources/lib")))
+        si
+    si
+si

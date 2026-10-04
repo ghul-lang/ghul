@@ -1,0 +1,138 @@
+namespace Source is
+    use Collections
+    use IO.Path
+
+    // A source library declared on the command line with --library-source:
+    // an identity - a name and an opaque version string, compared for
+    // equality only - and the directory root its files live under, as a
+    // full path. Which files under the root are the library's is the
+    // caller's concern: the compiler is only ever handed the files to
+    // compile, and uses the root to say which library each one belongs to.
+    class SOURCE_LIBRARY(name: string public, version: string public, root: string public) is
+        // Whether a full path names one of this library's files: it lies
+        // under the root, below it rather than beside it.
+        contains(full_path: string) -> bool => is_under(full_path, root)
+
+        // Whether one path lies under another, below it rather than beside
+        // it. The boundary has to be a separator, so a sibling directory
+        // whose name extends the root's (/lib beside /library) is not
+        // under it.
+        is_under(path: string, root: string) -> bool static is
+            // A root is not under itself: there is no next character to be
+            // the separator
+            if path.length <= root.length \/ !path.starts_with(root) then
+                return false
+            fi
+
+            // A root carries a trailing separator only when it is a
+            // filesystem root itself ("/", "C:\"), where everything after
+            // it is below it
+            if ends_with_separator(root) then
+                return path.length > root.length
+            fi
+
+            let rest = path.substring(root.length)
+
+            return is_separator(rest[0])
+        si
+
+        // Whether a path ends in a directory separator
+        ends_with_separator(path: string) -> bool static => path.length >
+            0 /\
+            is_separator(path[path.length - 1])
+
+        // Either separator .NET spells a directory boundary with: the
+        // alternate is the same character as the primary on Linux, and a
+        // forward slash on Windows, where both spell one path
+        is_separator(c: char) -> bool static => c =~
+            Path.directory_separator_char \/
+            c =~ Path.alt_directory_separator_char
+    si
+
+    // The source libraries declared with --library-source, in declaration
+    // order. Answers which library a source file belongs to, and applies
+    // the include-once rule: a library reached through two dependency
+    // paths is declared twice, and only the files under its first root are
+    // compiled - compiling both would define its every symbol twice.
+    class SOURCE_LIBRARIES is
+        // One entry per declaration: the library as declared, and whether
+        // its root is the one the library is compiled from
+        _declarations: LIST[(library: SOURCE_LIBRARY, is_included: bool)]
+
+        init() is
+            _declarations = LIST[(library: SOURCE_LIBRARY, is_included: bool)]()
+        si
+
+        // Records one declaration, resolving the root to a full path.
+        // Answers the text of an error when the declaration conflicts with
+        // one already recorded - the same library name at another version,
+        // or a root that overlaps another declaration's - and records
+        // nothing. Null means the declaration stands, as the one a library
+        // is compiled from or as a later root of one already included.
+        add(name: string, version: string, root: string) -> string? is
+            let full_root = Path.get_full_path(root)
+
+            let seen_name mut = false
+
+            for declaration in _declarations do
+                let other = declaration.library
+
+                if other.name =~ name then
+                    if other.version !~ version then
+                        return "library {name} included at versions {other.version} and {version}"
+                    fi
+
+                    // The same declaration written twice records nothing
+                    // the second time. Any conflict between this root and
+                    // another declaration's was reported when the other
+                    // was added.
+                    if other.root =~ full_root then
+                        return null
+                    fi
+
+                    seen_name = true
+                fi
+
+                // Another library at the very same root overlaps it as
+                // surely as one nested inside it
+                if other.root =~ full_root \/
+                    SOURCE_LIBRARY.is_under(full_root, other.root) \/
+                    SOURCE_LIBRARY.is_under(other.root, full_root) then
+                    return "library roots {other.root} and {full_root} overlap"
+                fi
+            od
+
+            _declarations.add(
+                (library = SOURCE_LIBRARY(name, version, full_root), is_included = !seen_name)
+            )
+
+            return null
+        si
+
+        // The library a full source path belongs to, or null when the file
+        // is the program's own rather than a library's. Roots never
+        // overlap, so at most one declaration's root contains it.
+        library_for(full_path: string) -> SOURCE_LIBRARY? is
+            for declaration in _declarations do
+                if declaration.library.contains(full_path) then
+                    return declaration.library
+                fi
+            od
+
+            return null
+        si
+
+        // Whether a full source path sits under a root the build does not
+        // compile from: its library was already declared under an earlier
+        // root, and the file is skipped rather than compiled again.
+        is_skipped(full_path: string) -> bool is
+            for declaration in _declarations do
+                if declaration.library.contains(full_path) then
+                    return !declaration.is_included
+                fi
+            od
+
+            return false
+        si
+    si
+si
