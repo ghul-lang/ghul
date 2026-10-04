@@ -175,6 +175,9 @@ namespace IR.WasmGC is
 
         _unsupported: LIST[(location: LOCATION, construct: string)]
 
+        // Methods a class has on this target that no symbol of it declares.
+        _synthesised_methods: MAP[Classy, LIST[Function]]
+
         _dispatch: WASMGC_DISPATCH
 
         _closure_type_index: int
@@ -249,6 +252,8 @@ namespace IR.WasmGC is
 
             _unsupported = LIST[(location: LOCATION, construct: string)]()
 
+            _synthesised_methods = MAP[Classy, LIST[Function]]()
+
             _dispatch = WASMGC_DISPATCH(self)
             _closure_descriptor = LIST[INSTRUCTION]()
             _closure_thunks = LIST[int]()
@@ -279,6 +284,33 @@ namespace IR.WasmGC is
                     _boxed[boxed] = scalar
                 fi
             od
+        si
+
+        /// Gives `owner` a method that no symbol of it declares, which
+        /// dispatch reaches as it reaches the methods `owner` declares.
+        add_method(owner: Classy, method: Function) is
+            if !_synthesised_methods.contains_key(owner) then
+                _synthesised_methods[owner] = LIST[Function]()
+            fi
+
+            _synthesised_methods[owner].add(method)
+        si
+
+        /// The methods `definition` has: those it declares, then any it
+        /// was given.
+        methods_of(definition: Classy) -> Collections.List[Function] is
+            let declared = SRM_MEMBER_ORDER.methods(SRM_EMITTED_TYPE(definition))
+            let synthesised: LIST[Function] mut
+
+            if !_synthesised_methods.try_get_value(definition, synthesised ref) then
+                return declared
+            fi
+
+            let result = LIST[Function](declared)
+
+            result.add_range(synthesised)
+
+            return result
         si
 
         /// The classes added since this was last asked, each once.
@@ -1065,11 +1097,8 @@ namespace IR.WasmGC is
         // with a representation of their own, and the built-in types the
         // compiler constructs are not declared by the program.
         _is_object_type(type: Classy) -> bool is
-            let is_frame = isa Semantic.Symbols.FRAME(type)
+            let is_frame = isa Semantic.Symbols.FRAME(type) \/ isa Semantic.Symbols.STATE_MACHINE_FRAME(type)
 
-            // A closure's frame is synthesised, so it has no source
-            // location, as the built-in types the compiler constructs have
-            // none.
             if type.is_object \/ type.is_reflected then
                 return false
             fi

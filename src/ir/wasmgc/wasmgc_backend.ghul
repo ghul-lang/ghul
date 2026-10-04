@@ -43,6 +43,10 @@ namespace IR.WasmGC is
         // members is reported once.
         _reported_frames: SET[Classy]
 
+        // The methods generator frames have that no symbol of theirs
+        // declares.
+        _frame_members: LIST[(frame: Classy, method: Function)]
+
         _entry_point: Function?
         _module: MODULE?
         _want_library: bool
@@ -52,6 +56,7 @@ namespace IR.WasmGC is
             _host_declarations = LIST[Function]()
             _enclosing = STACK[LIST[Value]?]()
             _reported_frames = SET[Classy]()
+            _frame_members = LIST[(frame: Classy, method: Function)]()
         si
 
         /// Starts a module, discarding anything kept from an earlier one.
@@ -65,6 +70,7 @@ namespace IR.WasmGC is
             _bodies.clear()
             _host_declarations.clear()
             _reported_frames.clear()
+            _frame_members.clear()
             _enclosing.clear()
             _current = null
             _entry_point = null
@@ -134,10 +140,21 @@ namespace IR.WasmGC is
             _bodies.add((function, _current!))
         si
 
-        /// Reports the frame member: this target generates no generators or
-        /// asynchronous functions yet. The report is at the function the
-        /// frame was made for, since the frame itself has no source location.
+        /// Keeps a generator frame's member as a method of the frame. A
+        /// member no trait the frame implements stands for is dropped:
+        /// nothing on this target calls it. The frame of an asynchronous
+        /// function is reported, at the function the frame was made for,
+        /// since the frame itself has no source location.
         finish_frame_member_body(frame: Classy, member: FrameMember) is
+            if let generator: Semantic.Symbols.STATE_MACHINE_FRAME = frame then
+                if let method = WASMGC_FRAME_MEMBERS.method_for(generator, member) then
+                    _frame_members.add((frame, method))
+                    _bodies.add((method, _current!))
+                fi
+
+                return
+            fi
+
             if !_reported_frames.add(frame) then
                 return
             fi
@@ -471,6 +488,10 @@ namespace IR.WasmGC is
 
             registry.collect(container.symbol_table.global_scope)
 
+            for (frame, method) in _frame_members do
+                registry.add_method(frame, method)
+            od
+
             return registry
         si
 
@@ -633,12 +654,21 @@ namespace IR.WasmGC is
 
             if !registry.discovering then
                 for construct in lowering.unsupported do
-                    _report(definition.location, construct)
+                    _report(_source_location(definition), construct)
                 od
             fi
 
             return (body, lowering.local_types.to_array())
         si
+
+        // Where a report about `function` points: a generator frame's
+        // members have no source of their own, so it is the generator.
+        _source_location(function: Function) -> Source.LOCATION =>
+            if let frame: Semantic.Symbols.STATE_MACHINE_FRAME_BASE = function.owner then
+                frame.owning_function.location
+            else
+                function.location
+            fi
 
         _body_of(definition: Function) -> LIST[Value] is
             for (function, values) in _bodies do
