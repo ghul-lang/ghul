@@ -519,11 +519,26 @@ namespace IR.Emitter is
         si
 
         visit(arithmetic: Values.ARITHMETIC) is
-            for operand in arithmetic.operands do
+            let scalar = IoC.CONTAINER.instance.value_converter.scalar(arithmetic.type)
+
+            for i in 0..arithmetic.operands.count do
+                let operand = arithmetic.operands[i]
+
                 if arithmetic.is_marked then
                     gen_marked(operand)
                 else
                     gen(operand)
+                fi
+
+                // An unsigned shift of a narrow signed kind shifts in zeros
+                // at the kind's own width, so its sign-extended operand is
+                // first cut back to that width.
+                if i == 0 /\ arithmetic.operation == ArithmeticOperation.SHIFT_RIGHT_UNSIGNED then
+                    if scalar =~ Scalar.INT8 then
+                        _body.op(System.Reflection.Metadata.ILOpCode.CONV_U1)
+                    elif scalar =~ Scalar.INT16 then
+                        _body.op(System.Reflection.Metadata.ILOpCode.CONV_U2)
+                    fi
                 fi
             od
 
@@ -532,7 +547,22 @@ namespace IR.Emitter is
             fi
 
             _body.op(CIL_OPERATIONS.arithmetic(arithmetic.operation))
+
+            // The evaluation stack holds a narrow kind's result as an
+            // int32, so it is wrapped back to the kind's width here rather
+            // than only where it is next stored.
+            if let narrow = scalar /\ _is_narrow(narrow) then
+                for op_code in CIL_OPERATIONS.conversion(Scalar.INT32, narrow) do
+                    _body.op(op_code)
+                od
+            fi
         si
+
+        _is_narrow(scalar: Scalar) -> bool =>
+            case scalar
+            when Scalar.CHAR, Scalar.INT8, Scalar.UINT8, Scalar.INT16, Scalar.UINT16 then true
+            else false
+            esac
 
         visit(compare: Values.COMPARE) is
             gen_marked(compare.left)
