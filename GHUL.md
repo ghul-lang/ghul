@@ -2600,3 +2600,52 @@ struct WORD_BYTES is
     init() is si
 si
 ```
+
+## compilation targets
+
+See <https://ghul.dev/webassembly.html>.
+
+The compiler builds for one of two targets, chosen with `--target`: `dotnet`, the default, writes a .NET assembly, and `wasm` writes a WebAssembly module using the GC proposal, with a JavaScript loader beside it that runs the module under Node.js 22 or newer. The same source builds for either target, and it means the same thing on both: where the `wasm` target cannot compile something yet, it reports an error rather than compiling it differently.
+
+A `wasm` build loads no .NET assemblies. What they supply on .NET comes from two libraries compiled into the module from source: ghul-core, which gives the built-in types their members and declares the collections, and ghul-runtime, which supplies the pipes and the rest of `Ghul`. The `ghul` command-line tool builds a project for either target and fetches those libraries for a `wasm` build; a project lists the targets it builds for in its `ghul-project.json` manifest:
+
+```sh
+ghul new hello --target dotnet,wasm
+cd hello
+ghul run --target wasm
+```
+
+### conditional compilation
+
+`@IF.<name>()` written before a definition or a statement keeps it only when `<name>` is on, and `@IF.not.<name>()` keeps it only when it is off. The target's own name is on for its build and the other target's is off, so `@IF.dotnet()` and `@IF.wasm()` give each target a declaration of its own:
+
+```ghul
+use IO.Std.write_line
+
+entry() is
+    write_line(target_name())
+
+    @IF.wasm()
+    write_line("a statement kept only for wasm")
+si
+
+@IF.dotnet()
+target_name() -> string => "dotnet"
+
+@IF.wasm()
+target_name() -> string => "wasm"
+```
+
+`--define <name>` turns any other name on, and a name nothing turns on is off. A `--define` of either target's name has no effect: the target being built decides those two. What is left out is never compiled, so it can name things the build does not have, a .NET API in a `@IF.dotnet()` declaration for instance. To leave a whole file out of one target, write the `@IF` on its namespace.
+
+### what differs on the wasm target
+
+A .NET API that the core library does not declare does not exist on the `wasm` target, so a program that calls one is told the name is not found, as it would be for any other missing name. A construct the `wasm` target cannot carry at all is reported where it is written: a pointer type as `pointer types not supported on the wasm target`, and an `IL.` pragma, which names a fact about an assembly, as `pragma IL.name not supported on the wasm target`. A construct the target will carry but cannot generate code for yet is reported at the function holding it, as `code generation for <construct> is not supported on the wasm target`.
+
+Not yet supported on the `wasm` target:
+
+- asynchronous functions and `await`
+- `decimal`
+- interpolating a value whose type has no `to_string` of its own, such as a tuple or an array
+- slicing with the from-the-end ranges `..<` and `..<<`
+- files and directories, and the rest of `IO` beyond writing to standard output
