@@ -16,6 +16,8 @@ namespace IR.WasmGC is
     use Wasm.TYPE_FIELD_INSTRUCTION
     use Wasm.HEAP_TYPE_INSTRUCTION
     use Wasm.CAST_BRANCH_INSTRUCTION
+    use Wasm.IF_INSTRUCTION
+    use Wasm.CALL_INDIRECT_INSTRUCTION
 
     use Collections.LIST
     use Collections.MAP
@@ -184,6 +186,14 @@ namespace IR.WasmGC is
                 return _held_type(view.underlying)
             elif let projection: Values.NARROW_PROJECT = value then
                 return _held_type(projection.projected)
+            elif let conversion: Values.CAST = value /\ _registry.box_index(conversion.type)? then
+                return VALUE_TYPE.of_type_index(_registry.box_index(conversion.type)!, true)
+            elif let box: Values.BOX = value then
+                if let index = _registry.box_index(box.value.type) then
+                    return VALUE_TYPE.of_type_index(index, true)
+                fi
+
+                return _held_type(box.value)
             elif let load: Values.Load.TEMP = value then
                 return _local_type(_local(load.local))
             elif let load: Values.Load.LOCAL_VARIABLE = value then
@@ -389,7 +399,7 @@ namespace IR.WasmGC is
             let index_found = _numbering.index_of(function)
 
             if !index_found? then
-                _report("a call to {function.name}, which has no body on this target")
+                _report("a call to {function.name}")
                 return
             fi
 
@@ -482,6 +492,7 @@ namespace IR.WasmGC is
 
         _global_get(symbol: Semantic.Symbols.Symbol) is
             if let index = _registry.global_of(symbol) then
+                _ensure_initialised(symbol.owner)
                 _emit(INDEX_INSTRUCTION(Opcode.GLOBAL_GET, index))
             else
                 _report("a static field of {symbol.owner}")
@@ -490,6 +501,7 @@ namespace IR.WasmGC is
 
         _global_set(symbol: Semantic.Symbols.Symbol, value: Value) is
             if let index = _registry.global_of(symbol) then
+                _ensure_initialised(symbol.owner)
                 gen(value)
 
                 _normalise_for(cast Semantic.Types.Typed?(symbol)?.type)
@@ -738,7 +750,48 @@ namespace IR.WasmGC is
         visit(enter: Values.ENTER_FILE) is si
         visit(leave: Values.LEAVE_FILE) is si
 
-        visit(closure: Values.MAKE_CLOSURE) is _report("a function value") si
+        // A function value holds a thunk with the signature its type calls
+        // through, and the receiver or frame the thunk passes on.
+        visit(closure: Values.MAKE_CLOSURE) is
+            let function = closure.function
+
+            if closure.is_virtual /\ !function.has_no_overriders then
+                _report("a function value of an overridden method")
+                return
+            fi
+
+            if !_numbering.index_of(function)? then
+                _report("a function value of {function.name}")
+                return
+            fi
+
+            let signature = _registry.closure_signature(closure.type)
+
+            if !signature? then
+                _report("a function value of type {closure.type}")
+                return
+            fi
+
+            let discards_result = _discards_result(closure.type, function)
+            let thunk = _registry.closure_thunk(signature, function, discards_result, _numbering)
+
+            _emit(INDEX_INSTRUCTION(Opcode.GLOBAL_GET, _registry.closure_descriptor_global))
+            _emit(INDEX_INSTRUCTION(Opcode.REF_FUNC, thunk))
+
+            if function.is_emitted_with_receiver /\ !isa Values.NULL(closure.receiver) then
+                gen(closure.receiver)
+            else
+                _emit(HEAP_TYPE_INSTRUCTION(Opcode.REF_NULL, _registry.object_reference.heap_type()!))
+            fi
+
+            _emit(TYPE_INSTRUCTION(Opcode.STRUCT_NEW, _registry.closure_type_index))
+        si
+
+        // Whether a function value's type returns nothing while the
+        // function it holds returns something, which the thunk drops.
+        _discards_result(type: Type, function: Function) -> bool =>
+            (type.is_action \/ WASMGC_TYPES.is_void(type.arguments[type.arguments.count - 1])) /\
+            !WASMGC_TYPES.is_void(function.return_type)
 
         visit(address: Values.ARRAY_ELEMENT_ADDRESS) is _report("an array") si
         visit_address(address: Values.ARRAY_ELEMENT_ADDRESS) is _report("an array") si
@@ -845,17 +898,50 @@ namespace IR.WasmGC is
         visit(null_value: Values.NULL) is
             _zero(null_value.type)
         si
-        visit(box: Values.BOX) is _report("boxing") si
-        visit(unbox: Values.UNBOX) is _report("unboxing") si
+        // A scalar is boxed in a struct carrying its type's descriptor, so
+        // a boxed int and a boxed long answer type tests differently. A
+        // reference needs no box.
+        visit(box: Values.BOX) is
+            let value = box.value
+
+            if let index = _registry.box_index(value.type) then
+                let box_type = _registry.box_type(value.type)!
+
+                _emit(INDEX_INSTRUCTION(Opcode.GLOBAL_GET, _registry.descriptor_global(box_type)))
+                gen(value)
+                _emit(TYPE_INSTRUCTION(Opcode.STRUCT_NEW, index))
+            elif _value_type(value.type)?.heap_type()? then
+                gen(value)
+            else
+                _report("boxing a {value.type}")
+            fi
+        si
+
+        // A null or a box of another type traps, where .NET throws.
+        visit(unbox: Values.UNBOX) is
+            if let index = _registry.box_index(unbox.type) then
+                gen(unbox.value)
+
+                _emit(HEAP_TYPE_INSTRUCTION(Opcode.REF_CAST, HEAP_TYPE.of_type_index(index)))
+                _emit(TYPE_FIELD_INSTRUCTION(Opcode.STRUCT_GET, index, WASMGC_TYPE_REGISTRY.BOX_VALUE))
+            else
+                _report("unboxing a {unbox.type}")
+            fi
+        si
         // A cast to a class the program declares is checked against the
         // struct type, which holds exactly that class and those derived
         // from it. A cast that faults on failure keeps null, as CIL's
         // castclass does; one that declines answers null instead.
         visit(conversion: Values.CAST) is
-            let value = conversion.value
+            let value = _type_test_operand(conversion.value)
 
-            if !_is_reference_operand(value) then
-                _report("a cast from {value.type}")
+            if !value? then
+                _report("a cast from {conversion.value.type}")
+                return
+            fi
+
+            if let ids = _trait_class_ids(conversion.type) then
+                _cast_to_trait(value, ids, conversion.faults_on_failure)
                 return
             fi
 
@@ -900,13 +986,42 @@ namespace IR.WasmGC is
             _emit(BLOCK_INSTRUCTION(Opcode.BLOCK, BLOCK_TYPE.of_value(VALUE_TYPE.of_type_index(target, true)), body))
         si
 
+        // A cast to a trait answers the value where its class implements
+        // the trait. Otherwise it traps where the cast faults on failure,
+        // and answers null where it declines.
+        _cast_to_trait(value: Value, ids: Collections.List[int], faults: bool) is
+            let held = _temp(_registry.object_reference)
+
+            gen(value)
+            _emit(INDEX_INSTRUCTION(Opcode.LOCAL_TEE, held))
+            _test_class_ids(ids)
+
+            let failed = LIST[INSTRUCTION]()
+
+            if faults then
+                failed.add(INDEX_INSTRUCTION(Opcode.LOCAL_GET, held))
+                failed.add(SIMPLE_INSTRUCTION(Opcode.REF_IS_NULL))
+                failed.add(SIMPLE_INSTRUCTION(Opcode.I32_EQZ))
+                failed.add(IF_INSTRUCTION(BLOCK_TYPE(), [SIMPLE_INSTRUCTION(Opcode.UNREACHABLE)]: INSTRUCTION, LIST[INSTRUCTION]()))
+                failed.add(INDEX_INSTRUCTION(Opcode.LOCAL_GET, held))
+            else
+                failed.add(HEAP_TYPE_INSTRUCTION(Opcode.REF_NULL, _registry.object_reference.heap_type()!))
+            fi
+
+            _emit(
+                IF_INSTRUCTION(
+                    BLOCK_TYPE.of_value(_registry.object_reference),
+                    [INDEX_INSTRUCTION(Opcode.LOCAL_GET, held)]: INSTRUCTION,
+                    failed))
+        si
+
         // An instance of a class the program declares is tested against
         // its struct type; null is not an instance of anything.
         visit(test: Values.ISA) is
-            let value = test.value
+            let value = _type_test_operand(test.value)
 
-            if !_is_reference_operand(value) then
-                _report("a type test of {value.type}")
+            if !value? then
+                _report("a type test of {test.value.type}")
                 return
             fi
 
@@ -914,16 +1029,81 @@ namespace IR.WasmGC is
                 gen(value)
 
                 _emit(HEAP_TYPE_INSTRUCTION(Opcode.REF_TEST, HEAP_TYPE.of_type_index(target)))
+            elif let ids = _trait_class_ids(test.isa_type) then
+                gen(value)
+
+                _test_class_ids(ids)
             else
                 _report("a type test against {test.isa_type}")
             fi
         si
 
-        // Whether the type test examines the value as it is, a reference,
-        // rather than boxing or unwrapping it first.
-        _is_reference_operand(value: Value) -> bool =>
-            Values.TYPE_TEST_OPERAND.mode(value) == Values.TypeTestOperandMode.AS_IS /\
-            _value_type(value.type)?.heap_type()?
+        // The numbers of the classes implementing `type`, where it is a
+        // trait that is not generic.
+        _trait_class_ids(type: Type?) -> Collections.List[int]? is
+            if !type? \/ !type.is_trait then
+                return null
+            fi
+
+            if !isa Semantic.Symbols.GENERIC(type.symbol) then
+                if let trait_type: Semantic.Symbols.Classy = type.symbol then
+                    let ids = LIST[int]()
+
+                    if let implementors = _registry.dispatch.implementors(trait_type) then
+                        for implementor in implementors do
+                            ids.add(_registry.numbering.id(implementor))
+                        od
+                    fi
+
+                    return ids
+                fi
+            fi
+
+            return null
+        si
+
+        // Replaces the reference on the stack with whether it is an object
+        // whose class number is among `ids`. Null is not.
+        _test_class_ids(ids: Collections.List[int]) is
+            let held = _temp(_registry.object_reference)
+            let id = _temp(VALUE_TYPE.of_numeric(NumericType.I32))
+
+            _emit(INDEX_INSTRUCTION(Opcode.LOCAL_TEE, held))
+            _emit(Opcode.REF_IS_NULL)
+
+            let present = LIST[INSTRUCTION]()
+
+            present.add(INDEX_INSTRUCTION(Opcode.LOCAL_GET, held))
+            present.add(TYPE_FIELD_INSTRUCTION(Opcode.STRUCT_GET, WASMGC_TYPE_REGISTRY.OBJECT_TYPE_INDEX, 0))
+            present.add(TYPE_FIELD_INSTRUCTION(Opcode.STRUCT_GET, WASMGC_TYPE_REGISTRY.DESCRIPTOR_TYPE_INDEX, WASMGC_TYPE_REGISTRY.DESCRIPTOR_CLASS_ID))
+            present.add(INDEX_INSTRUCTION(Opcode.LOCAL_SET, id))
+            present.add(I32_CONSTANT(0))
+
+            for (low, high) in CLASS_ID_RANGES.of(ids) do
+                present.add(INDEX_INSTRUCTION(Opcode.LOCAL_GET, id))
+                present.add(I32_CONSTANT(low))
+                present.add(SIMPLE_INSTRUCTION(Opcode.I32_SUB))
+                present.add(I32_CONSTANT(high - low))
+                present.add(SIMPLE_INSTRUCTION(Opcode.I32_LE_U))
+                present.add(SIMPLE_INSTRUCTION(Opcode.I32_OR))
+            od
+
+            _emit(IF_INSTRUCTION(BLOCK_TYPE.of_value(VALUE_TYPE.of_numeric(NumericType.I32)), [I32_CONSTANT(0)]: INSTRUCTION, present))
+        si
+
+        // The reference a type test examines: the value itself, or a
+        // scalar boxed. Null where the value is neither.
+        _type_test_operand(value: Value) -> Value? is
+            let mode = Values.TYPE_TEST_OPERAND.mode(value)
+
+            if mode == Values.TypeTestOperandMode.AS_IS /\ _value_type(value.type)?.heap_type()? then
+                return value
+            elif mode == Values.TypeTestOperandMode.BOX /\ _registry.box_index(value.type)? then
+                return Values.TYPE_TEST_OPERAND.operand(value)
+            fi
+
+            return null
+        si
 
         // A cast to `object`: every reference is held as one already.
         _is_unchecked_widening(to: Type?) -> bool =>
@@ -951,11 +1131,13 @@ namespace IR.WasmGC is
             let index_found = _numbering.index_of(constructor)
 
             if !index_found? then
-                _report("a constructor of {type}, which has no body on this target")
+                _report("a constructor of {type}")
                 return
             fi
 
             let index = index_found
+
+            _ensure_initialised(type)
 
             let instance = _temp(VALUE_TYPE.of_type_index(_registry.type_index(type)!, true))
 
@@ -1290,7 +1472,37 @@ namespace IR.WasmGC is
             if call.constrained_receiver? then
                 _report("a constrained call")
             else
+                _ensure_initialised(call.function.owner)
                 _call(call.function, call.arguments)
+            fi
+        si
+
+        // A type's static constructor runs once, before the type is first
+        // used: before a static member is read, written or called, and
+        // before an instance is made. Its flag is set before the body runs,
+        // so a use of the type from inside it does not run it again.
+        _ensure_initialised(owner: Semantic.Scope?) is
+            if let type: Semantic.Symbols.Classy = owner then
+                if let (constructor, initialised) = _registry.static_constructor(type) then
+                    let index_found = _numbering.index_of(constructor)
+
+                    if !index_found? then
+                        _report("a static constructor of {type}")
+                        return
+                    fi
+
+                    let index = index_found
+
+                    let run = LIST[INSTRUCTION]()
+
+                    run.add(I32_CONSTANT(1))
+                    run.add(INDEX_INSTRUCTION(Opcode.GLOBAL_SET, initialised))
+                    run.add(INDEX_INSTRUCTION(Opcode.CALL, index))
+
+                    _emit(INDEX_INSTRUCTION(Opcode.GLOBAL_GET, initialised))
+                    _emit(Opcode.I32_EQZ)
+                    _emit(IF_INSTRUCTION(BLOCK_TYPE(), run, LIST[INSTRUCTION]()))
+                fi
             fi
         si
 
@@ -1307,17 +1519,24 @@ namespace IR.WasmGC is
             fi
 
             if dispatch == IR.Dispatch.VIRTUAL /\ !function.has_no_overriders then
-                _report("a virtual call")
+                _call_virtual(call)
+                return
+            elif dispatch == IR.Dispatch.INTERFACE then
+                _call_interface(call)
                 return
             elif dispatch != IR.Dispatch.DIRECT /\ dispatch != IR.Dispatch.VIRTUAL then
                 _report("a {dispatch} call")
                 return
             fi
 
+            _call_direct(call, function)
+        si
+
+        _call_direct(call: Values.Call.INSTANCE, function: Function) is
             let index_found = _numbering.index_of(function)
 
             if !index_found? then
-                _report("a call to {function.name}, which has no body on this target")
+                _report("a call to {function.name}")
                 return
             fi
 
@@ -1331,18 +1550,124 @@ namespace IR.WasmGC is
             _emit(INDEX_INSTRUCTION(Opcode.CALL, index))
         si
 
-        _local_type_of_receiver(function: Function) -> VALUE_TYPE? =>
-            if let owner: Semantic.Symbols.Classy = function.owner then
-                if let index = _registry.type_index(owner) then VALUE_TYPE.of_type_index(index, true) else null fi
-            else
-                null
+        // The receiver's vtable is read from its descriptor and the
+        // method's slot called. The receiver is held in a local, since it
+        // is both the first argument and where the vtable comes from.
+        _call_virtual(call: Values.Call.INSTANCE) is
+            let function = call.function
+            let dispatch = _registry.dispatch
+
+            let slot = dispatch.slot_of(function)
+
+            if !slot? then
+                _report("a virtual call to {function.name}")
+                return
             fi
+
+            dispatch.use_slot(slot, _numbering)
+
+            let receiver_type = VALUE_TYPE.of_type_index(_registry.type_index(slot.owner)!, true)
+            let receiver = _temp(receiver_type)
+
+            gen(call.from)
+            _coerce_top(receiver_type)
+            _emit(INDEX_INSTRUCTION(Opcode.LOCAL_TEE, receiver))
+
+            _lower_arguments(function, call.arguments)
+
+            let vtable_type = dispatch.vtable_type(slot.owner)!
+
+            _emit(INDEX_INSTRUCTION(Opcode.LOCAL_GET, receiver))
+            _load_descriptor()
+            _emit(TYPE_FIELD_INSTRUCTION(Opcode.STRUCT_GET, WASMGC_TYPE_REGISTRY.DESCRIPTOR_TYPE_INDEX, WASMGC_TYPE_REGISTRY.DESCRIPTOR_VTABLE))
+            _emit(HEAP_TYPE_INSTRUCTION(Opcode.REF_CAST, HEAP_TYPE.of_type_index(vtable_type)))
+            _emit(TYPE_FIELD_INSTRUCTION(Opcode.STRUCT_GET, vtable_type, slot.index))
+            _emit(TYPE_INSTRUCTION(Opcode.CALL_REF, slot.signature))
+        si
+
+        // Reads the descriptor of the object on the stack, which traps
+        // where it is null.
+        _load_descriptor() is
+            _emit(TYPE_FIELD_INSTRUCTION(Opcode.STRUCT_GET, WASMGC_TYPE_REGISTRY.OBJECT_TYPE_INDEX, 0))
+        si
+
+        // A trait call with one possible implementation in the program is
+        // direct. Any other reads the trait table at the selector's row,
+        // offset by the receiver's class number.
+        _call_interface(call: Values.Call.INSTANCE) is
+            let function = call.function
+            let dispatch = _registry.dispatch
+
+            let selector = dispatch.selector_of(function)
+
+            if !selector? then
+                _report("a trait call to {function.name}")
+                return
+            fi
+
+            if let only = dispatch.only_implementation(selector) then
+                _call_direct(call, only)
+                return
+            fi
+
+            dispatch.use_selector(selector, _numbering)
+
+            let receiver = _temp(_registry.object_reference)
+
+            gen(call.from)
+            _emit(INDEX_INSTRUCTION(Opcode.LOCAL_TEE, receiver))
+
+            _lower_arguments(function, call.arguments)
+
+            _emit(INDEX_INSTRUCTION(Opcode.LOCAL_GET, receiver))
+            _load_descriptor()
+            _emit(TYPE_FIELD_INSTRUCTION(Opcode.STRUCT_GET, WASMGC_TYPE_REGISTRY.DESCRIPTOR_TYPE_INDEX, WASMGC_TYPE_REGISTRY.DESCRIPTOR_CLASS_ID))
+            _emit(I32_CONSTANT(selector.offset))
+            _emit(Opcode.I32_ADD)
+            _emit(CALL_INDIRECT_INSTRUCTION(selector.signature, 0))
+        si
+
+        _local_type_of_receiver(function: Function) -> VALUE_TYPE? =>
+            _registry.receiver_type(function)
 
         // The root class has no constructor body to run, so a call to it
         // from a constructor does nothing.
         _is_object_constructor(function: Function) -> bool =>
             if let owner: Semantic.Symbols.Classy = function.owner then owner.is_object else false fi
-        visit(call: Values.Call.CLOSURE) is _report("a function value call") si
+        // The function value is held in a local: its receiver is the
+        // first argument, and its function is called after the rest.
+        visit(call: Values.Call.CLOSURE) is
+            let func_type = call.func_type ?? call.from.type
+
+            let signature = if func_type? then _registry.closure_signature(func_type) else null fi
+
+            if !signature? then
+                _report("a call to a function value of type {func_type}")
+                return
+            fi
+
+            let closure_type = VALUE_TYPE.of_type_index(_registry.closure_type_index, true)
+            let closure = _temp(closure_type)
+
+            gen(call.from)
+            _emit(INDEX_INSTRUCTION(Opcode.LOCAL_TEE, closure))
+            _emit(TYPE_FIELD_INSTRUCTION(Opcode.STRUCT_GET, _registry.closure_type_index, WASMGC_TYPE_REGISTRY.CLOSURE_RECEIVER))
+
+            let parameters = func_type!.arguments
+
+            for i in 0..call.arguments.count do
+                gen(call.arguments[i])
+
+                if i < parameters.count then
+                    _normalise_for(parameters[i])
+                fi
+            od
+
+            _emit(INDEX_INSTRUCTION(Opcode.LOCAL_GET, closure))
+            _emit(TYPE_FIELD_INSTRUCTION(Opcode.STRUCT_GET, _registry.closure_type_index, WASMGC_TYPE_REGISTRY.CLOSURE_FUNCTION))
+            _emit(HEAP_TYPE_INSTRUCTION(Opcode.REF_CAST, HEAP_TYPE.of_type_index(signature)))
+            _emit(TYPE_INSTRUCTION(Opcode.CALL_REF, signature))
+        si
 
         // An operation the host provides is a call of its import rather
         // than an operation the generator lowers.
