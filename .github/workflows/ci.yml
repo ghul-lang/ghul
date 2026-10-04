@@ -601,6 +601,42 @@ jobs:
         ANALYSIS_TESTS_COMPILER_DLL: ${{ github.workspace }}/bootstrap-tool/ghul.dll
       run: dotnet test analysis-tests -p:SkipCompilerProjectRef=true
 
+  # The wasm integration tests compare what the compiler said and the text
+  # form it wrote, but no engine reads the modules. This builds each one
+  # again with the bootstrapped compiler and has Node validate it.
+  wasm_validation:
+    needs: [version, bootstrap]
+    if: needs.version.outputs.full_suite == 'true'
+    name: Validate wasm modules
+
+    runs-on: ubuntu-latest
+
+    timeout-minutes: 10
+
+    steps:
+    - uses: actions/checkout@v7
+
+    - name: Set up .NET 10
+      uses: actions/setup-dotnet@v6
+      with:
+        dotnet-version: '10.0.x'
+
+    - name: Set up Node.js
+      uses: actions/setup-node@v7
+      with:
+        node-version: '24'
+
+    # The script runs the compiler at publish/ghul.dll, so the bootstrapped
+    # tool tree goes where a local `dotnet publish` would put it.
+    - name: Download bootstrap compiler tool tree
+      uses: actions/download-artifact@v8
+      with:
+        name: ghul-compiler-tool
+        path: publish
+
+    - name: Validate the wasm test modules in Node
+      run: build/wasm-validate.sh
+
   # The formatter is the AST serializer, so its output has to parse back to
   # the same tree. Nothing else tests that: its unit and analysis-mode tests
   # each check one construct against a snapshot, and a snapshot only says the
@@ -1086,7 +1122,7 @@ jobs:
   # then a skipped job satisfies it. This job runs regardless and checks
   # that nothing was skipped that should have run.
   gate:
-    needs: [version, bootstrap, unit_tests, unit_tests_gate, analysis_tests, integration_tests, cross_assembly_tests, bare_invocation_test, runtime_tests, examples_tests, format_round_trip, rosetta_tests]
+    needs: [version, bootstrap, unit_tests, unit_tests_gate, analysis_tests, integration_tests, wasm_validation, cross_assembly_tests, bare_invocation_test, runtime_tests, examples_tests, format_round_trip, rosetta_tests]
     name: Gate
 
     if: always()
