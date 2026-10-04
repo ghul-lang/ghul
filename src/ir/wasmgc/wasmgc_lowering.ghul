@@ -2900,13 +2900,31 @@ namespace IR.WasmGC is
 
             let values = region.body.values
 
-            _lower_body(region, values)
+            // A region that ends in another produces its value through
+            // that one: a block expression's statements end with the value
+            // they leave, and that region falls through holding it.
+            let last_region =
+                if result? /\ values.count > 0 /\ !_resume_states.contains_key(region) then
+                    cast Values.REGION?(values[values.count - 1])
+                else
+                    null
+                fi
 
-            // A region that produces a value is left only by its arms,
-            // each of which breaks out carrying it, so the end of its
-            // last arm does not fall through. Wasm takes the end of a
-            // block to be reachable, so it is told.
-            if result? /\ values.count > 0 /\ isa Values.Breakable(values[values.count - 1]) then
+            if let last = last_region then
+                for i in 0..values.count - 1 do
+                    gen(values[i])
+                od
+
+                _lower_region(last, result)
+            else
+                _lower_body(region, values)
+            fi
+
+            // A region that produces a value is otherwise left only by its
+            // arms, each of which breaks out carrying it, so the end of its
+            // last arm does not fall through. Wasm takes the end of a block
+            // to be reachable, so it is told.
+            if result? /\ !last_region? /\ values.count > 0 /\ isa Values.Breakable(values[values.count - 1]) then
                 _emit(Opcode.UNREACHABLE)
             fi
 
