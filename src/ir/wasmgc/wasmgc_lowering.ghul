@@ -535,6 +535,10 @@ namespace IR.WasmGC is
         // Brings a value stored into a slot of a narrow kind back into
         // range, as a CIL store into a narrow local or argument does.
         _normalise_for(type: Type?) is
+            if _convert_tuple_top(type) then
+                return
+            fi
+
             _coerce_top(_value_type(type))
 
             if let scalar = WASMGC_TYPES.scalar(_specialize(type)) then
@@ -544,6 +548,56 @@ namespace IR.WasmGC is
             fi
         si
 
+
+        // A tuple held as one tuple struct goes where another is expected
+        // by being rebuilt from its elements, each converted to the
+        // element type the other holds, as .NET rebuilds a tuple at a
+        // wider type: two tuple structs are unrelated types, so a cast
+        // between them fails. False where the value just lowered is not
+        // such a tuple.
+        _convert_tuple_top(target: Type?) -> bool is
+            let value = _top_value
+
+            if !value? \/ _registry.discovering then
+                return false
+            fi
+
+            let from = _struct_of(value.type)
+            let to = _struct_of(target)
+
+            if !from? \/ !to? \/ from =~ to \/ !_registry.is_read_only(from) \/ !_registry.is_read_only(to) then
+                return false
+            fi
+
+            let from_types = _registry.field_value_types(from)
+            let to_types = _registry.field_value_types(to)
+
+            if from_types.count != to_types.count then
+                return false
+            fi
+
+            let from_index = _registry.type_index(from)!
+            let to_index = _registry.type_index(to)!
+            let source = _temp(VALUE_TYPE.of_type_index(from_index, true))
+
+            _emit(INDEX_INSTRUCTION(Opcode.LOCAL_SET, source))
+            _emit(INDEX_INSTRUCTION(Opcode.GLOBAL_GET, _registry.descriptor_global(to)))
+
+            for i in 1..from_types.count do
+                _emit(INDEX_INSTRUCTION(Opcode.LOCAL_GET, source))
+                _emit(TYPE_FIELD_INSTRUCTION(Opcode.STRUCT_GET, from_index, i))
+
+                if let to_heap = to_types[i].heap_type(), from_heap = from_types[i].heap_type() /\ !_registry.is_held_as(from_heap, to_heap) then
+                    _emit(HEAP_TYPE_INSTRUCTION(Opcode.REF_CAST_NULL, to_heap))
+                fi
+            od
+
+            _emit(TYPE_INSTRUCTION(Opcode.STRUCT_NEW, to_index))
+
+            _top_cast = VALUE_TYPE.of_type_index(to_index, true)
+
+            return true
+        si
         // The index of `local`, numbered after the parameters the first
         // time it is seen.
         _local(local: LOCAL) -> int is
