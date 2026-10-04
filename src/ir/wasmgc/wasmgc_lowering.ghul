@@ -37,6 +37,7 @@ namespace IR.WasmGC is
 
         _function_indices: MAP[Function, int]
         _registry: WASMGC_TYPE_REGISTRY
+        _imports: WASMGC_IMPORTS
 
         // An instance method's receiver is its parameter 0, so its
         // declared arguments start at 1.
@@ -87,15 +88,18 @@ namespace IR.WasmGC is
         ///
         /// - function_indices: the index every function with a body takes
         /// - registry: the program's struct types and globals
+        /// - imports: the module's imports, which a call to a host
+        ///   operation is a call of
         /// - parameter_types: the types of the function's parameters, the
         ///   receiver first where it takes one
         init(
             function_indices: MAP[Function, int],
             registry: WASMGC_TYPE_REGISTRY,
+            imports: WASMGC_IMPORTS,
             function: Function,
             parameter_types: Collections.List[VALUE_TYPE]
         ) is
-            init(function_indices, registry, parameter_types)
+            init(function_indices, registry, imports, parameter_types)
 
             _receiver_offset = if function.is_emitted_with_receiver then 1 else 0 fi
             _return_type = function.return_type
@@ -106,10 +110,12 @@ namespace IR.WasmGC is
         init(
             function_indices: MAP[Function, int],
             registry: WASMGC_TYPE_REGISTRY,
+            imports: WASMGC_IMPORTS,
             parameter_types: Collections.List[VALUE_TYPE]
         ) is
             _function_indices = function_indices
             _registry = registry
+            _imports = imports
             _parameter_types = parameter_types
             _parameter_count = parameter_types.count
 
@@ -349,6 +355,11 @@ namespace IR.WasmGC is
         si
 
         _call(function: Function, arguments: Collections.List[Value]) is
+            if WASMGC_IMPORTS.is_host(function.intrinsic_operation) then
+                _call_host(function.intrinsic_operation!, arguments)
+                return
+            fi
+
             let index mut = 0
 
             if !_function_indices.try_get_value(function, index ref) then
@@ -1223,10 +1234,39 @@ namespace IR.WasmGC is
             if let owner: Semantic.Symbols.Classy = function.owner then owner.is_object else false fi
         visit(call: Values.Call.CLOSURE) is _report("a function value call") si
 
+        // An operation the host provides is a call of its import rather
+        // than an operation the generator lowers.
         visit(call: Values.Call.INNATE) is
-            if !call.is_lowered then
+            if WASMGC_IMPORTS.is_host(call.innate_name) then
+                _call_host(call.innate_name, call.arguments)
+            elif !call.is_lowered then
                 gen(call.lower())
             fi
+        si
+
+        _call_host(operation: string, arguments: Collections.List[Value]) is
+            let index = _imports.index_of(operation)
+
+            if !index? then
+                _report("{operation}, which no host import provides")
+                return
+            fi
+
+            for argument in arguments do
+                gen(argument)
+
+                if WASMGC_TYPES.is_string(argument.type) then
+                    _to_host(argument.type)
+                fi
+            od
+
+            _emit(INDEX_INSTRUCTION(Opcode.CALL, index))
+        si
+
+        // Converts the ghūl string on the stack to the JavaScript string
+        // a host import takes.
+        _to_host(type: Type?) is
+            _report("a string passed to the host")
         si
 
         visit(store: Values.Store.SYMBOL) is _report("a store to {store.symbol.name}") si

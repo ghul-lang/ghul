@@ -33,21 +33,28 @@ namespace IR.WasmGC is
         _enclosing: STACK[LIST[Value]?]
         _current: LIST[Value]?
 
+        _host_declarations: LIST[Function]
+
         _entry_point: Function?
         _module: MODULE?
+        _want_library: bool
 
         init() is
             _bodies = LIST[(function: Function, values: LIST[Value])]()
+            _host_declarations = LIST[Function]()
             _enclosing = STACK[LIST[Value]?]()
         si
 
         /// Starts a module, discarding anything kept from an earlier one.
         install(module_name: string, module_version: string, want_library: bool) is
             reset()
+
+            _want_library = want_library
         si
 
         reset() is
             _bodies.clear()
+            _host_declarations.clear()
             _enclosing.clear()
             _current = null
             _entry_point = null
@@ -65,7 +72,8 @@ namespace IR.WasmGC is
         add_resource(name: string, content: ubyte[]) is si
 
         /// Writes the module to `path`, and its text form where the build
-        /// asks for one.
+        /// asks for one. An executable also gets its JavaScript loader,
+        /// beside it with the extension `.mjs`.
         write(path: string) is
             let module = _module
 
@@ -74,6 +82,10 @@ namespace IR.WasmGC is
             fi
 
             File.write_all_bytes(path, BINARY_WRITER().write(module))
+
+            if !_want_library then
+                WASMGC_LOADER.write(path)
+            fi
 
             if let wat_path = IoC.CONTAINER.instance.build_flags.wat_output then
                 File.write_all_text(wat_path, WAT_PRINTER().print(module))
@@ -93,11 +105,14 @@ namespace IR.WasmGC is
             _current!.add(value)
         si
 
-        /// A call to a function that provides an intrinsic lowers to the
-        /// operation itself, so the declared body is never reached on this
-        /// target and is not kept.
+        /// Keeps the body for lowering. A function that provides an
+        /// intrinsic has its body dropped, since a call to it lowers to the
+        /// operation itself; one the host provides becomes an import.
         finish_body(function: Function) is
-            if function.intrinsic_operation? then
+            if WASMGC_IMPORTS.is_host(function.intrinsic_operation) then
+                _host_declarations.add(function)
+                return
+            elif function.intrinsic_operation? then
                 return
             fi
 
@@ -129,7 +144,8 @@ namespace IR.WasmGC is
         /// Always false: this target generates no unions yet.
         has_unit_variant_instance(variant: Classy) -> bool => false
 
-        /// The function the module exports as `_start`.
+        /// The function the module starts at, run through the `_start` it
+        /// exports.
         mark_entry_point(function: Function) is
             _entry_point = function
         si
@@ -140,17 +156,31 @@ namespace IR.WasmGC is
                 "code generation for {construct} is not supported on the wasm target")
         si
 
-        // Numbers every kept function, then lowers each body against
-        // those numbers.
+        // Builds the types, declares the imports, numbers every kept
+        // function after them, then lowers each body against those
+        // numbers.
         _build_module() -> MODULE is
             let module = MODULE()
 
             let registry = _build_registry(module)
 
+            let imports = WASMGC_IMPORTS(module)
+
+            for host in _host_declarations do
+                if let signature = _host_signature(host) then
+                    imports.host(host.intrinsic_operation!, module.add_type(signature))
+                fi
+            od
+
+            // Every other import is declared here, before the defined
+            // functions are numbered.
+
+            imports.freeze()
+
             let indices = MAP[Function, int]()
 
             for i in 0.._bodies.count do
-                indices[_bodies[i].function] = i
+                indices[_bodies[i].function] = imports.count + i
             od
 
             let names = NAME_MAP()
@@ -158,16 +188,16 @@ namespace IR.WasmGC is
             for i in 0.._bodies.count do
                 let (function, values) = _bodies[i]
 
-                module.add_function(_build_function(module, registry, function, values, indices))
+                module.add_function(_build_function(module, registry, imports, function, values, indices))
 
-                names.add(i, function.qualified_name)
+                names.add(imports.count + i, function.qualified_name)
             od
 
             if let entry = _entry_point then
                 let index mut = 0
 
                 if indices.try_get_value(entry, index ref) then
-                    module.add_export(EXPORT("_start", ExportKind.FUNCTION, index))
+                    WASMGC_ENTRY.add(module, entry, index, names)
                 fi
             fi
 
@@ -196,9 +226,52 @@ namespace IR.WasmGC is
             return registry
         si
 
+        // The signature of a host import, or null where a part of it cannot
+        // cross to the host. A string crosses as a JavaScript string.
+        _host_signature(function: Function) -> FUNC_TYPE? is
+            let parameters = LIST[VALUE_TYPE]()
+            let results = LIST[VALUE_TYPE]()
+            let is_valid mut = true
+
+            for argument in function.arguments do
+                if let type = _host_value_type(argument) then
+                    parameters.add(type)
+                else
+                    _report(function.location, "a host argument of type {argument}")
+                    is_valid = false
+                fi
+            od
+
+            if !WASMGC_TYPES.is_void(function.return_type) then
+                if let scalar = WASMGC_TYPES.scalar(function.return_type) then
+                    results.add(WASMGC_TYPES.value_type(scalar))
+                else
+                    _report(function.location, "a host result of type {function.return_type}")
+                    is_valid = false
+                fi
+            fi
+
+            if !is_valid then
+                return null
+            fi
+
+            return FUNC_TYPE(parameters.to_array(), results.to_array())
+        si
+
+        _host_value_type(type: Semantic.Types.Type) -> VALUE_TYPE? is
+            if let scalar = WASMGC_TYPES.scalar(type) then
+                return WASMGC_TYPES.value_type(scalar)
+            elif WASMGC_TYPES.is_string(type) then
+                return VALUE_TYPE.of_abstract(Wasm.AbstractHeapType.EXTERN)
+            fi
+
+            return null
+        si
+
         _build_function(
             module: MODULE,
             registry: WASMGC_TYPE_REGISTRY,
+            imports: WASMGC_IMPORTS,
             function: Function,
             values: LIST[Value],
             indices: MAP[Function, int]
@@ -232,7 +305,7 @@ namespace IR.WasmGC is
                 fi
             fi
 
-            let lowering = WASMGC_LOWERING(indices, registry, function, parameters)
+            let lowering = WASMGC_LOWERING(indices, registry, imports, function, parameters)
 
             let body = lowering.lower(values)
 
