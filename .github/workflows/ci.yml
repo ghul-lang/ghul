@@ -553,6 +553,42 @@ jobs:
   # surface, because its fixtures build the analysis-protocol library
   # with the freshly built compiler - which is why it could not run
   # while that library came out empty.
+  # The wasm integration tests compare what the compiler said and the text
+  # form it wrote, but no engine reads the modules. This builds each one
+  # again with the bootstrapped compiler and has Node validate it.
+  wasm_validation:
+    needs: [version, bootstrap]
+    if: needs.version.outputs.full_suite == 'true'
+    name: Validate wasm modules
+
+    runs-on: ubuntu-latest
+
+    timeout-minutes: 10
+
+    steps:
+    - uses: actions/checkout@v7
+
+    - name: Set up .NET 10
+      uses: actions/setup-dotnet@v6
+      with:
+        dotnet-version: '10.0.x'
+
+    - name: Set up Node.js
+      uses: actions/setup-node@v7
+      with:
+        node-version: '24'
+
+    # The script runs the compiler at publish/ghul.dll, so the bootstrapped
+    # tool tree goes where a local `dotnet publish` would put it.
+    - name: Download bootstrap compiler tool tree
+      uses: actions/download-artifact@v8
+      with:
+        name: ghul-compiler-tool
+        path: publish
+
+    - name: Validate the wasm test modules in Node
+      run: build/wasm-validate.sh
+
   analysis_tests:
     needs: [version, bootstrap]
     if: needs.version.outputs.build == 'true'
@@ -1086,7 +1122,7 @@ jobs:
   # then a skipped job satisfies it. This job runs regardless and checks
   # that nothing was skipped that should have run.
   gate:
-    needs: [version, bootstrap, unit_tests, unit_tests_gate, analysis_tests, integration_tests, cross_assembly_tests, bare_invocation_test, runtime_tests, examples_tests, format_round_trip, rosetta_tests]
+    needs: [version, bootstrap, unit_tests, unit_tests_gate, analysis_tests, integration_tests, wasm_validation, cross_assembly_tests, bare_invocation_test, runtime_tests, examples_tests, format_round_trip, rosetta_tests]
     name: Gate
 
     if: always()
