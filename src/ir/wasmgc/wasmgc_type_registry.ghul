@@ -105,6 +105,10 @@ namespace IR.WasmGC is
         /// has none.
         DESCRIPTOR_VTABLE: int static => 4
 
+        /// The descriptor field caching the type object `get_type` and
+        /// `typeof` answer for the type, null until one is first asked for.
+        DESCRIPTOR_TYPE_OBJECT: int static => 5
+
         /// The closure field holding the function to call.
         CLOSURE_FUNCTION: int static => 1
 
@@ -546,7 +550,7 @@ namespace IR.WasmGC is
             else
                 _closure_descriptor.add(HEAP_TYPE_INSTRUCTION(Opcode.REF_NULL, HEAP_TYPE.of_abstract(AbstractHeapType.STRUCT)))
             fi
-            _closure_descriptor.add(TYPE_INSTRUCTION(Opcode.STRUCT_NEW, DESCRIPTOR_TYPE_INDEX))
+            _end_descriptor(_closure_descriptor)
         si
 
         // A function value: its descriptor, the function to call, and the
@@ -967,7 +971,7 @@ namespace IR.WasmGC is
             initialiser.add(I32_CONSTANT(_numbering.id(array)))
             initialiser.add(I32_CONSTANT(_numbering.last_descendant(array)))
             initialiser.add(INDEX_INSTRUCTION(Opcode.GLOBAL_GET, _descriptor_globals[_object!]))
-            initialiser.add_range(chars_of("{element}[]"))
+            initialiser.add_range(chars_of("{_display_name(element)}[]"))
 
             if let vtable = _dispatch.vtable(array, _functions!) then
                 initialiser.add_range(vtable)
@@ -975,7 +979,7 @@ namespace IR.WasmGC is
                 initialiser.add(HEAP_TYPE_INSTRUCTION(Opcode.REF_NULL, HEAP_TYPE.of_abstract(AbstractHeapType.STRUCT)))
             fi
 
-            initialiser.add(TYPE_INSTRUCTION(Opcode.STRUCT_NEW, DESCRIPTOR_TYPE_INDEX))
+            _end_descriptor(initialiser)
         si
 
         /// The global holding the descriptor of the class the elements of
@@ -1077,13 +1081,82 @@ namespace IR.WasmGC is
         /// The class `type` extends, or null where that is the root.
         superclass_of(type: WASMGC_CLASS) -> WASMGC_CLASS? => _superclass_of(type)
 
+        // A descriptor's type object is made the first time one is asked
+        // for, so every descriptor starts without one.
+        _end_descriptor(initialiser: LIST[INSTRUCTION]) is
+            initialiser.add(HEAP_TYPE_INSTRUCTION(Opcode.REF_NULL, HEAP_TYPE.of_abstract(AbstractHeapType.STRUCT)))
+            initialiser.add(TYPE_INSTRUCTION(Opcode.STRUCT_NEW, DESCRIPTOR_TYPE_INDEX))
+        si
+
+        /// The name `type`'s descriptor carries: the name .NET gives the
+        /// same type, so a type's name reads the same on either target.
+        display_name(type: WASMGC_CLASS) -> string is
+            if let boxed = boxed_type(type) then
+                return _display_name(boxed)
+            elif type == _string then
+                return "System.String"
+            elif type == _object then
+                return "System.Object"
+            elif type.arguments.count == 0 then
+                return type.definition.qualified_name
+            fi
+
+            let result = System.Text.StringBuilder()
+
+            result.append(type.definition.qualified_name)
+            result.append('[')
+
+            for i in 0..type.arguments.count do
+                if i > 0 then
+                    result.append(',')
+                fi
+
+                result.append(_display_name(type.arguments[i]))
+            od
+
+            result.append(']')
+
+            return result.to_string()
+        si
+
+        _display_name(type: Type) -> string is
+            if let scalar = WASMGC_TYPES.scalar(type) then
+                return _scalar_name(scalar)
+            elif WASMGC_TYPES.is_string(type) then
+                return "System.String"
+            elif let held = class_of(type) then
+                return display_name(held)
+            fi
+
+            return "{type}"
+        si
+
+        _scalar_name(scalar: Scalar) -> string =>
+            case scalar
+            when Scalar.BOOL then "System.Boolean"
+            when Scalar.CHAR then "System.Char"
+            when Scalar.INT8 then "System.SByte"
+            when Scalar.UINT8 then "System.Byte"
+            when Scalar.INT16 then "System.Int16"
+            when Scalar.UINT16 then "System.UInt16"
+            when Scalar.INT32 then "System.Int32"
+            when Scalar.UINT32 then "System.UInt32"
+            when Scalar.INT64 then "System.Int64"
+            when Scalar.UINT64 then "System.UInt64"
+            when Scalar.INT_NATIVE then "System.IntPtr"
+            when Scalar.UINT_NATIVE then "System.UIntPtr"
+            when Scalar.FLOAT32 then "System.Single"
+            when Scalar.FLOAT64 then "System.Double"
+            esac
+
         _descriptor_struct() -> STRUCT_TYPE =>
             STRUCT_TYPE([
                 FIELD_TYPE(NumericType.I32, false),
                 FIELD_TYPE(NumericType.I32, false),
                 FIELD_TYPE.of_reference(VALUE_TYPE.of_type_index(DESCRIPTOR_TYPE_INDEX, true), false),
                 FIELD_TYPE.of_reference(VALUE_TYPE.of_type_index(CHARS_TYPE_INDEX, false), false),
-                FIELD_TYPE.of_reference(VALUE_TYPE.of_abstract(AbstractHeapType.STRUCT), false)
+                FIELD_TYPE.of_reference(VALUE_TYPE.of_abstract(AbstractHeapType.STRUCT), false),
+                FIELD_TYPE.of_reference(VALUE_TYPE.of_abstract(AbstractHeapType.STRUCT), true)
             ])
 
         // Every scalar a program can box: a box is a final struct holding
@@ -1233,7 +1306,7 @@ namespace IR.WasmGC is
                 initialiser.add(INDEX_INSTRUCTION(Opcode.GLOBAL_GET, _descriptor_globals[_superclass_of(type) ?? _object!]))
             fi
 
-            for instruction in chars_of(type.definition.qualified_name) do
+            for instruction in chars_of(display_name(type)) do
                 initialiser.add(instruction)
             od
 
@@ -1243,7 +1316,7 @@ namespace IR.WasmGC is
                 initialiser.add(HEAP_TYPE_INSTRUCTION(Opcode.REF_NULL, HEAP_TYPE.of_abstract(AbstractHeapType.STRUCT)))
             fi
 
-            initialiser.add(TYPE_INSTRUCTION(Opcode.STRUCT_NEW, DESCRIPTOR_TYPE_INDEX))
+            _end_descriptor(initialiser)
         si
 
         // A class's static fields are globals, each instantiation of a
@@ -1697,6 +1770,24 @@ namespace IR.WasmGC is
         /// where `type` is not a scalar.
         box_index(type: Type?) -> int? =>
             if let box = box_type(type) then type_index(box) else null fi
+
+        /// The class whose descriptor stands for `type` at run time: its box
+        /// where it is a scalar, otherwise the class or array type it names.
+        /// Null where `type` has no descriptor, as a trait or a function type
+        /// has none.
+        descriptor_class_of(type: Type?) -> WASMGC_CLASS? is
+            if let box = box_type(type) then
+                return box
+            elif WASMGC_TYPES.is_string(type) then
+                return _string
+            elif let array = array_of(type) then
+                return array
+            elif let held = class_of(type) /\ (is_object(held) \/ is_object_type(held)) then
+                return held
+            fi
+
+            return null
+        si
 
         /// The box a value of the scalar `type` is held in, or null where
         /// `type` is not a scalar.
