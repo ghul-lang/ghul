@@ -44,6 +44,7 @@ namespace IR.WasmGC is
 
         _equals: int?
         _concat: int?
+        _substring: int?
         _to_host: int?
 
         _from_char_code_array: int?
@@ -152,6 +153,20 @@ namespace IR.WasmGC is
             return index
         si
 
+        /// The function making a new string of `length` code units of
+        /// `text` from `start` on. A range outside `text` traps.
+        substring_function: int is
+            if let index = _substring then
+                return index
+            fi
+
+            let index = _helper(() => _build_substring())
+
+            _substring = index
+
+            return index
+        si
+
         _helper(build: () -> FUNCTION) -> int => _numbering!.reserve(build)
 
         /// Adds the data segment holding every literal, and numbers the
@@ -233,6 +248,32 @@ namespace IR.WasmGC is
         si
 
         // (a, b) -> string: a new string holding a's code units then b's.
+        // (text, start, length) -> string: a new string holding `length`
+        // code units of `text` from `start` on.
+        _build_substring() -> FUNCTION is
+            let chars = _registry.chars_type_index
+            let i32 = VALUE_TYPE.of_numeric(NumericType.I32)
+
+            // parameters 0 the string, 1 the start, 2 the length; local 3
+            // the result's code units
+            let body = LIST[INSTRUCTION]([
+                _get(2), TYPE_INSTRUCTION(Opcode.ARRAY_NEW_DEFAULT, chars), _set(3),
+                _get(3), I32_CONSTANT(0),
+                _get(0), _chars_of(), _get(1),
+                _get(2),
+                TWO_TYPE_INSTRUCTION(Opcode.ARRAY_COPY, chars, chars),
+                INDEX_INSTRUCTION(Opcode.GLOBAL_GET, _registry.string_descriptor_global!),
+                I32_CONSTANT(0),
+                _get(3), _op(Opcode.REF_AS_NON_NULL),
+                TYPE_INSTRUCTION(Opcode.STRUCT_NEW, string_type_index)
+            ]:INSTRUCTION)
+
+            return FUNCTION(
+                _module.add_type(FUNC_TYPE([string_reference, i32, i32], [string_reference])),
+                [_chars_reference],
+                body)
+        si
+
         _build_concat() -> FUNCTION is
             let chars = _registry.chars_type_index
 
