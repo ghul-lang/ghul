@@ -177,6 +177,15 @@ namespace IR.WasmGC is
 
             imports.freeze()
 
+            // The string helpers are numbered straight after the kept
+            // bodies.
+            let strings =
+                if registry.string_type_index? then
+                    WASMGC_STRINGS(module, registry, imports.count + _bodies.count)
+                else
+                    null
+                fi
+
             let indices = MAP[Function, int]()
 
             for i in 0.._bodies.count do
@@ -188,10 +197,12 @@ namespace IR.WasmGC is
             for i in 0.._bodies.count do
                 let (function, values) = _bodies[i]
 
-                module.add_function(_build_function(module, registry, imports, function, values, indices))
+                module.add_function(_build_function(module, registry, imports, strings, function, values, indices))
 
                 names.add(imports.count + i, function.qualified_name)
             od
+
+            strings?.finish()
 
             if let entry = _entry_point then
                 let index mut = 0
@@ -214,8 +225,9 @@ namespace IR.WasmGC is
             let container = IoC.CONTAINER.instance
 
             let object = cast Classy?(container.innate_symbol_lookup.get_object_type().symbol)!
+            let string_type = cast Classy?(container.innate_symbol_lookup.get_string_type().symbol)
 
-            let registry = WASMGC_TYPE_REGISTRY(module, object)
+            let registry = WASMGC_TYPE_REGISTRY(module, object, string_type)
 
             registry.build(container.symbol_table.global_scope)
 
@@ -272,6 +284,7 @@ namespace IR.WasmGC is
             module: MODULE,
             registry: WASMGC_TYPE_REGISTRY,
             imports: WASMGC_IMPORTS,
+            strings: WASMGC_STRINGS?,
             function: Function,
             values: LIST[Value],
             indices: MAP[Function, int]
@@ -305,7 +318,7 @@ namespace IR.WasmGC is
                 fi
             fi
 
-            let lowering = WASMGC_LOWERING(indices, registry, imports, function, parameters)
+            let lowering = WASMGC_LOWERING(indices, registry, imports, strings, function, parameters)
 
             let body = lowering.lower(values)
 

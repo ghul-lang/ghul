@@ -1,0 +1,267 @@
+namespace IR.WasmGC is
+    use Wasm.MODULE
+    use Wasm.FUNCTION
+    use Wasm.FUNC_TYPE
+    use Wasm.GLOBAL
+    use Wasm.DATA_SEGMENT
+    use Wasm.VALUE_TYPE
+    use Wasm.HEAP_TYPE
+    use Wasm.NumericType
+    use Wasm.BLOCK_TYPE
+    use Wasm.INSTRUCTION
+    use Wasm.SIMPLE_INSTRUCTION
+    use Wasm.INDEX_INSTRUCTION
+    use Wasm.I32_CONSTANT
+    use Wasm.TYPE_INSTRUCTION
+    use Wasm.TYPE_FIELD_INSTRUCTION
+    use Wasm.TWO_TYPE_INSTRUCTION
+    use Wasm.HEAP_TYPE_INSTRUCTION
+    use Wasm.BLOCK_INSTRUCTION
+    use Wasm.IF_INSTRUCTION
+    use Wasm.Opcode
+
+    use Collections.LIST
+
+    /// A string on the wasm target: a struct of the string type's
+    /// descriptor, a cached hash and an immutable array of UTF-16 code
+    /// units. This builds what strings need beyond their types: one
+    /// interned global per distinct literal, filled from a data segment
+    /// when the module starts, and the helper functions the string
+    /// operations call.
+    ///
+    /// Helper functions are defined functions numbered after the program's
+    /// own, so the index of each is fixed when it is first asked for, and
+    /// `finish` adds the functions in that order.
+    class WASMGC_STRINGS is
+        _module: MODULE
+        _registry: WASMGC_TYPE_REGISTRY
+
+        _pool: WASMGC_LITERAL_POOL
+        _literal_globals: LIST[int]
+
+        _first_helper: int
+        _helpers: LIST[() -> FUNCTION]
+
+        _equals: int?
+        _concat: int?
+
+        /// Strings for `module`, whose types `registry` holds.
+        ///
+        /// - first_helper: the function index the first helper function
+        ///   takes, which is the number of functions before it
+        init(module: MODULE, registry: WASMGC_TYPE_REGISTRY, first_helper: int) is
+            _module = module
+            _registry = registry
+            _first_helper = first_helper
+
+            _pool = WASMGC_LITERAL_POOL()
+            _literal_globals = LIST[int]()
+            _helpers = LIST[() -> FUNCTION]()
+        si
+
+        /// The struct type a string is held in.
+        string_type_index: int => _registry.string_type_index!
+
+        /// A nullable reference to a string.
+        string_reference: VALUE_TYPE => VALUE_TYPE.of_type_index(string_type_index, true)
+
+        _chars_reference: VALUE_TYPE => VALUE_TYPE.of_type_index(_registry.chars_type_index, true)
+
+        /// The global holding the literal `text`. Two literals with the
+        /// same text are the same global, so they are the same string.
+        literal(text: string) -> int is
+            let position = _pool.add(text)
+
+            if position < _literal_globals.count then
+                return _literal_globals[position]
+            fi
+
+            let index = _module.add_global(
+                GLOBAL(
+                    string_reference,
+                    true,
+                    [HEAP_TYPE_INSTRUCTION(Opcode.REF_NULL, HEAP_TYPE.of_type_index(string_type_index))]))
+
+            _literal_globals.add(index)
+
+            return index
+        si
+
+        /// The function comparing two strings by their code units. Two
+        /// absent strings are equal, and an absent one equals no present
+        /// one.
+        equals_function: int is
+            if let index = _equals then
+                return index
+            fi
+
+            let index = _helper(() => _build_equals())
+
+            _equals = index
+
+            return index
+        si
+
+        /// The function joining two strings, reading an absent one as
+        /// empty.
+        concat_function: int is
+            if let index = _concat then
+                return index
+            fi
+
+            let index = _helper(() => _build_concat())
+
+            _concat = index
+
+            return index
+        si
+
+        _helper(build: () -> FUNCTION) -> int is
+            let index = _first_helper + _helpers.count
+
+            _helpers.add(build)
+
+            return index
+        si
+
+        /// Adds the helper functions asked for, in the order their indices
+        /// were given, then the data segment holding every literal and the
+        /// start function that builds them. Call once, after every body
+        /// has been lowered and before any other function is added.
+        finish() is
+            for build in _helpers do
+                _module.add_function(build())
+            od
+
+            let entries = _pool.entries
+
+            if entries.count == 0 then
+                return
+            fi
+
+            let segment = _module.data_segments().count
+            let start = LIST[INSTRUCTION]()
+
+            for i in 0..entries.count do
+                let (text, offset) = entries[i]
+
+                start.add(INDEX_INSTRUCTION(Opcode.GLOBAL_GET, _registry.string_descriptor_global!))
+                start.add(I32_CONSTANT(0))
+                start.add(I32_CONSTANT(offset))
+                start.add(I32_CONSTANT(text.length))
+                start.add(TYPE_FIELD_INSTRUCTION(Opcode.ARRAY_NEW_DATA, _registry.chars_type_index, segment))
+                start.add(TYPE_INSTRUCTION(Opcode.STRUCT_NEW, string_type_index))
+                start.add(INDEX_INSTRUCTION(Opcode.GLOBAL_SET, _literal_globals[i]))
+            od
+
+            _module.add_data_segment(DATA_SEGMENT(_pool.bytes))
+
+            let start_index = _module.function_count()
+
+            _module.add_function(FUNCTION(_module.add_type(FUNC_TYPE([], [])), [], start))
+            _module.set_start(start_index)
+        si
+
+        // (a, b) -> i32: equal when both are the same reference (both
+        // absent included), unequal when one is absent, and otherwise
+        // equal when their code units are.
+        _build_equals() -> FUNCTION is
+            let chars = _registry.chars_type_index
+
+            // parameters 0 and 1; locals: 2 and 3 the code units, 4 the
+            // length, 5 the position
+            let loop_body = LIST[INSTRUCTION]([
+                _get(5), _get(4), _op(Opcode.I32_GE_U),
+                INDEX_INSTRUCTION(Opcode.BR_IF, 1),
+                _get(2), _get(5), TYPE_INSTRUCTION(Opcode.ARRAY_GET_U, chars),
+                _get(3), _get(5), TYPE_INSTRUCTION(Opcode.ARRAY_GET_U, chars),
+                _op(Opcode.I32_NE),
+                _return_if(0),
+                _get(5), I32_CONSTANT(1), _op(Opcode.I32_ADD), _set(5),
+                INDEX_INSTRUCTION(Opcode.BR, 0)
+            ]:INSTRUCTION)
+
+            let body = LIST[INSTRUCTION]([
+                _get(0), _get(1), _op(Opcode.REF_EQ),
+                _return_if(1),
+                _get(0), _op(Opcode.REF_IS_NULL),
+                _return_if(0),
+                _get(1), _op(Opcode.REF_IS_NULL),
+                _return_if(0),
+                _get(0), _chars_of(), _set(2),
+                _get(1), _chars_of(), _set(3),
+                _get(2), _op(Opcode.ARRAY_LEN), INDEX_INSTRUCTION(Opcode.LOCAL_TEE, 4),
+                _get(3), _op(Opcode.ARRAY_LEN), _op(Opcode.I32_NE),
+                _return_if(0),
+                BLOCK_INSTRUCTION(
+                    Opcode.BLOCK,
+                    BLOCK_TYPE(),
+                    LIST[INSTRUCTION]([BLOCK_INSTRUCTION(Opcode.LOOP, BLOCK_TYPE(), loop_body)]:INSTRUCTION)),
+                I32_CONSTANT(1)
+            ]:INSTRUCTION)
+
+            let i32 = VALUE_TYPE.of_numeric(NumericType.I32)
+
+            return FUNCTION(
+                _module.add_type(FUNC_TYPE([string_reference, string_reference], [i32])),
+                [_chars_reference, _chars_reference, i32, i32],
+                body)
+        si
+
+        // (a, b) -> string: a new string holding a's code units then b's.
+        _build_concat() -> FUNCTION is
+            let chars = _registry.chars_type_index
+
+            // parameters 0 and 1; locals: 2 and 3 the code units, 4 the
+            // result's code units
+            let body = LIST[INSTRUCTION]([
+                _get(0), _op(Opcode.REF_IS_NULL), _chars_or_empty(0), _set(2),
+                _get(1), _op(Opcode.REF_IS_NULL), _chars_or_empty(1), _set(3),
+                _get(2), _op(Opcode.ARRAY_LEN),
+                _get(3), _op(Opcode.ARRAY_LEN),
+                _op(Opcode.I32_ADD),
+                TYPE_INSTRUCTION(Opcode.ARRAY_NEW_DEFAULT, chars),
+                _set(4),
+                _get(4), I32_CONSTANT(0), _get(2), I32_CONSTANT(0), _get(2), _op(Opcode.ARRAY_LEN),
+                TWO_TYPE_INSTRUCTION(Opcode.ARRAY_COPY, chars, chars),
+                _get(4), _get(2), _op(Opcode.ARRAY_LEN), _get(3), I32_CONSTANT(0), _get(3), _op(Opcode.ARRAY_LEN),
+                TWO_TYPE_INSTRUCTION(Opcode.ARRAY_COPY, chars, chars),
+                INDEX_INSTRUCTION(Opcode.GLOBAL_GET, _registry.string_descriptor_global!),
+                I32_CONSTANT(0),
+                _get(4), _op(Opcode.REF_AS_NON_NULL),
+                TYPE_INSTRUCTION(Opcode.STRUCT_NEW, string_type_index)
+            ]:INSTRUCTION)
+
+            return FUNCTION(
+                _module.add_type(FUNC_TYPE([string_reference, string_reference], [string_reference])),
+                [_chars_reference, _chars_reference, _chars_reference],
+                body)
+        si
+
+        // The code units of the string on the stack.
+        _chars_of() -> INSTRUCTION =>
+            TYPE_FIELD_INSTRUCTION(Opcode.STRUCT_GET, string_type_index, WASMGC_TYPE_REGISTRY.STRING_CHARS)
+
+        // The code units of the string in local `index`, or an empty
+        // array where it is absent: an `if` on the null test of that local,
+        // which the caller pushes first.
+        _chars_or_empty(index: int) -> INSTRUCTION =>
+            IF_INSTRUCTION(
+                BLOCK_TYPE.of_value(_chars_reference),
+                LIST[INSTRUCTION]([
+                    I32_CONSTANT(0),
+                    TYPE_INSTRUCTION(Opcode.ARRAY_NEW_DEFAULT, _registry.chars_type_index)
+                ]:INSTRUCTION),
+                LIST[INSTRUCTION]([_get(index), _chars_of()]:INSTRUCTION))
+
+        _return_if(value: int) -> INSTRUCTION =>
+            IF_INSTRUCTION(
+                BLOCK_TYPE(),
+                LIST[INSTRUCTION]([I32_CONSTANT(value), _op(Opcode.RETURN)]:INSTRUCTION),
+                LIST[INSTRUCTION]())
+
+        _get(index: int) -> INSTRUCTION => INDEX_INSTRUCTION(Opcode.LOCAL_GET, index)
+        _set(index: int) -> INSTRUCTION => INDEX_INSTRUCTION(Opcode.LOCAL_SET, index)
+        _op(opcode: Opcode) -> INSTRUCTION => SIMPLE_INSTRUCTION(opcode)
+    si
+si
