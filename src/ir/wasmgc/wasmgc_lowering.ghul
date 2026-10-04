@@ -1562,7 +1562,13 @@ namespace IR.WasmGC is
         visit(decrement: Values.DECREMENT) is _report("decrement") si
         visit(increment: Values.POST_INCREMENT) is _report("increment") si
         visit(decrement: Values.PRE_DECREMENT) is _report("decrement") si
-        visit(repack: Values.TUPLE_REPACK) is _report("a tuple") si
+        // The source is held in a local and the target built from its
+        // elements.
+        visit(repack: Values.TUPLE_REPACK) is
+            gen(repack.source)
+            _emit(INDEX_INSTRUCTION(Opcode.LOCAL_SET, _local(repack.temp)))
+            gen(repack.built)
+        si
 
         visit(spilled: Values.SPILLED_SUBJECT) is
             _emit(INDEX_INSTRUCTION(Opcode.LOCAL_SET, _local(spilled.temp)))
@@ -1829,7 +1835,34 @@ namespace IR.WasmGC is
         _is_unchecked_widening(to: Type?) -> bool =>
             if let to_class: Semantic.Symbols.Classy = to?.symbol then to_class.is_object else false fi
         visit(type_of: Values.TYPEOF) is _report("typeof") si
-        visit(tuple: Values.TUPLE) is _report("a tuple") si
+        // A tuple is a read-only struct built from its elements in order.
+        visit(tuple: Values.TUPLE) is
+            let held = _struct_of(tuple.type)
+
+            if !held? then
+                _report("a tuple")
+                return
+            fi
+
+            if _registry.discovering then
+                for value in tuple.values do
+                    gen(value)
+                od
+
+                return
+            fi
+
+            let field_types = _registry.field_value_types(held)
+
+            _emit(INDEX_INSTRUCTION(Opcode.GLOBAL_GET, _registry.descriptor_global(held)))
+
+            for i in 0..tuple.values.count do
+                gen(tuple.values[i])
+                _coerce_top(field_types[i + 1])
+            od
+
+            _emit(TYPE_INSTRUCTION(Opcode.STRUCT_NEW, _registry.type_index(held)!))
+        si
         // A new object holds its descriptor and the default value of each
         // field, and its constructor then runs on it. A unit variant is
         // the one shared instance.

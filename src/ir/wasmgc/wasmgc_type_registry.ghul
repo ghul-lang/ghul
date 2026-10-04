@@ -932,11 +932,31 @@ namespace IR.WasmGC is
             // A closure's frame is synthesised, so it has no source
             // location, as the built-in types the compiler constructs have
             // none.
-            if type.is_object \/ type.is_reflected \/ !is_frame /\ type.location == LOCATION.internal then
+            if type.is_object \/ type.is_reflected then
                 return false
             fi
 
+            // A tuple family is constructed too, but held as a struct once
+            // the core library gives it fields.
+            if !is_frame /\ type.location == LOCATION.internal then
+                return _is_constructed_struct_with_fields(type)
+            fi
+
             return isa Semantic.Symbols.CLASS(type) \/ isa Semantic.Symbols.STRUCT(type) \/ is_frame \/ type.is_union \/ type.is_variant
+        si
+
+        _is_constructed_struct_with_fields(type: Classy) -> bool is
+            if !isa Semantic.Symbols.STRUCT(type) then
+                return false
+            fi
+
+            for `field in SRM_MEMBER_ORDER.fields(SRM_EMITTED_TYPE(type)) do
+                if `field.is_instance then
+                    return true
+                fi
+            od
+
+            return false
         si
 
         _add_class(type: WASMGC_CLASS, added: Collections.SET[WASMGC_CLASS]) is
@@ -1329,6 +1349,11 @@ namespace IR.WasmGC is
             if let string_type = _string then _descriptor_globals[string_type] else null fi
 
         _infer_read_only(type: WASMGC_CLASS) -> bool is
+            // A constructed struct is a tuple, which cannot be changed.
+            if type.definition.location == LOCATION.internal then
+                return true
+            fi
+
             let emitted = SRM_EMITTED_TYPE(type.definition)
 
             for `field in SRM_MEMBER_ORDER.fields(emitted) do
