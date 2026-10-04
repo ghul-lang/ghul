@@ -1,0 +1,97 @@
+namespace IR.WasmGC is
+    use Collections.LIST
+    use Collections.MAP
+
+    /// Numbers a class tree depth first, so a class and everything derived
+    /// from it hold one unbroken run of numbers, and a union's variants
+    /// number consecutively. Children are numbered in the order added.
+    class CLASS_ID_NUMBERING[T] is
+        _roots: LIST[T]
+        _children: MAP[T, LIST[T]]
+        _ids: MAP[T, int]
+        _last_descendants: MAP[T, int]
+
+        init() is
+            _roots = LIST[T]()
+            _children = MAP[T, LIST[T]]()
+            _ids = MAP[T, int]()
+            _last_descendants = MAP[T, int]()
+        si
+
+        /// Adds a tree's root.
+        add_root(node: T) is
+            _roots.add(node)
+            _children[node] = LIST[T]()
+        si
+
+        /// Adds `node` under `parent`, which must already have been added.
+        add(node: T, parent: T) is
+            _children[parent].add(node)
+            _children[node] = LIST[T]()
+        si
+
+        /// Assigns the numbers; call after the last node is added.
+        number() is
+            _ids.clear()
+            _last_descendants.clear()
+
+            let next mut = 0
+
+            for root in _roots do
+                next = _number(root, next)
+            od
+        si
+
+        _number(node: T, first: int) -> int is
+            _ids[node] = first
+
+            let next mut = first + 1
+
+            for child in _children[node] do
+                next = _number(child, next)
+            od
+
+            _last_descendants[node] = next - 1
+
+            return next
+        si
+
+        /// The number of `node`.
+        id(node: T) -> int => _ids[node]
+
+        /// The highest number held by `node` or anything derived from it.
+        last_descendant(node: T) -> int => _last_descendants[node]
+
+        /// Whether anything was added under `node`.
+        has_children(node: T) -> bool => _children[node].count > 0
+
+        /// The nodes added directly under `node`, in the order added.
+        children(node: T) -> Collections.List[T] => _children[node]
+
+        /// Whether `node` is `ancestor` or derives from it.
+        is_within(node: T, ancestor: T) -> bool is
+            let id = _ids[node]
+
+            return id >= _ids[ancestor] /\ id <= _last_descendants[ancestor]
+        si
+
+        /// Every node, parents before their children, in number order.
+        in_order() -> Collections.List[T] is
+            let result = LIST[T]()
+
+            for root in _roots do
+                _collect(root, result)
+            od
+
+            return result
+        si
+
+        _collect(node: T, into: LIST[T]) is
+            into.add(node)
+
+            for child in _children[node] do
+                _collect(child, into)
+            od
+        si
+    si
+si

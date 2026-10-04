@@ -1,0 +1,540 @@
+namespace IR.WasmGC is
+    use Wasm.MODULE
+    use Wasm.SUB_TYPE
+    use Wasm.STRUCT_TYPE
+    use Wasm.FIELD_TYPE
+    use Wasm.VALUE_TYPE
+    use Wasm.HEAP_TYPE
+    use Wasm.NumericType
+    use Wasm.GLOBAL
+    use Wasm.INSTRUCTION
+    use Wasm.INDEX_INSTRUCTION
+    use Wasm.TYPE_INSTRUCTION
+    use Wasm.HEAP_TYPE_INSTRUCTION
+    use Wasm.I32_CONSTANT
+    use Wasm.I64_CONSTANT
+    use Wasm.F32_CONSTANT
+    use Wasm.F64_CONSTANT
+    use Wasm.Opcode
+
+    use Collections.LIST
+    use Collections.MAP
+
+    use Source.LOCATION
+
+    use Semantic.Types.Type
+    use Semantic.Symbols.Symbol
+    use Semantic.Symbols.Scope
+    use Semantic.Symbols.Classy
+    use Semantic.Symbols.Field
+
+    use IR.Emitter.SRM_MEMBER_ORDER
+    use IR.Emitter.SRM_EMITTED_TYPE
+
+    /// Where an instance field lives: the struct type that declares it and
+    /// its position there. A subclass keeps its superclass's fields in the
+    /// same positions, so this reaches the field in any instance.
+    ///
+    /// - type_index: the declaring class's struct type
+    /// - field_index: the field's position in that struct
+    /// - value_type: the type the field is held in
+    class WASMGC_FIELD(type_index: int, field_index: int, value_type: VALUE_TYPE)
+
+    /// The program's classes, unions and variants as WasmGC struct types,
+    /// and the globals holding their descriptors, their static fields, the
+    /// namespace-level variables and the unit variants' shared instances.
+    ///
+    /// Field 0 of every object is its type's descriptor, followed by its
+    /// superclass's fields in order, then its own. A class nothing derives
+    /// from is final.
+    class WASMGC_TYPE_REGISTRY is
+        // Every struct type goes in one recursion group at the start of the
+        // type section. WasmGC treats two types as the same when their
+        // groups have the same shape, so separate groups would make classes
+        // with the same fields interchangeable.
+
+        /// The descriptor's struct type, first in the recursion group.
+        DESCRIPTOR_TYPE_INDEX: int static => 0
+
+        /// The root's struct type, which every class derives from.
+        OBJECT_TYPE_INDEX: int static => 1
+
+        /// The descriptor field holding the class's number.
+        DESCRIPTOR_CLASS_ID: int static => 0
+
+        /// The descriptor field holding the highest number of any class
+        /// derived from it.
+        DESCRIPTOR_LAST_DESCENDANT: int static => 1
+
+        /// The descriptor field holding the superclass's descriptor, null
+        /// for the root.
+        DESCRIPTOR_SUPERCLASS: int static => 2
+
+        _module: MODULE
+        _object: Classy?
+
+        _numbering: CLASS_ID_NUMBERING[Classy]
+
+        _type_indices: MAP[Classy, int]
+        _layouts: MAP[Classy, LIST[VALUE_TYPE]]
+        _descriptor_globals: MAP[Classy, int]
+        _unit_variant_globals: MAP[Classy, int]
+
+        _fields: MAP[Symbol, WASMGC_FIELD]
+        _globals: MAP[Symbol, int]
+        _global_types: MAP[Symbol, VALUE_TYPE]
+        _classes_by_index: MAP[int, Classy]
+
+        _unsupported: LIST[(location: LOCATION, construct: string)]
+
+        /// The constructs the program declares that the object model cannot
+        /// represent yet, each with where it was declared.
+        unsupported: Collections.List[(location: LOCATION, construct: string)] => _unsupported
+
+        /// The numbers given to the classes.
+        numbering: CLASS_ID_NUMBERING[Classy] => _numbering
+
+        /// A nullable reference to the root, which holds any object.
+        object_reference: VALUE_TYPE => VALUE_TYPE.of_type_index(OBJECT_TYPE_INDEX, true)
+
+        /// A registry that knows no classes, and so holds scalars only.
+        init(module: MODULE) is
+            init(module, null)
+        si
+
+        /// A registry for `module`, whose classes derive from `object`.
+        init(module: MODULE, object: Classy?) is
+            _module = module
+            _object = object
+
+            _numbering = CLASS_ID_NUMBERING[Classy]()
+
+            _type_indices = MAP[Classy, int]()
+            _layouts = MAP[Classy, LIST[VALUE_TYPE]]()
+            _descriptor_globals = MAP[Classy, int]()
+            _unit_variant_globals = MAP[Classy, int]()
+
+            _fields = MAP[Symbol, WASMGC_FIELD]()
+            _globals = MAP[Symbol, int]()
+            _global_types = MAP[Symbol, VALUE_TYPE]()
+            _classes_by_index = MAP[int, Classy]()
+
+            _unsupported = LIST[(location: LOCATION, construct: string)]()
+        si
+
+        /// Builds the recursion group and the globals for every type
+        /// declared under `root`. Must run before anything else adds a type
+        /// to the module.
+        build(root: Scope) is
+            assert _module.type_count() == 0 else "the object model's types must come first"
+
+            let object = _object!
+
+            let emitted = SRM_MEMBER_ORDER.types(root)
+
+            _numbering.add_root(object)
+
+            let added = Collections.SET[Classy]()
+            added.add(object)
+
+            for type in emitted do
+                if let declared = type.declared /\ _is_object_type(declared) then
+                    _add_class(declared, added)
+                fi
+            od
+
+            _numbering.number()
+
+            let ordered = _numbering.in_order()
+
+            for i in 0..ordered.count do
+                _type_indices[ordered[i]] = OBJECT_TYPE_INDEX + i
+                _classes_by_index[OBJECT_TYPE_INDEX + i] = ordered[i]
+            od
+
+            let group = LIST[SUB_TYPE]()
+
+            group.add(SUB_TYPE(_descriptor_struct(), true, []))
+
+            for type in ordered do
+                group.add(_sub_type(type))
+            od
+
+            let first = _module.add_rec_group(group)
+
+            assert first == DESCRIPTOR_TYPE_INDEX else "the object model's types must come first"
+
+            for type in ordered do
+                _add_descriptor_global(type)
+            od
+
+            for type in emitted do
+                _add_static_globals(type)
+            od
+
+            for type in ordered do
+                if type.is_unit_variant then
+                    _add_unit_variant_global(type)
+                fi
+            od
+        si
+
+        // Whether `type` is represented as a struct by this model. Traits
+        // have no instances of their own, structs and enums are value types
+        // with a representation of their own, a generic type is compiled
+        // per instantiation, and the built-in types the compiler constructs
+        // are not declared by the program.
+        _is_object_type(type: Classy) -> bool is
+            if type.is_object \/ type.is_reflected \/ type.location == LOCATION.internal then
+                return false
+            fi
+
+            if !(isa Semantic.Symbols.CLASS(type) \/ type.is_union \/ type.is_variant) then
+                return false
+            fi
+
+            if type.is_generic \/ _superclass_of(type) == null /\ _has_generic_superclass(type) then
+                _unsupported.add((type.location, "a generic type"))
+                return false
+            fi
+
+            return true
+        si
+
+        _add_class(type: Classy, added: Collections.SET[Classy]) is
+            if added.contains(type) then
+                return
+            fi
+
+            let parent = _superclass_of(type) ?? _object!
+
+            if !added.contains(parent) then
+                _add_class(parent, added)
+            fi
+
+            _numbering.add(type, parent)
+            added.add(type)
+        si
+
+        // The class `type` extends, where the program declares it, or null
+        // where it extends the root.
+        _superclass_of(type: Classy) -> Classy? is
+            for ancestor in type.ancestors do
+                if ancestor.is_trait then
+                    continue
+                fi
+
+                if let superclass: Classy = ancestor.symbol /\ superclass != type then
+                    if superclass.is_object \/ superclass.location == LOCATION.internal then
+                        return null
+                    fi
+
+                    return superclass
+                fi
+            od
+
+            return null
+        si
+
+        _has_generic_superclass(type: Classy) -> bool is
+            for ancestor in type.ancestors do
+                if !ancestor.is_trait /\ isa Semantic.Symbols.GENERIC(ancestor.symbol) then
+                    return true
+                fi
+            od
+
+            return false
+        si
+
+        _descriptor_struct() -> STRUCT_TYPE =>
+            STRUCT_TYPE([
+                FIELD_TYPE(NumericType.I32, false),
+                FIELD_TYPE(NumericType.I32, false),
+                FIELD_TYPE.of_reference(VALUE_TYPE.of_type_index(DESCRIPTOR_TYPE_INDEX, true), false)
+            ])
+
+        _sub_type(type: Classy) -> SUB_TYPE is
+            let layout = LIST[VALUE_TYPE]()
+            let type_index = _type_indices[type]
+
+            if type == _object then
+                layout.add(VALUE_TYPE.of_type_index(DESCRIPTOR_TYPE_INDEX, false))
+
+                _layouts[type] = layout
+
+                return SUB_TYPE(_struct(layout), false, [])
+            fi
+
+            let parent = _superclass_of(type) ?? _object!
+
+            for inherited in _layouts[parent] do
+                layout.add(inherited)
+            od
+
+            for `field in SRM_MEMBER_ORDER.fields(SRM_EMITTED_TYPE(type)) do
+                if _is_instance_field(`field) then
+                    let value_type = _field_value_type(`field)
+
+                    _fields[`field] = WASMGC_FIELD(type_index, layout.count, value_type)
+
+                    layout.add(value_type)
+                fi
+            od
+
+            _layouts[type] = layout
+
+            return SUB_TYPE(
+                _struct(layout),
+                !_numbering.has_children(type),
+                [_type_indices[parent]])
+        si
+
+        // Field 0, the descriptor, never changes; every other field can be
+        // assigned.
+        _struct(layout: LIST[VALUE_TYPE]) -> STRUCT_TYPE is
+            let fields = LIST[FIELD_TYPE]()
+
+            for i in 0..layout.count do
+                let value_type = layout[i]
+                let mutable = i > 0
+
+                if let numeric = value_type.numeric() then
+                    fields.add(FIELD_TYPE(numeric, mutable))
+                else
+                    fields.add(FIELD_TYPE.of_reference(value_type, mutable))
+                fi
+            od
+
+            return STRUCT_TYPE(fields.to_array())
+        si
+
+        _is_instance_field(`field: Field) -> bool =>
+            `field.is_instance
+
+        _field_value_type(`field: Field) -> VALUE_TYPE is
+            if let value_type = value_type(`field.type) then
+                return value_type
+            fi
+
+            _unsupported.add((`field.location, "a field of type {`field.type}"))
+
+            return object_reference
+        si
+
+        _add_descriptor_global(type: Classy) is
+            let initialiser = LIST[INSTRUCTION]()
+
+            initialiser.add(I32_CONSTANT(_numbering.id(type)))
+            initialiser.add(I32_CONSTANT(_numbering.last_descendant(type)))
+
+            if type == _object then
+                initialiser.add(HEAP_TYPE_INSTRUCTION(Opcode.REF_NULL, HEAP_TYPE.of_type_index(DESCRIPTOR_TYPE_INDEX)))
+            else
+                initialiser.add(INDEX_INSTRUCTION(Opcode.GLOBAL_GET, _descriptor_globals[_superclass_of(type) ?? _object!]))
+            fi
+
+            initialiser.add(TYPE_INSTRUCTION(Opcode.STRUCT_NEW, DESCRIPTOR_TYPE_INDEX))
+
+            _descriptor_globals[type] =
+                _module.add_global(
+                    GLOBAL(VALUE_TYPE.of_type_index(DESCRIPTOR_TYPE_INDEX, false), false, initialiser))
+        si
+
+        // Static fields and namespace-level variables are globals, each
+        // starting at its type's default value.
+        _add_static_globals(type: SRM_EMITTED_TYPE) is
+            if let declared = type.declared then
+                for method in SRM_MEMBER_ORDER.methods(type) do
+                    if method.is_static_constructor then
+                        _unsupported.add((method.location, "a static constructor"))
+                    fi
+                od
+
+                if !_type_indices.contains_key(declared) /\ !type.is_globals_carrier then
+                    return
+                fi
+            fi
+
+            for `field in SRM_MEMBER_ORDER.fields(type) do
+                if `field.is_instance \/ isa Semantic.Symbols.CONSTANT_FIELD(`field) then
+                    continue
+                fi
+
+                let value_type = _field_value_type(`field)
+
+                _global_types[`field] = value_type
+                _globals[`field] =
+                    _module.add_global(GLOBAL(value_type, true, [default_value(value_type)]))
+            od
+        si
+
+        // A unit variant is one shared instance, built once, holding the
+        // default value of every field it inherits.
+        _add_unit_variant_global(variant: Classy) is
+            _unit_variant_globals[variant] =
+                _module.add_global(
+                    GLOBAL(
+                        VALUE_TYPE.of_type_index(_type_indices[variant], false),
+                        false,
+                        new_instance(variant)))
+        si
+
+        /// The constant expression that builds an instance of `type` with
+        /// every field at its default value.
+        new_instance(type: Classy) -> LIST[INSTRUCTION] is
+            let result = LIST[INSTRUCTION]()
+
+            result.add(INDEX_INSTRUCTION(Opcode.GLOBAL_GET, _descriptor_globals[type]))
+
+            let layout = _layouts[type]
+
+            for i in 1..layout.count do
+                result.add(default_value(layout[i]))
+            od
+
+            result.add(TYPE_INSTRUCTION(Opcode.STRUCT_NEW, _type_indices[type]))
+
+            return result
+        si
+
+        /// The zero of a numeric type, or the null of a reference type.
+        default_value(value_type: VALUE_TYPE) -> INSTRUCTION static =>
+            case value_type.numeric()
+            when NumericType.I64 then I64_CONSTANT(0L)
+            when NumericType.F32 then F32_CONSTANT(0.0s)
+            when NumericType.F64 then F64_CONSTANT(0.0)
+            when NumericType.I32 then I32_CONSTANT(0)
+            else HEAP_TYPE_INSTRUCTION(Opcode.REF_NULL, value_type.heap_type()!)
+            esac
+
+        /// The type a value of `type` is held in, or null where the target
+        /// cannot hold it yet. A declared class is a reference to its
+        /// struct; `object` and a trait are references to the root.
+        value_type(type: Type?) -> VALUE_TYPE? is
+            if !type? \/ type.is_void then
+                return null
+            fi
+
+            if let scalar = WASMGC_TYPES.scalar(type) then
+                return WASMGC_TYPES.value_type(scalar)
+            fi
+
+            if type.is_value_type \/ type.is_type_variable then
+                return null
+            fi
+
+            if let index = type_index(type) then
+                return VALUE_TYPE.of_type_index(index, true)
+            fi
+
+            if type.is_trait \/ (cast Classy?(type.symbol)?.is_object ?? false) then
+                return object_reference
+            fi
+
+            return null
+        si
+
+        /// The struct type a value of `type` is held in, or null where
+        /// `type` is not a class the program declares.
+        type_index(type: Type?) -> int? =>
+            if let symbol: Classy = type?.symbol then type_index(symbol) else null fi
+
+        /// The struct type of `type`, or null where the program does not
+        /// declare it as a class.
+        type_index(type: Classy) -> int? is
+            let index mut = 0
+
+            if _type_indices.try_get_value(type, index ref) then
+                return index
+            fi
+
+            return null
+        si
+
+        /// Whether `type` has a struct type of its own.
+        is_object_type(type: Classy) -> bool => _type_indices.contains_key(type)
+
+        /// Where an instance field lives, or null where it is not a field
+        /// of a class the registry holds.
+        field_of(`field: Symbol) -> WASMGC_FIELD? is
+            let result: WASMGC_FIELD mut
+
+            if _fields.try_get_value(`field, result ref) then
+                return result
+            fi
+
+            return null
+        si
+
+        /// The global holding a static field or namespace-level variable.
+        global_of(`field: Symbol) -> int? is
+            let index mut = 0
+
+            if _globals.try_get_value(`field, index ref) then
+                return index
+            fi
+
+            return null
+        si
+
+        /// The type of the global holding a static field or namespace-level
+        /// variable.
+        global_type(`field: Symbol) -> VALUE_TYPE? is
+            let result: VALUE_TYPE mut
+
+            if _global_types.try_get_value(`field, result ref) then
+                return result
+            fi
+
+            return null
+        si
+
+        /// The global holding the descriptor of `type`.
+        descriptor_global(type: Classy) -> int => _descriptor_globals[type]
+
+        /// Whether a reference held as `held` is usable as `expected`
+        /// without a cast: the same type, or a class derived from it.
+        is_held_as(held: HEAP_TYPE, expected: HEAP_TYPE) -> bool is
+            if held.matches(expected) then
+                return true
+            fi
+
+            let held_index = held.type_index()
+            let expected_index = expected.type_index()
+
+            if !held_index? \/ !expected_index? then
+                return false
+            fi
+
+            let derived: Classy mut
+            let base: Classy mut
+
+            if
+                !_classes_by_index.try_get_value(held_index, derived ref) \/
+                !_classes_by_index.try_get_value(expected_index, base ref)
+            then
+                return false
+            fi
+
+            return is_subclass(derived, base)
+        si
+
+        /// The global holding a unit variant's shared instance.
+        unit_variant_global(variant: Classy) -> int? is
+            let index mut = 0
+
+            if _unit_variant_globals.try_get_value(variant, index ref) then
+                return index
+            fi
+
+            return null
+        si
+
+        /// Whether every instance of `derived` is an instance of `base`.
+        is_subclass(derived: Classy, base: Classy) -> bool =>
+            base == _object \/
+            _type_indices.contains_key(derived) /\
+            _type_indices.contains_key(base) /\
+            _numbering.is_within(derived, base)
+    si
+si

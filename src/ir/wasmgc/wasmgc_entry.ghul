@@ -1,0 +1,73 @@
+namespace IR.WasmGC is
+    use Wasm.MODULE
+    use Wasm.FUNCTION
+    use Wasm.FUNC_TYPE
+    use Wasm.GLOBAL
+    use Wasm.VALUE_TYPE
+    use Wasm.NumericType
+    use Wasm.EXPORT
+    use Wasm.ExportKind
+    use Wasm.NAME_MAP
+    use Wasm.INSTRUCTION
+    use Wasm.INDEX_INSTRUCTION
+    use Wasm.I32_CONSTANT
+    use Wasm.Opcode
+
+    use Collections.LIST
+
+    use Semantic.Symbols.Function
+
+    /// The two functions a host starts a module through: `_start` runs
+    /// the program's entry point, and `_exit_code` answers the exit
+    /// status it left, which is zero for an entry point that returns
+    /// nothing.
+    class WASMGC_ENTRY is
+        /// Adds and exports `_start` and `_exit_code` around the entry
+        /// point.
+        ///
+        /// - module: the module to add them to
+        /// - entry: the program's entry point
+        /// - index: the entry point's function index
+        /// - names: the function names, which the two are added to
+        add(module: MODULE, entry: Function, index: int, names: NAME_MAP) static is
+            let i32 = VALUE_TYPE.of_numeric(NumericType.I32)
+            let none: VALUE_TYPE[] = []
+
+            let exit_code =
+                module.add_global(
+                    GLOBAL(i32, true, LIST[INSTRUCTION]([I32_CONSTANT(0)])))
+
+            let start_body = LIST[INSTRUCTION]()
+
+            start_body.add(INDEX_INSTRUCTION(Opcode.CALL, index))
+
+            if !WASMGC_TYPES.is_void(entry.return_type) then
+                start_body.add(INDEX_INSTRUCTION(Opcode.GLOBAL_SET, exit_code))
+            fi
+
+            let start =
+                module.add_function(
+                    FUNCTION(
+                        module.add_type(FUNC_TYPE(none, none)),
+                        none,
+                        start_body))
+
+            let exit_code_body = LIST[INSTRUCTION]()
+
+            exit_code_body.add(INDEX_INSTRUCTION(Opcode.GLOBAL_GET, exit_code))
+
+            let exit_code_function =
+                module.add_function(
+                    FUNCTION(
+                        module.add_type(FUNC_TYPE(none, [i32])),
+                        none,
+                        exit_code_body))
+
+            module.add_export(EXPORT("_start", ExportKind.FUNCTION, start))
+            module.add_export(EXPORT("_exit_code", ExportKind.FUNCTION, exit_code_function))
+
+            names.add(start, "_start")
+            names.add(exit_code_function, "_exit_code")
+        si
+    si
+si
