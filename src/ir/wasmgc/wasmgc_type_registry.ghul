@@ -33,13 +33,15 @@ namespace IR.WasmGC is
     use Semantic.Symbols.Classy
     use Semantic.Symbols.Field
     use Semantic.Symbols.Function
+    use Semantic.Symbols.GENERIC
 
     use IR.Emitter.SRM_MEMBER_ORDER
     use IR.Emitter.SRM_EMITTED_TYPE
 
-    /// Where an instance field lives: the struct type that declares it and
-    /// its position there. A subclass keeps its superclass's fields in the
-    /// same positions, so this reaches the field in any instance.
+    /// Where an instance field lives: the struct type of the class that
+    /// declares it and its position there. A subclass keeps its
+    /// superclass's fields in the same positions, so this reaches the field
+    /// in any instance.
     ///
     /// - type_index: the declaring class's struct type
     /// - field_index: the field's position in that struct
@@ -47,13 +49,18 @@ namespace IR.WasmGC is
     class WASMGC_FIELD(type_index: int, field_index: int, value_type: VALUE_TYPE)
 
     /// The program's classes, unions and variants as WasmGC struct types,
-    /// with a box type for each scalar, and the globals holding their
-    /// descriptors, their static fields, static-constructor flags, the
-    /// namespace-level variables and the unit variants' shared instances.
+    /// one for each instantiation the program uses, with a box type for each
+    /// scalar, and the globals holding their descriptors, their static
+    /// fields, static-constructor flags, the namespace-level variables and
+    /// the unit variants' shared instances.
     ///
     /// Field 0 of every object is its type's descriptor, followed by its
     /// superclass's fields in order, then its own. A class nothing derives
     /// from is final.
+    ///
+    /// The classes are found in two steps. `collect` takes every class that
+    /// is not generic, and while `discovering` is set, every instantiation
+    /// asked about is added too. `build` then numbers them all.
     class WASMGC_TYPE_REGISTRY is
         // Every struct type goes in one recursion group near the start of
         // the type section. WasmGC treats two types as the same when their
@@ -97,27 +104,48 @@ namespace IR.WasmGC is
         /// has none.
         DESCRIPTOR_VTABLE: int static => 4
 
+        /// The closure field holding the function to call.
+        CLOSURE_FUNCTION: int static => 1
+
+        /// The closure field holding the receiver or frame, null for none.
+        CLOSURE_RECEIVER: int static => 2
+
+        /// The field of a box holding the value.
+        BOX_VALUE: int static => 1
+
         _module: MODULE
-        _object: Classy?
-        _string: Classy?
+        _object_definition: Classy?
+        _object: WASMGC_CLASS?
+        _string: WASMGC_CLASS?
 
-        _numbering: CLASS_ID_NUMBERING[Classy]
+        /// Whether classes asked about are being found rather than
+        /// compiled: every instantiation is added, and nothing is written
+        /// to the module.
+        discovering: bool public
 
-        _type_indices: MAP[Classy, int]
-        _layouts: MAP[Classy, LIST[VALUE_TYPE]]
-        _descriptor_globals: MAP[Classy, int]
-        _unit_variant_globals: MAP[Classy, int]
+        _classes: MAP[WASMGC_CLASS, WASMGC_CLASS]
+        _new_classes: LIST[WASMGC_CLASS]
+        _dispatched: Collections.SET[Function]
+        _lowered: Collections.SET[IR.Values.Call.INNATE]
+        _is_built: bool
 
-        _fields: MAP[Symbol, WASMGC_FIELD]
-        _globals: MAP[Symbol, int]
-        _global_types: MAP[Symbol, VALUE_TYPE]
-        _classes_by_index: MAP[int, Classy]
+        _numbering: CLASS_ID_NUMBERING[WASMGC_CLASS]
+
+        _type_indices: MAP[WASMGC_CLASS, int]
+        _layouts: MAP[WASMGC_CLASS, LIST[VALUE_TYPE]]
+        _descriptor_globals: MAP[WASMGC_CLASS, int]
+        _unit_variant_globals: MAP[WASMGC_CLASS, int]
+        _classes_by_index: MAP[int, WASMGC_CLASS]
+
+        _field_positions: MAP[Symbol, int]
+        _statics: MAP[(member: Symbol, owner: WASMGC_CLASS), (index: int, type: VALUE_TYPE)]
+        _namespace_globals: MAP[Symbol, (index: int, type: VALUE_TYPE)]
 
         // The scalar types a value is boxed from, keyed by the box's
         // place in the class tree.
-        _boxed: MAP[Classy, Type]
+        _boxed: MAP[WASMGC_CLASS, Type]
 
-        _static_constructors: MAP[Classy, (constructor: Function, initialised: int)]
+        _static_constructors: MAP[WASMGC_CLASS, (constructor: WASMGC_FUNCTION, initialised: int)]
 
         _unsupported: LIST[(location: LOCATION, construct: string)]
 
@@ -127,19 +155,22 @@ namespace IR.WasmGC is
         _closure_descriptor: LIST[INSTRUCTION]
         _closure_descriptor_global: int
         _closure_thunks: LIST[int]
-        _ordered: Collections.List[Classy]
-        _initialisers: MAP[Classy, LIST[INSTRUCTION]]
-        _numbering_functions: WASMGC_FUNCTION_NUMBERING?
+        _ordered: Collections.List[WASMGC_CLASS]
+        _initialisers: MAP[WASMGC_CLASS, LIST[INSTRUCTION]]
+        _functions: WASMGC_FUNCTION_NUMBERING?
 
         /// The constructs the program declares that the object model cannot
         /// represent yet, each with where it was declared.
         unsupported: Collections.List[(location: LOCATION, construct: string)] => _unsupported
 
         /// The numbers given to the classes.
-        numbering: CLASS_ID_NUMBERING[Classy] => _numbering
+        numbering: CLASS_ID_NUMBERING[WASMGC_CLASS] => _numbering
 
         /// A nullable reference to the root, which holds any object.
         object_reference: VALUE_TYPE => VALUE_TYPE.of_type_index(OBJECT_TYPE_INDEX, true)
+
+        /// How the program's virtual and trait calls dispatch.
+        dispatch: WASMGC_DISPATCH => _dispatch
 
         /// A registry that knows no classes, and so holds scalars only.
         init(module: MODULE) is
@@ -155,64 +186,212 @@ namespace IR.WasmGC is
         /// whose strings are instances of `string_type`.
         init(module: MODULE, object: Classy?, string_type: Classy?) is
             _module = module
-            _object = object
-            _string = string_type
+            _object_definition = object
 
-            _numbering = CLASS_ID_NUMBERING[Classy]()
+            _classes = MAP[WASMGC_CLASS, WASMGC_CLASS]()
+            _new_classes = LIST[WASMGC_CLASS]()
+            _dispatched = Collections.SET[Function]()
+            _lowered = Collections.SET[IR.Values.Call.INNATE]()
 
-            _type_indices = MAP[Classy, int]()
-            _layouts = MAP[Classy, LIST[VALUE_TYPE]]()
-            _descriptor_globals = MAP[Classy, int]()
-            _unit_variant_globals = MAP[Classy, int]()
+            _numbering = CLASS_ID_NUMBERING[WASMGC_CLASS]()
 
-            _fields = MAP[Symbol, WASMGC_FIELD]()
-            _globals = MAP[Symbol, int]()
-            _global_types = MAP[Symbol, VALUE_TYPE]()
-            _classes_by_index = MAP[int, Classy]()
-            _boxed = MAP[Classy, Type]()
-            _static_constructors = MAP[Classy, (constructor: Function, initialised: int)]()
+            _type_indices = MAP[WASMGC_CLASS, int]()
+            _layouts = MAP[WASMGC_CLASS, LIST[VALUE_TYPE]]()
+            _descriptor_globals = MAP[WASMGC_CLASS, int]()
+            _unit_variant_globals = MAP[WASMGC_CLASS, int]()
+            _classes_by_index = MAP[int, WASMGC_CLASS]()
+
+            _field_positions = MAP[Symbol, int]()
+            _statics = MAP[(member: Symbol, owner: WASMGC_CLASS), (index: int, type: VALUE_TYPE)]()
+            _namespace_globals = MAP[Symbol, (index: int, type: VALUE_TYPE)]()
+
+            _boxed = MAP[WASMGC_CLASS, Type]()
+            _static_constructors = MAP[WASMGC_CLASS, (constructor: WASMGC_FUNCTION, initialised: int)]()
 
             _unsupported = LIST[(location: LOCATION, construct: string)]()
 
             _dispatch = WASMGC_DISPATCH(self)
             _closure_descriptor = LIST[INSTRUCTION]()
             _closure_thunks = LIST[int]()
-            _ordered = LIST[Classy]()
-            _initialisers = MAP[Classy, LIST[INSTRUCTION]]()
-        si
+            _ordered = LIST[WASMGC_CLASS]()
+            _initialisers = MAP[WASMGC_CLASS, LIST[INSTRUCTION]]()
 
-        /// Builds the recursion group and the globals for every type
-        /// declared under `root`. Must run before anything else adds a type
-        /// to the module.
-        build(root: Scope) is
-            assert _module.type_count() == 0 else "the object model's types must come first"
-
-            let object = _object!
-
-            let emitted = SRM_MEMBER_ORDER.types(root)
-
-            _numbering.add_root(object)
-
-            let added = Collections.SET[Classy]()
-            added.add(object)
-
-            if let string_type = _string then
-                _numbering.add(string_type, object)
-                added.add(string_type)
+            if let definition = object then
+                _object = _intern(WASMGC_CLASS.of(definition))
             fi
 
-            for type in emitted do
-                if let declared = type.declared /\ _is_object_type(declared) then
-                    _add_class(declared, added)
+            if let definition = string_type then
+                _string = _intern(WASMGC_CLASS.of(definition))
+            fi
+        si
+
+        /// Takes every class declared under `root` that is not generic.
+        collect(root: Scope) is
+            for type in SRM_MEMBER_ORDER.types(root) do
+                if let declared = type.declared /\ _is_object_type(declared) /\ !declared.is_generic then
+                    class_of(declared, MAP[Symbol, Type]())
                 fi
             od
 
             for scalar in _scalar_types() do
-                if let box: Classy = scalar.symbol /\ !added.contains(box) then
-                    _numbering.add(box, object)
-                    _boxed[box] = scalar
-                    added.add(box)
+                if let box: Classy = scalar.symbol then
+                    let boxed = _intern(WASMGC_CLASS.of(box))
+
+                    _boxed[boxed] = scalar
                 fi
+            od
+        si
+
+        /// The classes added since this was last asked, each once.
+        take_new_classes() -> Collections.List[WASMGC_CLASS] is
+            let result = LIST[WASMGC_CLASS](_new_classes)
+
+            _new_classes.clear()
+
+            return result
+        si
+
+        /// Records, while discovering, that a call dispatches on `method`
+        /// through a vtable or the trait table, so whatever overrides it
+        /// can be reached.
+        note_dispatched(method: Function) is
+            _dispatched.add(cast Function?(method.root_specialized_from)!)
+        si
+
+        /// Whether `method` is, or overrides, a method a call dispatches on.
+        is_dispatched_to(method: Function) -> bool is
+            if _dispatched.contains(method) then
+                return true
+            fi
+
+            if let overridees = method.overridees then
+                for overridee in overridees do
+                    if let function: Function = overridee /\ is_dispatched_to(function) then
+                        return true
+                    fi
+                od
+            fi
+
+            return false
+        si
+
+        /// Records that the backend lowered the built-in operation `call`,
+        /// so a later pass over the same body lowers it the same way.
+        note_lowered(call: IR.Values.Call.INNATE) is
+            _lowered.add(call)
+        si
+
+        /// Whether the backend lowered the built-in operation `call`.
+        was_lowered(call: IR.Values.Call.INNATE) -> bool => _lowered.contains(call)
+
+        /// Every class the registry holds, boxes included.
+        classes: Collections.Iterable[WASMGC_CLASS] => _classes.values
+
+        // The one instance of each class, so the maps below can be keyed by
+        // it. A class's superclass is added with it.
+        _intern(type: WASMGC_CLASS) -> WASMGC_CLASS is
+            let existing: WASMGC_CLASS mut
+
+            if _classes.try_get_value(type, existing ref) then
+                return existing
+            fi
+
+            _classes[type] = type
+            _new_classes.add(type)
+
+            _superclass_of(type)
+
+            return type
+        si
+
+        /// The class `definition` at the type arguments `type_map` gives its
+        /// parameters, added while discovering. Null where the registry does
+        /// not hold it, or where `definition` is not a class the object
+        /// model represents.
+        class_of(definition: Classy, type_map: Collections.Map[Symbol, Type]) -> WASMGC_CLASS? is
+            let arguments = LIST[Type]()
+            let map = MAP[Symbol, Type]()
+
+            for (parameter, argument) in type_map do
+                if parameter.owner == definition then
+                    map[parameter] = argument
+                fi
+            od
+
+            for name in definition.argument_names do
+                for (parameter, argument) in map do
+                    if parameter.name =~ name then
+                        arguments.add(argument)
+                    fi
+                od
+            od
+
+            let key = WASMGC_CLASS(definition, arguments, map)
+
+            let existing: WASMGC_CLASS mut
+
+            if _classes.try_get_value(key, existing ref) then
+                return existing
+            fi
+
+            if _is_built \/ !_is_object_type(definition) \/ arguments.count != definition.argument_names.count then
+                return null
+            fi
+
+            // An instantiation is compiled only once every argument is a
+            // type rather than a type parameter still to be bound.
+            for argument in arguments do
+                if argument.is_type_variable then
+                    return null
+                fi
+            od
+
+            return _intern(key)
+        si
+
+        /// The class a value of `type` is an instance of, or null where it
+        /// is not one the registry holds. `type` must have no type
+        /// parameters left in it.
+        class_of(type: Type?) -> WASMGC_CLASS? is
+            if !type? then
+                return null
+            fi
+
+            let symbol = type.symbol
+
+            if let generic: GENERIC = symbol then
+                if let definition: Classy = generic.unspecialized_symbol then
+                    return class_of(definition, generic.type_map)
+                fi
+            elif let definition: Classy = symbol then
+                return class_of(definition, MAP[Symbol, Type]())
+            fi
+
+            return null
+        si
+
+        /// Numbers every class held and builds the recursion group and the
+        /// globals. Must run before anything else adds a type to the module.
+        build() is
+            assert _module.type_count() == 0 else "the object model's types must come first"
+
+            _is_built = true
+
+            let object = _object!
+
+            _numbering.add_root(object)
+
+            let added = Collections.SET[WASMGC_CLASS]()
+            added.add(object)
+
+            for type in _classes.values do
+                if !_boxed.contains_key(type) then
+                    _add_class(type, added)
+                fi
+            od
+
+            for (box, _) in _boxed do
+                _numbering.add(box, object)
             od
 
             _numbering.number()
@@ -262,23 +441,26 @@ namespace IR.WasmGC is
                 _module.add_global(
                     GLOBAL(VALUE_TYPE.of_type_index(DESCRIPTOR_TYPE_INDEX, false), false, _closure_descriptor))
 
-            for type in emitted do
-                _add_static_globals(type)
+            for type in ordered do
+                if !_boxed.contains_key(type) /\ type != object then
+                    _add_statics(type)
+                fi
             od
 
+            _add_namespace_globals()
+
             for type in ordered do
-                if type.is_unit_variant then
+                if type.definition.is_unit_variant then
                     _add_unit_variant_global(type)
                 fi
             od
         si
 
-        /// Fills in the descriptors and adds the trait table, once every
-        /// function with a body has its index, numbering the dispatch thunks
-        /// from `first_thunk`. The descriptors' global indices are fixed by
-        /// `build`.
+        /// Fills in the descriptors and adds the trait table, once the walk
+        /// has reached everything. The descriptors' global indices are fixed
+        /// by `build`.
         finish(numbering: WASMGC_FUNCTION_NUMBERING) is
-            _numbering_functions = numbering
+            _functions = numbering
 
             _dispatch.finish(_module, numbering)
 
@@ -309,12 +491,6 @@ namespace IR.WasmGC is
 
         /// The struct type a function value is held in.
         closure_type_index: int => _closure_type_index
-
-        /// The closure field holding the function to call.
-        CLOSURE_FUNCTION: int static => 1
-
-        /// The closure field holding the receiver or frame, null for none.
-        CLOSURE_RECEIVER: int static => 2
 
         /// The global holding the descriptor every function value has.
         closure_descriptor_global: int => _closure_descriptor_global
@@ -348,20 +524,31 @@ namespace IR.WasmGC is
                 fi
             fi
 
+            if discovering then
+                return 0
+            fi
+
             return _module.add_type(FUNC_TYPE(parameters.to_array(), results.to_array()))
         si
 
         /// The thunk a function value of `signature` holding `function`
         /// calls, reserved in `numbering`. It casts the receiver or frame it
         /// is given to the type the function takes, or ignores it where the
-        /// function takes none, and calls the function.
-        closure_thunk(signature: int, function: Function, discards_result: bool, numbering: WASMGC_FUNCTION_NUMBERING) -> int is
+        /// function takes none, and calls the function. Nothing is reserved
+        /// while discovering.
+        closure_thunk(signature: int, function: WASMGC_FUNCTION, discards_result: bool, numbering: WASMGC_FUNCTION_NUMBERING) -> int is
+            if discovering then
+                return 0
+            fi
+
             let registry = self
 
             let index = numbering.reserve(() is
                 let body = LIST[INSTRUCTION]()
 
-                if function.is_emitted_with_receiver then
+                let definition = function.definition
+
+                if definition.is_emitted_with_receiver then
                     body.add(INDEX_INSTRUCTION(Opcode.LOCAL_GET, 0))
 
                     if let receiver = registry.receiver_type(function) then
@@ -371,7 +558,7 @@ namespace IR.WasmGC is
                     fi
                 fi
 
-                for i in 0..function.arguments.count do
+                for i in 0..definition.arguments.count do
                     body.add(INDEX_INSTRUCTION(Opcode.LOCAL_GET, i + 1))
                 od
 
@@ -393,33 +580,34 @@ namespace IR.WasmGC is
         /// since bodies name them with ref.func.
         closure_thunks: LIST[int] => _closure_thunks
 
-        /// The type an instance method of `function`'s owner, or a closure
-        /// body taking its frame, receives `self` as, or null where it has
-        /// no receiver the object model holds.
-        receiver_type(function: Function) -> VALUE_TYPE? is
-            if let closure: Semantic.Symbols.Closure = function /\ closure.frame? then
-                if let index = type_index(closure.frame) then
-                    return VALUE_TYPE.of_type_index(index, true)
+        /// The type the instance of `function` receives `self` as: its
+        /// class, or the frame of a closure body, or the root for a trait's
+        /// default method. Null where it has no receiver the object model
+        /// holds.
+        receiver_type(function: WASMGC_FUNCTION) -> VALUE_TYPE? is
+            let definition = function.definition
+
+            if let closure: Semantic.Symbols.Closure = definition /\ closure.frame? then
+                if let frame_type = closure.frame.type then
+                    if let index = type_index(function.specialize(frame_type)) then
+                        return VALUE_TYPE.of_type_index(index, true)
+                    fi
                 fi
-            elif let owner: Classy = function.owner /\ is_object_type(owner) then
-                if let index = type_index(owner) then
-                    return VALUE_TYPE.of_type_index(index, true)
-                fi
-            elif let owner: Classy = function.owner /\ owner.is_trait then
+            elif let owner: Classy = definition.owner /\ owner.is_trait then
                 return object_reference
+            elif let owner: Classy = definition.owner then
+                if let type = class_of(owner, function.type_map) /\ is_object_type(type) then
+                    return VALUE_TYPE.of_type_index(type_index(type)!, true)
+                fi
             fi
 
             return null
         si
 
-        /// How the program's virtual and trait calls dispatch.
-        dispatch: WASMGC_DISPATCH => _dispatch
-
         // Whether `type` is represented as a struct by this model. Traits
         // have no instances of their own, structs and enums are value types
-        // with a representation of their own, a generic type is compiled
-        // per instantiation, and the built-in types the compiler constructs
-        // are not declared by the program.
+        // with a representation of their own, and the built-in types the
+        // compiler constructs are not declared by the program.
         _is_object_type(type: Classy) -> bool is
             let is_frame = isa Semantic.Symbols.FRAME(type)
 
@@ -430,19 +618,10 @@ namespace IR.WasmGC is
                 return false
             fi
 
-            if !(isa Semantic.Symbols.CLASS(type) \/ isa Semantic.Symbols.FRAME(type) \/ type.is_union \/ type.is_variant) then
-                return false
-            fi
-
-            if type.is_generic \/ _superclass_of(type) == null /\ _has_generic_superclass(type) then
-                _unsupported.add((type.location, "a generic type"))
-                return false
-            fi
-
-            return true
+            return isa Semantic.Symbols.CLASS(type) \/ is_frame \/ type.is_union \/ type.is_variant
         si
 
-        _add_class(type: Classy, added: Collections.SET[Classy]) is
+        _add_class(type: WASMGC_CLASS, added: Collections.SET[WASMGC_CLASS]) is
             if added.contains(type) then
                 return
             fi
@@ -459,14 +638,16 @@ namespace IR.WasmGC is
 
         // The class `type` extends, where the program declares it, or null
         // where it extends the root.
-        _superclass_of(type: Classy) -> Classy? is
-            for ancestor in type.ancestors do
+        _superclass_of(type: WASMGC_CLASS) -> WASMGC_CLASS? is
+            for ancestor in type.definition.ancestors do
                 if ancestor.is_trait then
                     continue
                 fi
 
-                if let superclass: Classy = ancestor.symbol /\ superclass != type then
-                    if superclass.is_object \/ superclass.location == LOCATION.internal then
+                let specialized = type.specialize(ancestor)!
+
+                if let superclass = class_of(specialized) /\ superclass != type then
+                    if superclass.definition.is_object then
                         return null
                     fi
 
@@ -477,15 +658,8 @@ namespace IR.WasmGC is
             return null
         si
 
-        _has_generic_superclass(type: Classy) -> bool is
-            for ancestor in type.ancestors do
-                if !ancestor.is_trait /\ isa Semantic.Symbols.GENERIC(ancestor.symbol) then
-                    return true
-                fi
-            od
-
-            return false
-        si
+        /// The class `type` extends, or null where that is the root.
+        superclass_of(type: WASMGC_CLASS) -> WASMGC_CLASS? => _superclass_of(type)
 
         _descriptor_struct() -> STRUCT_TYPE =>
             STRUCT_TYPE([
@@ -512,9 +686,8 @@ namespace IR.WasmGC is
             ]
         si
 
-        _sub_type(type: Classy) -> SUB_TYPE is
+        _sub_type(type: WASMGC_CLASS) -> SUB_TYPE is
             let layout = LIST[VALUE_TYPE]()
-            let type_index = _type_indices[type]
 
             let boxed: Type mut
 
@@ -558,13 +731,11 @@ namespace IR.WasmGC is
                 layout.add(inherited)
             od
 
-            for `field in SRM_MEMBER_ORDER.fields(SRM_EMITTED_TYPE(type)) do
-                if _is_instance_field(`field) then
-                    let value_type = _field_value_type(`field)
+            for `field in SRM_MEMBER_ORDER.fields(SRM_EMITTED_TYPE(type.definition)) do
+                if `field.is_instance then
+                    _field_positions[`field] = layout.count
 
-                    _fields[`field] = WASMGC_FIELD(type_index, layout.count, value_type)
-
-                    layout.add(value_type)
+                    layout.add(_field_value_type(`field, type))
                 fi
             od
 
@@ -595,15 +766,14 @@ namespace IR.WasmGC is
             return STRUCT_TYPE(fields.to_array())
         si
 
-        _is_instance_field(`field: Field) -> bool =>
-            `field.is_instance
+        _field_value_type(`field: Field, owner: WASMGC_CLASS?) -> VALUE_TYPE is
+            let type = if let o = owner then o.specialize(`field.type) else `field.type fi
 
-        _field_value_type(`field: Field) -> VALUE_TYPE is
-            if let value_type = value_type(`field.type) then
+            if let value_type = value_type(type) then
                 return value_type
             fi
 
-            _unsupported.add((`field.location, "a field of type {`field.type}"))
+            _unsupported.add((`field.location, "a field of type {type}"))
 
             return object_reference
         si
@@ -611,7 +781,7 @@ namespace IR.WasmGC is
         // A descriptor's global takes its index when the types are built,
         // so lowering can name it, and its initialiser is filled in by
         // `finish`, once the functions its vtable refers to are numbered.
-        _add_descriptor_global(type: Classy) is
+        _add_descriptor_global(type: WASMGC_CLASS) is
             let initialiser = LIST[INSTRUCTION]()
 
             _initialisers[type] = initialiser
@@ -621,7 +791,7 @@ namespace IR.WasmGC is
                     GLOBAL(VALUE_TYPE.of_type_index(DESCRIPTOR_TYPE_INDEX, false), false, initialiser))
         si
 
-        _fill_descriptor(type: Classy) is
+        _fill_descriptor(type: WASMGC_CLASS) is
             let initialiser = _initialisers[type]
 
             initialiser.add(I32_CONSTANT(_numbering.id(type)))
@@ -633,11 +803,11 @@ namespace IR.WasmGC is
                 initialiser.add(INDEX_INSTRUCTION(Opcode.GLOBAL_GET, _descriptor_globals[_superclass_of(type) ?? _object!]))
             fi
 
-            for instruction in chars_of(type.qualified_name) do
+            for instruction in chars_of(type.definition.qualified_name) do
                 initialiser.add(instruction)
             od
 
-            if let vtable = _dispatch.vtable(type, _numbering_functions!) then
+            if let vtable = _dispatch.vtable(type, _functions!) then
                 initialiser.add_range(vtable)
             else
                 initialiser.add(HEAP_TYPE_INSTRUCTION(Opcode.REF_NULL, HEAP_TYPE.of_abstract(AbstractHeapType.STRUCT)))
@@ -646,44 +816,65 @@ namespace IR.WasmGC is
             initialiser.add(TYPE_INSTRUCTION(Opcode.STRUCT_NEW, DESCRIPTOR_TYPE_INDEX))
         si
 
-        // Static fields and namespace-level variables are globals, each
-        // starting at its type's default value.
-        _add_static_globals(type: SRM_EMITTED_TYPE) is
-            if let declared = type.declared then
-                if !_type_indices.contains_key(declared) /\ !type.is_globals_carrier then
+        // A class's static fields are globals, each instantiation of a
+        // generic class having its own, as on .NET. So is its static
+        // constructor's flag.
+        _add_statics(type: WASMGC_CLASS) is
+            let emitted = SRM_EMITTED_TYPE(type.definition)
+
+            for method in SRM_MEMBER_ORDER.methods(emitted) do
+                if method.is_static_constructor then
+                    _static_constructors[type] =
+                        (
+                            WASMGC_FUNCTION(method, type.type_map),
+                            _module.add_global(GLOBAL(VALUE_TYPE.of_numeric(NumericType.I32), true, [I32_CONSTANT(0)]))
+                        )
+                fi
+            od
+
+            for `field in SRM_MEMBER_ORDER.fields(emitted) do
+                if `field.is_instance \/ isa Semantic.Symbols.CONSTANT_FIELD(`field) then
+                    continue
+                fi
+
+                let value_type = _field_value_type(`field, type)
+
+                _statics[(`field, type)] =
+                    (_module.add_global(GLOBAL(value_type, true, [default_value(value_type)])), value_type)
+            od
+        si
+
+        // Namespace-level variables are globals, each starting at its
+        // type's default value. A static constructor anywhere the object
+        // model does not hold a class is reported.
+        _add_namespace_globals() is
+            let root = IoC.CONTAINER.instance.symbol_table.global_scope
+
+            for type in SRM_MEMBER_ORDER.types(root) do
+                if type.is_globals_carrier then
+                    for `field in SRM_MEMBER_ORDER.fields(type) do
+                        if `field.is_instance \/ isa Semantic.Symbols.CONSTANT_FIELD(`field) then
+                            continue
+                        fi
+
+                        let value_type = _field_value_type(`field, null)
+
+                        _namespace_globals[`field] =
+                            (_module.add_global(GLOBAL(value_type, true, [default_value(value_type)])), value_type)
+                    od
+                elif let declared = type.declared /\ !_is_object_type(declared) then
                     for method in SRM_MEMBER_ORDER.methods(type) do
                         if method.is_static_constructor then
                             _unsupported.add((method.location, "a static constructor"))
                         fi
                     od
-
-                    return
                 fi
-
-                for method in SRM_MEMBER_ORDER.methods(type) do
-                    if method.is_static_constructor then
-                        _static_constructors[declared] =
-                            (method, _module.add_global(GLOBAL(VALUE_TYPE.of_numeric(NumericType.I32), true, [I32_CONSTANT(0)])))
-                    fi
-                od
-            fi
-
-            for `field in SRM_MEMBER_ORDER.fields(type) do
-                if `field.is_instance \/ isa Semantic.Symbols.CONSTANT_FIELD(`field) then
-                    continue
-                fi
-
-                let value_type = _field_value_type(`field)
-
-                _global_types[`field] = value_type
-                _globals[`field] =
-                    _module.add_global(GLOBAL(value_type, true, [default_value(value_type)]))
             od
         si
 
-        // A unit variant is one shared instance, built once, holding the
-        // default value of every field it inherits.
-        _add_unit_variant_global(variant: Classy) is
+        // A unit variant is one shared instance for each instantiation,
+        // built once, holding the default value of every field it inherits.
+        _add_unit_variant_global(variant: WASMGC_CLASS) is
             _unit_variant_globals[variant] =
                 _module.add_global(
                     GLOBAL(
@@ -694,8 +885,12 @@ namespace IR.WasmGC is
 
         /// The constant expression that builds an instance of `type` with
         /// every field at its default value.
-        new_instance(type: Classy) -> LIST[INSTRUCTION] is
+        new_instance(type: WASMGC_CLASS) -> LIST[INSTRUCTION] is
             let result = LIST[INSTRUCTION]()
+
+            if discovering then
+                return result
+            fi
 
             result.add(INDEX_INSTRUCTION(Opcode.GLOBAL_GET, _descriptor_globals[type]))
 
@@ -723,6 +918,10 @@ namespace IR.WasmGC is
             return result
         si
 
+        /// Whether the program has a string type, which it does once the
+        /// core library declares one.
+        has_string_type: bool => _string?
+
         /// The struct type a string is held in, or null where the registry
         /// knows no string type.
         string_type_index: int? => if let string_type = _string then type_index(string_type) else null fi
@@ -747,7 +946,8 @@ namespace IR.WasmGC is
 
         /// The type a value of `type` is held in, or null where the target
         /// cannot hold it yet. A declared class is a reference to its
-        /// struct; `object` and a trait are references to the root.
+        /// struct; `object` and a trait are references to the root. `type`
+        /// must have no type parameters left in it.
         value_type(type: Type?) -> VALUE_TYPE? is
             if !type? \/ type.is_void then
                 return null
@@ -779,11 +979,15 @@ namespace IR.WasmGC is
         /// The struct type a value of `type` is held in, or null where
         /// `type` is not a class the program declares.
         type_index(type: Type?) -> int? =>
-            if let symbol: Classy = type?.symbol then type_index(symbol) else null fi
+            if let held = class_of(type) then type_index(held) else null fi
 
-        /// The struct type of `type`, or null where the program does not
-        /// declare it as a class.
-        type_index(type: Classy) -> int? is
+        /// The struct type of `type`, or null where it has none; while
+        /// discovering, the root's.
+        type_index(type: WASMGC_CLASS) -> int? is
+            if discovering then
+                return OBJECT_TYPE_INDEX
+            fi
+
             let index mut = 0
 
             if _type_indices.try_get_value(type, index ref) then
@@ -794,40 +998,52 @@ namespace IR.WasmGC is
         si
 
         /// Whether `type` is a class with a struct type of its own.
-        is_object_type(type: Classy) -> bool => _type_indices.contains_key(type) /\ !is_box(type)
+        is_object_type(type: WASMGC_CLASS) -> bool =>
+            !is_box(type) /\ _is_object_type(type.definition)
 
         /// Whether `type` is a scalar's box rather than a class.
-        is_box(type: Classy) -> bool => _boxed.contains_key(type)
+        is_box(type: WASMGC_CLASS) -> bool => _boxed.contains_key(type)
 
-        /// Where an instance field lives, or null where it is not a field
-        /// of a class the registry holds.
-        field_of(`field: Symbol) -> WASMGC_FIELD? is
-            let result: WASMGC_FIELD mut
+        /// Where the instance field `field` lives in `owner`, the class
+        /// declaring it, or null where the registry does not hold it.
+        field_of(`field: Symbol, owner: WASMGC_CLASS) -> WASMGC_FIELD? is
+            let root = `field.root_specialized_from
 
-            if _fields.try_get_value(`field, result ref) then
-                return result
+            let position mut = 0
+
+            if discovering then
+                return WASMGC_FIELD(OBJECT_TYPE_INDEX, 0, object_reference)
             fi
 
-            return null
-        si
-
-        /// The global holding a static field or namespace-level variable.
-        global_of(`field: Symbol) -> int? is
-            let index mut = 0
-
-            if _globals.try_get_value(`field, index ref) then
-                return index
+            if !_field_positions.try_get_value(root, position ref) then
+                return null
             fi
 
-            return null
+            let index = type_index(owner)
+
+            if !index? then
+                return null
+            fi
+
+            return WASMGC_FIELD(index, position, _layouts[owner][position])
         si
 
-        /// The type of the global holding a static field or namespace-level
-        /// variable.
-        global_type(`field: Symbol) -> VALUE_TYPE? is
-            let result: VALUE_TYPE mut
+        /// The global holding the static field `field` of `owner`, or the
+        /// namespace-level variable `field` where `owner` is null, and its
+        /// type.
+        global_of(`field: Symbol, owner: WASMGC_CLASS?) -> (index: int, type: VALUE_TYPE)? is
+            if discovering then
+                return (0, object_reference)
+            fi
 
-            if _global_types.try_get_value(`field, result ref) then
+            let root = `field.root_specialized_from
+            let result: (index: int, type: VALUE_TYPE) mut
+
+            if let o = owner then
+                if _statics.try_get_value((root, o), result ref) then
+                    return result
+                fi
+            elif _namespace_globals.try_get_value(root, result ref) then
                 return result
             fi
 
@@ -835,7 +1051,8 @@ namespace IR.WasmGC is
         si
 
         /// The global holding the descriptor of `type`.
-        descriptor_global(type: Classy) -> int => _descriptor_globals[type]
+        descriptor_global(type: WASMGC_CLASS) -> int =>
+            if discovering then 0 else _descriptor_globals[type] fi
 
         /// Whether a reference held as `held` is usable as `expected`
         /// without a cast: the same type, or a class derived from it.
@@ -851,8 +1068,8 @@ namespace IR.WasmGC is
                 return false
             fi
 
-            let derived: Classy mut
-            let base: Classy mut
+            let derived: WASMGC_CLASS mut
+            let base: WASMGC_CLASS mut
 
             if
                 !_classes_by_index.try_get_value(held_index, derived ref) \/
@@ -866,8 +1083,18 @@ namespace IR.WasmGC is
 
         /// The static constructor of `type`, and the global that records
         /// whether it has run, or null where `type` declares none.
-        static_constructor(type: Classy) -> (constructor: Function, initialised: int)? is
-            let result: (constructor: Function, initialised: int) mut
+        static_constructor(type: WASMGC_CLASS) -> (constructor: WASMGC_FUNCTION, initialised: int)? is
+            if discovering then
+                for method in SRM_MEMBER_ORDER.methods(SRM_EMITTED_TYPE(type.definition)) do
+                    if method.is_static_constructor then
+                        return (WASMGC_FUNCTION(method, type.type_map), 0)
+                    fi
+                od
+
+                return null
+            fi
+
+            let result: (constructor: WASMGC_FUNCTION, initialised: int) mut
 
             if _static_constructors.try_get_value(type, result ref) then
                 return result
@@ -877,7 +1104,11 @@ namespace IR.WasmGC is
         si
 
         /// The global holding a unit variant's shared instance.
-        unit_variant_global(variant: Classy) -> int? is
+        unit_variant_global(variant: WASMGC_CLASS) -> int? is
+            if discovering then
+                return 0
+            fi
+
             let index mut = 0
 
             if _unit_variant_globals.try_get_value(variant, index ref) then
@@ -889,27 +1120,33 @@ namespace IR.WasmGC is
 
         /// The struct type a value of the scalar `type` is boxed in, or null
         /// where `type` is not a scalar.
-        box_index(type: Type?) -> int? is
-            if let box: Classy = type?.symbol /\ _boxed.contains_key(box) then
-                return type_index(box)
+        box_index(type: Type?) -> int? =>
+            if let box = box_type(type) then type_index(box) else null fi
+
+        /// The box a value of the scalar `type` is held in, or null where
+        /// `type` is not a scalar.
+        box_type(type: Type?) -> WASMGC_CLASS? is
+            if let box: Classy = type?.symbol then
+                let key = WASMGC_CLASS.of(box)
+
+                let existing: WASMGC_CLASS mut
+
+                if _classes.try_get_value(key, existing ref) /\ _boxed.contains_key(existing) then
+                    return existing
+                fi
             fi
 
             return null
         si
 
-        /// The box a value of the scalar `type` is held in, or null where
-        /// `type` is not a scalar.
-        box_type(type: Type?) -> Classy? =>
-            if let box: Classy = type?.symbol /\ _boxed.contains_key(box) then box else null fi
-
-        /// The field of a box holding the value.
-        BOX_VALUE: int static => 1
-
         /// Whether every instance of `derived` is an instance of `base`.
-        is_subclass(derived: Classy, base: Classy) -> bool =>
+        is_subclass(derived: WASMGC_CLASS, base: WASMGC_CLASS) -> bool =>
             base == _object \/
             _type_indices.contains_key(derived) /\
             _type_indices.contains_key(base) /\
             _numbering.is_within(derived, base)
+
+        /// Whether `type` is the root class.
+        is_object(type: WASMGC_CLASS) -> bool => type == _object
     si
 si

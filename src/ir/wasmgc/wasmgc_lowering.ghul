@@ -39,6 +39,10 @@ namespace IR.WasmGC is
 
         _numbering: WASMGC_FUNCTION_NUMBERING
         _registry: WASMGC_TYPE_REGISTRY
+
+        // The instantiation being compiled: the type arguments the body's
+        // type parameters stand for.
+        _instance: WASMGC_FUNCTION?
         _imports: WASMGC_IMPORTS
         _strings: WASMGC_STRINGS?
 
@@ -100,7 +104,7 @@ namespace IR.WasmGC is
             numbering: WASMGC_FUNCTION_NUMBERING,
             registry: WASMGC_TYPE_REGISTRY,
             imports: WASMGC_IMPORTS,
-            function: Function,
+            function: WASMGC_FUNCTION,
             parameter_types: Collections.List[VALUE_TYPE]
         ) is
             init(numbering, registry, imports, null, function, parameter_types)
@@ -122,15 +126,16 @@ namespace IR.WasmGC is
             registry: WASMGC_TYPE_REGISTRY,
             imports: WASMGC_IMPORTS,
             strings: WASMGC_STRINGS?,
-            function: Function,
+            function: WASMGC_FUNCTION,
             parameter_types: Collections.List[VALUE_TYPE]
         ) is
             init(numbering, registry, imports, parameter_types)
 
             _strings = strings
 
-            _receiver_offset = if function.is_emitted_with_receiver then 1 else 0 fi
-            _return_type = function.return_type
+            _instance = function
+            _receiver_offset = if function.definition.is_emitted_with_receiver then 1 else 0 fi
+            _return_type = function.specialize(function.definition.return_type)
         si
 
         /// Lowers a body that takes no receiver and whose result needs no
@@ -186,10 +191,10 @@ namespace IR.WasmGC is
                 return _held_type(view.underlying)
             elif let projection: Values.NARROW_PROJECT = value then
                 return _held_type(projection.projected)
-            elif let conversion: Values.CAST = value /\ _registry.box_index(conversion.type)? then
-                return VALUE_TYPE.of_type_index(_registry.box_index(conversion.type)!, true)
+            elif let conversion: Values.CAST = value /\ _registry.box_index(_specialize(conversion.type))? then
+                return VALUE_TYPE.of_type_index(_registry.box_index(_specialize(conversion.type))!, true)
             elif let box: Values.BOX = value then
-                if let index = _registry.box_index(box.value.type) then
+                if let index = _registry.box_index(_specialize(box.value.type)) then
                     return VALUE_TYPE.of_type_index(index, true)
                 fi
 
@@ -209,11 +214,13 @@ namespace IR.WasmGC is
             elif isa Values.Load.RECEIVER(value) \/ isa Values.Load.REFERENCE_SELF(value) then
                 return _local_type(0)
             elif let load: Values.Load.INSTANCE_FIELD = value then
-                return _registry.field_of(load.symbol)?.value_type
+                if let owner = _owner_class(load.symbol.owner) then
+                    return _registry.field_of(load.symbol, owner)?.value_type
+                fi
             elif let load: Values.Load.STATIC_FIELD = value then
-                return _registry.global_type(load.symbol)
+                return _global_of(load.symbol)?.type
             elif let load: Values.Load.GLOBAL_FIELD = value then
-                return _registry.global_type(load.symbol)
+                return _global_of(load.symbol)?.type
             fi
 
             return _value_type(value.type)
@@ -289,10 +296,58 @@ namespace IR.WasmGC is
 
         // The wasm type a value of `type` is held in, or null where it
         // is not a scalar the target can hold yet.
-        _value_type(type: Type?) -> VALUE_TYPE? => _registry.value_type(type)
+        _value_type(type: Type?) -> VALUE_TYPE? => _registry.value_type(_specialize(type))
+
+        // `type` with the type parameters of the body being compiled
+        // replaced by the arguments of this instantiation.
+        _specialize(type: Type?) -> Type? =>
+            if let instance = _instance then instance.specialize(type) else type fi
+
+        _type_map: Collections.Map[Semantic.Symbols.Symbol, Type] =>
+            if let instance = _instance then instance.type_map else MAP[Semantic.Symbols.Symbol, Type]() fi
+
+        // The index of the instantiation of `function` a reference from
+        // this body names, numbered the first time it is asked for.
+        _index_of(function: Function) -> int? =>
+            _numbering.index_of(_instance_of(function))
+
+        // The instantiation of `function` a reference from this body names.
+        _instance_of(function: Function) -> WASMGC_FUNCTION =>
+            WASMGC_FUNCTION(
+                cast Function?(function.root_specialized_from)!,
+                WASMGC_TYPE_MAPS.function_map(function, _type_map))
+
+        // The class a member's owner is, at the arguments this body gives
+        // it: a constructed generic names them itself, and a reference from
+        // inside a generic class to its own members takes the body's.
+        _owner_class(owner: Semantic.Scope?) -> WASMGC_CLASS? is
+            if let generic: Semantic.Symbols.GENERIC = owner then
+                return _registry.class_of(_specialize(generic.type))
+            elif let classy: Semantic.Symbols.Classy = owner then
+                return _registry.class_of(classy, _type_map)
+            fi
+
+            return null
+        si
+
+        // The global holding a static field or a namespace-level variable.
+        _global_of(symbol: Semantic.Symbols.Symbol) -> (index: int, type: VALUE_TYPE)? =>
+            _registry.global_of(symbol, _owner_class(symbol.owner))
+
+        // The instantiation of the trait a member's owner is, at the
+        // arguments this body gives it.
+        _trait_instance(owner: Semantic.Scope?) -> WASMGC_CLASS? is
+            if let generic: Semantic.Symbols.GENERIC = owner then
+                return _registry.dispatch.trait_of(_specialize(generic.type)!)
+            elif let classy: Semantic.Symbols.Classy = owner then
+                return _registry.dispatch.trait_of(classy, _type_map)
+            fi
+
+            return null
+        si
 
         _numeric(type: Type?) -> NumericType? is
-            if let scalar = WASMGC_TYPES.scalar(type) then
+            if let scalar = WASMGC_TYPES.scalar(_specialize(type)) then
                 return WASMGC_TYPES.numeric(scalar)
             fi
 
@@ -304,7 +359,7 @@ namespace IR.WasmGC is
         _normalise_for(type: Type?) is
             _coerce_top(_value_type(type))
 
-            if let scalar = WASMGC_TYPES.scalar(type) then
+            if let scalar = WASMGC_TYPES.scalar(_specialize(type)) then
                 if WASMGC_TYPES.is_narrow(scalar) then
                     _emit_all(WASMGC_OPERATIONS.normalise(scalar))
                 fi
@@ -398,7 +453,7 @@ namespace IR.WasmGC is
                 return
             fi
 
-            let index_found = _numbering.index_of(function)
+            let index_found = _index_of(function)
 
             if !index_found? then
                 _report("a call to {function.name}")
@@ -470,8 +525,10 @@ namespace IR.WasmGC is
                 return null
             fi
 
-            if let `field = _registry.field_of(symbol) then
-                return `field
+            if let owner = _owner_class(symbol.owner) then
+                if let `field = _registry.field_of(symbol, owner) then
+                    return `field
+                fi
             fi
 
             _report("a field of {symbol.owner}")
@@ -493,7 +550,7 @@ namespace IR.WasmGC is
         si
 
         _global_get(symbol: Semantic.Symbols.Symbol) is
-            if let index = _registry.global_of(symbol) then
+            if let (index, _) = _global_of(symbol) then
                 _ensure_initialised(symbol.owner)
                 _emit(INDEX_INSTRUCTION(Opcode.GLOBAL_GET, index))
             else
@@ -502,7 +559,7 @@ namespace IR.WasmGC is
         si
 
         _global_set(symbol: Semantic.Symbols.Symbol, value: Value) is
-            if let index = _registry.global_of(symbol) then
+            if let (index, _) = _global_of(symbol) then
                 _ensure_initialised(symbol.owner)
                 gen(value)
 
@@ -594,11 +651,10 @@ namespace IR.WasmGC is
         /// value is the region its arms leave, each carrying the value it
         /// produces, so that region's wasm block results in the type the
         /// block produces.
+        // Unlike the CIL backend, this one lowers a body more than once,
+        // while discovering and then once for each instantiation, so a block
+        // is not marked as emitted.
         visit(block: Values.BLOCK) is
-            assert !block.is_emitted else "block value already emitted"
-
-            block.is_emitted = true
-
             let values = block.values
 
             for i in 0..values.count do
@@ -653,6 +709,9 @@ namespace IR.WasmGC is
             esac
         si
 
+        _is_representation_operation(name: string) -> bool =>
+            name =~ "string.length" \/ name =~ "string.char_at" \/ name =~ "string.concat" \/ name =~ "object.type_name"
+
         _call_string_helper(index: int, strings: WASMGC_STRINGS, arguments: Collections.List[Value]) is
             for argument in arguments do
                 gen(argument)
@@ -665,17 +724,24 @@ namespace IR.WasmGC is
         // The operations the core library declares on strings and objects
         // that read their representation, which no ghūl code can reach.
         _lower_representation(operation: string?, arguments: Collections.List[Value]) -> bool is
-            let strings = _strings
-
-            if !strings? then
-                return false
-            fi
-
             if !operation? then
                 return false
             fi
 
+            let strings = _strings
             let name = operation
+
+            // Discovery runs before the strings exist, and only needs
+            // what the arguments reach.
+            if !strings? then
+                if _registry.discovering /\ _is_representation_operation(name) then
+                    _lower_all(arguments)
+                    return true
+                fi
+
+                return false
+            fi
+
             let string_type = strings.string_type_index
             let chars = _registry.chars_type_index
 
@@ -766,12 +832,14 @@ namespace IR.WasmGC is
                 return
             fi
 
-            if !_numbering.index_of(function)? then
+            let instance = _instance_of(function)
+
+            if !_numbering.index_of(instance)? then
                 _report("a function value of {function.name}")
                 return
             fi
 
-            let signature = _registry.closure_signature(closure.type)
+            let signature = _registry.closure_signature(_specialize(closure.type)!)
 
             if !signature? then
                 _report("a function value of type {closure.type}")
@@ -779,7 +847,7 @@ namespace IR.WasmGC is
             fi
 
             let discards_result = _discards_result(closure.type, function)
-            let thunk = _registry.closure_thunk(signature, function, discards_result, _numbering)
+            let thunk = _registry.closure_thunk(signature, instance, discards_result, _numbering)
 
             _emit(INDEX_INSTRUCTION(Opcode.GLOBAL_GET, _registry.closure_descriptor_global))
             _emit(INDEX_INSTRUCTION(Opcode.REF_FUNC, thunk))
@@ -910,8 +978,8 @@ namespace IR.WasmGC is
         visit(box: Values.BOX) is
             let value = box.value
 
-            if let index = _registry.box_index(value.type) then
-                let box_type = _registry.box_type(value.type)!
+            if let index = _registry.box_index(_specialize(value.type)) then
+                let box_type = _registry.box_type(_specialize(value.type))!
 
                 _emit(INDEX_INSTRUCTION(Opcode.GLOBAL_GET, _registry.descriptor_global(box_type)))
                 gen(value)
@@ -925,7 +993,7 @@ namespace IR.WasmGC is
 
         // A null or a box of another type traps, where .NET throws.
         visit(unbox: Values.UNBOX) is
-            if let index = _registry.box_index(unbox.type) then
+            if let index = _registry.box_index(_specialize(unbox.type)) then
                 gen(unbox.value)
 
                 _emit(HEAP_TYPE_INSTRUCTION(Opcode.REF_CAST, HEAP_TYPE.of_type_index(index)))
@@ -951,7 +1019,7 @@ namespace IR.WasmGC is
                 return
             fi
 
-            let target = _registry.type_index(conversion.type)
+            let target = _registry.type_index(_specialize(conversion.type))
 
             if !target? then
                 if _is_unchecked_widening(conversion.type) then
@@ -1031,7 +1099,7 @@ namespace IR.WasmGC is
                 return
             fi
 
-            if let target = _registry.type_index(test.isa_type) then
+            if let target = _registry.type_index(_specialize(test.isa_type)) then
                 gen(value)
 
                 _emit(HEAP_TYPE_INSTRUCTION(Opcode.REF_TEST, HEAP_TYPE.of_type_index(target)))
@@ -1051,18 +1119,16 @@ namespace IR.WasmGC is
                 return null
             fi
 
-            if !isa Semantic.Symbols.GENERIC(type.symbol) then
-                if let trait_type: Semantic.Symbols.Classy = type.symbol then
-                    let ids = LIST[int]()
+            if let trait_type = _registry.dispatch.trait_of(_specialize(type)!) then
+                let ids = LIST[int]()
 
-                    if let implementors = _registry.dispatch.implementors(trait_type) then
-                        for implementor in implementors do
-                            ids.add(_registry.numbering.id(implementor))
-                        od
-                    fi
-
-                    return ids
+                if let implementors = _registry.dispatch.implementors(trait_type) then
+                    for implementor in implementors do
+                        ids.add(_registry.numbering.id(implementor))
+                    od
                 fi
+
+                return ids
             fi
 
             return null
@@ -1104,7 +1170,7 @@ namespace IR.WasmGC is
 
             if mode == Values.TypeTestOperandMode.AS_IS /\ _value_type(value.type)?.heap_type()? then
                 return value
-            elif mode == Values.TypeTestOperandMode.BOX /\ _registry.box_index(value.type)? then
+            elif mode == Values.TypeTestOperandMode.BOX /\ _registry.box_index(_specialize(value.type))? then
                 return Values.TYPE_TEST_OPERAND.operand(value)
             fi
 
@@ -1122,19 +1188,19 @@ namespace IR.WasmGC is
         visit(construction: Values.NEW) is
             let constructor = construction.constructor
 
-            let type = cast Semantic.Symbols.Classy?(constructor.owner)
+            let type = _owner_class(constructor.owner)
 
             if !type? \/ !_registry.is_object_type(type) then
                 _report("constructing a {construction.type}")
                 return
             fi
 
-            if type.is_unit_variant then
+            if type.definition.is_unit_variant then
                 _emit(INDEX_INSTRUCTION(Opcode.GLOBAL_GET, _registry.unit_variant_global(type)!))
                 return
             fi
 
-            let index_found = _numbering.index_of(constructor)
+            let index_found = _index_of(constructor)
 
             if !index_found? then
                 _report("a constructor of {type}")
@@ -1143,7 +1209,7 @@ namespace IR.WasmGC is
 
             let index = index_found
 
-            _ensure_initialised(type)
+            _ensure_initialised(constructor.owner)
 
             let instance = _temp(VALUE_TYPE.of_type_index(_registry.type_index(type)!, true))
 
@@ -1488,7 +1554,7 @@ namespace IR.WasmGC is
         // before an instance is made. Its flag is set before the body runs,
         // so a use of the type from inside it does not run it again.
         _ensure_initialised(owner: Semantic.Scope?) is
-            if let type: Semantic.Symbols.Classy = owner then
+            if let type = _owner_class(owner) then
                 if let (constructor, initialised) = _registry.static_constructor(type) then
                     let index_found = _numbering.index_of(constructor)
 
@@ -1524,7 +1590,13 @@ namespace IR.WasmGC is
                 return
             fi
 
-            if dispatch == IR.Dispatch.VIRTUAL /\ !function.has_no_overriders then
+            // A method of an instantiated generic trait is owned by the
+            // instantiation rather than the trait, so the call reads as
+            // virtual; its definition says where it dispatches.
+            if dispatch == IR.Dispatch.VIRTUAL /\ _is_trait_method(function) then
+                _call_interface(call)
+                return
+            elif dispatch == IR.Dispatch.VIRTUAL /\ !function.has_no_overriders then
                 _call_virtual(call)
                 return
             elif dispatch == IR.Dispatch.INTERFACE then
@@ -1535,14 +1607,14 @@ namespace IR.WasmGC is
                 return
             fi
 
-            _call_direct(call, function)
+            _call_direct(call, _instance_of(function))
         si
 
-        _call_direct(call: Values.Call.INSTANCE, function: Function) is
+        _call_direct(call: Values.Call.INSTANCE, function: WASMGC_FUNCTION) is
             let index_found = _numbering.index_of(function)
 
             if !index_found? then
-                _report("a call to {function.name}")
+                _report("a call to {function.definition.name}")
                 return
             fi
 
@@ -1551,7 +1623,7 @@ namespace IR.WasmGC is
             gen(call.from)
             _coerce_top(_local_type_of_receiver(function))
 
-            _lower_arguments(function, call.arguments)
+            _lower_arguments(call.function, call.arguments)
 
             _emit(INDEX_INSTRUCTION(Opcode.CALL, index))
         si
@@ -1563,7 +1635,14 @@ namespace IR.WasmGC is
             let function = call.function
             let dispatch = _registry.dispatch
 
-            let slot = dispatch.slot_of(function)
+            if _registry.discovering then
+                _registry.note_dispatched(function)
+                gen(call.from)
+                _lower_all(call.arguments)
+                return
+            fi
+
+            let slot = dispatch.slot_of(_instance_of(function))
 
             if !slot? then
                 _report("a virtual call to {function.name}")
@@ -1604,7 +1683,16 @@ namespace IR.WasmGC is
             let function = call.function
             let dispatch = _registry.dispatch
 
-            let selector = dispatch.selector_of(function)
+            if _registry.discovering then
+                _registry.note_dispatched(function)
+                gen(call.from)
+                _lower_all(call.arguments)
+                return
+            fi
+
+            let trait_type = _trait_instance(function.owner)
+
+            let selector = if trait_type? then dispatch.selector_of(cast Function?(function.root_specialized_from)!, trait_type) else null fi
 
             if !selector? then
                 _report("a trait call to {function.name}")
@@ -1633,7 +1721,10 @@ namespace IR.WasmGC is
             _emit(CALL_INDIRECT_INSTRUCTION(selector.signature, 0))
         si
 
-        _local_type_of_receiver(function: Function) -> VALUE_TYPE? =>
+        _is_trait_method(function: Function) -> bool =>
+            cast Semantic.Symbols.Classy?(function.root_specialized_from.owner)?.is_trait ?? false
+
+        _local_type_of_receiver(function: WASMGC_FUNCTION) -> VALUE_TYPE? =>
             _registry.receiver_type(function)
 
         // The root class has no constructor body to run, so a call to it
@@ -1645,7 +1736,7 @@ namespace IR.WasmGC is
         visit(call: Values.Call.CLOSURE) is
             let func_type = call.func_type ?? call.from.type
 
-            let signature = if func_type? then _registry.closure_signature(func_type) else null fi
+            let signature = if func_type? then _registry.closure_signature(_specialize(func_type)!) else null fi
 
             if !signature? then
                 _report("a call to a function value of type {func_type}")
@@ -1686,7 +1777,12 @@ namespace IR.WasmGC is
             elif call.innate_name.starts_with("nullable.") then
                 _report("a value-type optional")
             elif !call.is_lowered then
+                _registry.note_lowered(call)
                 gen(call.lower())
+            elif _registry.was_lowered(call) then
+                // Lowered by an earlier pass over the same body: a body is
+                // lowered while discovering and for each instantiation.
+                gen(call.lowering)
             fi
         si
 

@@ -165,31 +165,18 @@ namespace IR.WasmGC is
         _build_module() -> MODULE is
             let module = MODULE()
 
-            let registry = _build_registry(module)
+            let registry = _create_registry(module)
 
-            let imports = WASMGC_IMPORTS(module)
-
-            for host in _host_declarations do
-                if let signature = _host_signature(host) then
-                    imports.host(host.intrinsic_operation!, module.add_type(signature))
-                fi
-            od
-
-            // Every other import is declared here, before the defined
-            // functions are numbered.
-
-            let strings =
-                if registry.string_type_index? then
-                    WASMGC_STRINGS(module, registry)
-                else
-                    null
-                fi
-
-            if let present = strings /\ _host_takes_a_string() then
-                present.declare_imports(imports)
-            fi
-
-            imports.freeze()
+            // Discovery compiles bodies only for what they number, so it
+            // declares the imports into a module that is thrown away: the
+            // real module's recursion group has to come before any import's
+            // signature. Both declare the same imports in the same order,
+            // so the function indices agree.
+            let discovery_module = MODULE()
+            let discovery_imports =
+                _declare_imports(
+                    discovery_module,
+                    if registry.has_string_type then WASMGC_STRINGS(discovery_module, registry) else null fi)
 
             let bodies = MAP[Function, LIST[Value]]()
 
@@ -197,31 +184,48 @@ namespace IR.WasmGC is
                 bodies[function] = values
             od
 
-            let numbering = WASMGC_FUNCTION_NUMBERING(imports.count, f => bodies.contains_key(f))
-
-            strings?.use_numbering(numbering)
+            let numbering = WASMGC_FUNCTION_NUMBERING(discovery_imports.count, f => bodies.contains_key(f))
 
             // An executable compiles what its entry point reaches; a library
-            // compiles everything, since anything can be called from outside.
+            // compiles everything that is not generic, since anything can be
+            // called from outside, and each instantiation that reaches.
             if let entry = _entry_point then
                 numbering.index_of(entry)
             else
                 for (function, _) in _bodies do
-                    numbering.index_of(function)
+                    if !_is_generic(function) then
+                        numbering.index_of(function)
+                    fi
                 od
             fi
 
+            _discover(registry, discovery_imports, numbering)
+
+            registry.build()
+
+            for (location, construct) in registry.unsupported do
+                _report(location, construct)
+            od
+
+            let strings = if registry.has_string_type then WASMGC_STRINGS(module, registry) else null fi
+            let imports = _declare_imports(module, strings)
+
+            assert imports.count == discovery_imports.count else "discovery declared different imports"
+
+            strings?.use_numbering(numbering)
+
             let names = NAME_MAP()
 
+            numbering.restart()
+
             while let instance = numbering.next() do
-                let function = instance.definition
                 let index = numbering.index_of(instance)!
 
                 numbering.place(
                     instance,
-                    _build_function(module, registry, imports, strings, function, bodies[function], numbering))
+                    _build_function(module, registry, imports, strings, numbering, instance))
 
-                names.add(index, function.qualified_name)
+                names.add(index, instance.to_string())
             od
 
             // The descriptors, vtables and trait table refer to what the
@@ -253,10 +257,152 @@ namespace IR.WasmGC is
             return module
         si
 
-        // The struct types and globals for every class the program
-        // declares. They take the first type indices, so they are built
-        // before any function's signature is added.
-        _build_registry(module: MODULE) -> WASMGC_TYPE_REGISTRY is
+        _declare_imports(module: MODULE, strings: WASMGC_STRINGS?) -> WASMGC_IMPORTS is
+            let imports = WASMGC_IMPORTS(module)
+
+            for host in _host_declarations do
+                if let signature = _host_signature(host) then
+                    imports.host(host.intrinsic_operation!, module.add_type(signature))
+                fi
+            od
+
+            // Every other import is declared here, before the defined
+            // functions are numbered.
+
+            if let present = strings /\ _host_takes_a_string() then
+                present.declare_imports(imports)
+            fi
+
+            imports.freeze()
+
+            return imports
+        si
+
+        // Finds every class instantiation the program uses, before the
+        // recursion group is built, by compiling what the walk reaches and
+        // throwing the code away; the function numbers it gives out stay.
+        // Every method of a generic class found is numbered, and so is
+        // every known class's implementation of a method called through a
+        // vtable or the trait table, since dispatch can reach it.
+        _discover(
+            registry: WASMGC_TYPE_REGISTRY,
+            imports: WASMGC_IMPORTS,
+            numbering: WASMGC_FUNCTION_NUMBERING
+        ) is
+            let methods = MAP[Classy, LIST[Function]]()
+
+            for (function, _) in _bodies do
+                if let owner = _class_of_body(function) then
+                    if !methods.contains_key(owner) then
+                        methods[owner] = LIST[Function]()
+                    fi
+
+                    methods[owner].add(function)
+                fi
+            od
+
+            registry.discovering = true
+
+            let is_done mut = false
+
+            while !is_done do
+                is_done = true
+
+                while let function = numbering.next() do
+                    is_done = false
+
+                    _lower(registry, imports, null, numbering, function, LIST[VALUE_TYPE]())
+                od
+
+                for type in registry.take_new_classes() do
+                    if type.definition.is_generic then
+                        is_done = false
+
+                        let class_methods: LIST[Function] mut
+
+                        // A generic method is compiled only at the type
+                        // arguments a call gives it.
+                        if methods.try_get_value(type.definition, class_methods ref) then
+                            for method in class_methods do
+                                if method.generic_arguments.count == 0 then
+                                    numbering.index_of(WASMGC_FUNCTION(method, type.type_map))
+                                fi
+                            od
+                        fi
+                    fi
+                od
+
+                let count = numbering.count
+
+                for type in registry.classes do
+                    let class_methods: LIST[Function] mut
+
+                    if methods.try_get_value(type.definition, class_methods ref) then
+                        for method in class_methods do
+                            if method.generic_arguments.count == 0 /\ registry.is_dispatched_to(method) then
+                                numbering.index_of(WASMGC_FUNCTION(method, type.type_map))
+                            fi
+                        od
+                    fi
+                od
+
+                for (definition, class_methods) in methods do
+                    if definition.is_trait /\ !definition.is_generic then
+                        for method in class_methods do
+                            if registry.is_dispatched_to(method) then
+                                numbering.index_of(WASMGC_FUNCTION.of(method))
+                            fi
+                        od
+                    fi
+                od
+
+                if numbering.count != count then
+                    is_done = false
+                fi
+            od
+
+            registry.discovering = false
+        si
+
+        // The class whose members `function` is one of, where its body can
+        // name that class's type parameters.
+        _class_of_body(function: Function) -> Classy? =>
+            if let closure: Semantic.Symbols.Closure = function /\ closure.frame? then
+                closure.frame
+            else
+                cast Classy?(function.owner)
+            fi
+
+        // Whether `function`'s body names type parameters, so that it is
+        // compiled only for the instantiations the program uses.
+        _is_generic(function: Function) -> bool is
+            if function.generic_arguments.count > 0 then
+                return true
+            fi
+
+            let scope: Semantic.Scope? mut = function.owner
+
+            while scope? do
+                if let classy: Classy = scope /\ classy.is_generic then
+                    return true
+                elif let enclosing: Function = scope /\ enclosing.generic_arguments.count > 0 then
+                    return true
+                fi
+
+                if let symbol: Semantic.Symbols.Symbol = scope /\ symbol.owner != scope then
+                    scope = symbol.owner
+                else
+                    scope = null
+                fi
+            od
+
+            return false
+        si
+
+        // The registry the classes are collected into. Their struct types
+        // take the first type indices, so they are built before any
+        // function's signature is added.
+        _create_registry(module: MODULE) -> WASMGC_TYPE_REGISTRY is
             let container = IoC.CONTAINER.instance
 
             let object = cast Classy?(container.innate_symbol_lookup.get_object_type().symbol)!
@@ -264,11 +410,7 @@ namespace IR.WasmGC is
 
             let registry = WASMGC_TYPE_REGISTRY(module, object, string_type)
 
-            registry.build(container.symbol_table.global_scope)
-
-            for (location, construct) in registry.unsupported do
-                _report(location, construct)
-            od
+            registry.collect(container.symbol_table.global_scope)
 
             return registry
         si
@@ -334,53 +476,95 @@ namespace IR.WasmGC is
             registry: WASMGC_TYPE_REGISTRY,
             imports: WASMGC_IMPORTS,
             strings: WASMGC_STRINGS?,
-            function: Function,
-            values: LIST[Value],
-            numbering: WASMGC_FUNCTION_NUMBERING
+            numbering: WASMGC_FUNCTION_NUMBERING,
+            function: WASMGC_FUNCTION
         ) -> FUNCTION is
+            let definition = function.definition
             let parameters = LIST[VALUE_TYPE]()
 
-            if function.is_emitted_with_receiver then
-                if let receiver = _receiver_type(registry, function) then
+            if definition.is_emitted_with_receiver then
+                if let receiver = registry.receiver_type(function) then
                     parameters.add(receiver)
                 else
-                    _report(function.location, "an instance method of {function.owner}")
+                    _report(definition.location, "an instance method of {definition.owner}")
                     parameters.add(registry.object_reference)
                 fi
             fi
 
-            for argument in function.arguments do
-                if let value_type = registry.value_type(argument) then
+            for argument in definition.arguments do
+                if let value_type = registry.value_type(function.specialize(argument)) then
                     parameters.add(value_type)
                 else
-                    _report(function.location, "an argument of type {argument}")
+                    _report(definition.location, "an argument of type {argument}")
                 fi
             od
 
             let results = LIST[VALUE_TYPE]()
+            let return_type = function.specialize(definition.return_type)
 
-            if !WASMGC_TYPES.is_void(function.return_type) then
-                if let value_type = registry.value_type(function.return_type) then
+            if !WASMGC_TYPES.is_void(return_type) then
+                if let value_type = registry.value_type(return_type) then
                     results.add(value_type)
                 else
-                    _report(function.location, "a result of type {function.return_type}")
+                    _report(definition.location, "a result of type {return_type}")
                 fi
             fi
 
-            let lowering = WASMGC_LOWERING(numbering, registry, imports, strings, function, parameters)
-
-            let body = lowering.lower(values)
-
-            for construct in lowering.unsupported do
-                _report(function.location, construct)
-            od
+            let (body, locals) = _lower(registry, imports, strings, numbering, function, parameters)
 
             let type_index = module.add_type(FUNC_TYPE(parameters.to_array(), results.to_array()))
 
-            return FUNCTION(type_index, lowering.local_types.to_array(), body)
+            return FUNCTION(type_index, locals, body)
         si
 
-        _receiver_type(registry: WASMGC_TYPE_REGISTRY, function: Function) -> VALUE_TYPE? =>
-            registry.receiver_type(function)
+        // Lowers the body of `function`, reporting whatever it uses that the
+        // target cannot generate, except while the registry is discovering,
+        // when the result is wanted only for what it numbers.
+        _lower(
+            registry: WASMGC_TYPE_REGISTRY,
+            imports: WASMGC_IMPORTS,
+            strings: WASMGC_STRINGS?,
+            numbering: WASMGC_FUNCTION_NUMBERING,
+            function: WASMGC_FUNCTION,
+            parameters: LIST[VALUE_TYPE]
+        ) -> (body: Collections.List[Wasm.INSTRUCTION], locals: VALUE_TYPE[]) is
+            let definition = function.definition
+
+            let parameter_types mut = parameters
+
+            if registry.discovering then
+                // Only how many there are matters to a lowering that is
+                // discarded.
+                parameter_types = LIST[VALUE_TYPE]()
+
+                let count = definition.arguments.count + (if definition.is_emitted_with_receiver then 1 else 0 fi)
+
+                for i in 0..count do
+                    parameter_types.add(registry.object_reference)
+                od
+            fi
+
+            let lowering = WASMGC_LOWERING(numbering, registry, imports, strings, function, parameter_types)
+
+            let body = lowering.lower(_body_of(definition))
+
+            if !registry.discovering then
+                for construct in lowering.unsupported do
+                    _report(definition.location, construct)
+                od
+            fi
+
+            return (body, lowering.local_types.to_array())
+        si
+
+        _body_of(definition: Function) -> LIST[Value] is
+            for (function, values) in _bodies do
+                if function == definition then
+                    return values
+                fi
+            od
+
+            return LIST[Value]()
+        si
     si
 si
