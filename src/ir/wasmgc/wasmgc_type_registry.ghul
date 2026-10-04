@@ -27,6 +27,7 @@ namespace IR.WasmGC is
     use Semantic.Symbols.Scope
     use Semantic.Symbols.Classy
     use Semantic.Symbols.Field
+    use Semantic.Symbols.Function
 
     use IR.Emitter.SRM_MEMBER_ORDER
     use IR.Emitter.SRM_EMITTED_TYPE
@@ -41,7 +42,8 @@ namespace IR.WasmGC is
     class WASMGC_FIELD(type_index: int, field_index: int, value_type: VALUE_TYPE)
 
     /// The program's classes, unions and variants as WasmGC struct types,
-    /// and the globals holding their descriptors, their static fields, the
+    /// with a box type for each scalar, and the globals holding their
+    /// descriptors, their static fields, static-constructor flags, the
     /// namespace-level variables and the unit variants' shared instances.
     ///
     /// Field 0 of every object is its type's descriptor, followed by its
@@ -85,6 +87,12 @@ namespace IR.WasmGC is
         _global_types: MAP[Symbol, VALUE_TYPE]
         _classes_by_index: MAP[int, Classy]
 
+        // The scalar types a value is boxed from, keyed by the box's
+        // place in the class tree.
+        _boxed: MAP[Classy, Type]
+
+        _static_constructors: MAP[Classy, (constructor: Function, initialised: int)]
+
         _unsupported: LIST[(location: LOCATION, construct: string)]
 
         /// The constructs the program declares that the object model cannot
@@ -118,6 +126,8 @@ namespace IR.WasmGC is
             _globals = MAP[Symbol, int]()
             _global_types = MAP[Symbol, VALUE_TYPE]()
             _classes_by_index = MAP[int, Classy]()
+            _boxed = MAP[Classy, Type]()
+            _static_constructors = MAP[Classy, (constructor: Function, initialised: int)]()
 
             _unsupported = LIST[(location: LOCATION, construct: string)]()
         si
@@ -140,6 +150,14 @@ namespace IR.WasmGC is
             for type in emitted do
                 if let declared = type.declared /\ _is_object_type(declared) then
                     _add_class(declared, added)
+                fi
+            od
+
+            for scalar in _scalar_types() do
+                if let box: Classy = scalar.symbol /\ !added.contains(box) then
+                    _numbering.add(box, object)
+                    _boxed[box] = scalar
+                    added.add(box)
                 fi
             od
 
@@ -253,9 +271,36 @@ namespace IR.WasmGC is
                 FIELD_TYPE.of_reference(VALUE_TYPE.of_type_index(DESCRIPTOR_TYPE_INDEX, true), false)
             ])
 
+        // Every scalar a program can box: a box is a final struct holding
+        // the descriptor of the scalar's type and the value.
+        _scalar_types() -> Collections.List[Type] is
+            let lookup = IoC.CONTAINER.instance.innate_symbol_lookup
+
+            return [
+                lookup.get_bool_type(), lookup.get_char_type(),
+                lookup.get_byte_type(), lookup.get_ubyte_type(),
+                lookup.get_short_type(), lookup.get_ushort_type(),
+                lookup.get_int_type(), lookup.get_uint_type(),
+                lookup.get_long_type(), lookup.get_ulong_type(),
+                lookup.get_word_type(), lookup.get_uword_type(),
+                lookup.get_single_type(), lookup.get_double_type()
+            ]
+        si
+
         _sub_type(type: Classy) -> SUB_TYPE is
             let layout = LIST[VALUE_TYPE]()
             let type_index = _type_indices[type]
+
+            let boxed: Type mut
+
+            if _boxed.try_get_value(type, boxed ref) then
+                layout.add(VALUE_TYPE.of_type_index(DESCRIPTOR_TYPE_INDEX, false))
+                layout.add(value_type(boxed)!)
+
+                _layouts[type] = layout
+
+                return SUB_TYPE(_struct(layout), true, [OBJECT_TYPE_INDEX])
+            fi
 
             if type == _object then
                 layout.add(VALUE_TYPE.of_type_index(DESCRIPTOR_TYPE_INDEX, false))
@@ -344,15 +389,22 @@ namespace IR.WasmGC is
         // starting at its type's default value.
         _add_static_globals(type: SRM_EMITTED_TYPE) is
             if let declared = type.declared then
-                for method in SRM_MEMBER_ORDER.methods(type) do
-                    if method.is_static_constructor then
-                        _unsupported.add((method.location, "a static constructor"))
-                    fi
-                od
-
                 if !_type_indices.contains_key(declared) /\ !type.is_globals_carrier then
+                    for method in SRM_MEMBER_ORDER.methods(type) do
+                        if method.is_static_constructor then
+                            _unsupported.add((method.location, "a static constructor"))
+                        fi
+                    od
+
                     return
                 fi
+
+                for method in SRM_MEMBER_ORDER.methods(type) do
+                    if method.is_static_constructor then
+                        _static_constructors[declared] =
+                            (method, _module.add_global(GLOBAL(VALUE_TYPE.of_numeric(NumericType.I32), true, [I32_CONSTANT(0)])))
+                    fi
+                od
             fi
 
             for `field in SRM_MEMBER_ORDER.fields(type) do
@@ -451,8 +503,11 @@ namespace IR.WasmGC is
             return null
         si
 
-        /// Whether `type` has a struct type of its own.
-        is_object_type(type: Classy) -> bool => _type_indices.contains_key(type)
+        /// Whether `type` is a class with a struct type of its own.
+        is_object_type(type: Classy) -> bool => _type_indices.contains_key(type) /\ !is_box(type)
+
+        /// Whether `type` is a scalar's box rather than a class.
+        is_box(type: Classy) -> bool => _boxed.contains_key(type)
 
         /// Where an instance field lives, or null where it is not a field
         /// of a class the registry holds.
@@ -519,6 +574,18 @@ namespace IR.WasmGC is
             return is_subclass(derived, base)
         si
 
+        /// The static constructor of `type`, and the global that records
+        /// whether it has run, or null where `type` declares none.
+        static_constructor(type: Classy) -> (constructor: Function, initialised: int)? is
+            let result: (constructor: Function, initialised: int) mut
+
+            if _static_constructors.try_get_value(type, result ref) then
+                return result
+            fi
+
+            return null
+        si
+
         /// The global holding a unit variant's shared instance.
         unit_variant_global(variant: Classy) -> int? is
             let index mut = 0
@@ -529,6 +596,24 @@ namespace IR.WasmGC is
 
             return null
         si
+
+        /// The struct type a value of the scalar `type` is boxed in, or null
+        /// where `type` is not a scalar.
+        box_index(type: Type?) -> int? is
+            if let box: Classy = type?.symbol /\ _boxed.contains_key(box) then
+                return type_index(box)
+            fi
+
+            return null
+        si
+
+        /// The box a value of the scalar `type` is held in, or null where
+        /// `type` is not a scalar.
+        box_type(type: Type?) -> Classy? =>
+            if let box: Classy = type?.symbol /\ _boxed.contains_key(box) then box else null fi
+
+        /// The field of a box holding the value.
+        BOX_VALUE: int static => 1
 
         /// Whether every instance of `derived` is an instance of `base`.
         is_subclass(derived: Classy, base: Classy) -> bool =>
