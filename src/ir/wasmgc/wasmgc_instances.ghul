@@ -66,6 +66,9 @@ namespace IR.WasmGC is
             if !type? \/ map.count == 0 then type else type.specialize(map) fi
 
         /// Whether two type maps bind the same parameters to the same types.
+        /// A type is the same as another only where each matches the other:
+        /// the null type matches every optional type, so one direction alone
+        /// would make two instantiations one.
         same(left: Collections.Map[Symbol, Type], right: Collections.Map[Symbol, Type]) -> bool static pure is
             if left.count != right.count then
                 return false
@@ -74,12 +77,31 @@ namespace IR.WasmGC is
             for (parameter, argument) in left do
                 let other: Type mut
 
-                if !right.try_get_value(parameter, other ref) \/ !argument.matches(other) then
+                if !right.try_get_value(parameter, other ref) \/ !argument.matches(other) \/ !other.matches(argument) then
                     return false
                 fi
             od
 
             return true
+        si
+
+        /// How deeply `types` nest generic type arguments: zero for types
+        /// that take none, and one more than the deepest argument for one
+        /// that does.
+        depth(types: Collections.Iterable[Type]) -> int static is
+            let result mut = 0
+
+            for type in types do
+                if let generic: Semantic.Types.GENERIC = type then
+                    let nested = 1 + depth(generic.arguments)
+
+                    if nested > result then
+                        result = nested
+                    fi
+                fi
+            od
+
+            return result
         si
 
         /// `map` with every value specialized by `context`.

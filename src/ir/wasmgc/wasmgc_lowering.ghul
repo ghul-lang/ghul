@@ -230,6 +230,26 @@ namespace IR.WasmGC is
 
                 _top_value = value
                 _top_cast = null
+
+                _unbox_narrowed(value)
+            fi
+        si
+
+        // A load flow analysis has narrowed from a reference to a scalar or
+        // an enum still reads the reference, which holds the value in a
+        // box: the value is read out of the box.
+        _unbox_narrowed(value: Value) is
+            if _registry.discovering \/ !isa Values.Load.SYMBOL(value) then
+                return
+            fi
+
+            // Only a reference held as the root can hold a box: a cell
+            // holding a local is read through by the load itself.
+            if let index = _registry.box_index(_specialize(value.type)), heap_type = _top?.heap_type() /\ heap_type.matches(_registry.object_reference.heap_type()!) then
+                _emit(HEAP_TYPE_INSTRUCTION(Opcode.REF_CAST, HEAP_TYPE.of_type_index(index)))
+                _emit(TYPE_FIELD_INSTRUCTION(Opcode.STRUCT_GET, index, WASMGC_TYPE_REGISTRY.BOX_VALUE))
+
+                _top_cast = _value_type(value.type)
             fi
         si
 
@@ -524,17 +544,15 @@ namespace IR.WasmGC is
             return null
         si
 
-        _numeric(type: Type?) -> NumericType? is
-            if let scalar = WASMGC_TYPES.scalar(_specialize(type)) then
-                return WASMGC_TYPES.numeric(scalar)
-            fi
-
-            return null
-        si
+        _numeric(type: Type?) -> NumericType? => WASMGC_TYPES.numeric_of(_specialize(type))
 
         // Brings a value stored into a slot of a narrow kind back into
         // range, as a CIL store into a narrow local or argument does.
         _normalise_for(type: Type?) is
+            if _convert_tuple_top(type) then
+                return
+            fi
+
             _coerce_top(_value_type(type))
 
             if let scalar = WASMGC_TYPES.scalar(_specialize(type)) then
@@ -544,6 +562,56 @@ namespace IR.WasmGC is
             fi
         si
 
+
+        // A tuple held as one tuple struct goes where another is expected
+        // by being rebuilt from its elements, each converted to the
+        // element type the other holds, as .NET rebuilds a tuple at a
+        // wider type: two tuple structs are unrelated types, so a cast
+        // between them fails. False where the value just lowered is not
+        // such a tuple.
+        _convert_tuple_top(target: Type?) -> bool is
+            let value = _top_value
+
+            if !value? \/ _registry.discovering then
+                return false
+            fi
+
+            let from = _struct_of(value.type)
+            let to = _struct_of(target)
+
+            if !from? \/ !to? \/ from =~ to \/ !_registry.is_read_only(from) \/ !_registry.is_read_only(to) then
+                return false
+            fi
+
+            let from_types = _registry.field_value_types(from)
+            let to_types = _registry.field_value_types(to)
+
+            if from_types.count != to_types.count then
+                return false
+            fi
+
+            let from_index = _registry.type_index(from)!
+            let to_index = _registry.type_index(to)!
+            let source = _temp(VALUE_TYPE.of_type_index(from_index, true))
+
+            _emit(INDEX_INSTRUCTION(Opcode.LOCAL_SET, source))
+            _emit(INDEX_INSTRUCTION(Opcode.GLOBAL_GET, _registry.descriptor_global(to)))
+
+            for i in 1..from_types.count do
+                _emit(INDEX_INSTRUCTION(Opcode.LOCAL_GET, source))
+                _emit(TYPE_FIELD_INSTRUCTION(Opcode.STRUCT_GET, from_index, i))
+
+                if let to_heap = to_types[i].heap_type(), from_heap = from_types[i].heap_type() /\ !_registry.is_held_as(from_heap, to_heap) then
+                    _emit(HEAP_TYPE_INSTRUCTION(Opcode.REF_CAST_NULL, to_heap))
+                fi
+            od
+
+            _emit(TYPE_INSTRUCTION(Opcode.STRUCT_NEW, to_index))
+
+            _top_cast = VALUE_TYPE.of_type_index(to_index, true)
+
+            return true
+        si
         // The index of `local`, numbered after the parameters the first
         // time it is seen.
         _local(local: LOCAL) -> int is
@@ -1282,6 +1350,12 @@ namespace IR.WasmGC is
                 gen(store.value)
                 _emit(INDEX_INSTRUCTION(Opcode.LOCAL_SET, source))
 
+                // While discovering, the struct's layout is not built yet,
+                // and only what the operands reach matters.
+                if _registry.discovering then
+                    return
+                fi
+
                 for i in 1.._registry.field_value_types(held).count do
                     _emit(INDEX_INSTRUCTION(Opcode.LOCAL_GET, target))
                     _emit(INDEX_INSTRUCTION(Opcode.LOCAL_GET, source))
@@ -1313,6 +1387,8 @@ namespace IR.WasmGC is
 
         visit_address(wrapper: Values.WRAPPER) is _report("the address of a value") si
         // A present value-type optional is the box its value is held in.
+        // The value is produced before the box's descriptor is pushed,
+        // since it may read a receiver an earlier step left on the stack.
         visit(wrap: Values.WRAP_OPTIONAL) is
             let value = wrap.value
 
@@ -1368,16 +1444,27 @@ namespace IR.WasmGC is
 
             let discards_result = _discards_result(closure.type, function)
 
+            // A function with no receiver can still be held closed over its
+            // first argument, which the value then carries where a receiver
+            // would go.
+            let closes_over_first = !function.is_emitted_with_receiver /\ !isa Values.NULL(closure.receiver)
+
             let thunk mut = 0
 
             if !is_virtual then
-                thunk = _registry.closure_thunk(signature, instance, discards_result, _numbering)
+                thunk = _registry.closure_thunk(signature, instance, discards_result, closes_over_first, _numbering)
             elif _registry.discovering then
                 _registry.note_dispatched(function)
             elif let slot = _registry.dispatch.slot_of(instance) then
                 _registry.dispatch.use_slot(slot, _numbering)
 
-                thunk = _registry.closure_virtual_thunk(signature, slot, function.arguments.count, discards_result, _numbering)
+                let parameter_types = LIST[VALUE_TYPE?]()
+
+                for argument in function.arguments do
+                    parameter_types.add(_value_type(instance.specialize(argument)))
+                od
+
+                thunk = _registry.closure_virtual_thunk(signature, slot, parameter_types, discards_result, _numbering)
             else
                 _report("a function value of an overridden method")
                 return
@@ -1386,7 +1473,7 @@ namespace IR.WasmGC is
             _emit(INDEX_INSTRUCTION(Opcode.GLOBAL_GET, _registry.closure_descriptor_global))
             _emit(INDEX_INSTRUCTION(Opcode.REF_FUNC, thunk))
 
-            if function.is_emitted_with_receiver /\ !isa Values.NULL(closure.receiver) then
+            if (function.is_emitted_with_receiver \/ closes_over_first) /\ !isa Values.NULL(closure.receiver) then
                 gen(closure.receiver)
             else
                 _emit(HEAP_TYPE_INSTRUCTION(Opcode.REF_NULL, _registry.object_reference.heap_type()!))
@@ -2470,6 +2557,20 @@ namespace IR.WasmGC is
                 _complement(arithmetic.operands[0], numeric)
             elif let opcode = WASMGC_OPERATIONS.arithmetic(operation, numeric) then
                 gen(arithmetic.operands[0])
+
+                // An unsigned shift of a narrow signed kind shifts in zeros
+                // at the kind's own width, so its sign-extended operand is
+                // first cut back to that width.
+                if operation == ArithmeticOperation.SHIFT_RIGHT_UNSIGNED then
+                    let scalar = WASMGC_TYPES.scalar(_specialize(arithmetic.type))
+
+                    if scalar =~ Scalar.INT8 then
+                        _emit_all(WASMGC_OPERATIONS.normalise(Scalar.UINT8))
+                    elif scalar =~ Scalar.INT16 then
+                        _emit_all(WASMGC_OPERATIONS.normalise(Scalar.UINT16))
+                    fi
+                fi
+
                 gen(arithmetic.operands[1])
 
                 // A shift count is an int whatever the shifted value is,
@@ -2481,6 +2582,15 @@ namespace IR.WasmGC is
                 _emit(opcode)
             else
                 _report("{operation} on {arithmetic.type}")
+                return
+            fi
+
+            // A narrow kind's arithmetic runs at 32 bits, so its result is
+            // wrapped back to the kind's width as CIL's narrow stores do.
+            if let scalar = WASMGC_TYPES.scalar(_specialize(arithmetic.type)) then
+                if WASMGC_TYPES.is_narrow(scalar) then
+                    _emit_all(WASMGC_OPERATIONS.normalise(scalar))
+                fi
             fi
         si
 
@@ -2840,13 +2950,31 @@ namespace IR.WasmGC is
 
             let values = region.body.values
 
-            _lower_body(region, values)
+            // A region that ends in another produces its value through
+            // that one: a block expression's statements end with the value
+            // they leave, and that region falls through holding it.
+            let last_region =
+                if result? /\ values.count > 0 /\ !_resume_states.contains_key(region) then
+                    cast Values.REGION?(values[values.count - 1])
+                else
+                    null
+                fi
 
-            // A region that produces a value is left only by its arms,
-            // each of which breaks out carrying it, so the end of its
-            // last arm does not fall through. Wasm takes the end of a
-            // block to be reachable, so it is told.
-            if result? /\ values.count > 0 /\ isa Values.Breakable(values[values.count - 1]) then
+            if let last = last_region then
+                for i in 0..values.count - 1 do
+                    gen(values[i])
+                od
+
+                _lower_region(last, result)
+            else
+                _lower_body(region, values)
+            fi
+
+            // A region that produces a value is otherwise left only by its
+            // arms, each of which breaks out carrying it, so the end of its
+            // last arm does not fall through. Wasm takes the end of a block
+            // to be reachable, so it is told.
+            if result? /\ !last_region? /\ values.count > 0 /\ isa Values.Breakable(values[values.count - 1]) then
                 _emit(Opcode.UNREACHABLE)
             fi
 
@@ -3635,6 +3763,12 @@ namespace IR.WasmGC is
             _emit(TYPE_FIELD_INSTRUCTION(Opcode.STRUCT_GET, _registry.closure_type_index, WASMGC_TYPE_REGISTRY.CLOSURE_FUNCTION))
             _emit(HEAP_TYPE_INSTRUCTION(Opcode.REF_CAST, HEAP_TYPE.of_type_index(signature)))
             _emit(TYPE_INSTRUCTION(Opcode.CALL_REF, signature))
+
+            // The signature holds a reference result as the root, so it is
+            // cast back to the type the call gives it.
+            if let heap_type = _value_type(call.type)?.heap_type() /\ !heap_type.matches(_registry.object_reference.heap_type()!) then
+                _emit(HEAP_TYPE_INSTRUCTION(Opcode.REF_CAST_NULL, heap_type))
+            fi
         si
 
         // An operation the host provides is a call of its import rather

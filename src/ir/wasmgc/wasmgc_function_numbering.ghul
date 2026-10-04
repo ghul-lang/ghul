@@ -27,6 +27,8 @@ namespace IR.WasmGC is
 
         _cursor: int
 
+        _is_sealed: bool
+
         /// Numbers functions from `first_index` on.
         ///
         /// - first_index: the index the first function takes, after the
@@ -61,6 +63,8 @@ namespace IR.WasmGC is
             if !_has_body(instance.definition) then
                 return null
             fi
+
+            assert !_is_sealed else "{instance} was first asked for after every body was compiled, so it never would be"
 
             index = _first_index + _numbered.count
 
@@ -112,6 +116,13 @@ namespace IR.WasmGC is
             return null
         si
 
+        /// Records that every body has been compiled. A function with a body
+        /// that is first asked for after this would never be compiled, which
+        /// `index_of` then asserts against.
+        seal() is
+            _is_sealed = true
+        si
+
         /// Hands out the numbered functions again from the first, in index
         /// order, keeping every number.
         restart() is
@@ -120,7 +131,11 @@ namespace IR.WasmGC is
 
         /// Records the compiled body of `instance`.
         place(instance: WASMGC_FUNCTION, function: FUNCTION) is
-            _placed[index_of(instance)!] = function
+            let index = indexed(instance)
+
+            assert index? else "{instance} was compiled without having been numbered"
+
+            _placed[index] = function
         si
 
         /// Adds every numbered function to `module` in index order,
@@ -138,7 +153,11 @@ namespace IR.WasmGC is
                     if _reserved.try_get_value(index, build ref) then
                         build()
                     else
-                        _placed[index]
+                        let placed: FUNCTION mut
+
+                        assert _placed.try_get_value(index, placed ref) else "function {index}, {_numbered[i]}, was numbered but never compiled"
+
+                        placed
                     fi
 
                 let added = module.add_function(function)

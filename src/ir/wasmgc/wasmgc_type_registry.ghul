@@ -284,6 +284,14 @@ namespace IR.WasmGC is
                     _boxed[boxed] = scalar
                 fi
             od
+
+            // An enum is boxed as a scalar is, in a box of its own, so a
+            // boxed value says which enum it holds.
+            for type in SRM_MEMBER_ORDER.types(root) do
+                if let declared = type.declared /\ declared.symbol_kind =~ Semantic.Symbols.SymbolKind.ENUM then
+                    _boxed[_intern(WASMGC_CLASS.of(declared))] = Semantic.Types.NAMED(declared)
+                fi
+            od
         si
 
         /// Gives `owner` a method that no symbol of it declares, which
@@ -658,7 +666,10 @@ namespace IR.WasmGC is
 
         /// The signature a call through a value of the function type `type`
         /// uses: the receiver or frame as the root, then the parameters,
-        /// then the result. Null where one of them cannot be held yet.
+        /// then the result, each reference held as the root, so function
+        /// types that differ only in reference types one converts to by
+        /// variance share a signature. Null where one of them cannot be
+        /// held yet.
         closure_signature(type: Type) -> int? is
             let arguments = type.arguments
             let parameter_count = if type.is_action then arguments.count else arguments.count - 1 fi
@@ -669,7 +680,7 @@ namespace IR.WasmGC is
 
             for i in 0..parameter_count do
                 if let value_type = value_type(arguments[i]) then
-                    parameters.add(value_type)
+                    parameters.add(_erased(value_type))
                 else
                     return null
                 fi
@@ -679,7 +690,7 @@ namespace IR.WasmGC is
 
             if !type.is_action /\ !WASMGC_TYPES.is_void(arguments[arguments.count - 1]) then
                 if let value_type = value_type(arguments[arguments.count - 1]) then
-                    results.add(value_type)
+                    results.add(_erased(value_type))
                 else
                     return null
                 fi
@@ -692,12 +703,29 @@ namespace IR.WasmGC is
             return _module.add_type(FUNC_TYPE(parameters.to_array(), results.to_array()))
         si
 
+        // A reference held as the root, as a function value's signature
+        // holds its references.
+        _erased(value_type: VALUE_TYPE) -> VALUE_TYPE =>
+            if value_type.heap_type()? then object_reference else value_type fi
+
+        // Loads parameter `local` of a thunk, cast from the root its
+        // signature holds it as to `expected`, the type the function it
+        // calls takes.
+        _forward(body: LIST[INSTRUCTION], local: int, expected: VALUE_TYPE?) is
+            body.add(INDEX_INSTRUCTION(Opcode.LOCAL_GET, local))
+
+            if let heap_type = expected?.heap_type() /\ !heap_type.matches(object_reference.heap_type()!) then
+                body.add(HEAP_TYPE_INSTRUCTION(Opcode.REF_CAST_NULL, heap_type))
+            fi
+        si
+
         /// The thunk a function value of `signature` holding `function`
         /// calls, reserved in `numbering`. It casts the receiver or frame it
         /// is given to the type the function takes, or ignores it where the
-        /// function takes none, and calls the function. Nothing is reserved
-        /// while discovering.
-        closure_thunk(signature: int, function: WASMGC_FUNCTION, discards_result: bool, numbering: WASMGC_FUNCTION_NUMBERING) -> int is
+        /// function takes none, and calls the function. Where the value is
+        /// closed over the function's first argument, what it is given is
+        /// that argument. Nothing is reserved while discovering.
+        closure_thunk(signature: int, function: WASMGC_FUNCTION, discards_result: bool, closes_over_first: bool, numbering: WASMGC_FUNCTION_NUMBERING) -> int is
             if discovering then
                 return 0
             fi
@@ -719,9 +747,21 @@ namespace IR.WasmGC is
                     fi
                 fi
 
-                for i in 0..definition.arguments.count do
-                    body.add(INDEX_INSTRUCTION(Opcode.LOCAL_GET, i + 1))
-                od
+                if closes_over_first then
+                    body.add(INDEX_INSTRUCTION(Opcode.LOCAL_GET, 0))
+
+                    if let first = registry.value_type(function.specialize(definition.arguments[0])), heap_type = first.heap_type() then
+                        body.add(HEAP_TYPE_INSTRUCTION(Opcode.REF_CAST_NULL, heap_type))
+                    fi
+
+                    for i in 1..definition.arguments.count do
+                        registry._forward(body, i, registry.value_type(function.specialize(definition.arguments[i])))
+                    od
+                else
+                    for i in 0..definition.arguments.count do
+                        registry._forward(body, i + 1, registry.value_type(function.specialize(definition.arguments[i])))
+                    od
+                fi
 
                 body.add(INDEX_INSTRUCTION(Opcode.CALL, numbering.indexed(function)!))
 
@@ -741,7 +781,7 @@ namespace IR.WasmGC is
         /// method calls, reserved in `numbering`. It calls through the
         /// receiver's vtable at `slot`, so the value runs whichever override
         /// the receiver has. Nothing is reserved while discovering.
-        closure_virtual_thunk(signature: int, slot: WASMGC_SLOT, argument_count: int, discards_result: bool, numbering: WASMGC_FUNCTION_NUMBERING) -> int is
+        closure_virtual_thunk(signature: int, slot: WASMGC_SLOT, parameter_types: Collections.List[VALUE_TYPE?], discards_result: bool, numbering: WASMGC_FUNCTION_NUMBERING) -> int is
             if discovering then
                 return 0
             fi
@@ -756,8 +796,8 @@ namespace IR.WasmGC is
                 body.add(INDEX_INSTRUCTION(Opcode.LOCAL_GET, 0))
                 body.add(HEAP_TYPE_INSTRUCTION(Opcode.REF_CAST_NULL, HEAP_TYPE.of_type_index(registry.type_index(slot.owner)!)))
 
-                for i in 0..argument_count do
-                    body.add(INDEX_INSTRUCTION(Opcode.LOCAL_GET, i + 1))
+                for i in 0..parameter_types.count do
+                    registry._forward(body, i + 1, parameter_types[i])
                 od
 
                 body.add(INDEX_INSTRUCTION(Opcode.LOCAL_GET, 0))
@@ -1548,9 +1588,10 @@ namespace IR.WasmGC is
 
         /// The struct a value of `type` is a box of, or null where `type` is
         /// not a struct the registry holds. An optional struct is not one:
-        /// it is a reference that can be null.
+        /// it is a reference that can be null. Nor is an enum, a value type
+        /// held as its int.
         struct_of(type: Type?) -> WASMGC_CLASS? is
-            if !type? \/ type.is_optional \/ !type.is_value_type \/ WASMGC_TYPES.scalar(type)? then
+            if !type? \/ type.is_optional \/ !type.is_value_type \/ WASMGC_TYPES.scalar(type)? \/ WASMGC_TYPES.is_enum(type) then
                 return null
             fi
 
@@ -1636,6 +1677,18 @@ namespace IR.WasmGC is
                 return WASMGC_TYPES.value_type(scalar)
             fi
 
+            // An enum is held as its underlying int, as its members are.
+            if WASMGC_TYPES.is_enum(type) then
+                return VALUE_TYPE.of_numeric(NumericType.I32)
+            fi
+
+            // The type of `null` itself, such as a tuple literal's element
+            // before the tuple converts to the type it goes into, holds
+            // nothing but null: the bottom reference, which goes wherever a
+            // reference does.
+            if isa Semantic.Types.NULL(type) then
+                return VALUE_TYPE.of_abstract(Wasm.AbstractHeapType.NONE)
+            fi
 
             // A reference to a scalar is the box, the cell, the scalar
             // lives in, and a reference to a struct the struct's own box.
@@ -1781,6 +1834,11 @@ namespace IR.WasmGC is
         /// without a cast: the same type, or a class derived from it.
         is_held_as(held: HEAP_TYPE, expected: HEAP_TYPE) -> bool is
             if held.matches(expected) then
+                return true
+            fi
+
+            // The bottom reference, which only null has, is held as any.
+            if held.matches(HEAP_TYPE.of_abstract(Wasm.AbstractHeapType.NONE)) then
                 return true
             fi
 
