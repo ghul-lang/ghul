@@ -12,6 +12,9 @@ namespace IR.WasmGC is
     use Wasm.CUSTOM_SECTION
     use Wasm.BINARY_WRITER
     use Wasm.WAT_PRINTER
+    use Wasm.ELEMENT_SEGMENT
+    use Wasm.ElementMode
+    use Wasm.INSTRUCTION
 
     use Collections.LIST
     use Collections.MAP
@@ -201,6 +204,19 @@ namespace IR.WasmGC is
                 module.add_function(thunk)
             od
 
+            let referenced = LIST[int]()
+
+            for thunk in registry.closure_thunks(indices) do
+                referenced.add(module.add_function(thunk))
+            od
+
+            // A function value names its thunk with ref.func, which a
+            // module has to declare in an element segment.
+            if referenced.count > 0 then
+                module.add_element_segment(
+                    ELEMENT_SEGMENT.of_functions(ElementMode.DECLARATIVE, 0, LIST[INSTRUCTION](), referenced.to_array()))
+            fi
+
             if let entry = _entry_point then
                 let index mut = 0
 
@@ -326,20 +342,7 @@ namespace IR.WasmGC is
             return FUNCTION(type_index, lowering.local_types.to_array(), body)
         si
 
-        // An instance method takes its receiver as its first parameter,
-        // typed as the class that declares the method.
-        _receiver_type(registry: WASMGC_TYPE_REGISTRY, function: Function) -> VALUE_TYPE? is
-            if let owner: Classy = function.owner /\ registry.is_object_type(owner) then
-                if let index = registry.type_index(owner) then
-                    return VALUE_TYPE.of_type_index(index, true)
-                fi
-            elif let owner: Classy = function.owner /\ owner.is_trait then
-                // A trait's default method runs on any implementing
-                // instance, so it takes its receiver as the root.
-                return registry.object_reference
-            fi
-
-            return null
-        si
+        _receiver_type(registry: WASMGC_TYPE_REGISTRY, function: Function) -> VALUE_TYPE? =>
+            registry.receiver_type(function)
     si
 si

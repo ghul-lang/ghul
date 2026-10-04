@@ -644,7 +644,48 @@ namespace IR.WasmGC is
         visit(enter: Values.ENTER_FILE) is si
         visit(leave: Values.LEAVE_FILE) is si
 
-        visit(closure: Values.MAKE_CLOSURE) is _report("a function value") si
+        // A function value holds a thunk with the signature its type calls
+        // through, and the receiver or frame the thunk passes on.
+        visit(closure: Values.MAKE_CLOSURE) is
+            let function = closure.function
+
+            if closure.is_virtual /\ !function.has_no_overriders then
+                _report("a function value of an overridden method")
+                return
+            fi
+
+            if !_function_indices.contains_key(function) then
+                _report("a function value of {function.name}, which has no body on this target")
+                return
+            fi
+
+            let signature = _registry.closure_signature(closure.type)
+
+            if !signature? then
+                _report("a function value of type {closure.type}")
+                return
+            fi
+
+            let discards_result = _discards_result(closure.type, function)
+            let thunk = _registry.closure_thunk(signature, function, discards_result)
+
+            _emit(INDEX_INSTRUCTION(Opcode.GLOBAL_GET, _registry.closure_descriptor_global))
+            _emit(INDEX_INSTRUCTION(Opcode.REF_FUNC, thunk))
+
+            if function.is_emitted_with_receiver /\ !isa Values.NULL(closure.receiver) then
+                gen(closure.receiver)
+            else
+                _emit(HEAP_TYPE_INSTRUCTION(Opcode.REF_NULL, _registry.object_reference.heap_type()!))
+            fi
+
+            _emit(TYPE_INSTRUCTION(Opcode.STRUCT_NEW, _registry.closure_type_index))
+        si
+
+        // Whether a function value's type returns nothing while the
+        // function it holds returns something, which the thunk drops.
+        _discards_result(type: Type, function: Function) -> bool =>
+            (type.is_action \/ WASMGC_TYPES.is_void(type.arguments[type.arguments.count - 1])) /\
+            !WASMGC_TYPES.is_void(function.return_type)
 
         visit(address: Values.ARRAY_ELEMENT_ADDRESS) is _report("an array") si
         visit_address(address: Values.ARRAY_ELEMENT_ADDRESS) is _report("an array") si
@@ -1471,17 +1512,46 @@ namespace IR.WasmGC is
         si
 
         _local_type_of_receiver(function: Function) -> VALUE_TYPE? =>
-            if let owner: Semantic.Symbols.Classy = function.owner then
-                if let index = _registry.type_index(owner) then VALUE_TYPE.of_type_index(index, true) else null fi
-            else
-                null
-            fi
+            _registry.receiver_type(function)
 
         // The root class has no constructor body to run, so a call to it
         // from a constructor does nothing.
         _is_object_constructor(function: Function) -> bool =>
             if let owner: Semantic.Symbols.Classy = function.owner then owner.is_object else false fi
-        visit(call: Values.Call.CLOSURE) is _report("a function value call") si
+        // The function value is held in a local: its receiver is the
+        // first argument, and its function is called after the rest.
+        visit(call: Values.Call.CLOSURE) is
+            let func_type = call.func_type ?? call.from.type
+
+            let signature = if func_type? then _registry.closure_signature(func_type) else null fi
+
+            if !signature? then
+                _report("a call to a function value of type {func_type}")
+                return
+            fi
+
+            let closure_type = VALUE_TYPE.of_type_index(_registry.closure_type_index, true)
+            let closure = _temp(closure_type)
+
+            gen(call.from)
+            _emit(INDEX_INSTRUCTION(Opcode.LOCAL_TEE, closure))
+            _emit(TYPE_FIELD_INSTRUCTION(Opcode.STRUCT_GET, _registry.closure_type_index, WASMGC_TYPE_REGISTRY.CLOSURE_RECEIVER))
+
+            let parameters = func_type!.arguments
+
+            for i in 0..call.arguments.count do
+                gen(call.arguments[i])
+
+                if i < parameters.count then
+                    _normalise_for(parameters[i])
+                fi
+            od
+
+            _emit(INDEX_INSTRUCTION(Opcode.LOCAL_GET, closure))
+            _emit(TYPE_FIELD_INSTRUCTION(Opcode.STRUCT_GET, _registry.closure_type_index, WASMGC_TYPE_REGISTRY.CLOSURE_FUNCTION))
+            _emit(HEAP_TYPE_INSTRUCTION(Opcode.REF_CAST, HEAP_TYPE.of_type_index(signature)))
+            _emit(TYPE_INSTRUCTION(Opcode.CALL_REF, signature))
+        si
 
         // An operation the host provides is a call of its import rather
         // than an operation the generator lowers.
