@@ -1218,9 +1218,7 @@ namespace IR.WasmGC is
             let value = wrap.value
 
             if let index = _registry.box_index(_specialize(value.type)) then
-                _emit(INDEX_INSTRUCTION(Opcode.GLOBAL_GET, _registry.descriptor_global(_registry.box_type(_specialize(value.type))!)))
-                gen(value)
-                _emit(TYPE_INSTRUCTION(Opcode.STRUCT_NEW, index))
+                _box(value, _registry.box_type(_specialize(value.type))!, index)
             elif _struct_of(value.type)? then
                 gen(value)
             else
@@ -1814,6 +1812,20 @@ namespace IR.WasmGC is
         visit(null_value: Values.NULL) is
             _zero(null_value.type)
         si
+        // The value is lowered before the descriptor is pushed, as a value
+        // can read an operand its enclosing construct left on the stack:
+        // the member call a coalescing access makes reads its receiver there.
+        _box(value: Value, box_type: WASMGC_CLASS, index: int) is
+            gen(value)
+
+            let held = _temp(_value_type(value.type)!)
+
+            _emit(INDEX_INSTRUCTION(Opcode.LOCAL_SET, held))
+            _emit(INDEX_INSTRUCTION(Opcode.GLOBAL_GET, _registry.descriptor_global(box_type)))
+            _emit(INDEX_INSTRUCTION(Opcode.LOCAL_GET, held))
+            _emit(TYPE_INSTRUCTION(Opcode.STRUCT_NEW, index))
+        si
+
         // A scalar is boxed in a struct carrying its type's descriptor, so
         // a boxed int and a boxed long answer type tests differently. A
         // reference needs no box.
@@ -1821,11 +1833,7 @@ namespace IR.WasmGC is
             let value = box.value
 
             if let index = _registry.box_index(_specialize(value.type)) then
-                let box_type = _registry.box_type(_specialize(value.type))!
-
-                _emit(INDEX_INSTRUCTION(Opcode.GLOBAL_GET, _registry.descriptor_global(box_type)))
-                gen(value)
-                _emit(TYPE_INSTRUCTION(Opcode.STRUCT_NEW, index))
+                _box(value, _registry.box_type(_specialize(value.type))!, index)
             elif _value_type(value.type)?.heap_type()? then
                 gen(value)
             else
