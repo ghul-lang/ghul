@@ -832,8 +832,9 @@ namespace IR.WasmGC is
             esac
 
         // For each way of holding elements the program's arrays use, a
-        // final struct under the root holding the descriptor and the
-        // elements, then the mutable array of the elements.
+        // final struct under the root holding the descriptor, the elements
+        // and the element descriptor, then the mutable array of the
+        // elements.
         _add_array_types(group: LIST[SUB_TYPE]) is
             for storage in 0::4 do
                 if !_array_storages.contains(storage) then
@@ -845,11 +846,14 @@ namespace IR.WasmGC is
 
                 _array_storage_types[storage] = struct_index
 
+                // The element descriptor is held by each array rather than
+                // its descriptor, whose vtable slot holds the root's vtable.
                 group.add(
                     SUB_TYPE(
                         STRUCT_TYPE([
                             FIELD_TYPE.of_reference(VALUE_TYPE.of_type_index(DESCRIPTOR_TYPE_INDEX, false), false),
-                            FIELD_TYPE.of_reference(VALUE_TYPE.of_type_index(struct_index + 1, false), false)
+                            FIELD_TYPE.of_reference(VALUE_TYPE.of_type_index(struct_index + 1, false), false),
+                            FIELD_TYPE.of_reference(VALUE_TYPE.of_type_index(DESCRIPTOR_TYPE_INDEX, true), false)
                         ]),
                         true,
                         [OBJECT_TYPE_INDEX]))
@@ -869,10 +873,7 @@ namespace IR.WasmGC is
             od
         si
 
-        // An array has no methods of its own to dispatch, so its
-        // descriptor's vtable slot holds the descriptor of its element
-        // class, which a store into it is checked against. An array of a
-        // scalar, a trait or the root holds null there.
+        // An array answers the root's methods, so its vtable is the root's.
         _fill_array_descriptor(array: WASMGC_CLASS, element: Type) is
             let initialiser = _initialisers[array]
 
@@ -881,15 +882,35 @@ namespace IR.WasmGC is
             initialiser.add(INDEX_INSTRUCTION(Opcode.GLOBAL_GET, _descriptor_globals[_object!]))
             initialiser.add_range(chars_of("{element}[]"))
 
-            let held = if !WASMGC_TYPES.scalar(element)? then class_of(element) else null fi
-
-            if let element_class = held /\ element_class != _object /\ _descriptor_globals.contains_key(element_class) then
-                initialiser.add(INDEX_INSTRUCTION(Opcode.GLOBAL_GET, _descriptor_globals[element_class]))
+            if let vtable = _dispatch.vtable(_object!, _functions!) then
+                initialiser.add_range(vtable)
             else
                 initialiser.add(HEAP_TYPE_INSTRUCTION(Opcode.REF_NULL, HEAP_TYPE.of_abstract(AbstractHeapType.STRUCT)))
             fi
 
             initialiser.add(TYPE_INSTRUCTION(Opcode.STRUCT_NEW, DESCRIPTOR_TYPE_INDEX))
+        si
+
+        /// The global holding the descriptor of the class the elements of
+        /// an array of `type` are made to hold, which a store into the
+        /// array is checked against, or null where no check is needed: the
+        /// elements are scalars, or of a trait, or of the root.
+        array_element_descriptor(type: WASMGC_CLASS) -> int? is
+            if discovering then
+                return null
+            fi
+
+            let element = _arrays[type]
+
+            if WASMGC_TYPES.scalar(element)? then
+                return null
+            fi
+
+            if let element_class = class_of(element) /\ element_class != _object /\ _descriptor_globals.contains_key(element_class) then
+                return _descriptor_globals[element_class]
+            fi
+
+            return null
         si
 
         // Whether `type` is represented as a struct by this model. Traits

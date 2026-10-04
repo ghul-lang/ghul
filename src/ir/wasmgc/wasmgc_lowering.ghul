@@ -1012,6 +1012,7 @@ namespace IR.WasmGC is
             gen(array.count)
 
             _emit(TYPE_INSTRUCTION(Opcode.ARRAY_NEW_DEFAULT, storage.data_index))
+            _load_array_element_descriptor(type)
             _emit(TYPE_INSTRUCTION(Opcode.STRUCT_NEW, storage.struct_index))
         si
 
@@ -1032,6 +1033,7 @@ namespace IR.WasmGC is
             od
 
             _emit(TYPE_LENGTH_INSTRUCTION(Opcode.ARRAY_NEW_FIXED, storage.data_index, sequence.values.count))
+            _load_array_element_descriptor(type)
             _emit(TYPE_INSTRUCTION(Opcode.STRUCT_NEW, storage.struct_index))
         si
 
@@ -1062,17 +1064,27 @@ namespace IR.WasmGC is
                 let value = _temp(_registry.object_reference)
 
                 _emit(INDEX_INSTRUCTION(Opcode.LOCAL_TEE, value))
-                _check_array_store(array, value)
+                _check_array_store(array, storage.struct_index, value)
                 _emit(INDEX_INSTRUCTION(Opcode.LOCAL_GET, value))
             fi
 
             _emit(TYPE_INSTRUCTION(Opcode.ARRAY_SET, storage.data_index))
         si
 
+        // The descriptor of the class an array of `type` is made to hold, or
+        // null where a store into it needs no check.
+        _load_array_element_descriptor(type: WASMGC_CLASS) is
+            if let global = _registry.array_element_descriptor(type) then
+                _emit(INDEX_INSTRUCTION(Opcode.GLOBAL_GET, global))
+            else
+                _emit(HEAP_TYPE_INSTRUCTION(Opcode.REF_NULL, HEAP_TYPE.of_type_index(WASMGC_TYPE_REGISTRY.DESCRIPTOR_TYPE_INDEX)))
+            fi
+        si
+
         // Traps where the non-null `value` is not an instance of the
-        // element class recorded in `array`'s descriptor. An array of the
-        // root or of a trait records none, and takes any value.
-        _check_array_store(array: int, value: int) is
+        // element class `array` records. An array of the root or of a trait
+        // records none, and takes any value.
+        _check_array_store(array: int, struct_index: int, value: int) is
             _emit(Opcode.DROP)
 
             let descriptor_type = VALUE_TYPE.of_type_index(WASMGC_TYPE_REGISTRY.DESCRIPTOR_TYPE_INDEX, true)
@@ -1096,9 +1108,7 @@ namespace IR.WasmGC is
             check.add(IF_INSTRUCTION(BLOCK_TYPE(), [SIMPLE_INSTRUCTION(Opcode.UNREACHABLE)]: INSTRUCTION, LIST[INSTRUCTION]()))
 
             _emit(INDEX_INSTRUCTION(Opcode.LOCAL_GET, array))
-            _load_descriptor()
-            _emit(TYPE_FIELD_INSTRUCTION(Opcode.STRUCT_GET, WASMGC_TYPE_REGISTRY.DESCRIPTOR_TYPE_INDEX, WASMGC_TYPE_REGISTRY.DESCRIPTOR_VTABLE))
-            _emit(HEAP_TYPE_INSTRUCTION(Opcode.REF_CAST_NULL, descriptor_type.heap_type()!))
+            _emit(TYPE_FIELD_INSTRUCTION(Opcode.STRUCT_GET, struct_index, 2))
             _emit(INDEX_INSTRUCTION(Opcode.LOCAL_TEE, element))
             _emit(Opcode.REF_IS_NULL)
             _emit(INDEX_INSTRUCTION(Opcode.LOCAL_GET, value))
