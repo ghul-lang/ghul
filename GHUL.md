@@ -1757,7 +1757,7 @@ Bare `return;` (no value) is accepted in a void block — same rule as `return;`
 
 ### exceptions
 
-`throw` raises an exception, which must derive from `System.Exception`. Exception handling runs `try` ... `yrt`, with `catch` clauses and an optional `finally`. A `catch` names an exception variable and a type, and handles that type or any subtype; `finally` always runs, including before a `return` leaves the `try`:
+`throw` raises an exception, which must derive from `Ghul.Exception`. Exception handling runs `try` ... `yrt`, with `catch` clauses and an optional `finally`. A `catch` names an exception variable and a type, and handles that type or any subtype; `finally` always runs, including before a `return` leaves the `try`:
 
 ```ghul
 try
@@ -1788,7 +1788,7 @@ assert index >= 0;
 assert index < array.count else "index out of range";
 ```
 
-A string after `else` is prefixed with the source location and wrapped in a `Ghul.AssertFailedException`; a `System.Exception` value is thrown as it stands. Anything else is a compile error.
+A string after `else` is prefixed with the source location and wrapped in a `Ghul.AssertFailedException`; a `Ghul.Exception` value is thrown as it stands. Anything else is a compile error.
 
 In expression position, `assert cond else "msg" in expr` guards a value and chains like `let X in expr`: a failing assert throws, a passing assert yields the inner expression. The narrowing applied by the condition flows into the inner expression, so the guarded value can be used there directly:
 
@@ -2380,7 +2380,9 @@ Inference also works from later use: a variable with no immediate clue takes its
 
 See <https://ghul.dev/dotnet-integration.html>.
 
-ghūl compiles to .NET IL and can consume most types in any .NET assembly. .NET names are mapped to ghūl conventions: method, property, and field names become `snake_case`; enum names and members become `MACRO_CASE`; class, struct, and trait names are left as they are, with .NET's generic arity suffix removed — `KeyValuePair<K, V>` is `Collections.KeyValuePair[K, V]`. The namespace `System.Collections.Generic` maps to `Collections` and `System.IO` to `IO`, and some common types are remapped — `System.Console` is `IO.Std`, `IReadOnlyList<T>` is `Collections.List[T]`, `IReadOnlySet<T>` is `Collections.Set[T]`, `IEnumerable<T>` is `Collections.Iterable[T]`, and `IComparable<T>`/`IEquatable<T>` are `Ghul.Comparable[T]`/`Ghul.Equatable[T]`. The dotnet-integration page has the full mapping table.
+ghūl compiles to .NET IL and can consume most types in any .NET assembly. .NET names are mapped to ghūl conventions: method, property, and field names become `snake_case`; enum names and members become `MACRO_CASE`; class, struct, and trait names are left as they are, with .NET's generic arity suffix removed — `Queue<T>` is `Collections.Queue[T]`. The namespace `System.Collections.Generic` maps to `Collections` and `System.IO` to `IO`, and some common types are remapped — `System.Console` is `IO.Std`, `IReadOnlyList<T>` is `Collections.List[T]`, `IReadOnlySet<T>` is `Collections.Set[T]`, `IEnumerable<T>` is `Collections.Iterable[T]`, and `IComparable<T>`/`IEquatable<T>` are `Ghul.Comparable[T]`/`Ghul.Equatable[T]`. The dotnet-integration page has the full mapping table.
+
+The core types have ghūl names in ghūl namespaces. `System.Exception` is `Ghul.Exception`, and so are the common exceptions: `Ghul.InvalidOperationException`, `Ghul.NotImplementedException`, `Ghul.ArgumentException` and the rest of those in `System`. `System.Text.StringBuilder` is `Text.STRING_BUILDER`, `System.Math` is `Ghul.Math`, `System.Random` is `Ghul.RANDOM`, `System.StringSplitOptions` and `System.StringComparison` are `Ghul.StringSplitOptions` and `Ghul.StringComparison`, and `KeyValuePair<K, V>` is `Collections.KEY_VALUE_PAIR[K, V]`. The old name of each still reaches the same type wherever a type can be named, and a `use` that names one by its old name brings it in under that name. Diagnostics, hover and completion give only the new name.
 
 Those two interfaces are declared in terms of the operators rather than named methods: `Ghul.Equatable[T]` requires `=~` and `Ghul.Comparable[T]` requires `<>`, so a type implements them by defining the operator. Every .NET type implementing them gains the operator in turn, which is why `=~` compares a `System.DateTime` and the relational operators order a `System.Version`.
 
