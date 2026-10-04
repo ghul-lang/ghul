@@ -994,11 +994,212 @@ namespace IR.WasmGC is
             (type.is_action \/ WASMGC_TYPES.is_void(type.arguments[type.arguments.count - 1])) /\
             !WASMGC_TYPES.is_void(function.return_type)
 
-        visit(address: Values.ARRAY_ELEMENT_ADDRESS) is _report("an array") si
-        visit_address(address: Values.ARRAY_ELEMENT_ADDRESS) is _report("an array") si
-        visit(array: Values.NEW_ARRAY) is _report("an array") si
-        visit(store: Values.STORE_ARRAY_ELEMENT) is _report("an array") si
-        visit(sequence: Values.SEQUENCE) is _report("an array literal") si
+        visit(address: Values.ARRAY_ELEMENT_ADDRESS) is _report("the address of an array element") si
+        visit_address(address: Values.ARRAY_ELEMENT_ADDRESS) is _report("the address of an array element") si
+
+        // An array is a struct holding its descriptor and its elements.
+        visit(array: Values.NEW_ARRAY) is
+            let type = _array_of(array.type)
+
+            if !type? then
+                return
+            fi
+
+            let storage = _registry.array_storage(type)
+
+            _emit(INDEX_INSTRUCTION(Opcode.GLOBAL_GET, _registry.descriptor_global(type)))
+
+            gen(array.count)
+
+            _emit(TYPE_INSTRUCTION(Opcode.ARRAY_NEW_DEFAULT, storage.data_index))
+            _emit(TYPE_INSTRUCTION(Opcode.STRUCT_NEW, storage.struct_index))
+        si
+
+        visit(sequence: Values.SEQUENCE) is
+            let type = _array_of(sequence.type)
+
+            if !type? then
+                return
+            fi
+
+            let storage = _registry.array_storage(type)
+
+            _emit(INDEX_INSTRUCTION(Opcode.GLOBAL_GET, _registry.descriptor_global(type)))
+
+            for value in sequence.values do
+                gen(value)
+                _normalise_for(sequence.element_type)
+            od
+
+            _emit(TYPE_LENGTH_INSTRUCTION(Opcode.ARRAY_NEW_FIXED, storage.data_index, sequence.values.count))
+            _emit(TYPE_INSTRUCTION(Opcode.STRUCT_NEW, storage.struct_index))
+        si
+
+        // A store into an array of references checks that the array was
+        // made to hold the value, since an array of a class is usable as an
+        // array of its superclass. A store that would break that traps.
+        visit(store: Values.STORE_ARRAY_ELEMENT) is
+            let type = _array_of(store.array.type)
+
+            if !type? then
+                return
+            fi
+
+            let storage = _registry.array_storage(type)
+            let array = _temp(VALUE_TYPE.of_type_index(storage.struct_index, true))
+
+            gen(store.array)
+            _coerce_top(VALUE_TYPE.of_type_index(storage.struct_index, true))
+            _emit(INDEX_INSTRUCTION(Opcode.LOCAL_TEE, array))
+            _emit(TYPE_FIELD_INSTRUCTION(Opcode.STRUCT_GET, storage.struct_index, 1))
+
+            gen(store.index)
+
+            gen(store.element)
+            _normalise_for(store.element_type)
+
+            if !_registry.discovering /\ _registry.array_store_is_checked(type) then
+                let value = _temp(_registry.object_reference)
+
+                _emit(INDEX_INSTRUCTION(Opcode.LOCAL_TEE, value))
+                _check_array_store(array, value)
+                _emit(INDEX_INSTRUCTION(Opcode.LOCAL_GET, value))
+            fi
+
+            _emit(TYPE_INSTRUCTION(Opcode.ARRAY_SET, storage.data_index))
+        si
+
+        // Traps where the non-null `value` is not an instance of the
+        // element class recorded in `array`'s descriptor. An array of the
+        // root or of a trait records none, and takes any value.
+        _check_array_store(array: int, value: int) is
+            _emit(Opcode.DROP)
+
+            let descriptor_type = VALUE_TYPE.of_type_index(WASMGC_TYPE_REGISTRY.DESCRIPTOR_TYPE_INDEX, true)
+            let element = _temp(descriptor_type)
+            let id = _temp(VALUE_TYPE.of_numeric(NumericType.I32))
+
+            let check = LIST[INSTRUCTION]()
+
+            check.add(INDEX_INSTRUCTION(Opcode.LOCAL_GET, value))
+            check.add(TYPE_FIELD_INSTRUCTION(Opcode.STRUCT_GET, WASMGC_TYPE_REGISTRY.OBJECT_TYPE_INDEX, 0))
+            check.add(TYPE_FIELD_INSTRUCTION(Opcode.STRUCT_GET, WASMGC_TYPE_REGISTRY.DESCRIPTOR_TYPE_INDEX, WASMGC_TYPE_REGISTRY.DESCRIPTOR_CLASS_ID))
+            check.add(INDEX_INSTRUCTION(Opcode.LOCAL_GET, element))
+            check.add(TYPE_FIELD_INSTRUCTION(Opcode.STRUCT_GET, WASMGC_TYPE_REGISTRY.DESCRIPTOR_TYPE_INDEX, WASMGC_TYPE_REGISTRY.DESCRIPTOR_CLASS_ID))
+            check.add(INDEX_INSTRUCTION(Opcode.LOCAL_TEE, id))
+            check.add(SIMPLE_INSTRUCTION(Opcode.I32_SUB))
+            check.add(INDEX_INSTRUCTION(Opcode.LOCAL_GET, element))
+            check.add(TYPE_FIELD_INSTRUCTION(Opcode.STRUCT_GET, WASMGC_TYPE_REGISTRY.DESCRIPTOR_TYPE_INDEX, WASMGC_TYPE_REGISTRY.DESCRIPTOR_LAST_DESCENDANT))
+            check.add(INDEX_INSTRUCTION(Opcode.LOCAL_GET, id))
+            check.add(SIMPLE_INSTRUCTION(Opcode.I32_SUB))
+            check.add(SIMPLE_INSTRUCTION(Opcode.I32_GT_U))
+            check.add(IF_INSTRUCTION(BLOCK_TYPE(), [SIMPLE_INSTRUCTION(Opcode.UNREACHABLE)]: INSTRUCTION, LIST[INSTRUCTION]()))
+
+            _emit(INDEX_INSTRUCTION(Opcode.LOCAL_GET, array))
+            _load_descriptor()
+            _emit(TYPE_FIELD_INSTRUCTION(Opcode.STRUCT_GET, WASMGC_TYPE_REGISTRY.DESCRIPTOR_TYPE_INDEX, WASMGC_TYPE_REGISTRY.DESCRIPTOR_VTABLE))
+            _emit(HEAP_TYPE_INSTRUCTION(Opcode.REF_CAST_NULL, descriptor_type.heap_type()!))
+            _emit(INDEX_INSTRUCTION(Opcode.LOCAL_TEE, element))
+            _emit(Opcode.REF_IS_NULL)
+            _emit(INDEX_INSTRUCTION(Opcode.LOCAL_GET, value))
+            _emit(Opcode.REF_IS_NULL)
+            _emit(Opcode.I32_OR)
+            _emit(IF_INSTRUCTION(BLOCK_TYPE(), LIST[INSTRUCTION](), check))
+        si
+
+        // The array type `type` is, or null, reported, where the target
+        // cannot hold it.
+        _array_of(type: Type?) -> WASMGC_CLASS? is
+            if let array = _registry.array_of(_specialize(type)) then
+                return array
+            fi
+
+            _report("an array of type {type}")
+
+            return null
+        si
+
+        // The built-in operation on an array that a call to `function`
+        // performs, or null where it is not one.
+        _array_operation(function: Function) -> string? is
+            if let operation = cast Function?(function.root_specialized_from)?.intrinsic_operation /\ operation.starts_with("array.") then
+                return operation
+            fi
+
+            return null
+        si
+
+        // The member the core library gives every array that `call` reaches
+        // on an array, whether it names that member or a trait member the
+        // array implements with it. Null where `call` is not on an array.
+        _array_member(call: Values.Call.INSTANCE) -> Function? is
+            let type = _registry.array_of(_specialize(call.from?.type))
+
+            if !type? then
+                return null
+            fi
+
+            let called = cast Function?(call.function.root_specialized_from)!
+
+            if called.owner == type.definition then
+                return called
+            fi
+
+            let member = type.definition.find_member(called.name)
+
+            let candidates =
+                if let group: Semantic.Symbols.FUNCTION_GROUP = member then
+                    group.functions
+                elif let function: Function = member then
+                    LIST[Function]([function])
+                else
+                    LIST[Function]()
+                fi
+
+            for candidate in candidates do
+                if let overridees = candidate.overridees then
+                    for overridee in overridees do
+                        if overridee.root_specialized_from == called then
+                            return candidate
+                        fi
+                    od
+                fi
+            od
+
+            return null
+        si
+
+        // The elements of the array `from` holds are read from the struct
+        // holding them.
+        _lower_array_operation(operation: string, call: Values.Call.INSTANCE) is
+            let type = _array_of(call.from?.type)
+
+            if !type? then
+                return
+            fi
+
+            let storage = _registry.array_storage(type)
+
+            gen(call.from)
+            _coerce_top(VALUE_TYPE.of_type_index(storage.struct_index, true))
+            _emit(TYPE_FIELD_INSTRUCTION(Opcode.STRUCT_GET, storage.struct_index, 1))
+
+            if operation =~ "array.count" then
+                _emit(Opcode.ARRAY_LEN)
+            elif operation =~ "array.get" then
+                gen(call.arguments[0])
+
+                _emit(TYPE_INSTRUCTION(Opcode.ARRAY_GET, storage.data_index))
+
+                if let element = _value_type(_registry.array_element(type)), heap = element.heap_type() /\ !_registry.discovering then
+                    if !heap.matches(_registry.object_reference.heap_type()!) then
+                        _emit(HEAP_TYPE_INSTRUCTION(Opcode.REF_CAST_NULL, heap))
+                    fi
+                fi
+            else
+                _report("the array operation {operation}")
+            fi
+        si
 
         visit(compare: Values.COMPARE_ORDER_TO_ZERO) is
             gen(compare.value)
@@ -1741,6 +1942,16 @@ namespace IR.WasmGC is
             let dispatch = call.dispatch
 
             if function.is_constructor /\ _is_object_constructor(function) then
+                return
+            fi
+
+            if let member = _array_member(call) then
+                if let operation = _array_operation(member) then
+                    _lower_array_operation(operation, call)
+                else
+                    _call_direct(call, WASMGC_FUNCTION(member, WASMGC_TYPE_MAPS.function_map(function, _type_map)))
+                fi
+
                 return
             fi
 
