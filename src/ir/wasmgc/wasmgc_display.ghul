@@ -1,27 +1,33 @@
 namespace IR.WasmGC is
     use Wasm.FUNCTION
-    use Wasm.FUNC_TYPE
     use Wasm.INSTRUCTION
     use Wasm.SIMPLE_INSTRUCTION
     use Wasm.INDEX_INSTRUCTION
     use Wasm.HEAP_TYPE_INSTRUCTION
+    use Wasm.TYPE_FIELD_INSTRUCTION
     use Wasm.BLOCK_INSTRUCTION
     use Wasm.BLOCK_TYPE
+    use Wasm.HEAP_TYPE
     use Wasm.Opcode
 
     use Collections.LIST
+    use Collections.MAP
 
+    use Semantic.Types.Type
+    use Semantic.Symbols.Symbol
+    use Semantic.Symbols.Classy
     use Semantic.Symbols.Function
     use Semantic.Symbols.Property
 
     use IR.Emitter.SRM_MEMBER_ORDER
     use IR.Emitter.SRM_EMITTED_TYPE
 
-    /// The displayers: for each class with no text of its own, a function
+    /// The displayers: for each type with no text of its own, a function
     /// that writes a value of it for display through the core library's
-    /// display state, as its type and its public members.
+    /// display state. A sequence is written as its elements, a tuple as
+    /// its parts, and anything else as its type and public properties.
     ///
-    /// A displayer is reached through its class's descriptor, and only
+    /// A displayer is reached through its type's descriptor, and only
     /// where the program renders values for display at all.
     class WASMGC_DISPLAY is
         _registry: WASMGC_TYPE_REGISTRY
@@ -30,28 +36,20 @@ namespace IR.WasmGC is
             _registry = registry
         si
 
-        /// Numbers every function a displayer calls, for each class the
+        /// Numbers every function a displayer calls, for each type the
         /// walk has reached so far.
         number(numbering: WASMGC_FUNCTION_NUMBERING) is
             if let helpers = _helpers() then
-                numbering.index_of(helpers.begin)
-                numbering.index_of(helpers.end)
-
                 for type in _displayable do
-                    if let element = _element_type(type) then
-                        numbering.index_of(_generic_helper(helpers.elements, element))
-                    elif _shows_members(type) then
-                        for member in _members(type) do
-                            numbering.index_of(member.getter)
-                            numbering.index_of(_generic_helper(helpers.member, member.type))
-                        od
-                    fi
+                    for function in _calls(type, helpers) do
+                        numbering.index_of(function)
+                    od
                 od
             fi
         si
 
-        /// Reserves the displayer of each class that has one, once the walk
-        /// has numbered everything they call, and records it in the class's
+        /// Reserves the displayer of each type that has one, once the walk
+        /// has numbered everything they call, and records it in the type's
         /// descriptor.
         reserve(numbering: WASMGC_FUNCTION_NUMBERING, strings: WASMGC_STRINGS?) is
             let helpers = _helpers()
@@ -61,16 +59,7 @@ namespace IR.WasmGC is
             fi
 
             for type in _displayable do
-                let body =
-                    if let element = _element_type(type) then
-                        _sequence_body(element, helpers, numbering)
-                    elif _shows_members(type) then
-                        _body(type, helpers, numbering, strings)
-                    else
-                        null
-                    fi
-
-                if body? then
+                if let body = _body(type, helpers, numbering, strings) then
                     let signature = _registry.display_signature
 
                     _registry.set_displayer(
@@ -89,58 +78,47 @@ namespace IR.WasmGC is
             return result
         si
 
-        // The display state's methods a displayer calls: the opening with
-        // the type's name, one member, and the close.
-        _helpers() -> (state: WASMGC_CLASS, begin: WASMGC_FUNCTION, member: Function, elements: Function, end: WASMGC_FUNCTION)? is
-            if let state = _registry.display_state then
-                let methods = SRM_MEMBER_ORDER.methods(SRM_EMITTED_TYPE(state.definition))
+        _helpers() -> _DISPLAY_HELPERS? =>
+            if let state = _registry.display_state then _DISPLAY_HELPERS.of(state) else null fi
 
-                let begin = _named(methods, "_begin_members")
-                let member = _named(methods, "_member")
-                let elements = _named(methods, "_elements")
-                let end = _named(methods, "_end_members")
+        // What the displayer of `type` calls, in the order it calls them,
+        // and nothing where `type` has no displayer.
+        _calls(type: WASMGC_CLASS, helpers: _DISPLAY_HELPERS) -> Collections.List[WASMGC_FUNCTION] is
+            let result = LIST[WASMGC_FUNCTION]()
 
-                if begin? /\ member? /\ elements? /\ end? then
-                    return (
-                        state = state,
-                        begin = WASMGC_FUNCTION(begin, state.type_map),
-                        member = member,
-                        elements = elements,
-                        end = WASMGC_FUNCTION(end, state.type_map))
-                fi
+            if let element = _element_type(type) then
+                result.add(helpers.elements(element))
+            elif _is_tuple(type) then
+                result.add(helpers.begin_parts)
+
+                for part in type.arguments do
+                    result.add(helpers.part(part))
+                od
+
+                result.add(helpers.end_parts)
+            elif _shows_members(type) then
+                result.add(helpers.begin_members)
+
+                for member in _members(type) do
+                    result.add(member.getter)
+                    result.add(helpers.member(member.type))
+                od
+
+                result.add(helpers.end_members)
             fi
 
-            return null
-        si
-
-        _named(methods: Collections.Iterable[Function], name: string) -> Function? is
-            for method in methods do
-                if method.name =~ name then
-                    return method
-                fi
-            od
-
-            return null
-        si
-
-        // One of the display state's generic methods, at `type`.
-        _generic_helper(method: Function, type: Semantic.Types.Type) -> WASMGC_FUNCTION is
-            let map = Collections.MAP[Semantic.Symbols.Symbol, Semantic.Types.Type]()
-
-            map[method.generic_arguments[0].symbol] = type
-
-            return WASMGC_FUNCTION(method, map)
+            return result
         si
 
         // The element type of `type` where a value of it is a sequence,
         // displayed as its elements: an array, or a class with no
         // `to_string` of its own that implements `Iterable`.
-        _element_type(type: WASMGC_CLASS) -> Semantic.Types.Type? is
+        _element_type(type: WASMGC_CLASS) -> Type? is
             if _registry.is_array(type) then
                 return _registry.array_element(type)
             fi
 
-            if !_has_no_text_of_its_own(type) then
+            if !_registry.is_object_type(type) \/ _registry.is_box(type) \/ !_has_no_text_of_its_own(type) then
                 return null
             fi
 
@@ -149,11 +127,7 @@ namespace IR.WasmGC is
             return _iterable_element(type.definition, type.type_map, iterable)
         si
 
-        _iterable_element(
-            from: Semantic.Symbols.Classy,
-            map: Collections.Map[Semantic.Symbols.Symbol, Semantic.Types.Type],
-            iterable: Semantic.Symbols.Symbol
-        ) -> Semantic.Types.Type? is
+        _iterable_element(from: Classy, map: Collections.Map[Symbol, Type], iterable: Symbol) -> Type? is
             for ancestor in from.ancestors do
                 let specialized = WASMGC_TYPE_MAPS.specialize(ancestor, map)!
 
@@ -171,19 +145,21 @@ namespace IR.WasmGC is
             return null
         si
 
+        // A tuple is a struct the compiler constructs, whose type arguments
+        // are its elements' types.
+        _is_tuple(type: WASMGC_CLASS) -> bool =>
+            _registry.is_struct(type) /\ type.definition.location == Source.LOCATION.internal
+
         // Whether a value of `type` is displayed as its type and members:
-        // a class of the program's own, with no `to_string` of its own or
-        // inherited from anything but the root.
+        // a class or struct of the program's own, with no `to_string` of
+        // its own or inherited from anything but the root.
         _shows_members(type: WASMGC_CLASS) -> bool is
             let definition = type.definition
 
-            if !_registry.is_object_type(type) \/ _registry.is_box(type) \/ _registry.is_array(type) \/ _element_type(type)? \/
-                definition.is_trait \/ definition.is_object \/ type.definition == _registry.display_state?.definition
+            if !_registry.is_object_type(type) \/ _registry.is_box(type) \/ _registry.is_array(type) \/
+                _registry.is_string_class(type) \/ definition.is_trait \/ definition.is_object \/
+                definition == _registry.display_state?.definition
             then
-                return false
-            fi
-
-            if _registry.is_string_class(type) then
                 return false
             fi
 
@@ -210,8 +186,8 @@ namespace IR.WasmGC is
 
         // The public instance properties of `type` and of its ancestors,
         // each with the getter that reads it at the class's type arguments.
-        _members(type: WASMGC_CLASS) -> Collections.List[(name: string, getter: WASMGC_FUNCTION, type: Semantic.Types.Type)] is
-            let result = LIST[(name: string, getter: WASMGC_FUNCTION, type: Semantic.Types.Type)]()
+        _members(type: WASMGC_CLASS) -> Collections.List[(name: string, getter: WASMGC_FUNCTION, type: Type)] is
+            let result = LIST[(name: string, getter: WASMGC_FUNCTION, type: Type)]()
 
             let current: WASMGC_CLASS? mut = type
 
@@ -253,84 +229,178 @@ namespace IR.WasmGC is
             return name
         si
 
-        // A sequence's displayer hands it to the display state as an
-        // `Iterable` of its element type.
-        _sequence_body(
-            element: Semantic.Types.Type,
-            helpers: (state: WASMGC_CLASS, begin: WASMGC_FUNCTION, member: Function, elements: Function, end: WASMGC_FUNCTION),
-            numbering: WASMGC_FUNCTION_NUMBERING
+        // The displayer of `type`, taking the value and the state, or null
+        // where it has none or something it calls was not compiled.
+        _body(
+            type: WASMGC_CLASS,
+            helpers: _DISPLAY_HELPERS,
+            numbering: WASMGC_FUNCTION_NUMBERING,
+            strings: WASMGC_STRINGS
         ) -> LIST[INSTRUCTION]? is
-            if let elements = numbering.indexed(_generic_helper(helpers.elements, element)) then
-                let body = LIST[INSTRUCTION]()
+            let calls = _calls(type, helpers)
 
-                body.add(INDEX_INSTRUCTION(Opcode.LOCAL_GET, 1))
-                body.add(HEAP_TYPE_INSTRUCTION(Opcode.REF_CAST_NULL, Wasm.HEAP_TYPE.of_type_index(_registry.type_index(helpers.state)!)))
+            if calls.count == 0 then
+                return null
+            fi
+
+            let indices = LIST[int]()
+
+            for call in calls do
+                if let index = numbering.indexed(call) then
+                    indices.add(index)
+                else
+                    return null
+                fi
+            od
+
+            let state = HEAP_TYPE.of_type_index(_registry.type_index(helpers.state)!)
+
+            let load_state = [
+                INDEX_INSTRUCTION(Opcode.LOCAL_GET, 1),
+                HEAP_TYPE_INSTRUCTION(Opcode.REF_CAST_NULL, state)
+            ]: INSTRUCTION
+
+            let body = LIST[INSTRUCTION]()
+
+            if _element_type(type)? then
+                body.add_range(load_state)
                 body.add(INDEX_INSTRUCTION(Opcode.LOCAL_GET, 0))
-                body.add(INDEX_INSTRUCTION(Opcode.CALL, elements))
+                body.add(INDEX_INSTRUCTION(Opcode.CALL, indices[0]))
+            elif _is_tuple(type) then
+                let held = HEAP_TYPE.of_type_index(_registry.type_index(type)!)
 
-                return body
+                body.add_range(load_state)
+                body.add(INDEX_INSTRUCTION(Opcode.CALL, indices[0]))
+
+                for i in 0..type.arguments.count do
+                    body.add_range(load_state)
+                    body.add(INDEX_INSTRUCTION(Opcode.LOCAL_GET, 0))
+                    body.add(HEAP_TYPE_INSTRUCTION(Opcode.REF_CAST_NULL, held))
+
+                    // A tuple's first field is its descriptor.
+                    body.add(TYPE_FIELD_INSTRUCTION(Opcode.STRUCT_GET, _registry.type_index(type)!, i + 1))
+                    body.add(INDEX_INSTRUCTION(Opcode.CALL, indices[i + 1]))
+                od
+
+                body.add_range(load_state)
+                body.add(INDEX_INSTRUCTION(Opcode.CALL, indices[indices.count - 1]))
+            else
+                body.add_range(load_state)
+                body.add(INDEX_INSTRUCTION(Opcode.GLOBAL_GET, strings.literal(_display_name(type))))
+                body.add(INDEX_INSTRUCTION(Opcode.CALL, indices[0]))
+
+                let members = LIST[INSTRUCTION]()
+                let shown = _members(type)
+
+                for i in 0..shown.count do
+                    let member = shown[i]
+
+                    members.add_range(load_state)
+                    members.add(INDEX_INSTRUCTION(Opcode.GLOBAL_GET, strings.literal(member.name)))
+                    members.add(INDEX_INSTRUCTION(Opcode.LOCAL_GET, 0))
+
+                    if let receiver = _registry.receiver_type(member.getter)?.heap_type() then
+                        members.add(HEAP_TYPE_INSTRUCTION(Opcode.REF_CAST_NULL, receiver))
+                    fi
+
+                    members.add(INDEX_INSTRUCTION(Opcode.CALL, indices[1 + 2 * i]))
+                    members.add(INDEX_INSTRUCTION(Opcode.CALL, indices[2 + 2 * i]))
+
+                    // The state answers false once its element budget is
+                    // spent.
+                    members.add(SIMPLE_INSTRUCTION(Opcode.I32_EQZ))
+                    members.add(INDEX_INSTRUCTION(Opcode.BR_IF, 0))
+                od
+
+                body.add(BLOCK_INSTRUCTION(Opcode.BLOCK, BLOCK_TYPE(), members))
+
+                body.add_range(load_state)
+                body.add(INDEX_INSTRUCTION(Opcode.CALL, indices[indices.count - 1]))
+            fi
+
+            return body
+        si
+    si
+
+    // The display state's methods a displayer calls, each at the type
+    // arguments a call gives it.
+    class _DISPLAY_HELPERS is
+        state: WASMGC_CLASS
+        begin_members: WASMGC_FUNCTION
+        end_members: WASMGC_FUNCTION
+        begin_parts: WASMGC_FUNCTION
+        end_parts: WASMGC_FUNCTION
+
+        _member: Function
+        _part: Function
+        _elements: Function
+
+        init(
+            state: WASMGC_CLASS,
+            begin_members: Function,
+            member: Function,
+            end_members: Function,
+            begin_parts: Function,
+            part: Function,
+            end_parts: Function,
+            elements: Function
+        ) is
+            self.state = state
+            self.begin_members = WASMGC_FUNCTION(begin_members, state.type_map)
+            self.end_members = WASMGC_FUNCTION(end_members, state.type_map)
+            self.begin_parts = WASMGC_FUNCTION(begin_parts, state.type_map)
+            self.end_parts = WASMGC_FUNCTION(end_parts, state.type_map)
+
+            _member = member
+            _part = part
+            _elements = elements
+        si
+
+        // The helpers `state` declares, or null where it lacks any of
+        // them.
+        of(state: WASMGC_CLASS) -> _DISPLAY_HELPERS? static is
+            let methods = SRM_MEMBER_ORDER.methods(SRM_EMITTED_TYPE(state.definition))
+
+            let begin_members = _named(methods, "_begin_members")
+            let member = _named(methods, "_member")
+            let end_members = _named(methods, "_end_members")
+            let begin_parts = _named(methods, "_begin_parts")
+            let part = _named(methods, "_part")
+            let end_parts = _named(methods, "_end_parts")
+            let elements = _named(methods, "_elements")
+
+            if begin_members? /\ member? /\ end_members? /\ begin_parts? /\ part? /\ end_parts? /\ elements? then
+                return _DISPLAY_HELPERS(state, begin_members, member, end_members, begin_parts, part, end_parts, elements)
             fi
 
             return null
         si
 
-        _body(
-            type: WASMGC_CLASS,
-            helpers: (state: WASMGC_CLASS, begin: WASMGC_FUNCTION, member: Function, elements: Function, end: WASMGC_FUNCTION),
-            numbering: WASMGC_FUNCTION_NUMBERING,
-            strings: WASMGC_STRINGS
-        ) -> LIST[INSTRUCTION]? is
-            let state_type = Wasm.HEAP_TYPE.of_type_index(_registry.type_index(helpers.state)!)
+        /// The state's member method, at a member's type.
+        member(type: Type) -> WASMGC_FUNCTION => _at(_member, type)
 
-            let begin = numbering.indexed(helpers.begin)
-            let end = numbering.indexed(helpers.end)
+        /// The state's part method, at a tuple element's type.
+        part(type: Type) -> WASMGC_FUNCTION => _at(_part, type)
 
-            if !begin? \/ !end? then
-                return null
-            fi
+        /// The state's elements method, at a sequence's element type.
+        elements(type: Type) -> WASMGC_FUNCTION => _at(_elements, type)
 
-            let body = LIST[INSTRUCTION]()
+        _at(method: Function, type: Type) -> WASMGC_FUNCTION is
+            let map = MAP[Symbol, Type]()
 
-            body.add(INDEX_INSTRUCTION(Opcode.LOCAL_GET, 1))
-            body.add(HEAP_TYPE_INSTRUCTION(Opcode.REF_CAST_NULL, state_type))
-            body.add(INDEX_INSTRUCTION(Opcode.GLOBAL_GET, strings.literal(_display_name(type))))
-            body.add(INDEX_INSTRUCTION(Opcode.CALL, begin))
+            map[method.generic_arguments[0].symbol] = type
 
-            let members = LIST[INSTRUCTION]()
+            return WASMGC_FUNCTION(method, map)
+        si
 
-            for member in _members(type) do
-                let getter = numbering.indexed(member.getter)
-                let helper = numbering.indexed(_generic_helper(helpers.member, member.type))
-
-                if !getter? \/ !helper? then
-                    return null
+        _named(methods: Collections.Iterable[Function], name: string) -> Function? static is
+            for method in methods do
+                if method.name =~ name then
+                    return method
                 fi
-
-                members.add(INDEX_INSTRUCTION(Opcode.LOCAL_GET, 1))
-                members.add(HEAP_TYPE_INSTRUCTION(Opcode.REF_CAST_NULL, state_type))
-                members.add(INDEX_INSTRUCTION(Opcode.GLOBAL_GET, strings.literal(member.name)))
-                members.add(INDEX_INSTRUCTION(Opcode.LOCAL_GET, 0))
-
-                if let receiver = _registry.receiver_type(member.getter)?.heap_type() then
-                    members.add(HEAP_TYPE_INSTRUCTION(Opcode.REF_CAST_NULL, receiver))
-                fi
-
-                members.add(INDEX_INSTRUCTION(Opcode.CALL, getter))
-                members.add(INDEX_INSTRUCTION(Opcode.CALL, helper))
-
-                // The state answers false once its element budget is
-                // spent.
-                members.add(SIMPLE_INSTRUCTION(Opcode.I32_EQZ))
-                members.add(INDEX_INSTRUCTION(Opcode.BR_IF, 0))
             od
 
-            body.add(BLOCK_INSTRUCTION(Opcode.BLOCK, BLOCK_TYPE(), members))
-
-            body.add(INDEX_INSTRUCTION(Opcode.LOCAL_GET, 1))
-            body.add(HEAP_TYPE_INSTRUCTION(Opcode.REF_CAST_NULL, state_type))
-            body.add(INDEX_INSTRUCTION(Opcode.CALL, end))
-
-            return body
+            return null
         si
     si
 si
