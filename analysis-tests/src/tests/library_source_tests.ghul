@@ -1,0 +1,141 @@
+namespace Analysis.Tests is
+    use IO.Path
+
+    use Analysis.Protocol.ANALYSER_PROCESS
+    use Analysis.Protocol.Response
+
+    use TestClass = Microsoft.VisualStudio.TestTools.UnitTesting.TestClassAttribute
+    use Test = Microsoft.VisualStudio.TestTools.UnitTesting.TestMethodAttribute
+    use Assertions
+
+    // A library source named on the analyser's command line is compiled
+    // with the files the client sends, so what the project uses from it
+    // resolves, hovers and goes to its definition there.
+    @TestClass()
+    class LIBRARY_SOURCE_TESTS is
+        init() is si
+
+        source() -> string =>
+            "namespace Main is\n"
+            "    use Lib.greeting\n"
+            "\n"
+            "    entry() is\n"
+            "        let g = greeting()\n"
+            "    si\n"
+            "si\n"
+
+        library_root() -> string => Path.get_directory_name(fixture_path("library-source/lib/greetings.ghul"))!
+
+        opened() -> ANALYSER_PROCESS is
+            let root = library_root()
+
+            let analyser =
+                ANALYSER_PROCESS([
+                    "--library-source",
+                    "lib@1.0.0={root}",
+                    Path.combine(root, "greetings.ghul")
+                ])
+
+            analyser.send_edit("library-source.ghul", source())
+
+            return analyser
+        si
+
+        wasm_source() -> string =>
+            "namespace Main is\n"
+            "    count(s: string) -> int => s.length + 1\n"
+            "si\n"
+
+        // Under a target that loads no assemblies, the built-in types are
+        // constructed, and a core library adds members to them with
+        // partial blocks.
+        opened_for_wasm() -> ANALYSER_PROCESS is
+            let root = Path.get_directory_name(fixture_path("library-source/core/core.ghul"))!
+
+            let analyser =
+                ANALYSER_PROCESS([
+                    "--target",
+                    "wasm",
+                    "--library-source",
+                    "core@1.0.0={root}",
+                    Path.combine(root, "core.ghul")
+                ])
+
+            analyser.send_edit("library-source-wasm.ghul", wasm_source())
+
+            return analyser
+        si
+
+        @Test()
+        a_name_from_the_library_resolves() is
+            let use analyser = opened()
+
+            let response = analyser.read_response()
+
+            assert isa Response.DIAGNOSTICS(response) else "expected DIAGNOSTICS response"
+
+            for diagnostic in response.diagnostics do
+                is_false(diagnostic.message.contains("greeting"), "unexpected diagnostic: {diagnostic.message}")
+            od
+        si
+
+        @Test()
+        hover_reads_the_library_declaration() is
+            let use analyser = opened()
+
+            let _ = analyser.read_response()
+
+            analyser.send_hover("library-source.ghul", 5, 18)
+
+            let response = analyser.read_query_response()
+
+            assert isa Response.HOVER(response) else "expected HOVER response"
+
+            are_equal("A greeting.", response.doc)
+        si
+
+        @Test()
+        definition_goes_to_the_library_file() is
+            let use analyser = opened()
+
+            let _ = analyser.read_response()
+
+            analyser.send_definition("library-source.ghul", 5, 18)
+
+            let response = analyser.read_query_response()
+
+            assert isa Response.DEFINITION(response) else "expected DEFINITION response"
+
+            are_equal(1, response.locations.count)
+            are_equal(Path.combine(library_root(), "greetings.ghul"), response.locations[0].file)
+            are_equal(3, response.locations[0].start_line)
+        si
+
+        @Test()
+        a_built_in_keeps_the_members_a_library_adds_across_rebuilds() is
+            let use analyser = opened_for_wasm()
+
+            for i in 0..3 do
+                let response = analyser.read_response()
+
+                assert isa Response.DIAGNOSTICS(response) else "expected DIAGNOSTICS response"
+
+                for diagnostic in response.diagnostics do
+                    is_false(diagnostic.severity == 1, "unexpected error: {diagnostic.message}")
+                od
+
+                analyser.send_edit("library-source-wasm.ghul", "{wasm_source()}\nnamespace Main is\n    other{i}() -> int => 1\nsi\n")
+            od
+
+            let _ = analyser.read_response()
+
+            analyser.send_hover("library-source-wasm.ghul", 2, 35)
+
+            let response = analyser.read_query_response()
+
+            assert isa Response.HOVER(response) else "expected HOVER response"
+
+            are_equal("The number of code units.", response.doc)
+        si
+    si
+si
