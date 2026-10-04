@@ -1,0 +1,98 @@
+namespace IR.WasmGC.UnitTests is
+    use Collections.List
+
+    use Wasm.INSTRUCTION
+    use Wasm.I32_CONSTANT
+    use Wasm.NumericType
+    use Wasm.Opcode
+
+    use TestClass = Microsoft.VisualStudio.TestTools.UnitTesting.TestClassAttribute
+    use Test = Microsoft.VisualStudio.TestTools.UnitTesting.TestMethodAttribute
+    use Assertions
+
+    @TestClass()
+    class WASMGC_OPERATIONS_TESTS is
+        init() is si
+
+        opcodes(instructions: List[INSTRUCTION]) -> string is
+            let result = System.Text.StringBuilder()
+
+            for instruction in instructions do
+                if result.length > 0 then
+                    result.append(" ")
+                fi
+
+                result.append("{instruction.opcode}")
+
+                if let constant: I32_CONSTANT = instruction then
+                    result.append("({constant.value})")
+                fi
+            od
+
+            return result.to_string()
+        si
+
+        @Test()
+        normalise__should_sign_extend_a_signed_byte() is
+            are_equal("I32_EXTEND8_S", opcodes(WASMGC_OPERATIONS.normalise(Scalar.INT8)))
+        si
+
+        @Test()
+        normalise__should_mask_an_unsigned_short_and_a_char() is
+            are_equal("I32_CONST(65535) I32_AND", opcodes(WASMGC_OPERATIONS.normalise(Scalar.UINT16)))
+            are_equal("I32_CONST(65535) I32_AND", opcodes(WASMGC_OPERATIONS.normalise(Scalar.CHAR)))
+        si
+
+        @Test()
+        normalise__should_leave_a_full_width_int_alone() is
+            are_equal("", opcodes(WASMGC_OPERATIONS.normalise(Scalar.INT32)))
+        si
+
+        @Test()
+        conversion__should_widen_an_unsigned_int_by_zero_extension() is
+            are_equal("I64_EXTEND_I32_U", opcodes(WASMGC_OPERATIONS.conversion(Scalar.UINT32, Scalar.INT64)))
+        si
+
+        @Test()
+        conversion__should_widen_a_signed_int_by_sign_extension() is
+            are_equal("I64_EXTEND_I32_S", opcodes(WASMGC_OPERATIONS.conversion(Scalar.INT32, Scalar.INT64)))
+        si
+
+        @Test()
+        conversion__should_saturate_a_double_to_an_int() is
+            are_equal("I32_TRUNC_SAT_F64_S", opcodes(WASMGC_OPERATIONS.conversion(Scalar.FLOAT64, Scalar.INT32)))
+        si
+
+        @Test()
+        conversion__should_narrow_after_truncating_to_a_byte() is
+            are_equal("I32_WRAP_I64 I32_EXTEND8_S", opcodes(WASMGC_OPERATIONS.conversion(Scalar.INT64, Scalar.INT8)))
+        si
+
+        @Test()
+        conversion__between_two_kinds_held_in_an_i32__should_need_nothing_but_the_narrowing() is
+            are_equal("", opcodes(WASMGC_OPERATIONS.conversion(Scalar.UINT32, Scalar.INT32)))
+            are_equal("I32_CONST(255) I32_AND", opcodes(WASMGC_OPERATIONS.conversion(Scalar.INT32, Scalar.UINT8)))
+        si
+
+        @Test()
+        unordered_float_less_than__should_be_the_negation_of_greater_or_equal() is
+            let (opcode, negates) = WASMGC_OPERATIONS.comparison(Comparison.LESS, NumericType.F64, true)!
+
+            are_equal(Opcode.F64_GE, opcode)
+            is_true(negates)
+        si
+
+        @Test()
+        unsigned_int_comparison__should_compare_unsigned() is
+            let (opcode, negates) = WASMGC_OPERATIONS.comparison(Comparison.GREATER, NumericType.I32, true)!
+
+            are_equal(Opcode.I32_GT_U, opcode)
+            is_false(negates)
+        si
+
+        @Test()
+        floating_remainder__should_have_no_instruction() is
+            is_false(WASMGC_OPERATIONS.arithmetic(ArithmeticOperation.REMAINDER, NumericType.F64)?)
+        si
+    si
+si
