@@ -16,6 +16,7 @@ namespace IR.WasmGC is
     use Wasm.F32_CONSTANT
     use Wasm.F64_CONSTANT
     use Wasm.Opcode
+    use Wasm.AbstractHeapType
 
     use Collections.LIST
     use Collections.MAP
@@ -72,6 +73,10 @@ namespace IR.WasmGC is
         /// for the root.
         DESCRIPTOR_SUPERCLASS: int static => 2
 
+        /// The descriptor field holding the class's vtable, null where it
+        /// has none.
+        DESCRIPTOR_VTABLE: int static => 3
+
         _module: MODULE
         _object: Classy?
 
@@ -94,6 +99,12 @@ namespace IR.WasmGC is
         _static_constructors: MAP[Classy, (constructor: Function, initialised: int)]
 
         _unsupported: LIST[(location: LOCATION, construct: string)]
+
+        _dispatch: WASMGC_DISPATCH
+        _ordered: Collections.List[Classy]
+        _initialisers: MAP[Classy, LIST[INSTRUCTION]]
+        _indices: MAP[Function, int]
+        _first_thunk: int
 
         /// The constructs the program declares that the object model cannot
         /// represent yet, each with where it was declared.
@@ -130,6 +141,11 @@ namespace IR.WasmGC is
             _static_constructors = MAP[Classy, (constructor: Function, initialised: int)]()
 
             _unsupported = LIST[(location: LOCATION, construct: string)]()
+
+            _dispatch = WASMGC_DISPATCH(self)
+            _ordered = LIST[Classy]()
+            _initialisers = MAP[Classy, LIST[INSTRUCTION]]()
+            _indices = MAP[Function, int]()
         si
 
         /// Builds the recursion group and the globals for every type
@@ -178,6 +194,10 @@ namespace IR.WasmGC is
                 group.add(_sub_type(type))
             od
 
+            _ordered = ordered
+
+            group.add_range(_dispatch.plan(ordered, group.count))
+
             let first = _module.add_rec_group(group)
 
             assert first == DESCRIPTOR_TYPE_INDEX else "the object model's types must come first"
@@ -196,6 +216,24 @@ namespace IR.WasmGC is
                 fi
             od
         si
+
+        /// Fills in the descriptors and adds the trait table, once every
+        /// function with a body has its index, numbering the dispatch thunks
+        /// from `first_thunk`. The descriptors' global indices are fixed by
+        /// `build`.
+        finish(indices: MAP[Function, int], first_thunk: int) is
+            _indices = indices
+            _first_thunk = first_thunk
+
+            _dispatch.finish(_module, indices, first_thunk)
+
+            for type in _ordered do
+                _fill_descriptor(type)
+            od
+        si
+
+        /// How the program's virtual and trait calls dispatch.
+        dispatch: WASMGC_DISPATCH => _dispatch
 
         // Whether `type` is represented as a struct by this model. Traits
         // have no instances of their own, structs and enums are value types
@@ -268,7 +306,8 @@ namespace IR.WasmGC is
             STRUCT_TYPE([
                 FIELD_TYPE(NumericType.I32, false),
                 FIELD_TYPE(NumericType.I32, false),
-                FIELD_TYPE.of_reference(VALUE_TYPE.of_type_index(DESCRIPTOR_TYPE_INDEX, true), false)
+                FIELD_TYPE.of_reference(VALUE_TYPE.of_type_index(DESCRIPTOR_TYPE_INDEX, true), false),
+                FIELD_TYPE.of_reference(VALUE_TYPE.of_abstract(AbstractHeapType.STRUCT), false)
             ])
 
         // Every scalar a program can box: a box is a final struct holding
@@ -366,8 +405,21 @@ namespace IR.WasmGC is
             return object_reference
         si
 
+        // A descriptor's global takes its index when the types are built,
+        // so lowering can name it, and its initialiser is filled in by
+        // `finish`, once the functions its vtable refers to are numbered.
         _add_descriptor_global(type: Classy) is
             let initialiser = LIST[INSTRUCTION]()
+
+            _initialisers[type] = initialiser
+
+            _descriptor_globals[type] =
+                _module.add_global(
+                    GLOBAL(VALUE_TYPE.of_type_index(DESCRIPTOR_TYPE_INDEX, false), false, initialiser))
+        si
+
+        _fill_descriptor(type: Classy) is
+            let initialiser = _initialisers[type]
 
             initialiser.add(I32_CONSTANT(_numbering.id(type)))
             initialiser.add(I32_CONSTANT(_numbering.last_descendant(type)))
@@ -378,11 +430,13 @@ namespace IR.WasmGC is
                 initialiser.add(INDEX_INSTRUCTION(Opcode.GLOBAL_GET, _descriptor_globals[_superclass_of(type) ?? _object!]))
             fi
 
-            initialiser.add(TYPE_INSTRUCTION(Opcode.STRUCT_NEW, DESCRIPTOR_TYPE_INDEX))
+            if let vtable = _dispatch.vtable(type, _indices, _first_thunk) then
+                initialiser.add_range(vtable)
+            else
+                initialiser.add(HEAP_TYPE_INSTRUCTION(Opcode.REF_NULL, HEAP_TYPE.of_abstract(AbstractHeapType.STRUCT)))
+            fi
 
-            _descriptor_globals[type] =
-                _module.add_global(
-                    GLOBAL(VALUE_TYPE.of_type_index(DESCRIPTOR_TYPE_INDEX, false), false, initialiser))
+            initialiser.add(TYPE_INSTRUCTION(Opcode.STRUCT_NEW, DESCRIPTOR_TYPE_INDEX))
         si
 
         // Static fields and namespace-level variables are globals, each
