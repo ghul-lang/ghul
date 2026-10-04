@@ -2,6 +2,10 @@ namespace IR.WasmGC is
     use Wasm.INSTRUCTION
     use Wasm.SIMPLE_INSTRUCTION
     use Wasm.I32_CONSTANT
+    use Wasm.I64_CONSTANT
+    use Wasm.F32_CONSTANT
+    use Wasm.F64_CONSTANT
+    use Wasm.INDEX_INSTRUCTION
     use Wasm.Opcode
     use Wasm.NumericType
 
@@ -9,6 +13,56 @@ namespace IR.WasmGC is
 
     /// How the WasmGC backend encodes the target-neutral operations.
     class WASMGC_OPERATIONS is
+        /// The instructions replacing a scalar of `type` on the stack with
+        /// its hash code: equal values hash alike, zero of either sign and
+        /// every NaN included.
+        ///
+        /// - type: how the scalar is held
+        /// - scratch: a local of type i64, which a 64-bit value is folded
+        ///   through
+        /// - float_scratch: a local of `type`, which a floating value is
+        ///   tested through; unused for an integer
+        hash(type: NumericType, scratch: int, float_scratch: int) -> LIST[INSTRUCTION] static is
+            let result = LIST[INSTRUCTION]()
+
+            case type
+            when NumericType.I32 then
+                return result
+            when NumericType.F32 then
+                _canonical_float(result, float_scratch, F32_CONSTANT(0.0s), Opcode.F32_ADD, Opcode.F32_NE)
+                result.add(SIMPLE_INSTRUCTION(Opcode.I32_REINTERPRET_F32))
+                return result
+            when NumericType.F64 then
+                _canonical_float(result, float_scratch, F64_CONSTANT(0.0), Opcode.F64_ADD, Opcode.F64_NE)
+                result.add(SIMPLE_INSTRUCTION(Opcode.I64_REINTERPRET_F64))
+            else
+            esac
+
+            result.add(INDEX_INSTRUCTION(Opcode.LOCAL_TEE, scratch))
+            result.add(INDEX_INSTRUCTION(Opcode.LOCAL_GET, scratch))
+            result.add(I64_CONSTANT(32L))
+            result.add(SIMPLE_INSTRUCTION(Opcode.I64_SHR_U))
+            result.add(SIMPLE_INSTRUCTION(Opcode.I64_XOR))
+            result.add(SIMPLE_INSTRUCTION(Opcode.I32_WRAP_I64))
+
+            return result
+        si
+
+        // Replaces the floating value on the stack with zero where it is a
+        // NaN, and otherwise with itself plus zero, which turns -0 into +0:
+        // the values `=~` reports equal then have the same bits.
+        _canonical_float(result: LIST[INSTRUCTION], scratch: int, zero: INSTRUCTION, add: Opcode, not_equal: Opcode) static is
+            result.add(INDEX_INSTRUCTION(Opcode.LOCAL_SET, scratch))
+            result.add(zero)
+            result.add(INDEX_INSTRUCTION(Opcode.LOCAL_GET, scratch))
+            result.add(zero)
+            result.add(SIMPLE_INSTRUCTION(add))
+            result.add(INDEX_INSTRUCTION(Opcode.LOCAL_GET, scratch))
+            result.add(INDEX_INSTRUCTION(Opcode.LOCAL_GET, scratch))
+            result.add(SIMPLE_INSTRUCTION(not_equal))
+            result.add(SIMPLE_INSTRUCTION(Opcode.SELECT))
+        si
+
         /// The instruction for a binary arithmetic or bitwise operation on
         /// two values of `type`, or null where wasm has none: there is no
         /// floating remainder, and the bitwise operations are integer
