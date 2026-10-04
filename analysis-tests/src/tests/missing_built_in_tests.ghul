@@ -1,0 +1,86 @@
+namespace Analysis.Tests is
+    use Collections.LIST;
+
+    use Analysis.Protocol.ANALYSER_PROCESS;
+    use Analysis.Protocol.DIAGNOSTIC;
+    use Analysis.Protocol.EDIT_FILE;
+    use Analysis.Protocol.Response;
+
+    use Microsoft.VisualStudio.TestTools.UnitTesting.Assert;
+    use TestClass = Microsoft.VisualStudio.TestTools.UnitTesting.TestClassAttribute;
+    use Test = Microsoft.VisualStudio.TestTools.UnitTesting.TestMethodAttribute;
+    use Assertions;
+
+    // An analyser whose environment declares none of the built-in types
+    // cannot analyse anything. The file it is sent says so, once, as an
+    // error an editor shows, rather than coming back clean - and the
+    // analyser keeps answering rather than restarting into the same
+    // failure.
+    @TestClass()
+    class MISSING_BUILT_IN_TESTS is
+        init() is si
+
+        source() -> string =>
+            "entry() is\n"
+            "    let x: int = \"not an int\"\n"
+            "si\n";
+
+        @Test()
+        A_missing_built_in_type_is_reported_once_as_an_error() is
+            let use analyser = ANALYSER_PROCESS(["--target", "wasm"], ["ghul-runtime.dll"]);
+
+            analyser.send_edit_files([EDIT_FILE("main.ghul", source())]);
+
+            let response = analyser.read_response();
+
+            assert isa Response.DIAGNOSTICS(response)
+                else "expected DIAGNOSTICS response after EDIT";
+
+
+            let missing = LIST[DIAGNOSTIC]();
+
+            for d in response.diagnostics do
+                if let code = d.code /\ code =~ "missing-built-in" then
+                    missing.add(d);
+                fi
+            od
+
+            are_equal(1, missing.count);
+            are_equal(1, missing[0].severity);
+            are_equal(1, missing[0].start_line);
+            are_equal(1, missing[0].start_column);
+        si
+
+        missing_of(response: Response) -> LIST[DIAGNOSTIC] is
+            let missing = LIST[DIAGNOSTIC]();
+
+            if let frame: Response.DIAGNOSTICS = response then
+                for d in frame.diagnostics do
+                    if let code = d.code /\ code =~ "missing-built-in" then
+                        missing.add(d);
+                    fi
+                od
+            fi
+
+            return missing;
+        si
+
+        @Test()
+        A_COMPILE_after_the_edit_reports_it_too() is
+            let use analyser = ANALYSER_PROCESS(["--target", "wasm"], ["ghul-runtime.dll"]);
+
+            analyser.send_edit_files([EDIT_FILE("main.ghul", source())]);
+
+            let _ = analyser.read_response();
+
+            analyser.send_compile();
+
+            let response = analyser.read_response();
+
+            assert isa Response.DIAGNOSTICS(response)
+                else "expected DIAGNOSTICS response after COMPILE";
+
+            are_equal(1, missing_of(response).count);
+        si
+    si
+si
