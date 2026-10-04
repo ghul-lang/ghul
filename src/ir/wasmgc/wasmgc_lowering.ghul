@@ -16,6 +16,7 @@ namespace IR.WasmGC is
     use Wasm.TYPE_FIELD_INSTRUCTION
     use Wasm.HEAP_TYPE_INSTRUCTION
     use Wasm.CAST_BRANCH_INSTRUCTION
+    use Wasm.IF_INSTRUCTION
 
     use Collections.LIST
     use Collections.MAP
@@ -158,6 +159,14 @@ namespace IR.WasmGC is
                 return _held_type(view.underlying)
             elif let projection: Values.NARROW_PROJECT = value then
                 return _held_type(projection.projected)
+            elif let conversion: Values.CAST = value /\ _registry.box_index(conversion.type)? then
+                return VALUE_TYPE.of_type_index(_registry.box_index(conversion.type)!, true)
+            elif let box: Values.BOX = value then
+                if let index = _registry.box_index(box.value.type) then
+                    return VALUE_TYPE.of_type_index(index, true)
+                fi
+
+                return _held_type(box.value)
             elif let load: Values.Load.TEMP = value then
                 return _local_type(_local(load.local))
             elif let load: Values.Load.LOCAL_VARIABLE = value then
@@ -448,6 +457,7 @@ namespace IR.WasmGC is
 
         _global_get(symbol: Semantic.Symbols.Symbol) is
             if let index = _registry.global_of(symbol) then
+                _ensure_initialised(symbol.owner)
                 _emit(INDEX_INSTRUCTION(Opcode.GLOBAL_GET, index))
             else
                 _report("a static field of {symbol.owner}")
@@ -456,6 +466,7 @@ namespace IR.WasmGC is
 
         _global_set(symbol: Semantic.Symbols.Symbol, value: Value) is
             if let index = _registry.global_of(symbol) then
+                _ensure_initialised(symbol.owner)
                 gen(value)
 
                 _normalise_for(cast Semantic.Types.Typed?(symbol)?.type)
@@ -739,17 +750,45 @@ namespace IR.WasmGC is
         visit(null_value: Values.NULL) is
             _zero(null_value.type)
         si
-        visit(box: Values.BOX) is _report("boxing") si
-        visit(unbox: Values.UNBOX) is _report("unboxing") si
+        // A scalar is boxed in a struct carrying its type's descriptor, so
+        // a boxed int and a boxed long answer type tests differently. A
+        // reference needs no box.
+        visit(box: Values.BOX) is
+            let value = box.value
+
+            if let index = _registry.box_index(value.type) then
+                let box_type = _registry.box_type(value.type)!
+
+                _emit(INDEX_INSTRUCTION(Opcode.GLOBAL_GET, _registry.descriptor_global(box_type)))
+                gen(value)
+                _emit(TYPE_INSTRUCTION(Opcode.STRUCT_NEW, index))
+            elif _value_type(value.type)?.heap_type()? then
+                gen(value)
+            else
+                _report("boxing a {value.type}")
+            fi
+        si
+
+        // A null or a box of another type traps, where .NET throws.
+        visit(unbox: Values.UNBOX) is
+            if let index = _registry.box_index(unbox.type) then
+                gen(unbox.value)
+
+                _emit(HEAP_TYPE_INSTRUCTION(Opcode.REF_CAST, HEAP_TYPE.of_type_index(index)))
+                _emit(TYPE_FIELD_INSTRUCTION(Opcode.STRUCT_GET, index, WASMGC_TYPE_REGISTRY.BOX_VALUE))
+            else
+                _report("unboxing a {unbox.type}")
+            fi
+        si
         // A cast to a class the program declares is checked against the
         // struct type, which holds exactly that class and those derived
         // from it. A cast that faults on failure keeps null, as CIL's
         // castclass does; one that declines answers null instead.
         visit(conversion: Values.CAST) is
-            let value = conversion.value
+            let value = _type_test_operand(conversion.value)
 
-            if !_is_reference_operand(value) then
-                _report("a cast from {value.type}")
+            if !value? then
+                _report("a cast from {conversion.value.type}")
                 return
             fi
 
@@ -797,10 +836,10 @@ namespace IR.WasmGC is
         // An instance of a class the program declares is tested against
         // its struct type; null is not an instance of anything.
         visit(test: Values.ISA) is
-            let value = test.value
+            let value = _type_test_operand(test.value)
 
-            if !_is_reference_operand(value) then
-                _report("a type test of {value.type}")
+            if !value? then
+                _report("a type test of {test.value.type}")
                 return
             fi
 
@@ -815,9 +854,19 @@ namespace IR.WasmGC is
 
         // Whether the type test examines the value as it is, a reference,
         // rather than boxing or unwrapping it first.
-        _is_reference_operand(value: Value) -> bool =>
-            Values.TYPE_TEST_OPERAND.mode(value) == Values.TypeTestOperandMode.AS_IS /\
-            _value_type(value.type)?.heap_type()?
+        // The reference a type test examines: the value itself, or a
+        // scalar boxed. Null where the value is neither.
+        _type_test_operand(value: Value) -> Value? is
+            let mode = Values.TYPE_TEST_OPERAND.mode(value)
+
+            if mode == Values.TypeTestOperandMode.AS_IS /\ _value_type(value.type)?.heap_type()? then
+                return value
+            elif mode == Values.TypeTestOperandMode.BOX /\ _registry.box_index(value.type)? then
+                return Values.TYPE_TEST_OPERAND.operand(value)
+            fi
+
+            return null
+        si
 
         // A cast to `object`: every reference is held as one already.
         _is_unchecked_widening(to: Type?) -> bool =>
@@ -848,6 +897,8 @@ namespace IR.WasmGC is
                 _report("a constructor of {type}, which has no body on this target")
                 return
             fi
+
+            _ensure_initialised(type)
 
             let instance = _temp(VALUE_TYPE.of_type_index(_registry.type_index(type)!, true))
 
@@ -1182,7 +1233,35 @@ namespace IR.WasmGC is
             if call.constrained_receiver? then
                 _report("a constrained call")
             else
+                _ensure_initialised(call.function.owner)
                 _call(call.function, call.arguments)
+            fi
+        si
+
+        // A type's static constructor runs once, before the type is first
+        // used: before a static member is read, written or called, and
+        // before an instance is made. Its flag is set before the body runs,
+        // so a use of the type from inside it does not run it again.
+        _ensure_initialised(owner: Semantic.Scope?) is
+            if let type: Semantic.Symbols.Classy = owner then
+                if let (constructor, initialised) = _registry.static_constructor(type) then
+                    let index mut = 0
+
+                    if !_function_indices.try_get_value(constructor, index ref) then
+                        _report("a static constructor of {type}, which has no body on this target")
+                        return
+                    fi
+
+                    let run = LIST[INSTRUCTION]()
+
+                    run.add(I32_CONSTANT(1))
+                    run.add(INDEX_INSTRUCTION(Opcode.GLOBAL_SET, initialised))
+                    run.add(INDEX_INSTRUCTION(Opcode.CALL, index))
+
+                    _emit(INDEX_INSTRUCTION(Opcode.GLOBAL_GET, initialised))
+                    _emit(Opcode.I32_EQZ)
+                    _emit(IF_INSTRUCTION(BLOCK_TYPE(), run, LIST[INSTRUCTION]()))
+                fi
             fi
         si
 
