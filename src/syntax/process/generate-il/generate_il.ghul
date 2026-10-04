@@ -339,7 +339,8 @@ namespace Syntax.Process is
         _are_runtime_symbols_materialized: bool
         _interpolated_value_classifier: Semantic.INTERPOLATED_VALUE_CLASSIFIER
         _display_function: Semantic.Symbols.Function?
-        _dispose: Semantic.Symbols.Function
+        _dispose: Semantic.Symbols.Function?
+        _is_dispose_resolved: bool
 
         // Generators whose state-machine class IL emission has been
         // deferred until the enclosing class/namespace closes. The
@@ -403,9 +404,10 @@ namespace Syntax.Process is
 
         current_block: Values.BLOCK => _block_context.current_block
 
-        // The interpolation-handler and disposal symbols are
-        // materialized by ensure_runtime_symbols_are_materialized,
-        // since the runtime types are not loaded yet at construction.
+        // The interpolation-handler symbols are materialized by
+        // ensure_runtime_symbols_are_materialized, and the disposal one by
+        // dispose_function, since the runtime types are not loaded yet at
+        // construction.
         @suppress("field-definite-assignment")
         init(
             logger: Logger,
@@ -452,18 +454,31 @@ namespace Syntax.Process is
             _val_block_il_stack = Collections.LIST[VAL_BLOCK_IL]()
         si
 
+        // The `dispose` a disposal calls, or null where the core library
+        // declares no disposable trait. Asked for only by a disposal, so a
+        // program that disposes nothing does not need the trait. Where it
+        // is missing, looking it up has reported so.
+        dispose_function() -> Semantic.Symbols.Function? is
+            if !_is_dispose_resolved then
+                _is_dispose_resolved = true
+
+                let idisposable_type = _innate_symbol_lookup.get_idisposable_type()
+
+                // there is only one overload of dispose:
+                if let group = cast Semantic.Symbols.FUNCTION_GROUP?(idisposable_type.find_member("dispose")) then
+                    _dispose = group.functions[0]
+                fi
+            fi
+
+            return _dispose
+        si
+
         ensure_runtime_symbols_are_materialized() is
             if _are_runtime_symbols_materialized then
                 return
             fi
 
             _are_runtime_symbols_materialized = true
-
-            // Materialize IDisposable.Dispose()
-            let idisposable_type = _innate_symbol_lookup.get_idisposable_type()
-
-            // there is only one overload of dispose:
-            _dispose = cast Semantic.Symbols.FUNCTION_GROUP?(idisposable_type.find_member("dispose"))!.functions[0]
 
             _interpolated_value_classifier = Semantic.INTERPOLATED_VALUE_CLASSIFIER(_innate_symbol_lookup)
             _display_function = _interpolated_value_classifier.display_function
