@@ -8,8 +8,9 @@ passed to the same compilation and attributed to a library with
 
 They exercise what the compiler does with those declarations: a program
 using a library, a library declared twice under two roots (included once),
-and the two conflicting shapes — one library at two versions, and
-overlapping roots — which are errors.
+the two conflicting shapes — one library at two versions, and overlapping
+roots — which are errors, and a library's own warnings, which are left out
+unless `--library-warnings` asks for them.
 
 Run the suite with:
 
