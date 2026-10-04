@@ -128,7 +128,7 @@ function describe(error, instance) {
     return `${error?.name ?? "Error"}: ${error?.message ?? String(error)}`;
 }
 
-if (is_node && import.meta.url === (await import("node:url")).pathToFileURL(process.argv[1]).href) {
+if (is_node && process.argv[1] && import.meta.url === (await import("node:url")).pathToFileURL(process.argv[1]).href) {
     process.exitCode = await run({
         args: process.argv.slice(2),
         env: { ...process.env },
