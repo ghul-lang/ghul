@@ -708,7 +708,7 @@ namespace IR.WasmGC is
 
         _call(function: Function, arguments: Collections.List[Value]) is
             if WASMGC_IMPORTS.is_host(function.intrinsic_operation) then
-                _call_host(function.intrinsic_operation!, arguments)
+                _call_host(function.intrinsic_operation!, arguments, function.return_type)
                 return
             elif _lower_representation(function.intrinsic_operation, arguments) then
                 return
@@ -3775,7 +3775,7 @@ namespace IR.WasmGC is
         // than an operation the generator lowers.
         visit(call: Values.Call.INNATE) is
             if WASMGC_IMPORTS.is_host(call.innate_name) then
-                _call_host(call.innate_name, call.arguments)
+                _call_host(call.innate_name, call.arguments, call.type)
             elif _lower_representation(call.innate_name, call.arguments) then
                 return
             elif call.innate_name.starts_with("nullable.") then
@@ -3849,7 +3849,7 @@ namespace IR.WasmGC is
             fi
         si
 
-        _call_host(operation: string, arguments: Collections.List[Value]) is
+        _call_host(operation: string, arguments: Collections.List[Value], result: Type?) is
             let index = _imports.index_of(operation)
 
             if !index? then
@@ -3866,10 +3866,24 @@ namespace IR.WasmGC is
             od
 
             _emit(INDEX_INSTRUCTION(Opcode.CALL, index))
+
+            if result? /\ WASMGC_TYPES.is_string(result) then
+                _from_host()
+            fi
         si
 
         // Converts the ghūl string on the stack to the JavaScript string
         // a host import takes.
+        // Converts the JavaScript string a host import answered with, which
+        // can be null, to a string.
+        _from_host() is
+            if let strings = _strings then
+                _emit(INDEX_INSTRUCTION(Opcode.CALL, strings.from_host_function))
+            else
+                _report("a string the host answers with")
+            fi
+        si
+
         _to_host(type: Type?) is
             if let strings = _strings then
                 _coerce_top(strings.string_reference)
