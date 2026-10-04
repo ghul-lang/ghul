@@ -26,10 +26,15 @@ namespace Syntax.Process is
             let seen_any_namespaces mut = false
             let seen_any_other_definitions mut = false
 
+            // A definition is classified by what it is under any pragmas
+            // written on it: a pragma-wrapped function is still a global
+            // definition, and a pragma-wrapped namespace still a namespace.
+            // One conditional compilation dropped is an empty list, and is
+            // neither.
             for definition in list do
-                if isa Definitions.NAMESPACE(definition) then
+                if isa Definitions.NAMESPACE(definition.without_pragmas) then
                     seen_any_namespaces = true
-                elif !isa Definitions.PRAGMA(definition) then
+                elif !_is_dropped(definition) then
                     seen_any_other_definitions = true
                 fi
             od
@@ -38,10 +43,7 @@ namespace Syntax.Process is
                 let logger = IoC.CONTAINER.instance.logger
 
                 for definition in list do
-                    if
-                        !isa Definitions.NAMESPACE(definition) /\
-                        !isa Definitions.PRAGMA(definition)
-                    then
+                    if !isa Definitions.NAMESPACE(definition.without_pragmas) /\ !_is_dropped(definition) then
                         logger.error(definition.location, "cannot mix global definitions and namespaces in the same file")
                     fi
                 od
@@ -87,6 +89,10 @@ namespace Syntax.Process is
 
             node.walk(self)
         si
+
+        _is_dropped(definition: Definitions.Definition) -> bool =>
+            let unwrapped = definition.without_pragmas in
+            isa Definitions.LIST(unwrapped) /\ (cast Definitions.LIST(unwrapped) |> count()) == 0
 
         // Where an implicit `use default` goes: after any pragmas, so a
         // file-level pragma still comes first.
