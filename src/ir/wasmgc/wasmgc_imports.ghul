@@ -1,0 +1,90 @@
+namespace IR.WasmGC is
+    use Wasm.MODULE
+    use Wasm.FUNCTION_IMPORT
+
+    use Collections.MAP
+
+    /// The functions a module imports. Each takes a function index ahead
+    /// of every defined function, so every import is declared before the
+    /// defined functions are numbered, and none can be declared after.
+    class WASMGC_IMPORTS is
+        _module: MODULE
+        _indices: MAP[(module_name: string, name: string), int]
+        _operations: MAP[string, int]
+        _is_frozen: bool
+
+        /// The number of functions imported.
+        count: int => _indices.count
+
+        /// An import table writing its imports into `module`.
+        init(module: MODULE) is
+            _module = module
+            _indices = MAP[(module_name: string, name: string), int]()
+            _operations = MAP[string, int]()
+        si
+
+        /// Declares a function import, or finds one already declared,
+        /// and answers its function index.
+        ///
+        /// - module_name: the module the host provides it under
+        /// - name: its name in that module
+        /// - type_index: the index of its signature in the type section
+        function(module_name: string, name: string, type_index: int) -> int is
+            let key = (module_name, name)
+            let index mut = 0
+
+            if _indices.try_get_value(key, index ref) then
+                return index
+            fi
+
+            assert !_is_frozen else "import {module_name}.{name} declared after functions were numbered"
+
+            index = _module.add_import(FUNCTION_IMPORT(module_name, name, type_index))
+
+            _indices[key] = index
+
+            return index
+        si
+
+        /// Declares the host import that provides an intrinsic operation,
+        /// and answers its function index.
+        ///
+        /// - operation: the intrinsic operation, `host.` and the name
+        /// - type_index: the index of its signature in the type section
+        host(operation: string, type_index: int) -> int is
+            let index = function(HOST_MODULE, operation.substring(HOST_PREFIX.length), type_index)
+
+            _operations[operation] = index
+
+            return index
+        si
+
+        /// The function index of the host import providing `operation`,
+        /// or null where none was declared.
+        index_of(operation: string) -> int? is
+            let index mut = 0
+
+            if _operations.try_get_value(operation, index ref) then
+                return index
+            fi
+
+            return null
+        si
+
+        /// Refuses any further declaration: the defined functions are
+        /// being numbered after the imports.
+        freeze() is
+            _is_frozen = true
+        si
+
+        /// The module host imports are provided under.
+        HOST_MODULE: string static => "ghul:host"
+
+        /// What an intrinsic operation the host provides starts with.
+        HOST_PREFIX: string static => "host."
+
+        /// Whether `operation` is one the host provides.
+        is_host(operation: string?) -> bool static =>
+            operation? /\ operation.starts_with(HOST_PREFIX)
+    si
+si
