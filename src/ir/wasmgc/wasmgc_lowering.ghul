@@ -1102,6 +1102,15 @@ namespace IR.WasmGC is
             let strings = _strings
             let name = operation
 
+            if name =~ "object.get_type" then
+                gen(arguments[0])
+                _coerce_top(_registry.object_reference)
+                _emit(TYPE_FIELD_INSTRUCTION(Opcode.STRUCT_GET, WASMGC_TYPE_REGISTRY.OBJECT_TYPE_INDEX, 0))
+                _type_object()
+
+                return true
+            fi
+
             // Discovery runs before the strings exist, and only needs
             // what the arguments reach.
             if !strings? then
@@ -2123,7 +2132,14 @@ namespace IR.WasmGC is
         // A cast to `object`: every reference is held as one already.
         _is_unchecked_widening(to: Type?) -> bool =>
             if let to_class: Semantic.Symbols.Classy = to?.symbol then to_class.is_object else false fi
-        visit(type_of: Values.TYPEOF) is _report("typeof") si
+        visit(type_of: Values.TYPEOF) is
+            if let held = _registry.descriptor_class_of(_specialize(type_of.typeof_type)) then
+                _emit(INDEX_INSTRUCTION(Opcode.GLOBAL_GET, _registry.descriptor_global(held)))
+                _type_object()
+            else
+                _report("typeof {type_of.typeof_type}")
+            fi
+        si
         // A tuple is a read-only struct built from its elements in order.
         visit(tuple: Values.TUPLE) is
             let held = _struct_of(tuple.type)
@@ -2194,6 +2210,105 @@ namespace IR.WasmGC is
 
             _emit(INDEX_INSTRUCTION(Opcode.CALL, index))
             _emit(INDEX_INSTRUCTION(Opcode.LOCAL_GET, instance))
+        si
+
+        // Replaces the descriptor on the stack with its type object: the
+        // one it caches, or, the first time, a new core library type object
+        // made from the descriptor's name and cached there, so a type has
+        // one type object however it is asked for.
+        _type_object() is
+            let found = _type_object_constructor()
+
+            if !found? then
+                _report("a type object")
+                return
+            fi
+
+            let (type, constructor) = found
+            let string_type = IoC.CONTAINER.instance.innate_symbol_lookup.get_string_type()
+
+            if _registry.discovering then
+                _construct(type, constructor, [WASMGC_LOCAL_VALUE(0, string_type)]: Value)
+                return
+            fi
+
+            let descriptor_type = WASMGC_TYPE_REGISTRY.DESCRIPTOR_TYPE_INDEX
+            let cache = WASMGC_TYPE_REGISTRY.DESCRIPTOR_TYPE_OBJECT
+            let type_index = _registry.type_index(type)!
+            let descriptor = _temp(VALUE_TYPE.of_type_index(descriptor_type, false))
+            let name = _temp(VALUE_TYPE.of_type_index(_strings!.string_type_index, true))
+            let made = _temp(VALUE_TYPE.of_type_index(type_index, true))
+
+            _emit(INDEX_INSTRUCTION(Opcode.LOCAL_TEE, descriptor))
+            _emit(TYPE_FIELD_INSTRUCTION(Opcode.STRUCT_GET, descriptor_type, cache))
+            _emit(Opcode.REF_IS_NULL)
+
+            _begin()
+            _emit(INDEX_INSTRUCTION(Opcode.GLOBAL_GET, _registry.string_descriptor_global!))
+            _emit(I32_CONSTANT(0))
+            _emit(INDEX_INSTRUCTION(Opcode.LOCAL_GET, descriptor))
+            _emit(TYPE_FIELD_INSTRUCTION(Opcode.STRUCT_GET, descriptor_type, WASMGC_TYPE_REGISTRY.DESCRIPTOR_NAME))
+            _emit(TYPE_INSTRUCTION(Opcode.STRUCT_NEW, _strings!.string_type_index))
+            _emit(INDEX_INSTRUCTION(Opcode.LOCAL_SET, name))
+            _construct(type, constructor, [WASMGC_LOCAL_VALUE(name, string_type)]: Value)
+            _emit(INDEX_INSTRUCTION(Opcode.LOCAL_SET, made))
+            _emit(INDEX_INSTRUCTION(Opcode.LOCAL_GET, descriptor))
+            _emit(INDEX_INSTRUCTION(Opcode.LOCAL_GET, made))
+            _emit(TYPE_FIELD_INSTRUCTION(Opcode.STRUCT_SET, descriptor_type, cache))
+            let make = _end()
+
+            _emit(IF_INSTRUCTION(BLOCK_TYPE(), make, LIST[INSTRUCTION]()))
+
+            _emit(INDEX_INSTRUCTION(Opcode.LOCAL_GET, descriptor))
+            _emit(TYPE_FIELD_INSTRUCTION(Opcode.STRUCT_GET, descriptor_type, cache))
+            _emit(HEAP_TYPE_INSTRUCTION(Opcode.REF_CAST, HEAP_TYPE.of_type_index(type_index)))
+        si
+
+        // Whether a call to `function` asks for its receiver's type object,
+        // which no type can override: a member declaring the same name
+        // hides it.
+        _is_get_type(function: Function) -> bool =>
+            cast Function?(function.root_specialized_from)?.intrinsic_operation =~ "object.get_type"
+
+        // The type object of `call`'s receiver: the one its descriptor
+        // stands for, or, for a scalar, the one its box's does.
+        _get_type(call: Values.Call.INSTANCE) is
+            let receiver: Value mut = call.from
+
+            if let constrained: Values.CONSTRAINED = receiver then
+                receiver = if let address: Values.ADDRESS = constrained.value then address.value else constrained.value fi
+
+                if let box = _registry.box_type(_specialize(constrained.type)) then
+                    gen(receiver)
+                    _emit(Opcode.DROP)
+                    _emit(INDEX_INSTRUCTION(Opcode.GLOBAL_GET, _registry.descriptor_global(box)))
+                    _type_object()
+                    return
+                fi
+            fi
+
+            gen(receiver)
+            _coerce_top(_registry.object_reference)
+            _emit(TYPE_FIELD_INSTRUCTION(Opcode.STRUCT_GET, WASMGC_TYPE_REGISTRY.OBJECT_TYPE_INDEX, 0))
+            _type_object()
+        si
+
+        // The core library's type object class and its constructor taking
+        // the type's name, or null where the library declares none.
+        _type_object_constructor() -> (WASMGC_CLASS, Function)? is
+            if let declared = WASMGC_CORE_LIBRARY.find_class("Ghul.Type") then
+                if let group = cast Semantic.Symbols.FUNCTION_GROUP?(declared.find_direct("init")) then
+                    for constructor in group.functions do
+                        if constructor.arguments.count == 1 then
+                            if let type = _owner_class(constructor.owner) /\ _registry.is_object_type(type) then
+                                return (type, constructor)
+                            fi
+                        fi
+                    od
+                fi
+            fi
+
+            return null
         si
 
         // An exception the runtime makes is an instance of the class the
@@ -2902,6 +3017,11 @@ namespace IR.WasmGC is
             _element_in_place = false
 
             if function.is_constructor /\ _is_object_constructor(function) then
+                return
+            fi
+
+            if _is_get_type(function) then
+                _get_type(call)
                 return
             fi
 
