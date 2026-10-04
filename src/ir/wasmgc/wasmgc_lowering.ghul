@@ -452,6 +452,12 @@ namespace IR.WasmGC is
                 return
             elif _lower_representation(function.intrinsic_operation, arguments) then
                 return
+            elif function.intrinsic_operation =~ "array.new" then
+                _new_array(_instance_of(function).specialize(cast Function(function.root_specialized_from).return_type), arguments[0])
+                return
+            elif function.intrinsic_operation =~ "array.set" then
+                _store_array_element(arguments[0], arguments[1], arguments[2])
+                return
             fi
 
             let index_found = _index_of(function)
@@ -999,7 +1005,13 @@ namespace IR.WasmGC is
 
         // An array is a struct holding its descriptor and its elements.
         visit(array: Values.NEW_ARRAY) is
-            let type = _array_of(array.type)
+            _new_array(array.type, array.count)
+        si
+
+        // An array of `array_type` holding `count` elements, each the
+        // default value of the element type.
+        _new_array(array_type: Type?, count: Value) is
+            let type = _array_of(array_type)
 
             if !type? then
                 return
@@ -1009,7 +1021,7 @@ namespace IR.WasmGC is
 
             _emit(INDEX_INSTRUCTION(Opcode.GLOBAL_GET, _registry.descriptor_global(type)))
 
-            gen(array.count)
+            gen(count)
 
             _emit(TYPE_INSTRUCTION(Opcode.ARRAY_NEW_DEFAULT, storage.data_index))
             _load_array_element_descriptor(type)
@@ -1041,7 +1053,11 @@ namespace IR.WasmGC is
         // made to hold the value, since an array of a class is usable as an
         // array of its superclass. A store that would break that traps.
         visit(store: Values.STORE_ARRAY_ELEMENT) is
-            let type = _array_of(store.array.type)
+            _store_array_element(store.array, store.index, store.element)
+        si
+
+        _store_array_element(array_value: Value, index: Value, element: Value) is
+            let type = _array_of(array_value.type)
 
             if !type? then
                 return
@@ -1050,15 +1066,15 @@ namespace IR.WasmGC is
             let storage = _registry.array_storage(type)
             let array = _temp(VALUE_TYPE.of_type_index(storage.struct_index, true))
 
-            gen(store.array)
+            gen(array_value)
             _coerce_top(VALUE_TYPE.of_type_index(storage.struct_index, true))
             _emit(INDEX_INSTRUCTION(Opcode.LOCAL_TEE, array))
             _emit(TYPE_FIELD_INSTRUCTION(Opcode.STRUCT_GET, storage.struct_index, 1))
 
-            gen(store.index)
+            gen(index)
 
-            gen(store.element)
-            _normalise_for(store.element_type)
+            gen(element)
+            _normalise_for(_registry.array_element(type))
 
             if !_registry.discovering /\ _registry.array_store_is_checked(type) then
                 let value = _temp(_registry.object_reference)
