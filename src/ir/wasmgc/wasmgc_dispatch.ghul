@@ -6,6 +6,7 @@ namespace IR.WasmGC is
     use Wasm.FIELD_TYPE
     use Wasm.VALUE_TYPE
     use Wasm.HEAP_TYPE
+    use Wasm.TYPE_FIELD_INSTRUCTION
     use Wasm.FUNCTION
     use Wasm.TABLE
     use Wasm.LIMITS
@@ -245,9 +246,35 @@ namespace IR.WasmGC is
                 fi
             od
 
+            // A box answers with its scalar's own methods where they stand
+            // in for the root's, as the scalar would on .NET. A built-in
+            // type's members are not recorded as overriding the root's, so
+            // a member is matched to the slot by its name and arity.
+            if _registry.is_box(type) then
+                for method in _methods(type.definition) do
+                    if !method.is_instance \/ method.is_constructor then
+                        continue
+                    fi
+
+                    for i in 0..entries.count do
+                        if let inherited = entries[i] /\ _stands_in_for(method, inherited.definition) then
+                            let key = WASMGC_FUNCTION(method, type.type_map)
+
+                            _slot_of[key] = slots[i]
+                            entries[i] = key
+                        fi
+                    od
+                od
+            fi
+
             _slots[type] = slots
             _slot_entries[type] = entries
         si
+
+        // Whether `method` takes the place of the root's `inherited`: the
+        // same name and the same number of arguments.
+        _stands_in_for(method: Function, inherited: Function) -> bool =>
+            method.name =~ inherited.name /\ method.arguments.count == inherited.arguments.count
 
         _overridden_slot(type: WASMGC_CLASS, method: Function) -> WASMGC_SLOT? is
             if let overridees = method.overridees then
@@ -763,6 +790,15 @@ namespace IR.WasmGC is
                 if let receiver = registry.receiver_type(implementation) then
                     if let heap_type = receiver.heap_type() /\ !heap_type.matches(registry.object_reference.heap_type()!) then
                         body.add(HEAP_TYPE_INSTRUCTION(Opcode.REF_CAST_NULL, heap_type))
+                    elif receiver.numeric()? then
+                        // A scalar's method takes the value, so the box is
+                        // opened first.
+                        if let owner: Classy = implementation.definition.owner then
+                            if let box = registry.box_index(Semantic.Types.NAMED(owner)) then
+                                body.add(HEAP_TYPE_INSTRUCTION(Opcode.REF_CAST, HEAP_TYPE.of_type_index(box)))
+                                body.add(TYPE_FIELD_INSTRUCTION(Opcode.STRUCT_GET, box, WASMGC_TYPE_REGISTRY.BOX_VALUE))
+                            fi
+                        fi
                     fi
                 fi
 
