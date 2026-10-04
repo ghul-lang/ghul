@@ -37,6 +37,7 @@ namespace Wasm.Tests is
                 "cast-branches",
                 "i31-extern",
                 "element",
+                "data",
                 "rec-group",
                 "calls",
                 "exceptions",
@@ -63,6 +64,7 @@ namespace Wasm.Tests is
             if name =~ "cast-branches" then return cast_branches() fi
             if name =~ "i31-extern" then return i31_extern() fi
             if name =~ "element" then return element() fi
+            if name =~ "data" then return data() fi
             if name =~ "rec-group" then return rec_group() fi
             if name =~ "calls" then return calls() fi
             if name =~ "exceptions" then return exceptions() fi
@@ -691,6 +693,35 @@ namespace Wasm.Tests is
             module.add_element_segment(ELEMENT_SEGMENT.of_expressions(
                 ElementMode.DECLARATIVE, 0, _seq([]),
                 ref_of(AbstractHeapType.FUNC), one_ref))
+
+            return module
+        si
+
+        // A passive data segment and the two instructions that read one:
+        // building an immutable array of 16-bit units from its bytes, as a
+        // string literal is built, and copying them into a mutable array
+        // of bytes. A body naming a segment validates only when the
+        // data count section is written ahead of the code.
+        data() -> MODULE static is
+            let module = MODULE()
+
+            module.add_sub_type(SUB_TYPE(
+                ARRAY_TYPE(FIELD_TYPE.of_packed(PackedType.I16, false)), false, []))
+            module.add_sub_type(SUB_TYPE(
+                ARRAY_TYPE(FIELD_TYPE.of_packed(PackedType.I8, true)), false, []))
+            module.add_type(FUNC_TYPE([], []))
+
+            let segment = module.add_data_segment(DATA_SEGMENT([0x68ub, 0x00ub, 0x69ub, 0x00ub]))
+
+            module.add_function(FUNCTION(2, [], _seq([
+                I32_CONSTANT(0), I32_CONSTANT(2),
+                TYPE_FIELD_INSTRUCTION(Opcode.ARRAY_NEW_DATA, 0, segment),
+                SIMPLE_INSTRUCTION(Opcode.DROP),
+                I32_CONSTANT(4),
+                TYPE_INSTRUCTION(Opcode.ARRAY_NEW_DEFAULT, 1),
+                I32_CONSTANT(0), I32_CONSTANT(0), I32_CONSTANT(4),
+                TYPE_FIELD_INSTRUCTION(Opcode.ARRAY_INIT_DATA, 1, segment)
+            ])))
 
             return module
         si

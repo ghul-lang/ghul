@@ -1,0 +1,114 @@
+namespace Wasm.UnitTests is
+    use Collections.LIST
+
+    use Wasm.BINARY_WRITER
+    use Wasm.BYTE_BUFFER
+    use Wasm.DATA_SEGMENT
+    use Wasm.FUNC_TYPE
+    use Wasm.FUNCTION
+    use Wasm.INSTRUCTION
+    use Wasm.MODULE
+    use Wasm.WAT_PRINTER
+
+    use TestClass = Microsoft.VisualStudio.TestTools.UnitTesting.TestClassAttribute
+    use Test = Microsoft.VisualStudio.TestTools.UnitTesting.TestMethodAttribute
+    use Assertions
+
+    // A passive data segment, and the two sections that carry segments:
+    // the count ahead of the code, and the segments themselves after it.
+    @TestClass()
+    class DATA_SEGMENT_TESTS is
+        init() is si
+
+        _encoded(segment: DATA_SEGMENT) -> ubyte[] is
+            let buffer = BYTE_BUFFER()
+
+            segment.write(buffer)
+
+            return buffer.to_array()
+        si
+
+        @Test()
+        write__a_passive_segment__is_the_passive_form_and_its_bytes() is
+            BYTES.are(
+                [0x01, 0x02, 0x68, 0x69],
+                _encoded(DATA_SEGMENT([0x68ub, 0x69ub])))
+        si
+
+        @Test()
+        write__an_empty_segment__has_a_zero_length() is
+            BYTES.are([0x01, 0x00], _encoded(DATA_SEGMENT([])))
+        si
+
+        @Test()
+        add_data_segment__hands_back_the_data_index() is
+            let module = MODULE()
+
+            are_equal(0, module.add_data_segment(DATA_SEGMENT([])))
+            are_equal(1, module.add_data_segment(DATA_SEGMENT([])))
+            are_equal(2, module.data_segments().count)
+        si
+
+        @Test()
+        write__a_module_with_a_segment__writes_the_count_then_the_segments() is
+            let module = MODULE()
+
+            module.add_data_segment(DATA_SEGMENT([0x68ub, 0x69ub]))
+
+            BYTES.are(
+                [
+                    0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00,
+                    0x0C, 0x01, 0x01,
+                    0x0B, 0x05, 0x01, 0x01, 0x02, 0x68, 0x69
+                ],
+                BINARY_WRITER().write(module))
+        si
+
+        // The count goes ahead of the code, because a body naming a
+        // segment is validated before the data section is read; the
+        // segments go after it.
+        @Test()
+        write__a_module_with_code__puts_the_count_before_it_and_the_segments_after() is
+            let module = MODULE()
+
+            module.add_type(FUNC_TYPE([], []))
+            module.add_function(FUNCTION(0, [], LIST[INSTRUCTION]()))
+            module.add_data_segment(DATA_SEGMENT([]))
+
+            BYTES.are(
+                [
+                    0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00,
+                    0x01, 0x04, 0x01, 0x60, 0x00, 0x00,
+                    0x03, 0x02, 0x01, 0x00,
+                    0x0C, 0x01, 0x01,
+                    0x0A, 0x04, 0x01, 0x02, 0x00, 0x0B,
+                    0x0B, 0x03, 0x01, 0x01, 0x00
+                ],
+                BINARY_WRITER().write(module))
+        si
+
+        @Test()
+        write__a_module_with_no_segments__writes_neither_section() is
+            let module = MODULE()
+
+            module.add_type(FUNC_TYPE([], []))
+
+            are_equal(14, BINARY_WRITER().write(module).count)
+        si
+
+        // Printable characters stand for themselves; the quote, the
+        // backslash and everything outside printable ASCII are escaped.
+        @Test()
+        print__a_segment__is_a_string_with_unprintable_bytes_escaped() is
+            let module = MODULE()
+
+            module.add_data_segment(DATA_SEGMENT([0x61ub, 0x22ub, 0x5Cub, 0x00ub, 0xFFub]))
+
+            are_equal(
+                "(module\n"
+                "  (data (;0;) \"a\\22\\5c\\00\\ff\")\n"
+                ")\n",
+                WAT_PRINTER().print(module))
+        si
+    si
+si
