@@ -87,6 +87,10 @@ namespace IR.WasmGC is
         // start, as a .NET local holds a zeroed value.
         _struct_locals: LIST[(index: int, type: WASMGC_CLASS)]
 
+        // Set while a call is lowered as the receiver of a call on a struct,
+        // where an array element it reads is changed in place, not copied.
+        _element_in_place: bool
+
         /// The kinds of construct the lowered values used that this
         /// target cannot generate yet, each once, in the order they were
         /// met. A body with any is not a valid function.
@@ -292,6 +296,10 @@ namespace IR.WasmGC is
         _struct_receiver(from: Value) is
             if from.has_address /\ _struct_of(from.type)? then
                 gen_address(from)
+            elif isa Values.Call.INSTANCE(from) then
+                _element_in_place = true
+                gen(from)
+                _element_in_place = false
             else
                 gen(from)
             fi
@@ -1441,8 +1449,10 @@ namespace IR.WasmGC is
         si
 
         // The elements of the array `from` holds are read from the struct
-        // holding them.
-        _lower_array_operation(operation: string, call: Values.Call.INSTANCE) is
+        // holding them, an element of a mutable struct as a copy unless it
+        // is read `in_place` as a receiver.
+        _lower_array_operation(operation: string, call: Values.Call.INSTANCE, in_place: bool) is
+
             let type = _array_of(call.from?.type)
 
             if !type? then
@@ -1466,6 +1476,10 @@ namespace IR.WasmGC is
                     if !heap.matches(_registry.object_reference.heap_type()!) then
                         _emit(HEAP_TYPE_INSTRUCTION(Opcode.REF_CAST_NULL, heap))
                     fi
+                fi
+
+                if !in_place then
+                    _copy_if_mutable(_registry.array_element(type))
                 fi
             else
                 _report("the array operation {operation}")
@@ -2353,6 +2367,8 @@ namespace IR.WasmGC is
         visit(call: Values.Call.INSTANCE) is
             let function = call.function
             let dispatch = call.dispatch
+            let in_place = _element_in_place
+            _element_in_place = false
 
             if function.is_constructor /\ _is_object_constructor(function) then
                 return
@@ -2360,7 +2376,7 @@ namespace IR.WasmGC is
 
             if let member = _array_member(call) then
                 if let operation = _array_operation(member) then
-                    _lower_array_operation(operation, call)
+                    _lower_array_operation(operation, call, in_place)
                 else
                     _call_direct(call, WASMGC_FUNCTION(member, WASMGC_TYPE_MAPS.function_map(function, _type_map)))
                 fi
