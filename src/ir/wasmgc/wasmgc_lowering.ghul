@@ -335,6 +335,8 @@ namespace IR.WasmGC is
                 return _held_type(box.value)
             elif let load: Values.Load.TEMP = value then
                 return _local_type(_local(load.local))
+            elif let local: WASMGC_LOCAL_VALUE = value then
+                return _local_type(local.index)
             elif let load: Values.Load.LOCAL_VARIABLE = value then
                 if let variable = cast Semantic.Symbols.Variable?(load.symbol) then
                     return _local_type(_local(variable.ir_local))
@@ -617,6 +619,11 @@ namespace IR.WasmGC is
         si
 
         visit_value(value: Value) is
+            if let local: WASMGC_LOCAL_VALUE = value then
+                _emit(INDEX_INSTRUCTION(Opcode.LOCAL_GET, local.index))
+                return
+            fi
+
             _report("{value.get_type().name}")
         si
 
@@ -1531,7 +1538,134 @@ namespace IR.WasmGC is
         visit(arithmetic: Values.DECIMAL_ARITHMETIC) is _report("decimal arithmetic") si
         visit(compare: Values.DECIMAL_COMPARE) is _report("decimal arithmetic") si
         visit(convert: Values.DECIMAL_CONVERT) is _report("a decimal conversion") si
-        visit(equality: Values.EQUALITY_COMPARISON) is _report("an equality comparison") si
+        // A comparison over a type parameter compares as the instantiation's
+        // type argument does.
+        visit(equality: Values.EQUALITY_COMPARISON) is
+            _equal_values(equality.left, equality.right, _specialize(equality.left.type))
+        si
+
+        // `left =~ right` over values of the concrete `type`: by value for
+        // a scalar, by characters for a string, through the type's own `=~`
+        // where it declares one, and by reference otherwise. An absent
+        // value is equal only to another.
+        _equal_values(left: Value, right: Value, type: Type?) is
+            if let scalar = WASMGC_TYPES.scalar(type) then
+                _equal_scalars(left, right, WASMGC_TYPES.numeric(scalar))
+                return
+            fi
+
+            let value_type = _value_type(type)
+
+            if !value_type? \/ !value_type.heap_type()? then
+                _report("an equality comparison of {type}")
+                return
+            fi
+
+            if let strings = _strings /\ WASMGC_TYPES.is_string(type) then
+                _call_string_helper(strings.equals_function, strings, LIST[Value]([left, right]))
+                return
+            fi
+
+            let operator = _declared_equals(type!)
+
+            if !operator? then
+                gen(left)
+                gen(right)
+                _emit(Opcode.REF_EQ)
+                return
+            fi
+
+            let left_local = _temp(value_type)
+            let right_local = _temp(value_type)
+
+            gen(left)
+            _coerce_top(value_type)
+            _emit(INDEX_INSTRUCTION(Opcode.LOCAL_SET, left_local))
+
+            gen(right)
+            _coerce_top(value_type)
+            _emit(INDEX_INSTRUCTION(Opcode.LOCAL_SET, right_local))
+
+            let bool_type = IoC.CONTAINER.instance.innate_symbol_lookup.get_bool_type()
+            let receiver = WASMGC_LOCAL_VALUE(left_local, type)
+            let argument = WASMGC_LOCAL_VALUE(right_local, type)
+
+            let call: Value =
+                if type.is_value_type then
+                    Values.Call.STRUCT(receiver, operator, LIST[Value]([argument]), bool_type)
+                else
+                    Values.Call.INSTANCE(receiver, operator, LIST[Value]([argument]), bool_type)
+                fi
+
+            _begin()
+            gen(call)
+            let compared = _end()
+
+            let right_present = LIST[INSTRUCTION]()
+
+            right_present.add(INDEX_INSTRUCTION(Opcode.LOCAL_GET, right_local))
+            right_present.add(SIMPLE_INSTRUCTION(Opcode.REF_IS_NULL))
+            right_present.add(
+                IF_INSTRUCTION(
+                    BLOCK_TYPE.of_value(VALUE_TYPE.of_numeric(NumericType.I32)),
+                    LIST[INSTRUCTION]([I32_CONSTANT(0)]: INSTRUCTION),
+                    compared))
+
+            _emit(INDEX_INSTRUCTION(Opcode.LOCAL_GET, left_local))
+            _emit(Opcode.REF_IS_NULL)
+            _emit(
+                IF_INSTRUCTION(
+                    BLOCK_TYPE.of_value(VALUE_TYPE.of_numeric(NumericType.I32)),
+                    LIST[INSTRUCTION]([
+                        INDEX_INSTRUCTION(Opcode.LOCAL_GET, right_local),
+                        SIMPLE_INSTRUCTION(Opcode.REF_IS_NULL)
+                    ]: INSTRUCTION),
+                    right_present))
+        si
+
+        // Integers are equal where their bits are; floating values where
+        // they compare equal, or where both are NaN.
+        _equal_scalars(left: Value, right: Value, type: NumericType) is
+            if type == NumericType.I32 \/ type == NumericType.I64 then
+                gen(left)
+                gen(right)
+                _emit(if type == NumericType.I32 then Opcode.I32_EQ else Opcode.I64_EQ fi)
+                return
+            fi
+
+            let value_type = VALUE_TYPE.of_numeric(type)
+            let left_local = _temp(value_type)
+            let right_local = _temp(value_type)
+            let (eq, ne) = if type == NumericType.F32 then (Opcode.F32_EQ, Opcode.F32_NE) else (Opcode.F64_EQ, Opcode.F64_NE) fi
+
+            gen(left)
+            _emit(INDEX_INSTRUCTION(Opcode.LOCAL_TEE, left_local))
+            gen(right)
+            _emit(INDEX_INSTRUCTION(Opcode.LOCAL_TEE, right_local))
+            _emit(eq)
+            _emit(INDEX_INSTRUCTION(Opcode.LOCAL_GET, left_local))
+            _emit(INDEX_INSTRUCTION(Opcode.LOCAL_GET, left_local))
+            _emit(ne)
+            _emit(INDEX_INSTRUCTION(Opcode.LOCAL_GET, right_local))
+            _emit(INDEX_INSTRUCTION(Opcode.LOCAL_GET, right_local))
+            _emit(ne)
+            _emit(Opcode.I32_AND)
+            _emit(Opcode.I32_OR)
+        si
+
+        // The `=~` a type declares taking a value of itself, or null where
+        // it declares none.
+        _declared_equals(type: Type) -> Function? is
+            if let group: Semantic.Symbols.FUNCTION_GROUP = type.find_member("=~") then
+                for function in group.functions do
+                    if function.arguments.count == 1 /\ function.arguments[0].is_assignable_from(type) then
+                        return function
+                    fi
+                od
+            fi
+
+            return null
+        si
         // An optional reference holds a value when it is not null.
         visit(test: Values.HAS_VALUE) is
             gen(test.value)
@@ -2719,6 +2853,11 @@ namespace IR.WasmGC is
                 return
             fi
 
+            if let constrained: Values.CONSTRAINED = call.from then
+                _call_constrained(call, constrained)
+                return
+            fi
+
             if let member = _array_member(call) then
                 if let operation = _array_operation(member) then
                     _lower_array_operation(operation, call, in_place)
@@ -2747,6 +2886,30 @@ namespace IR.WasmGC is
             fi
 
             _call_direct(call, _instance_of(function))
+        si
+
+        // A call on a type parameter's value, once the instantiation has
+        // made its type concrete. A scalar's hash code is computed in
+        // place; anything else held as a reference is called as any value
+        // of its type is.
+        _call_constrained(call: Values.Call.INSTANCE, constrained: Values.CONSTRAINED) is
+            let receiver =
+                if let address: Values.ADDRESS = constrained.value then address.value else constrained.value fi
+
+            let type = _specialize(constrained.type)
+
+            if let scalar = WASMGC_TYPES.scalar(type) then
+                if call.function.name =~ "get_hash_code" /\ call.arguments.count == 0 then
+                    gen(receiver)
+                    _emit_all(WASMGC_OPERATIONS.hash(WASMGC_TYPES.numeric(scalar), _temp(VALUE_TYPE.of_numeric(NumericType.I64))))
+                else
+                    _report("a call to {call.function.name} on {type}")
+                fi
+
+                return
+            fi
+
+            gen(Values.Call.INSTANCE(receiver, call.function, call.arguments, call.type))
         si
 
         _call_direct(call: Values.Call.INSTANCE, function: WASMGC_FUNCTION) is

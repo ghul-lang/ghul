@@ -16,6 +16,8 @@ namespace IR.WasmGC is
     use Wasm.INDEX_INSTRUCTION
     use Wasm.TYPE_INSTRUCTION
     use Wasm.HEAP_TYPE_INSTRUCTION
+    use Wasm.TYPE_FIELD_INSTRUCTION
+    use Wasm.NumericType
     use Wasm.I32_CONSTANT
     use Wasm.Opcode
 
@@ -79,6 +81,7 @@ namespace IR.WasmGC is
         _next_type: int
 
         _thunk_indices: MAP[int, MAP[WASMGC_FUNCTION, int]]
+        _box_hashes: MAP[WASMGC_CLASS, int]
 
         _table_size: int
 
@@ -99,6 +102,7 @@ namespace IR.WasmGC is
             _types = LIST[SUB_TYPE]()
 
             _thunk_indices = MAP[int, MAP[WASMGC_FUNCTION, int]]()
+            _box_hashes = MAP[WASMGC_CLASS, int]()
         si
 
         /// The trait table's size, once `finish` has packed it.
@@ -646,7 +650,9 @@ namespace IR.WasmGC is
             let entries = _slot_entries[type]
 
             for i in 0..slots.count do
-                if let implementation = entries[i] /\ numbering.indexed(implementation)? then
+                if let implementation = entries[i] /\ _is_box_hash(type, implementation) then
+                    result.add(INDEX_INSTRUCTION(Opcode.REF_FUNC, _box_hash(slots[i].signature, type, numbering)))
+                elif let implementation = entries[i] /\ numbering.indexed(implementation)? then
                     result.add(INDEX_INSTRUCTION(Opcode.REF_FUNC, _thunk(slots[i].signature, implementation, numbering)))
                 else
                     result.add(HEAP_TYPE_INSTRUCTION(Opcode.REF_NULL, HEAP_TYPE.of_type_index(slots[i].signature)))
@@ -662,6 +668,44 @@ namespace IR.WasmGC is
         // the first time it is asked for. It takes the signature's
         // parameters, casts the receiver to the class the implementation
         // belongs to, and calls it.
+        // Whether `implementation` is the root's `get_hash_code` filling a
+        // slot in the vtable of the box `type`, which hashes the scalar it
+        // holds instead.
+        _is_box_hash(type: WASMGC_CLASS, implementation: WASMGC_FUNCTION) -> bool =>
+            _registry.is_box(type) /\
+            implementation.definition.name =~ "get_hash_code" /\
+            implementation.definition.arguments.count == 0 /\
+            (cast Classy?(implementation.definition.owner)?.is_object ?? false)
+
+        // A box's `get_hash_code`: the hash of the scalar it holds.
+        _box_hash(signature: int, type: WASMGC_CLASS, numbering: WASMGC_FUNCTION_NUMBERING) -> int is
+            let index mut = 0
+
+            if _box_hashes.try_get_value(type, index ref) then
+                return index
+            fi
+
+            let registry = _registry
+
+            index = numbering.reserve(() is
+                let box_index = registry.type_index(type)!
+                let numeric = WASMGC_TYPES.numeric(WASMGC_TYPES.scalar(registry.boxed_type(type))!)
+
+                let body = LIST[INSTRUCTION]()
+
+                body.add(INDEX_INSTRUCTION(Opcode.LOCAL_GET, 0))
+                body.add(HEAP_TYPE_INSTRUCTION(Opcode.REF_CAST, HEAP_TYPE.of_type_index(box_index)))
+                body.add(TYPE_FIELD_INSTRUCTION(Opcode.STRUCT_GET, box_index, 1))
+                body.add_range(WASMGC_OPERATIONS.hash(numeric, 1))
+
+                return FUNCTION(signature, [VALUE_TYPE.of_numeric(NumericType.I64)], body)
+            si)
+
+            _box_hashes[type] = index
+
+            return index
+        si
+
         _thunk(signature: int, implementation: WASMGC_FUNCTION, numbering: WASMGC_FUNCTION_NUMBERING) -> int is
             if !_thunk_indices.contains_key(signature) then
                 _thunk_indices[signature] = MAP[WASMGC_FUNCTION, int]()
