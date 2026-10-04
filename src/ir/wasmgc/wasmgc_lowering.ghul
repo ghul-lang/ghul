@@ -20,18 +20,16 @@ namespace IR.WasmGC is
 
     use Values.Value
 
-    // Lowers the IR values of one function body to wasm instructions.
-    //
-    // Structured control flow maps directly: a REGION is a `block`, a
-    // LOOP is a `loop` inside a `block`, a BREAK branches to the block
-    // and a CONTINUE to the loop. Branch depths count the blocks open
-    // between an exit and its target, so they are found from the nodes
-    // open when the exit is lowered.
-    //
-    // A value the lowering does not handle yet is recorded rather than
-    // thrown, once for each kind of construct, so a build reports
-    // everything a body uses that the target cannot generate.
+    /// Lowers the IR values of one function body to wasm instructions. A
+    /// construct it cannot lower yet is recorded in `unsupported` rather
+    /// than thrown.
     class WASMGC_LOWERING: Values.Visitor is
+        // Structured control flow maps directly: a REGION is a `block`, a
+        // LOOP is a `loop` inside a `block`, a BREAK branches to the block
+        // and a CONTINUE to the loop. Branch depths count the blocks open
+        // between an exit and its target, so they are found from the nodes
+        // open when the exit is lowered.
+
         _function_indices: MAP[Function, int]
 
         _parameter_count: int
@@ -47,10 +45,21 @@ namespace IR.WasmGC is
 
         _unsupported: LIST[string]
 
+        /// The kinds of construct the lowered values used that this
+        /// target cannot generate yet, each once, in the order they were
+        /// met. A body with any is not a valid function.
         unsupported: Collections.List[string] => _unsupported
 
+        /// The wasm types of the locals the lowered values declared, in
+        /// index order; the first is numbered after the parameters.
         local_types: LIST[VALUE_TYPE] => _local_types
 
+        /// A lowering for one function body.
+        ///
+        /// - function_indices: the index each function a body can call
+        ///   has in the module
+        /// - parameter_count: how many parameters the function takes, which
+        ///   is where its locals start being numbered
         init(function_indices: MAP[Function, int], parameter_count: int) is
             _function_indices = function_indices
             _parameter_count = parameter_count
@@ -62,7 +71,7 @@ namespace IR.WasmGC is
             _unsupported = LIST[string]()
         si
 
-        // Lowers a whole body, answering its instructions.
+        /// Lowers a whole body, answering its instructions.
         lower(values: Collections.Iterable[Value]) -> LIST[INSTRUCTION] is
             _begin()
 
@@ -73,6 +82,8 @@ namespace IR.WasmGC is
             return _end()
         si
 
+        /// Lowers one value into the instructions being built. An absent
+        /// value lowers to nothing.
         gen(value: Value?) is
             if value? then
                 value.accept(self)
@@ -315,8 +326,8 @@ namespace IR.WasmGC is
 
         visit(load: Values.Load.RECEIVER) is _report("an instance method's receiver") si
 
-        // A composite value's structured expansion is lowered as any
-        // other structured IR is.
+        /// A composite value's structured expansion is lowered as any
+        /// other structured IR is.
         visit(composite: Values.Composite) is
             _lower_all(composite.expand().values)
         si
@@ -337,10 +348,10 @@ namespace IR.WasmGC is
         visit(stack_top: Values.STACK_TOP_ADDRESS) is _report("STACK_TOP_ADDRESS") si
         visit_address(stack_top: Values.STACK_TOP_ADDRESS) is _report("STACK_TOP_ADDRESS") si
 
-        // An `if` or `case` that produces a value is a block whose last
-        // value is the region its arms leave, each carrying the value it
-        // produces, so that region's wasm block results in the type the
-        // block produces.
+        /// An `if` or `case` that produces a value is a block whose last
+        /// value is the region its arms leave, each carrying the value it
+        /// produces, so that region's wasm block results in the type the
+        /// block produces.
         visit(block: Values.BLOCK) is
             assert !block.is_emitted else "block value already emitted"
 
@@ -417,8 +428,8 @@ namespace IR.WasmGC is
 
         visit_address(view: Values.NARROW_VIEW) is _report("the address of a value") si
 
-        // An `@IL.output` region names CIL the build emits, and there is
-        // none on this target.
+        /// An `@IL.output` region names CIL the build emits, and there is
+        /// none on this target.
         visit(enter: Values.ENTER_FILE) is si
         visit(leave: Values.LEAVE_FILE) is si
 
@@ -790,8 +801,8 @@ namespace IR.WasmGC is
             _call(call.function, call.arguments)
         si
 
-        // A static method takes no receiver, so it is called as a
-        // global function is.
+        /// A static method takes no receiver, so it is called as a
+        /// global function is.
         visit(call: Values.Call.STATIC) is
             if call.constrained_receiver? then
                 _report("a constrained call")
