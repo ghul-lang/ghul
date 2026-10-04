@@ -123,7 +123,7 @@ them at a glance.
 
 The parts are printed in the order the binary sections have them -
 types, imports, tables, tags, globals, exports, the start function, the
-element segments, and the functions last - which is what keeps the
+element segments, the data segments, and the functions last - which is what keeps the
 printing stable rather than merely correct. A final type with no
 supertypes prints as the plain type definition the text format
 abbreviates it to. Definitions an instruction can reach by index carry
@@ -133,9 +133,10 @@ name after `module`, a function's after `func`, a local's after
 `local`, and a reference to a named function or local reads as the name
 rather than the index.
 
-The printed text is checked by reassembling it with a reference
-assembler and comparing against the bytes the writer produces, the same
-outside-the-suite check the engine run makes.
+The printed text is pinned by the printer's own tests. Nothing
+reassembles it with a reference assembler, so the printer is checked
+against what the tests expect, not against the bytes the writer
+produces.
 
 ## The module matrix
 
@@ -153,9 +154,12 @@ ones an engine accepts is the job of `tests/engine-check.sh`, which dumps
 every module of the matrix and hands each to every engine it can find:
 Node's `WebAssembly.validate`, and Wasmtime's `compile` with exceptions and
 garbage collection enabled when it is on the `PATH`. Neither engine is a
-build dependency, so the run is not part of the suite; it is run while the
-tests are written and its result recorded in the pull request. A module an
-engine rejects is wrong, however carefully the encoding was reasoned about.
+build dependency, so the run is not part of `dotnet test`. CI runs the
+script with Node installed. The script fails when it finds no engine at
+all, and `WASM_ENGINES` names engines that must be present
+(`WASM_ENGINES=node` in CI), so a missing engine fails the run instead of
+passing it by checking nothing. A module an engine rejects is wrong,
+however carefully the encoding was reasoned about.
 
 Two engines are worth running because each has caught what the other read
 past. Node's validator is the strict one on encoding shapes - it rejects
@@ -187,6 +191,9 @@ What the matrix covers, and why each module is there:
   carry a reference, the i31 instructions and the extern conversions.
 - `element` - all eight forms of element segment, which is every
   combination of mode, element type and table the format gives a form to.
+- `data` - a passive data segment read by `array.new_data` and
+  `array.init_data`. A body that names a segment validates only when the
+  data count section precedes the code, which is what this module checks.
 - `rec-group` - two types that name each other, which is what a recursion
   group is for and what two groups of unrelated types would not have
   needed.

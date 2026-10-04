@@ -7,14 +7,20 @@
 # throwaway test that dumps each module to a file, runs it, then validates
 # every file against each engine it can find and removes the test again.
 #
-# Engines, each run when it is on the PATH, skipped silently when not:
+# Engines, each run when it is on the PATH:
 #   node     - WebAssembly.validate
 #   wasmtime - `compile` with exceptions and gc enabled
+#
+# An engine that is not on the PATH is skipped, unless WASM_ENGINES names
+# it: WASM_ENGINES=node (or "node wasmtime") makes a missing engine an
+# error. Finding no engine at all is always an error, since a run that
+# checks nothing would otherwise pass.
 #
 # Usage: wasm/tests/engine-check.sh [output-dir]
 #        (default: a fresh directory under /tmp)
 #
-# Exits nonzero if any module is rejected by any engine present.
+# Exits nonzero if an engine is missing, or if any module is rejected by
+# any engine present.
 
 set -uo pipefail
 
@@ -23,6 +29,20 @@ out="${1:-$(mktemp -d /tmp/wasm-matrix.XXXXXX)}"
 mkdir -p "$out"
 
 dump="$here/_engine_dump.ghul"
+
+missing=0
+for engine in ${WASM_ENGINES:-}; do
+    if ! command -v "$engine" >/dev/null 2>&1; then
+        echo "engine-check: $engine is required by WASM_ENGINES and is not on the PATH" >&2
+        missing=1
+    fi
+done
+[ "$missing" -eq 0 ] || exit 1
+
+if ! command -v node >/dev/null 2>&1 && ! command -v wasmtime >/dev/null 2>&1; then
+    echo "engine-check: no engine found; install node or wasmtime" >&2
+    exit 1
+fi
 
 cleanup() { rm -f "$dump"; }
 trap cleanup EXIT
