@@ -172,11 +172,14 @@ namespace IR.WasmGC is
             // real module's recursion group has to come before any import's
             // signature. Both declare the same imports in the same order,
             // so the function indices agree.
+            let message_getter = _exception_message_getter()
+
             let discovery_module = MODULE()
             let discovery_imports =
                 _declare_imports(
                     discovery_module,
-                    if registry.has_string_type then WASMGC_STRINGS(discovery_module, registry) else null fi)
+                    if registry.has_string_type then WASMGC_STRINGS(discovery_module, registry) else null fi,
+                    message_getter?)
 
             let bodies = MAP[Function, LIST[Value]]()
 
@@ -191,6 +194,10 @@ namespace IR.WasmGC is
             // called from outside, and each instantiation that reaches.
             if let entry = _entry_point then
                 numbering.index_of(entry)
+
+                if let getter = message_getter then
+                    numbering.index_of(getter)
+                fi
             else
                 for (function, _) in _bodies do
                     if !_is_generic(function) then
@@ -208,7 +215,7 @@ namespace IR.WasmGC is
             od
 
             let strings = if registry.has_string_type then WASMGC_STRINGS(module, registry) else null fi
-            let imports = _declare_imports(module, strings)
+            let imports = _declare_imports(module, strings, message_getter?)
             let exceptions = WASMGC_EXCEPTIONS(module, registry)
 
             assert imports.count == discovery_imports.count else "discovery declared different imports"
@@ -229,6 +236,16 @@ namespace IR.WasmGC is
                 names.add(index, instance.to_string())
             od
 
+
+            // The loader describes an exception nothing caught through this,
+            // where the program can throw one.
+            if let getter = message_getter /\ strings? /\ exceptions.declared_tag_index? then
+                if let getter_index = numbering.index_of(getter) then
+                    if let describe = exceptions.describe(strings, getter_index, build => numbering.reserve(build)) then
+                        module.add_export(EXPORT("_describe_exception", ExportKind.FUNCTION, describe))
+                    fi
+                fi
+            fi
             // The descriptors, vtables and trait table refer to what the
             // walk reached, and add the thunks their entries call through.
             registry.finish(numbering)
@@ -264,7 +281,7 @@ namespace IR.WasmGC is
             return module
         si
 
-        _declare_imports(module: MODULE, strings: WASMGC_STRINGS?) -> WASMGC_IMPORTS is
+        _declare_imports(module: MODULE, strings: WASMGC_STRINGS?, describes_exceptions: bool) -> WASMGC_IMPORTS is
             let imports = WASMGC_IMPORTS(module)
 
             for host in _host_declarations do
@@ -276,7 +293,7 @@ namespace IR.WasmGC is
             // Every other import is declared here, before the defined
             // functions are numbered.
 
-            if let present = strings /\ _host_takes_a_string() then
+            if let present = strings /\ (_host_takes_a_string() \/ describes_exceptions) then
                 present.declare_imports(imports)
             fi
 
@@ -452,6 +469,28 @@ namespace IR.WasmGC is
             fi
 
             return FUNC_TYPE(parameters.to_array(), results.to_array())
+        si
+
+        // The getter of the core library's exception message, which an
+        // executable describes an exception nothing caught with; null in
+        // a library, or where the core library declares no exception
+        // message with a body.
+        _exception_message_getter() -> Function? is
+            if !_entry_point? then
+                return null
+            fi
+
+            if let exception = WASMGC_CORE_LIBRARY.find_class("Ghul.Exception") then
+                if let getter = WASMGC_CORE_LIBRARY.find_getter(exception, "message") then
+                    for (function, _) in _bodies do
+                        if function == getter then
+                            return getter
+                        fi
+                    od
+                fi
+            fi
+
+            return null
         si
 
         // Whether any host operation the program declares takes a string,

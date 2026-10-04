@@ -4,6 +4,17 @@ namespace IR.WasmGC is
     use Wasm.FUNC_TYPE
     use Wasm.VALUE_TYPE
     use Wasm.AbstractHeapType
+    use Wasm.FUNCTION
+    use Wasm.HEAP_TYPE
+    use Wasm.INSTRUCTION
+    use Wasm.INDEX_INSTRUCTION
+    use Wasm.I32_CONSTANT
+    use Wasm.TYPE_INSTRUCTION
+    use Wasm.TYPE_FIELD_INSTRUCTION
+    use Wasm.HEAP_TYPE_INSTRUCTION
+    use Wasm.Opcode
+
+    use Collections.LIST
 
     /// The tag every exception is thrown with, whose one value is the
     /// exception, and the types a handler receives it in. Declared the
@@ -55,6 +66,53 @@ namespace IR.WasmGC is
         /// declaring it otherwise.
         declared_tag_index: int? => _tag_index
 
+
+        /// The function the loader calls on an exception nothing caught,
+        /// taking the exception and answering a JavaScript string of its
+        /// type's name and its message, as .NET prints an unhandled one.
+        ///
+        /// - strings: the string helpers the text is built with
+        /// - message_getter: the function index of the exception type's
+        ///   `message` getter
+        /// - build: numbers the function and builds it when the module is
+        ///   finished
+        describe(strings: WASMGC_STRINGS, message_getter: int, build: (() -> FUNCTION) -> int) -> int? is
+            let exception = _exception
+            let descriptor = _registry.string_descriptor_global
+
+            if !exception? \/ !descriptor? then
+                return null
+            fi
+
+            let held = VALUE_TYPE.of_reference(exception.heap_type()!, true)
+            let separator = strings.literal(": ")
+            let concat = strings.concat_function
+            let to_host = strings.to_host_function
+
+            // parameter 0 the exception as anyref; local 1 the exception
+            let body = LIST[INSTRUCTION]([
+                INDEX_INSTRUCTION(Opcode.LOCAL_GET, 0),
+                HEAP_TYPE_INSTRUCTION(Opcode.REF_CAST_NULL, exception.heap_type()!),
+                INDEX_INSTRUCTION(Opcode.LOCAL_SET, 1),
+                INDEX_INSTRUCTION(Opcode.GLOBAL_GET, descriptor),
+                I32_CONSTANT(0),
+                INDEX_INSTRUCTION(Opcode.LOCAL_GET, 1),
+                TYPE_FIELD_INSTRUCTION(Opcode.STRUCT_GET, WASMGC_TYPE_REGISTRY.OBJECT_TYPE_INDEX, 0),
+                TYPE_FIELD_INSTRUCTION(Opcode.STRUCT_GET, WASMGC_TYPE_REGISTRY.DESCRIPTOR_TYPE_INDEX, WASMGC_TYPE_REGISTRY.DESCRIPTOR_NAME),
+                TYPE_INSTRUCTION(Opcode.STRUCT_NEW, strings.string_type_index),
+                INDEX_INSTRUCTION(Opcode.GLOBAL_GET, separator),
+                INDEX_INSTRUCTION(Opcode.CALL, concat),
+                INDEX_INSTRUCTION(Opcode.LOCAL_GET, 1),
+                INDEX_INSTRUCTION(Opcode.CALL, message_getter),
+                INDEX_INSTRUCTION(Opcode.CALL, concat),
+                INDEX_INSTRUCTION(Opcode.CALL, to_host)
+            ]:INSTRUCTION)
+
+            let type_index = _module.add_type(
+                FUNC_TYPE([VALUE_TYPE.of_abstract(AbstractHeapType.ANY)], [VALUE_TYPE.of_abstract(AbstractHeapType.EXTERN)]))
+
+            return build(() => FUNCTION(type_index, [held], body))
+        si
         _declare() is
             if _is_declared then
                 return
