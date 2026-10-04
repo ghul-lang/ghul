@@ -451,6 +451,10 @@ namespace IR.WasmGC is
             // fields are laid out.
             _closure_type_index = OBJECT_TYPE_INDEX + ordered.count
 
+            // The array types follow the closure type, and a field can hold
+            // an array, so theirs are fixed before any field is laid out too.
+            _number_array_types(_closure_type_index + 1)
+
             let group = LIST[SUB_TYPE]()
 
             group.add(SUB_TYPE(_descriptor_struct(), true, []))
@@ -467,7 +471,15 @@ namespace IR.WasmGC is
 
             _add_array_types(group)
 
-            group.add_range(_dispatch.plan(ordered, DESCRIPTOR_TYPE_INDEX + group.count))
+            // An array type implements the traits the array family declares
+            // as a class does, so it is planned with the classes.
+            let planned = LIST[WASMGC_CLASS](ordered)
+
+            for (array, _) in _arrays do
+                planned.add(array)
+            od
+
+            group.add_range(_dispatch.plan(planned, DESCRIPTOR_TYPE_INDEX + group.count))
 
             let first = _module.add_rec_group(group)
 
@@ -692,6 +704,16 @@ namespace IR.WasmGC is
                         return VALUE_TYPE.of_type_index(index, true)
                     fi
                 fi
+            elif let owner: Classy = definition.owner /\ owner == _array_definition then
+                for (parameter, element) in function.type_map do
+                    if parameter.owner == owner then
+                        let lookup = IoC.CONTAINER.instance.innate_symbol_lookup
+
+                        if let array = array_of(lookup.get_array_type(element)) then
+                            return VALUE_TYPE.of_type_index(type_index(array)!, true)
+                        fi
+                    fi
+                od
             elif let owner: Classy = definition.owner /\ (owner.is_trait \/ owner.is_object) then
                 return object_reference
             elif let owner: Classy = definition.owner then
@@ -770,6 +792,17 @@ namespace IR.WasmGC is
                     IoC.CONTAINER.instance.innate_symbol_lookup.get_array_type(
                         IoC.CONTAINER.instance.innate_symbol_lookup.get_int_type()).symbol)?.unspecialized_symbol)
 
+        /// Every class the registry holds, and every array type.
+        classes_and_arrays: Collections.List[WASMGC_CLASS] is
+            let result = LIST[WASMGC_CLASS](_classes.values)
+
+            for (array, _) in _arrays do
+                result.add(array)
+            od
+
+            return result
+        si
+
         /// Whether `type` is an array type.
         is_array(type: WASMGC_CLASS) -> bool => _arrays.contains_key(type)
 
@@ -842,6 +875,25 @@ namespace IR.WasmGC is
             else object_reference
             esac
 
+        // The type indices of the array types, from `first` on: a struct
+        // and its element array for each way of holding elements the
+        // program's arrays use. Every array type takes the struct of its
+        // element storage.
+        _number_array_types(first: int) is
+            let next mut = first
+
+            for storage in 0::4 do
+                if _array_storages.contains(storage) then
+                    _array_storage_types[storage] = next
+                    next = next + 2
+                fi
+            od
+
+            for (array, element) in _arrays do
+                _type_indices[array] = _array_storage_types[_array_storage(element)!]
+            od
+        si
+
         // For each way of holding elements the program's arrays use, a
         // final struct under the root holding the descriptor, the elements
         // and the element descriptor, then the mutable array of the
@@ -855,10 +907,11 @@ namespace IR.WasmGC is
                 let struct_index = DESCRIPTOR_TYPE_INDEX + group.count
                 let element = _array_storage_value_type(storage)
 
-                _array_storage_types[storage] = struct_index
+                assert _array_storage_types[storage] == struct_index else "array types are numbered where they are added"
 
                 // The element descriptor is held by each array rather than
-                // its descriptor, whose vtable slot holds the root's vtable.
+                // its descriptor, whose vtable slot holds the array type's
+                // vtable.
                 group.add(
                     SUB_TYPE(
                         STRUCT_TYPE([
@@ -878,13 +931,10 @@ namespace IR.WasmGC is
 
                 group.add(SUB_TYPE(ARRAY_TYPE(element_field), true, []))
             od
-
-            for (array, element) in _arrays do
-                _type_indices[array] = _array_storage_types[_array_storage(element)!]
-            od
         si
 
-        // An array answers the root's methods, so its vtable is the root's.
+        // An array type is planned with the classes, so its descriptor
+        // holds a vtable of its own, starting with the root's methods.
         _fill_array_descriptor(array: WASMGC_CLASS, element: Type) is
             let initialiser = _initialisers[array]
 
@@ -893,7 +943,7 @@ namespace IR.WasmGC is
             initialiser.add(INDEX_INSTRUCTION(Opcode.GLOBAL_GET, _descriptor_globals[_object!]))
             initialiser.add_range(chars_of("{element}[]"))
 
-            if let vtable = _dispatch.vtable(_object!, _functions!) then
+            if let vtable = _dispatch.vtable(array, _functions!) then
                 initialiser.add_range(vtable)
             else
                 initialiser.add(HEAP_TYPE_INSTRUCTION(Opcode.REF_NULL, HEAP_TYPE.of_abstract(AbstractHeapType.STRUCT)))
