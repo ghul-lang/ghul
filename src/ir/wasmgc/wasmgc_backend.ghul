@@ -33,6 +33,12 @@ namespace IR.WasmGC is
     /// so each body is kept as it is finished and lowered only once the
     /// last has been handed over, in `end_assembly`.
     class WASMGC_BACKEND: Backend is
+        // How deeply a generic class's type arguments can nest, and how
+        // many instantiations of one generic class discovery finds, before
+        // it takes the class to be instantiating itself without end.
+        MAXIMUM_TYPE_ARGUMENT_DEPTH: int static => 8
+        MAXIMUM_INSTANTIATIONS: int static => 256
+
         _bodies: LIST[(function: Function, values: LIST[Value])]
         _enclosing: STACK[LIST[Value]?]
         _current: LIST[Value]?
@@ -375,6 +381,9 @@ namespace IR.WasmGC is
                 fi
             od
 
+            let too_deep = Collections.SET[Classy]()
+            let instantiations = Collections.MAP[Classy, int]()
+
             registry.discovering = true
 
             let display = WASMGC_DISPLAY(registry)
@@ -391,7 +400,18 @@ namespace IR.WasmGC is
                 od
 
                 for type in registry.take_new_classes() do
-                    if type.definition.is_generic then
+                    let found mut = 0
+
+                    instantiations.try_get_value(type.definition, found ref)
+                    instantiations[type.definition] = found + 1
+
+                    if type.definition.is_generic /\ (found >= MAXIMUM_INSTANTIATIONS \/ WASMGC_TYPE_MAPS.depth(type.arguments) > MAXIMUM_TYPE_ARGUMENT_DEPTH) then
+                        // A class whose methods instantiate it at deeper and
+                        // deeper type arguments would be compiled without end.
+                        if too_deep.add(type.definition) then
+                            _report(type.definition.location, "a generic class that instantiates itself at ever deeper type arguments")
+                        fi
+                    elif type.definition.is_generic then
                         is_done = false
 
                         let class_methods: LIST[Function] mut
