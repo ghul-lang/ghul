@@ -1436,7 +1436,13 @@ namespace IR.WasmGC is
             elif let slot = _registry.dispatch.slot_of(instance) then
                 _registry.dispatch.use_slot(slot, _numbering)
 
-                thunk = _registry.closure_virtual_thunk(signature, slot, function.arguments.count, discards_result, _numbering)
+                let parameter_types = LIST[VALUE_TYPE?]()
+
+                for argument in function.arguments do
+                    parameter_types.add(_value_type(instance.specialize(argument)))
+                od
+
+                thunk = _registry.closure_virtual_thunk(signature, slot, parameter_types, discards_result, _numbering)
             else
                 _report("a function value of an overridden method")
                 return
@@ -3712,6 +3718,12 @@ namespace IR.WasmGC is
             _emit(TYPE_FIELD_INSTRUCTION(Opcode.STRUCT_GET, _registry.closure_type_index, WASMGC_TYPE_REGISTRY.CLOSURE_FUNCTION))
             _emit(HEAP_TYPE_INSTRUCTION(Opcode.REF_CAST, HEAP_TYPE.of_type_index(signature)))
             _emit(TYPE_INSTRUCTION(Opcode.CALL_REF, signature))
+
+            // The signature holds a reference result as the root, so it is
+            // cast back to the type the call gives it.
+            if let heap_type = _value_type(call.type)?.heap_type() /\ !heap_type.matches(_registry.object_reference.heap_type()!) then
+                _emit(HEAP_TYPE_INSTRUCTION(Opcode.REF_CAST_NULL, heap_type))
+            fi
         si
 
         // An operation the host provides is a call of its import rather

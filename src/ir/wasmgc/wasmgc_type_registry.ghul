@@ -666,7 +666,10 @@ namespace IR.WasmGC is
 
         /// The signature a call through a value of the function type `type`
         /// uses: the receiver or frame as the root, then the parameters,
-        /// then the result. Null where one of them cannot be held yet.
+        /// then the result, each reference held as the root, so function
+        /// types that differ only in reference types one converts to by
+        /// variance share a signature. Null where one of them cannot be
+        /// held yet.
         closure_signature(type: Type) -> int? is
             let arguments = type.arguments
             let parameter_count = if type.is_action then arguments.count else arguments.count - 1 fi
@@ -677,7 +680,7 @@ namespace IR.WasmGC is
 
             for i in 0..parameter_count do
                 if let value_type = value_type(arguments[i]) then
-                    parameters.add(value_type)
+                    parameters.add(_erased(value_type))
                 else
                     return null
                 fi
@@ -687,7 +690,7 @@ namespace IR.WasmGC is
 
             if !type.is_action /\ !WASMGC_TYPES.is_void(arguments[arguments.count - 1]) then
                 if let value_type = value_type(arguments[arguments.count - 1]) then
-                    results.add(value_type)
+                    results.add(_erased(value_type))
                 else
                     return null
                 fi
@@ -698,6 +701,22 @@ namespace IR.WasmGC is
             fi
 
             return _module.add_type(FUNC_TYPE(parameters.to_array(), results.to_array()))
+        si
+
+        // A reference held as the root, as a function value's signature
+        // holds its references.
+        _erased(value_type: VALUE_TYPE) -> VALUE_TYPE =>
+            if value_type.heap_type()? then object_reference else value_type fi
+
+        // Loads parameter `local` of a thunk, cast from the root its
+        // signature holds it as to `expected`, the type the function it
+        // calls takes.
+        _forward(body: LIST[INSTRUCTION], local: int, expected: VALUE_TYPE?) is
+            body.add(INDEX_INSTRUCTION(Opcode.LOCAL_GET, local))
+
+            if let heap_type = expected?.heap_type() /\ !heap_type.matches(object_reference.heap_type()!) then
+                body.add(HEAP_TYPE_INSTRUCTION(Opcode.REF_CAST_NULL, heap_type))
+            fi
         si
 
         /// The thunk a function value of `signature` holding `function`
@@ -736,11 +755,11 @@ namespace IR.WasmGC is
                     fi
 
                     for i in 1..definition.arguments.count do
-                        body.add(INDEX_INSTRUCTION(Opcode.LOCAL_GET, i))
+                        registry._forward(body, i, registry.value_type(function.specialize(definition.arguments[i])))
                     od
                 else
                     for i in 0..definition.arguments.count do
-                        body.add(INDEX_INSTRUCTION(Opcode.LOCAL_GET, i + 1))
+                        registry._forward(body, i + 1, registry.value_type(function.specialize(definition.arguments[i])))
                     od
                 fi
 
@@ -762,7 +781,7 @@ namespace IR.WasmGC is
         /// method calls, reserved in `numbering`. It calls through the
         /// receiver's vtable at `slot`, so the value runs whichever override
         /// the receiver has. Nothing is reserved while discovering.
-        closure_virtual_thunk(signature: int, slot: WASMGC_SLOT, argument_count: int, discards_result: bool, numbering: WASMGC_FUNCTION_NUMBERING) -> int is
+        closure_virtual_thunk(signature: int, slot: WASMGC_SLOT, parameter_types: Collections.List[VALUE_TYPE?], discards_result: bool, numbering: WASMGC_FUNCTION_NUMBERING) -> int is
             if discovering then
                 return 0
             fi
@@ -777,8 +796,8 @@ namespace IR.WasmGC is
                 body.add(INDEX_INSTRUCTION(Opcode.LOCAL_GET, 0))
                 body.add(HEAP_TYPE_INSTRUCTION(Opcode.REF_CAST_NULL, HEAP_TYPE.of_type_index(registry.type_index(slot.owner)!)))
 
-                for i in 0..argument_count do
-                    body.add(INDEX_INSTRUCTION(Opcode.LOCAL_GET, i + 1))
+                for i in 0..parameter_types.count do
+                    registry._forward(body, i + 1, parameter_types[i])
                 od
 
                 body.add(INDEX_INSTRUCTION(Opcode.LOCAL_GET, 0))
