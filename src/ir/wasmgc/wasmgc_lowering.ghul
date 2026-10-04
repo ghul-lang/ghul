@@ -14,6 +14,7 @@ namespace IR.WasmGC is
     use Wasm.HEAP_TYPE
     use Wasm.TYPE_INSTRUCTION
     use Wasm.TYPE_FIELD_INSTRUCTION
+    use Wasm.TYPE_LENGTH_INSTRUCTION
     use Wasm.HEAP_TYPE_INSTRUCTION
     use Wasm.CAST_BRANCH_INSTRUCTION
     use Wasm.IF_INSTRUCTION
@@ -687,9 +688,20 @@ namespace IR.WasmGC is
         visit_address(self_load: Values.Load.REFERENCE_SELF) is _report("self") si
         visit(self_load: Values.Load.OUTER_SELF) is _report("self") si
         visit_address(self_load: Values.Load.OUTER_SELF) is _report("self") si
-        visit(self_load: Values.Load.VALUE_SELF) is _report("self") si
+        // A scalar's method takes the value itself as its receiver.
+        visit(self_load: Values.Load.VALUE_SELF) is
+            if WASMGC_TYPES.scalar(self_load.type)? then
+                _emit(INDEX_INSTRUCTION(Opcode.LOCAL_GET, 0))
+            else
+                _report("self")
+            fi
+        si
         visit_address(self_load: Values.Load.VALUE_SELF) is _report("self") si
         visit(runtime: Values.RUNTIME) is
+            if _lower_builder(runtime) then
+                return
+            fi
+
             let strings = _strings
 
             if !strings? then
@@ -710,7 +722,100 @@ namespace IR.WasmGC is
         si
 
         _is_representation_operation(name: string) -> bool =>
-            name =~ "string.length" \/ name =~ "string.char_at" \/ name =~ "string.concat" \/ name =~ "object.type_name"
+            name =~ "string.length" \/ name =~ "string.char_at" \/ name =~ "string.concat" \/
+            name =~ "string.from_char" \/ name =~ "object.type_name"
+
+        // An interpolation's builder operations, as calls on the core
+        // library's builder: it is constructed, takes each piece of text
+        // through `append`, and answers the whole through `to_string`. A
+        // value's text comes from its own `to_string`, which dispatches as
+        // any other call does.
+        _lower_builder(runtime: Values.RUNTIME) -> bool is
+            let operands = runtime.operands
+
+            case runtime.operation
+            when IR.RuntimeOperation.NEW_STRING_BUILDER then
+                let builder_type = runtime.type
+
+                if let constructor = _method(builder_type, "init", 0) then
+                    gen(Values.NEW(builder_type!, constructor, LIST[Value]()))
+                else
+                    _report("an interpolation, whose builder has no constructor")
+                fi
+
+            when IR.RuntimeOperation.APPEND_TEXT then
+                _append(operands[0], operands[1])
+
+            when IR.RuntimeOperation.APPEND_VALUE then
+                _append(operands[0], _text_of(operands[1]))
+
+            when IR.RuntimeOperation.BUILD_STRING then
+                if let build = _method(operands[0].type, "to_string", 0) then
+                    gen(Values.Call.INSTANCE(operands[0], build, LIST[Value](), null))
+                else
+                    _report("an interpolation, whose builder has no to_string")
+                fi
+
+            when
+                IR.RuntimeOperation.APPEND_ALIGNED_VALUE,
+                IR.RuntimeOperation.APPEND_FORMATTED_VALUE,
+                IR.RuntimeOperation.APPEND_ALIGNED_FORMATTED_VALUE
+            then
+                _report("an interpolated value with an alignment or a format")
+
+            else
+                return false
+            esac
+
+            return true
+        si
+
+        _append(builder: Value, text: Value) is
+            if let append = _method(builder.type, "append", 1) then
+                gen(Values.Call.INSTANCE(builder, append, LIST[Value]([text]), null))
+            else
+                _report("an interpolation, whose builder has no append")
+            fi
+        si
+
+        // The text of `value`: a string as itself, anything else through
+        // its `to_string`. A value whose type has no `to_string` of its own
+        // is displayed by its members on .NET, which this target cannot do
+        // yet, so it is reported rather than given different text.
+        _text_of(value: Value) -> Value is
+            if WASMGC_TYPES.is_string(value.type) then
+                return value
+            elif let to_string = _method(value.type, "to_string", 0) then
+                if let owner: Semantic.Symbols.Classy = to_string.owner /\ owner.is_object then
+                    _report("an interpolated value whose type has no to_string of its own")
+
+                    return value
+                fi
+
+                return Values.Call.INSTANCE(value, to_string, LIST[Value](), null)
+            fi
+
+            _report("an interpolated value of type {value.type}")
+
+            return value
+        si
+
+        // The method of `type` named `name` that takes `arity` arguments.
+        _method(type: Type?, name: string, arity: int) -> Function? is
+            let found = type?.find_member(name)
+
+            if let group: Semantic.Symbols.FUNCTION_GROUP = found then
+                for function in group.functions do
+                    if function.arguments.count == arity then
+                        return function
+                    fi
+                od
+            elif let function: Function = found /\ function.arguments.count == arity then
+                return function
+            fi
+
+            return null
+        si
 
         _call_string_helper(index: int, strings: WASMGC_STRINGS, arguments: Collections.List[Value]) is
             for argument in arguments do
@@ -758,6 +863,12 @@ namespace IR.WasmGC is
                 _emit(TYPE_INSTRUCTION(Opcode.ARRAY_GET_U, chars))
             elif name =~ "string.concat" then
                 _call_string_helper(strings.concat_function, strings, arguments)
+            elif name =~ "string.from_char" then
+                _emit(INDEX_INSTRUCTION(Opcode.GLOBAL_GET, _registry.string_descriptor_global!))
+                _emit(I32_CONSTANT(0))
+                gen(arguments[0])
+                _emit(TYPE_LENGTH_INSTRUCTION(Opcode.ARRAY_NEW_FIXED, chars, 1))
+                _emit(TYPE_INSTRUCTION(Opcode.STRUCT_NEW, string_type))
             elif name =~ "object.type_name" then
                 _emit(INDEX_INSTRUCTION(Opcode.GLOBAL_GET, _registry.string_descriptor_global!))
                 _emit(I32_CONSTANT(0))
@@ -1594,7 +1705,34 @@ namespace IR.WasmGC is
             fi
         si
 
-        visit(call: Values.Call.STRUCT) is _report("a struct method call") si
+        // A method the core library gives a scalar takes the value itself
+        // as its receiver, where a struct's takes its address.
+        visit(call: Values.Call.STRUCT) is
+            let instance = _instance_of(call.function)
+            let receiver = _registry.receiver_type(instance)
+
+            if !receiver? \/ !receiver.numeric()? then
+                _report("a struct method call")
+                return
+            fi
+
+            let index = _numbering.index_of(instance)
+
+            if !index? then
+                _report("a call to {call.function.name}")
+                return
+            fi
+
+            if let address: Values.ADDRESS = call.from then
+                gen(address.value)
+            else
+                gen(call.from)
+            fi
+
+            _lower_arguments(call.function, call.arguments)
+
+            _emit(INDEX_INSTRUCTION(Opcode.CALL, index))
+        si
         // A call is direct where the dispatch says so, and where nothing
         // in the program overrides the method, since the whole program is
         // known. Dispatch through a vtable or a trait is not lowered yet.
