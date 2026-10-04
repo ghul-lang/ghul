@@ -1,24 +1,137 @@
 namespace IR.WasmGC is
+    use Collections.LIST
+    use Collections.MAP
+
+    use Semantic.Types.Type
+    use Semantic.Symbols.Symbol
+    use Semantic.Symbols.Classy
     use Semantic.Symbols.Function
+    use Semantic.Symbols.GENERIC
 
-    /// A function as the wasm module compiles it: one definition, compiled
-    /// once.
+    /// A class as the WasmGC target compiles it: a declared class at one
+    /// choice of its type arguments. Every instantiation a program uses is
+    /// compiled separately, and a class that is not generic has one, with no
+    /// arguments.
     ///
-    /// - definition: the function whose body is compiled
-    class WASMGC_FUNCTION is
-        definition: Function
+    /// - definition: the declared class
+    /// - arguments: its type arguments, in declaration order
+    /// - type_map: each of the definition's type parameters, to its argument
+    class WASMGC_CLASS(definition: Classy, arguments: Collections.List[Type], type_map: Collections.Map[Symbol, Type]) is
+        /// The class with no type arguments.
+        of(definition: Classy) -> WASMGC_CLASS static =>
+            WASMGC_CLASS(definition, LIST[Type](), MAP[Symbol, Type]())
 
-        init(definition: Function) is
-            self.definition = definition
+        /// `type`, with the class's type parameters replaced by its
+        /// arguments.
+        specialize(type: Type?) -> Type? => WASMGC_TYPE_MAPS.specialize(type, type_map)
+
+        =~(other: WASMGC_CLASS) -> bool pure =>
+            definition == other.definition /\ WASMGC_TYPE_MAPS.same(type_map, other.type_map)
+
+        get_hash_code() -> int pure => definition.get_hash_code()
+
+        to_string() -> string =>
+            if arguments.count == 0 then "{definition}" else "{definition}[{arguments |> Ghul.Pipes.join(",")}]" fi
+    si
+
+    /// A function as the WasmGC target compiles it: a declared function at
+    /// one choice of the type arguments its body can name, its class's and
+    /// its own.
+    ///
+    /// - definition: the declared function, whose body is the one compiled
+    /// - type_map: each type parameter the body can name, to its argument
+    class WASMGC_FUNCTION(definition: Function, type_map: Collections.Map[Symbol, Type]) is
+        /// The function with no type arguments.
+        of(definition: Function) -> WASMGC_FUNCTION static =>
+            WASMGC_FUNCTION(definition, MAP[Symbol, Type]())
+
+        /// `type`, with the type parameters the body can name replaced by
+        /// their arguments.
+        specialize(type: Type?) -> Type? => WASMGC_TYPE_MAPS.specialize(type, type_map)
+
+        =~(other: WASMGC_FUNCTION) -> bool pure =>
+            definition == other.definition /\ WASMGC_TYPE_MAPS.same(type_map, other.type_map)
+
+        get_hash_code() -> int pure => definition.get_hash_code()
+
+        to_string() -> string =>
+            if type_map.count == 0 then "{definition.qualified_name}" else "{definition.qualified_name}[{type_map.values |> Ghul.Pipes.join(",")}]" fi
+    si
+
+    /// Applying and comparing the type maps instantiations carry.
+    class WASMGC_TYPE_MAPS is
+        /// `type` with every type parameter `map` names replaced, or `type`
+        /// itself where the map is empty.
+        specialize(type: Type?, map: Collections.Map[Symbol, Type]) -> Type? static =>
+            if !type? \/ map.count == 0 then type else type.specialize(map) fi
+
+        /// Whether two type maps bind the same parameters to the same types.
+        same(left: Collections.Map[Symbol, Type], right: Collections.Map[Symbol, Type]) -> bool static pure is
+            if left.count != right.count then
+                return false
+            fi
+
+            for (parameter, argument) in left do
+                let other: Type mut
+
+                if !right.try_get_value(parameter, other ref) \/ !argument.matches(other) then
+                    return false
+                fi
+            od
+
+            return true
         si
 
-        /// The instance of `definition` that takes no type arguments.
-        of(definition: Function) -> WASMGC_FUNCTION static => WASMGC_FUNCTION(definition)
+        /// `map` with every value specialized by `context`.
+        compose(map: Collections.Map[Symbol, Type], context: Collections.Map[Symbol, Type]) -> MAP[Symbol, Type] static is
+            let result = MAP[Symbol, Type]()
 
-        =~(other: WASMGC_FUNCTION) -> bool pure => definition == other.definition
+            for (parameter, argument) in map do
+                result[parameter] = specialize(argument, context)!
+            od
 
-        get_hash_code() -> int => definition.get_hash_code()
+            return result
+        si
 
-        to_string() -> string => definition.qualified_name
+        /// The type arguments a reference to `function` binds, read in the
+        /// context `context` of the body making it: the class's from the
+        /// function's owner, and the function's own from its generic
+        /// arguments.
+        function_map(function: Function, context: Collections.Map[Symbol, Type]) -> MAP[Symbol, Type] static is
+            let definition = cast Function?(function.root_specialized_from)!
+            let result = MAP[Symbol, Type]()
+
+            if let owner: GENERIC = function.owner then
+                for (parameter, argument) in owner.type_map do
+                    result[parameter] = specialize(argument, context)!
+                od
+            elif let owner: Classy = definition.owner /\ owner.is_generic then
+                // A call from inside a generic class to its own members
+                // names the definition, and the class's arguments are the
+                // ones the calling body was compiled with.
+                for (parameter, argument) in context do
+                    if parameter.owner == owner then
+                        result[parameter] = argument
+                    fi
+                od
+            elif isa Semantic.Symbols.Closure(definition) then
+                // A closure body can name every type parameter of the body
+                // it was written in.
+                for (parameter, argument) in context do
+                    result[parameter] = argument
+                od
+            fi
+
+            let parameters = definition.generic_arguments
+            let arguments = function.generic_arguments
+
+            for i in 0..parameters.count do
+                if i < arguments.count then
+                    result[parameters[i].symbol] = specialize(arguments[i], context)!
+                fi
+            od
+
+            return result
+        si
     si
 si
