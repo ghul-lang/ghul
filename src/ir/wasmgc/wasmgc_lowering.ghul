@@ -3534,8 +3534,10 @@ namespace IR.WasmGC is
 
         // A call on a type parameter's value, once the instantiation has
         // made its type concrete. A scalar's hash code is computed in
-        // place; anything else held as a reference is called as any value
-        // of its type is.
+        // place, a member the core library gives the scalar is called on
+        // the value itself, and any other member is called on the boxed
+        // value, as the CIL constrained call does; anything held as a
+        // reference is called as any value of its type is.
         _call_constrained(call: Values.Call.INSTANCE, constrained: Values.CONSTRAINED) is
             let receiver =
                 if let address: Values.ADDRESS = constrained.value then address.value else constrained.value fi
@@ -3552,14 +3554,29 @@ namespace IR.WasmGC is
                             numeric,
                             _temp(VALUE_TYPE.of_numeric(NumericType.I64)),
                             _temp(VALUE_TYPE.of_numeric(numeric))))
+                elif let own = _scalar_member(type, call.function) then
+                    _call_direct(Values.Call.INSTANCE(receiver, own, call.arguments, call.type), WASMGC_FUNCTION.of(own))
                 else
-                    _report("a call to {call.function.name} on {type}")
+                    gen(Values.Call.INSTANCE(Values.BOX(receiver), call.function, call.arguments, call.type))
                 fi
 
                 return
             fi
 
             gen(Values.Call.INSTANCE(receiver, call.function, call.arguments, call.type))
+        si
+
+        // The member of the scalar `type` that the core library declares
+        // in place of `function`, which the root declares: same name, same
+        // arity.
+        _scalar_member(type: Type?, function: Function) -> Function? is
+            if let own = _method(type, function.name, function.arguments.count) then
+                if let owner: Semantic.Symbols.Classy = own.owner /\ !owner.is_object then
+                    return own
+                fi
+            fi
+
+            return null
         si
 
         _call_direct(call: Values.Call.INSTANCE, function: WASMGC_FUNCTION) is
@@ -3694,7 +3711,18 @@ namespace IR.WasmGC is
             let selector = if trait_type? then dispatch.selector_of(cast Function?(function.root_specialized_from)!, trait_type) else null fi
 
             if !selector? then
-                _report("a trait call to {function.name}")
+                // Nothing in the program implements the trait, so no value
+                // the call could be made on exists. The receiver and the
+                // arguments are still evaluated first, as they are before a
+                // call on null fails on .NET.
+                if let trait_class = trait_type /\ !dispatch.implementors(trait_class)? then
+                    gen(call.from)
+                    _lower_all(call.arguments)
+                    _emit(Opcode.UNREACHABLE)
+                else
+                    _report("a trait call to {function.name}")
+                fi
+
                 return
             fi
 
