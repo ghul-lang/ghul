@@ -114,6 +114,8 @@ namespace IR.WasmGC is
                 if _registry.is_object_type(type) then
                     _plan_slots(type)
                     _collect_traits(type)
+                else
+                    _plan_slots(type)
                 fi
             od
 
@@ -162,12 +164,17 @@ namespace IR.WasmGC is
             return index
         si
 
+        // The class `type`'s vtable extends: its superclass, or the root.
         _parent(type: WASMGC_CLASS) -> WASMGC_CLASS? is
+            if _registry.is_object(type) then
+                return null
+            fi
+
             if let parent = _registry.superclass_of(type) /\ _registry.is_object_type(parent) then
                 return parent
             fi
 
-            return null
+            return _registry.root
         si
 
         _methods(definition: Classy) -> Collections.List[Function] =>
@@ -204,7 +211,11 @@ namespace IR.WasmGC is
                 entries.add_range(_slot_entries[parent])
             fi
 
-            for method in _methods(type.definition) do
+            // The root and the classes the program declares bring methods
+            // of their own; a box or the string type answers the root's.
+            let has_own_methods = _registry.is_object(type) \/ _registry.is_object_type(type)
+
+            for method in if has_own_methods then _methods(type.definition) else LIST[Function]() fi do
                 if !_is_dispatched(method) then
                     continue
                 fi
