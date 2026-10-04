@@ -51,16 +51,22 @@ namespace IR.WasmGC is
     /// superclass's fields in order, then its own. A class nothing derives
     /// from is final.
     class WASMGC_TYPE_REGISTRY is
-        // Every struct type goes in one recursion group at the start of the
-        // type section. WasmGC treats two types as the same when their
+        // Every struct type goes in one recursion group near the start of
+        // the type section. WasmGC treats two types as the same when their
         // groups have the same shape, so separate groups would make classes
         // with the same fields interchangeable.
 
+        /// The array of UTF-16 code units a string holds, first in the type
+        /// section and in a group of its own. It has to be exactly the
+        /// standalone mutable array of i16 the host's string builtins take,
+        /// though nothing writes one after it is built.
+        CHARS_TYPE_INDEX: int static => 0
+
         /// The descriptor's struct type, first in the recursion group.
-        DESCRIPTOR_TYPE_INDEX: int static => 0
+        DESCRIPTOR_TYPE_INDEX: int static => 1
 
         /// The root's struct type, which every class derives from.
-        OBJECT_TYPE_INDEX: int static => 1
+        OBJECT_TYPE_INDEX: int static => 2
 
         /// The descriptor field holding the class's number.
         DESCRIPTOR_CLASS_ID: int static => 0
@@ -86,7 +92,6 @@ namespace IR.WasmGC is
         _module: MODULE
         _object: Classy?
         _string: Classy?
-        _chars_type_index: int
 
         _numbering: CLASS_ID_NUMBERING[Classy]
 
@@ -179,7 +184,9 @@ namespace IR.WasmGC is
                 _classes_by_index[OBJECT_TYPE_INDEX + i] = ordered[i]
             od
 
-            _chars_type_index = OBJECT_TYPE_INDEX + ordered.count
+            let chars = _module.add_sub_type(SUB_TYPE(ARRAY_TYPE(FIELD_TYPE.of_packed(PackedType.I16, true)), true, []))
+
+            assert chars == CHARS_TYPE_INDEX else "the code unit array must come first"
 
             let group = LIST[SUB_TYPE]()
 
@@ -188,11 +195,6 @@ namespace IR.WasmGC is
             for type in ordered do
                 group.add(_sub_type(type))
             od
-
-            // The code units must be a mutable array, the one shape the
-            // host's string builtins read, though nothing writes one after
-            // it is built.
-            group.add(SUB_TYPE(ARRAY_TYPE(FIELD_TYPE.of_packed(PackedType.I16, true)), true, []))
 
             let first = _module.add_rec_group(group)
 
@@ -285,7 +287,7 @@ namespace IR.WasmGC is
                 FIELD_TYPE(NumericType.I32, false),
                 FIELD_TYPE(NumericType.I32, false),
                 FIELD_TYPE.of_reference(VALUE_TYPE.of_type_index(DESCRIPTOR_TYPE_INDEX, true), false),
-                FIELD_TYPE.of_reference(VALUE_TYPE.of_type_index(_chars_type_index, false), false)
+                FIELD_TYPE.of_reference(VALUE_TYPE.of_type_index(CHARS_TYPE_INDEX, false), false)
             ])
 
         _sub_type(type: Classy) -> SUB_TYPE is
@@ -303,7 +305,7 @@ namespace IR.WasmGC is
             if type == _string then
                 layout.add(VALUE_TYPE.of_type_index(DESCRIPTOR_TYPE_INDEX, false))
                 layout.add(VALUE_TYPE.of_numeric(NumericType.I32))
-                layout.add(VALUE_TYPE.of_type_index(_chars_type_index, false))
+                layout.add(VALUE_TYPE.of_type_index(CHARS_TYPE_INDEX, false))
 
                 _layouts[type] = layout
 
@@ -461,7 +463,7 @@ namespace IR.WasmGC is
                 result.add(I32_CONSTANT(int(c)))
             od
 
-            result.add(TYPE_LENGTH_INSTRUCTION(Opcode.ARRAY_NEW_FIXED, _chars_type_index, text.length))
+            result.add(TYPE_LENGTH_INSTRUCTION(Opcode.ARRAY_NEW_FIXED, CHARS_TYPE_INDEX, text.length))
 
             return result
         si
@@ -471,7 +473,7 @@ namespace IR.WasmGC is
         string_type_index: int? => if let string_type = _string then type_index(string_type) else null fi
 
         /// The array type holding a string's UTF-16 code units.
-        chars_type_index: int => _chars_type_index
+        chars_type_index: int => CHARS_TYPE_INDEX
 
         /// The global holding the string type's descriptor, or null where
         /// the registry knows no string type.
