@@ -18,6 +18,7 @@ namespace IR.WasmGC is
 
     use Collections.LIST
     use Collections.MAP
+    use Collections.SET
     use Collections.STACK
 
     use Semantic.Symbols.Symbol
@@ -38,6 +39,10 @@ namespace IR.WasmGC is
 
         _host_declarations: LIST[Function]
 
+        // The state machine frames already reported, so a frame with several
+        // members is reported once.
+        _reported_frames: SET[Classy]
+
         _entry_point: Function?
         _module: MODULE?
         _want_library: bool
@@ -46,6 +51,7 @@ namespace IR.WasmGC is
             _bodies = LIST[(function: Function, values: LIST[Value])]()
             _host_declarations = LIST[Function]()
             _enclosing = STACK[LIST[Value]?]()
+            _reported_frames = SET[Classy]()
         si
 
         /// Starts a module, discarding anything kept from an earlier one.
@@ -58,6 +64,7 @@ namespace IR.WasmGC is
         reset() is
             _bodies.clear()
             _host_declarations.clear()
+            _reported_frames.clear()
             _enclosing.clear()
             _current = null
             _entry_point = null
@@ -128,9 +135,21 @@ namespace IR.WasmGC is
         si
 
         /// Reports the frame member: this target generates no generators or
-        /// asynchronous functions yet.
+        /// asynchronous functions yet. The report is at the function the
+        /// frame was made for, since the frame itself has no source location.
         finish_frame_member_body(frame: Classy, member: FrameMember) is
-            _report(frame.location, "a generator or asynchronous function")
+            if !_reported_frames.add(frame) then
+                return
+            fi
+
+            let location =
+                if let state_machine: Semantic.Symbols.STATE_MACHINE_FRAME_BASE = frame then
+                    state_machine.owning_function.location
+                else
+                    frame.location
+                fi
+
+            _report(location, "a generator or asynchronous function")
         si
 
         /// Reports the initializer: this target generates no unions yet.
