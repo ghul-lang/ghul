@@ -7,11 +7,15 @@ namespace IR.WasmGC.UnitTests is
     use Wasm.BLOCK_INSTRUCTION
     use Wasm.INDEX_INSTRUCTION
     use Wasm.Opcode
+    use Wasm.I32_CONSTANT
+    use Wasm.IF_INSTRUCTION
+    use Wasm.TRY_TABLE_INSTRUCTION
 
     use IR.Values.BREAK
     use IR.Values.CONTINUE
     use IR.Values.LOOP
     use IR.Values.REGION
+    use IR.Values.TRY
     use IR.Values.Value
 
     use Semantic.Symbols.Function
@@ -139,6 +143,38 @@ namespace IR.WasmGC.UnitTests is
             assert_branch(1, region_block[0])
         si
 
+
+        @Test()
+        break_out_of_a_try_with_a_finally__should_run_the_finally_then_take_the_exit() is
+            let outer = new_region()
+            let `try = TRY(LABEL(), Semantic.Types.ERROR())
+            let `finally = new_region()
+
+            `try.body.add(BREAK(outer))
+            `try.finally_region = closed(`finally)
+            `try.close()
+
+            outer.body.add(`try)
+
+            let outer_block = body_of(Opcode.BLOCK, lower(closed(outer))[0])
+
+            // The selector starts at no exit, then the try's own block.
+            let after = body_of(Opcode.BLOCK, outer_block[2])
+            let normal = body_of(Opcode.BLOCK, after[0])
+            let exceptional = body_of(Opcode.BLOCK, normal[0])
+
+            let guarded = cast TRY_TABLE_INSTRUCTION(exceptional[0]).body()
+
+            are_equal(1, cast I32_CONSTANT(guarded[0]).value)
+            are_equal(Opcode.LOCAL_SET, guarded[1].opcode)
+            assert_branch(2, guarded[2])
+
+            // After the finally, exit 1 is taken again: from inside the
+            // `if`, out through the try's block to the region's.
+            let taken = cast IF_INSTRUCTION(after[after.count - 1]).then_branch()
+
+            assert_branch(2, taken[0])
+        si
         @Test()
         a_value_the_lowering_does_not_handle__should_be_reported_rather_than_thrown() is
             let lowering = WASMGC_LOWERING(WASMGC_FUNCTION_NUMBERING(0, f => false), WASMGC_TYPE_REGISTRY(Wasm.MODULE()), WASMGC_IMPORTS(Wasm.MODULE()), LIST[Wasm.VALUE_TYPE]())

@@ -17,6 +17,11 @@ namespace IR.WasmGC is
     use Wasm.TYPE_LENGTH_INSTRUCTION
     use Wasm.HEAP_TYPE_INSTRUCTION
     use Wasm.CAST_BRANCH_INSTRUCTION
+    use Wasm.THROW_INSTRUCTION
+    use Wasm.TRY_TABLE_INSTRUCTION
+    use Wasm.CATCH_CLAUSE
+    use Wasm.CatchKind
+    use Wasm.AbstractHeapType
     use Wasm.IF_INSTRUCTION
     use Wasm.CALL_INDIRECT_INSTRUCTION
 
@@ -46,6 +51,7 @@ namespace IR.WasmGC is
         _instance: WASMGC_FUNCTION?
         _imports: WASMGC_IMPORTS
         _strings: WASMGC_STRINGS?
+        _exceptions: WASMGC_EXCEPTIONS?
 
         // An instance method's receiver is its parameter 0, so its
         // declared arguments start at 1.
@@ -79,7 +85,7 @@ namespace IR.WasmGC is
         // The labels open at the point being lowered, innermost last:
         // each structured node's block, and a loop's own `loop` after
         // it, which is where a CONTINUE goes.
-        _labels: LIST[(node: Values.Breakable, is_loop_head: bool)]
+        _labels: LIST[(node: Values.Breakable?, is_loop_head: bool, finally_exits: WASMGC_FINALLY_EXITS?)]
 
         _unsupported: LIST[string]
 
@@ -108,7 +114,7 @@ namespace IR.WasmGC is
             function: WASMGC_FUNCTION,
             parameter_types: Collections.List[VALUE_TYPE]
         ) is
-            init(numbering, registry, imports, null, function, parameter_types)
+            init(numbering, registry, imports, null, null, function, parameter_types)
         si
 
         /// Lowers a body of `function` that can use strings.
@@ -120,6 +126,8 @@ namespace IR.WasmGC is
         ///   operation is a call of
         /// - strings: the string literals and helper functions, or null
         ///   where the program has no string type
+        /// - exceptions: the tag exceptions are thrown with, or null where
+        ///   the body neither throws nor catches
         /// - parameter_types: the types of the function's parameters, the
         ///   receiver first where it takes one
         init(
@@ -127,12 +135,14 @@ namespace IR.WasmGC is
             registry: WASMGC_TYPE_REGISTRY,
             imports: WASMGC_IMPORTS,
             strings: WASMGC_STRINGS?,
+            exceptions: WASMGC_EXCEPTIONS?,
             function: WASMGC_FUNCTION,
             parameter_types: Collections.List[VALUE_TYPE]
         ) is
             init(numbering, registry, imports, parameter_types)
 
             _strings = strings
+            _exceptions = exceptions
 
             _instance = function
             _receiver_offset = if function.definition.is_emitted_with_receiver then 1 else 0 fi
@@ -156,7 +166,7 @@ namespace IR.WasmGC is
             _locals = MAP[LOCAL, int]()
             _local_types = LIST[VALUE_TYPE]()
             _bodies = LIST[LIST[INSTRUCTION]]()
-            _labels = LIST[(node: Values.Breakable, is_loop_head: bool)]()
+            _labels = LIST[(node: Values.Breakable?, is_loop_head: bool, finally_exits: WASMGC_FINALLY_EXITS?)]()
             _unsupported = LIST[string]()
         si
 
@@ -667,7 +677,7 @@ namespace IR.WasmGC is
             for i in 0..values.count do
                 let value = values[i]
 
-                if i == values.count - 1 /\ !WASMGC_TYPES.is_void(block.type) /\ isa Values.REGION(value) then
+                if i == values.count - 1 /\ _produces_value(block) /\ isa Values.REGION(value) then
                     let result = _value_type(block.type)
 
                     if !result? then
@@ -680,6 +690,11 @@ namespace IR.WasmGC is
                 fi
             od
         si
+
+        // A body every path out of which diverges, by a throw or a return,
+        // is typed as an error, and produces no value.
+        _produces_value(block: Values.BLOCK) -> bool =>
+            !WASMGC_TYPES.is_void(block.type) /\ !(block.type?.is_error ?? false)
 
         visit(block: Values.DUMMY_BLOCK) is
             throw System.InvalidOperationException("dummy block generated, created at: {block.location} because: {block.why}")
@@ -705,6 +720,11 @@ namespace IR.WasmGC is
         visit_address(self_load: Values.Load.VALUE_SELF) is _report("self") si
         visit(runtime: Values.RUNTIME) is
             if _lower_builder(runtime) then
+                return
+            fi
+
+            if let exception = _runtime_exception(runtime.operation) then
+                _construct_runtime_exception(exception, runtime.operands)
                 return
             fi
 
@@ -1285,7 +1305,6 @@ namespace IR.WasmGC is
             _emit(Opcode.DROP)
         si
 
-        visit(thrown: Values.THROW) is _report("throw") si
 
         visit(ret: Values.RET) is
             _normalise_for(_return_type)
@@ -1554,6 +1573,10 @@ namespace IR.WasmGC is
                 return
             fi
 
+            _construct(type, constructor, construction.arguments)
+        si
+
+        _construct(type: WASMGC_CLASS, constructor: Function, arguments: Collections.List[Value]) is
             let index_found = _index_of(constructor)
 
             if !index_found? then
@@ -1570,10 +1593,52 @@ namespace IR.WasmGC is
             _emit_all(_registry.new_instance(type))
             _emit(INDEX_INSTRUCTION(Opcode.LOCAL_TEE, instance))
 
-            _lower_arguments(constructor, construction.arguments)
+            _lower_arguments(constructor, arguments)
 
             _emit(INDEX_INSTRUCTION(Opcode.CALL, index))
             _emit(INDEX_INSTRUCTION(Opcode.LOCAL_GET, instance))
+        si
+
+        // An exception the runtime makes is an instance of the class the
+        // core library declares for it, made by its constructor taking
+        // the operation's operands. Null for any other operation.
+        _runtime_exception(operation: IR.RuntimeOperation) -> string? =>
+            case operation
+            when IR.RuntimeOperation.NEW_NOT_IMPLEMENTED then "Ghul.NotImplementedException"
+            when IR.RuntimeOperation.NEW_NOT_SUPPORTED then "Ghul.NotSupportedException"
+            when IR.RuntimeOperation.NEW_ASSERT_FAILED then "Ghul.AssertFailedException"
+            else null
+            esac
+
+        _construct_runtime_exception(name: string, operands: Collections.List[Value]) is
+            if let declared = _declared_class(name) then
+                if let group = cast Semantic.Symbols.FUNCTION_GROUP?(declared.find_direct("init")) then
+                    for constructor in group.functions do
+                        if constructor.arguments.count == operands.count then
+                            if let type = _owner_class(constructor.owner) /\ _registry.is_object_type(type) then
+                                _construct(type, constructor, operands)
+                                return
+                            fi
+                        fi
+                    od
+                fi
+            fi
+
+            _report("a {name} constructor taking {operands.count} arguments")
+        si
+
+        _declared_class(qualified_name: string) -> Semantic.Symbols.Classy? is
+            let scope: Semantic.Scope? mut = IoC.CONTAINER.instance.symbol_table.global_scope
+
+            for part in qualified_name.split(['.']) do
+                if !scope? then
+                    return null
+                fi
+
+                scope = cast Semantic.Scope?(scope.find_direct(part))
+            od
+
+            return cast Semantic.Symbols.Classy?(scope)
         si
 
         visit(negation: Values.NOT) is
@@ -1717,15 +1782,25 @@ namespace IR.WasmGC is
                 _lower_region(region, null)
             elif let loop: Values.LOOP = node then
                 _lower_loop(loop)
-            elif isa Values.TRY(node) then
-                _report("try")
+            elif let `try: Values.TRY = node then
+                if let `finally = `try.finally_region then
+                    if `try.catches.count > 0 then
+                        _report("a try with both catches and a finally")
+                    else
+                        _lower_try_finally(`try, `finally)
+                    fi
+                elif `try.catches.count > 0 then
+                    _lower_try_catch(`try)
+                else
+                    _report("a try with no handler")
+                fi
             else
                 _report("a generator or asynchronous function")
             fi
         si
 
         _lower_region(region: Values.REGION, result: VALUE_TYPE?) is
-            _labels.add((region, false))
+            _push_label(region, false)
             _begin()
 
             let values = region.body.values
@@ -1741,7 +1816,7 @@ namespace IR.WasmGC is
             fi
 
             let body = _end()
-            _labels.remove_at(_labels.count - 1)
+            _pop_label()
 
             _emit(BLOCK_INSTRUCTION(Opcode.BLOCK, _block_type(result), body))
         si
@@ -1753,10 +1828,10 @@ namespace IR.WasmGC is
         // again, a BREAK leaves the block, and a CONTINUE branches to the
         // loop, which starts it again.
         _lower_loop(loop: Values.LOOP) is
-            _labels.add((loop, false))
+            _push_label(loop, false)
             _begin()
 
-            _labels.add((loop, true))
+            _push_label(loop, true)
             _begin()
 
             _lower_all(loop.body.values)
@@ -1764,44 +1839,66 @@ namespace IR.WasmGC is
             _emit(INDEX_INSTRUCTION(Opcode.BR, 0))
 
             let body = _end()
-            _labels.remove_at(_labels.count - 1)
+            _pop_label()
 
             _emit(BLOCK_INSTRUCTION(Opcode.LOOP, BLOCK_TYPE(), body))
 
             let outer = _end()
-            _labels.remove_at(_labels.count - 1)
+            _pop_label()
 
             _emit(BLOCK_INSTRUCTION(Opcode.BLOCK, BLOCK_TYPE(), outer))
         si
 
+        _push_label(node: Values.Breakable?, is_loop_head: bool) is
+            _labels.add((node, is_loop_head, null))
+        si
+
+        // A label no exit names: a block the lowering adds for itself.
+        _push_label() is
+            _labels.add((null, false, null))
+        si
+
+        // The label of the `try_table` around the protected body of a try
+        // with a finally. An exit that finds it before its target leaves
+        // through the finally.
+        _push_label(finally_exits: WASMGC_FINALLY_EXITS) is
+            _labels.add((null, false, finally_exits))
+        si
+
+        _pop_label() is
+            _labels.remove_at(_labels.count - 1)
+        si
+
         // How many labels lie between the point being lowered and the
-        // target: the label a branch instruction names.
-        _depth(target: Values.Breakable, is_loop_head: bool) -> int? is
+        // one at `position` on the label stack: the label a branch
+        // instruction names.
+        _depth(position: int) -> int => _labels.count - 1 - position
+
+        // An exit branches to its target's label, unless it finds the
+        // protected body of a try with a finally on the way there.
+        visit(exit: Values.Exit) is
+            let is_continue = isa Values.CONTINUE(exit)
+
             let i mut = _labels.count - 1
 
             while i >= 0 do
                 let label = _labels[i]
 
-                if label.node == target /\ label.is_loop_head == is_loop_head then
-                    return _labels.count - 1 - i
+                if label.node == exit.target /\ label.is_loop_head == is_continue then
+                    _branch(exit, _depth(i))
+                    return
+                elif let finally_exits = label.finally_exits then
+                    _leave_through_finally(exit, finally_exits)
+                    return
                 fi
 
                 i = i - 1
             od
 
-            return null
+            _report("an exit from a construct the lowering does not handle")
         si
 
-        visit(exit: Values.Exit) is
-            let is_continue = isa Values.CONTINUE(exit)
-
-            let depth = _depth(exit.target, is_continue)
-
-            if !depth? then
-                _report("an exit from a construct the lowering does not handle")
-                return
-            fi
-
+        _branch(exit: Values.Exit, depth: int) is
             if exit.condition == BRANCH.ALWAYS then
                 _emit(INDEX_INSTRUCTION(Opcode.BR, depth))
                 return
@@ -1812,6 +1909,238 @@ namespace IR.WasmGC is
             fi
 
             _emit(INDEX_INSTRUCTION(Opcode.BR_IF, depth))
+        si
+
+        // Records which exit is being taken and branches to the finally,
+        // after which the exit is taken again.
+        _leave_through_finally(exit: Values.Exit, finally_exits: WASMGC_FINALLY_EXITS) is
+            if exit.condition != BRANCH.ALWAYS then
+                _report("a conditional exit from a try with a finally")
+                return
+            fi
+
+            _emit(I32_CONSTANT(finally_exits.number(exit)))
+            _emit(INDEX_INSTRUCTION(Opcode.LOCAL_SET, finally_exits.selector))
+            _emit(INDEX_INSTRUCTION(Opcode.BR, _depth(finally_exits.finally_label)))
+        si
+
+        // Every exception is thrown with the one tag, carrying the
+        // exception as a non-null reference to the exception type.
+        visit(thrown: Values.THROW) is
+            let exception = thrown.exception
+
+            if !exception? then
+                _report("a rethrow")
+                return
+            fi
+
+            gen(exception)
+
+            let tag = _exceptions?.tag_index
+            let exception_type = _exceptions?.exception
+
+            if !tag? \/ !exception_type? then
+                _report("a throw")
+                return
+            fi
+
+            _coerce_top(exception_type)
+
+            _emit(Opcode.REF_AS_NON_NULL)
+            _emit(THROW_INSTRUCTION(tag))
+        si
+
+        // The protected body is a `try_table` whose handler receives the
+        // exception and the reference that rethrows it. Each catch tests
+        // the exception against its type in turn; one that matches has
+        // the exception on the stack where its body starts, as the body
+        // expects. One no catch matches is rethrown.
+        _lower_try_catch(`try: Values.TRY) is
+            let tag = _exceptions?.tag_index
+            let exception = _exceptions?.exception
+
+            if !tag? \/ !exception? then
+                _lower_unhandled(`try)
+                _report("a catch")
+                return
+            fi
+
+            let caught = _temp(exception)
+            let rethrow = _temp(VALUE_TYPE.of_abstract(AbstractHeapType.EXN))
+
+            _push_label(`try, false)
+            _begin()
+
+            _push_label()
+            _begin()
+
+            _push_label()
+            _begin()
+
+            _lower_all(`try.body.values)
+
+            let guarded = _end()
+            _pop_label()
+
+            // A catch clause's label is counted from outside the
+            // `try_table`, so 0 is the handler block.
+            _emit(TRY_TABLE_INSTRUCTION(BLOCK_TYPE(), [CATCH_CLAUSE(CatchKind.CATCH_REF, tag, 0)], guarded))
+            _emit(INDEX_INSTRUCTION(Opcode.BR, 1))
+
+            let handler = _end()
+            _pop_label()
+
+            _emit(BLOCK_INSTRUCTION(Opcode.BLOCK, BLOCK_TYPE.of_type_index(_exceptions!.handler_type), handler))
+            _emit(INDEX_INSTRUCTION(Opcode.LOCAL_SET, rethrow))
+            _emit(INDEX_INSTRUCTION(Opcode.LOCAL_SET, caught))
+
+            for `catch in `try.catches do
+                _lower_catch(`catch, caught, exception)
+            od
+
+            _emit(INDEX_INSTRUCTION(Opcode.LOCAL_GET, rethrow))
+            _emit(Opcode.THROW_REF)
+
+            let body = _end()
+            _pop_label()
+
+            _emit(BLOCK_INSTRUCTION(Opcode.BLOCK, BLOCK_TYPE(), body))
+        si
+
+        // A block a catch body runs in, left early where the exception is
+        // not of the catch's type.
+        _lower_catch(`catch: Values.CATCH, caught: int, exception: VALUE_TYPE) is
+            let target = _registry.type_index(`catch.type)
+
+            if !target? then
+                _report("a catch of {`catch.type}")
+                return
+            fi
+
+            let target_heap = HEAP_TYPE.of_type_index(target)
+            let is_every_exception = _registry.is_held_as(exception.heap_type()!, target_heap)
+
+            _push_label()
+            _begin()
+
+            if !is_every_exception then
+                _emit(INDEX_INSTRUCTION(Opcode.LOCAL_GET, caught))
+                _emit(HEAP_TYPE_INSTRUCTION(Opcode.REF_TEST, target_heap))
+                _emit(Opcode.I32_EQZ)
+                _emit(INDEX_INSTRUCTION(Opcode.BR_IF, 0))
+            fi
+
+            _emit(INDEX_INSTRUCTION(Opcode.LOCAL_GET, caught))
+
+            if is_every_exception then
+                _top_cast = exception
+            else
+                _emit(HEAP_TYPE_INSTRUCTION(Opcode.REF_CAST, target_heap))
+                _top_cast = VALUE_TYPE.of_type_index(target, false)
+            fi
+
+            _top_value = null
+
+            _lower_all(`catch.body.values)
+
+            let body = _end()
+            _pop_label()
+
+            _emit(BLOCK_INSTRUCTION(Opcode.BLOCK, BLOCK_TYPE(), body))
+        si
+
+        // The protected body runs inside a `try_table` that catches
+        // everything. An exception runs the finally and is rethrown. An
+        // exit from the body records which it is and branches to the
+        // finally, after which it is taken again from there, so an exit
+        // crossing several finallies runs each of them in turn.
+        _lower_try_finally(`try: Values.TRY, `finally: Values.REGION) is
+            let exception = VALUE_TYPE.of_abstract(AbstractHeapType.EXN)
+
+            let finally_exits = WASMGC_FINALLY_EXITS(_temp(VALUE_TYPE.of_numeric(NumericType.I32)))
+            let rethrow = _temp(exception)
+
+            _emit(I32_CONSTANT(0))
+            _emit(INDEX_INSTRUCTION(Opcode.LOCAL_SET, finally_exits.selector))
+
+            _push_label(`try, false)
+            _begin()
+
+            _push_label()
+            _begin()
+
+            finally_exits.finally_label = _labels.count - 1
+
+            _push_label()
+            _begin()
+
+            _push_label(finally_exits)
+            _begin()
+
+            _lower_all(`try.body.values)
+
+            let guarded = _end()
+            _pop_label()
+
+            _emit(TRY_TABLE_INSTRUCTION(BLOCK_TYPE(), [CATCH_CLAUSE(CatchKind.CATCH_ALL_REF, 0, 0)], guarded))
+            _emit(INDEX_INSTRUCTION(Opcode.BR, 1))
+
+            let exceptional = _end()
+            _pop_label()
+
+            _emit(BLOCK_INSTRUCTION(Opcode.BLOCK, BLOCK_TYPE.of_value(exception), exceptional))
+            _emit(INDEX_INSTRUCTION(Opcode.LOCAL_SET, rethrow))
+
+            _lower_region(`finally, null)
+
+            _emit(INDEX_INSTRUCTION(Opcode.LOCAL_GET, rethrow))
+            _emit(Opcode.THROW_REF)
+
+            let normal = _end()
+            _pop_label()
+
+            _emit(BLOCK_INSTRUCTION(Opcode.BLOCK, BLOCK_TYPE(), normal))
+
+            _lower_region(`finally, null)
+
+            let exits = finally_exits.exits
+
+            for i in 0..exits.count do
+                _emit(INDEX_INSTRUCTION(Opcode.LOCAL_GET, finally_exits.selector))
+                _emit(I32_CONSTANT(i + 1))
+                _emit(Opcode.I32_EQ)
+
+                _push_label()
+                _begin()
+
+                gen(exits[i])
+
+                let taken = _end()
+                _pop_label()
+
+                _emit(IF_INSTRUCTION(BLOCK_TYPE(), taken, LIST[INSTRUCTION]()))
+            od
+
+            let body = _end()
+            _pop_label()
+
+            _emit(BLOCK_INSTRUCTION(Opcode.BLOCK, BLOCK_TYPE(), body))
+        si
+
+        // The body and catches of a try lowered for what they reach alone,
+        // where there is no tag to catch with.
+        _lower_unhandled(`try: Values.TRY) is
+            _push_label(`try, false)
+            _begin()
+
+            _lower_all(`try.body.values)
+
+            for `catch in `try.catches do
+                _lower_all(`catch.body.values)
+            od
+
+            _end()
+            _pop_label()
         si
 
         // Leaves an i32 on the stack that is nonzero when `condition`

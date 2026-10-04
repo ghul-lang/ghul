@@ -112,10 +112,17 @@ async function load(module) {
 }
 
 // The first line .NET prints for an unhandled exception, after its
-// "Unhandled exception. " prefix: the exception's type and message.
+// "Unhandled exception. " prefix: the exception's type and message. An
+// exception the program threw carries the module's exception tag, and
+// its one argument is the exception itself, which `_describe_exception`
+// describes where the module exports it.
 function describe(error, instance) {
-    if (instance?.exports._describe_exception && error instanceof WebAssembly.Exception) {
-        return instance.exports._describe_exception(error);
+    const tag = instance?.exports._exception;
+
+    if (tag && error instanceof WebAssembly.Exception && error.is(tag)) {
+        const describe_exception = instance.exports._describe_exception;
+
+        return describe_exception ? describe_exception(error.getArg(tag, 0)) : "an exception the program threw";
     }
 
     return `${error?.name ?? "Error"}: ${error?.message ?? String(error)}`;

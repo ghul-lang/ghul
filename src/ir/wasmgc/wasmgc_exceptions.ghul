@@ -1,0 +1,78 @@
+namespace IR.WasmGC is
+    use Wasm.MODULE
+    use Wasm.TAG
+    use Wasm.FUNC_TYPE
+    use Wasm.VALUE_TYPE
+    use Wasm.AbstractHeapType
+
+    /// The tag every exception is thrown with, whose one value is the
+    /// exception, and the types a handler receives it in. Declared the
+    /// first time a body throws or catches, so a program that does
+    /// neither needs no exception type.
+    class WASMGC_EXCEPTIONS is
+        _module: MODULE
+        _registry: WASMGC_TYPE_REGISTRY
+
+        _is_declared: bool
+
+        _tag_index: int?
+        _exception: VALUE_TYPE?
+        _handler_type: int
+
+        /// - module: the module the tag is declared in
+        /// - registry: the struct types, which hold the exception type's
+        init(module: MODULE, registry: WASMGC_TYPE_REGISTRY) is
+            _module = module
+            _registry = registry
+        si
+
+        /// The index of the tag, or null where the exception type is not
+        /// one the target can hold.
+        tag_index: int? is
+            _declare()
+
+            return _tag_index
+        si
+
+        /// The type the tag carries the exception as: a non-null
+        /// reference to the exception type's struct. Null as `tag_index`
+        /// is.
+        exception: VALUE_TYPE? is
+            _declare()
+
+            return _exception
+        si
+
+        /// The block type a handler block has: no parameters, and as
+        /// results the exception and the reference that rethrows it.
+        handler_type: int is
+            _declare()
+
+            return _handler_type
+        si
+
+        /// The index of the tag where a body has thrown or caught, without
+        /// declaring it otherwise.
+        declared_tag_index: int? => _tag_index
+
+        _declare() is
+            if _is_declared then
+                return
+            fi
+
+            _is_declared = true
+
+            let type = IoC.CONTAINER.instance.innate_symbol_lookup.get_exception_type()
+
+            if let index = _registry.type_index(type) then
+                let exception = VALUE_TYPE.of_type_index(index, false)
+
+                _exception = exception
+                _tag_index = _module.add_tag(TAG(_module.add_type(FUNC_TYPE([exception], []))))
+
+                _handler_type = _module.add_type(
+                    FUNC_TYPE([], [exception, VALUE_TYPE.of_abstract(AbstractHeapType.EXN)]))
+            fi
+        si
+    si
+si
