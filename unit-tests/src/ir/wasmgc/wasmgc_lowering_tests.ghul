@@ -1,0 +1,152 @@
+namespace IR.WasmGC.UnitTests is
+    use Collections.LIST
+    use Collections.MAP
+    use Collections.List
+
+    use Wasm.INSTRUCTION
+    use Wasm.BLOCK_INSTRUCTION
+    use Wasm.INDEX_INSTRUCTION
+    use Wasm.Opcode
+
+    use IR.Values.BREAK
+    use IR.Values.CONTINUE
+    use IR.Values.LOOP
+    use IR.Values.REGION
+    use IR.Values.Value
+
+    use Semantic.Symbols.Function
+
+    use TestClass = Microsoft.VisualStudio.TestTools.UnitTesting.TestClassAttribute
+    use Test = Microsoft.VisualStudio.TestTools.UnitTesting.TestMethodAttribute
+    use Assertions
+
+    @TestClass()
+    class WASMGC_LOWERING_TESTS is
+        init() is si
+
+        lower(value: Value) -> List[INSTRUCTION] =>
+            WASMGC_LOWERING(MAP[Function, int](), 0, null).lower([value])
+
+        new_region() -> REGION => REGION(LABEL(), Semantic.Types.ERROR())
+
+        new_loop() -> LOOP => LOOP(LABEL(), LABEL(), Semantic.Types.ERROR())
+
+        closed(region: REGION) -> REGION is
+            region.close()
+
+            return region
+        si
+
+        closed(loop: LOOP) -> LOOP is
+            loop.close()
+
+            return loop
+        si
+
+        body_of(opcode: Opcode, instruction: INSTRUCTION) -> List[INSTRUCTION] is
+            if let block: BLOCK_INSTRUCTION = instruction then
+                are_equal(opcode, block.opcode)
+
+                return block.body()
+            fi
+
+            fail("expected a {opcode}, got {instruction}")
+
+            return LIST[INSTRUCTION]()
+        si
+
+        assert_branch(depth: int, instruction: INSTRUCTION) is
+            if let branch: INDEX_INSTRUCTION = instruction then
+                are_equal(Opcode.BR, branch.opcode)
+                are_equal(depth, branch.index)
+            else
+                fail("expected a branch, got {instruction}")
+            fi
+        si
+
+        @Test()
+        break_from_a_region__should_branch_to_its_own_block() is
+            let region = new_region()
+
+            region.body.add(BREAK(region))
+
+            let block = body_of(Opcode.BLOCK, lower(closed(region))[0])
+
+            assert_branch(0, block[0])
+        si
+
+        @Test()
+        break_from_a_nested_region__should_count_the_block_between() is
+            let outer = new_region()
+            let inner = new_region()
+
+            inner.body.add(BREAK(outer))
+            outer.body.add(closed(inner))
+
+            let outer_block = body_of(Opcode.BLOCK, lower(closed(outer))[0])
+            let inner_block = body_of(Opcode.BLOCK, outer_block[0])
+
+            assert_branch(1, inner_block[0])
+        si
+
+        @Test()
+        loop__should_be_a_loop_inside_a_block_that_goes_round_again() is
+            let instructions = lower(closed(new_loop()))
+
+            let outer = body_of(Opcode.BLOCK, instructions[0])
+            let loop = body_of(Opcode.LOOP, outer[0])
+
+            are_equal(1, loop.count)
+            assert_branch(0, loop[0])
+        si
+
+        @Test()
+        continue__should_branch_to_the_loop() is
+            let loop = new_loop()
+
+            loop.body.add(CONTINUE(loop))
+
+            let outer = body_of(Opcode.BLOCK, lower(closed(loop))[0])
+            let body = body_of(Opcode.LOOP, outer[0])
+
+            assert_branch(0, body[0])
+        si
+
+        @Test()
+        break_from_a_loop__should_branch_to_the_block_around_it() is
+            let loop = new_loop()
+
+            loop.body.add(BREAK(loop))
+
+            let outer = body_of(Opcode.BLOCK, lower(closed(loop))[0])
+            let body = body_of(Opcode.LOOP, outer[0])
+
+            assert_branch(1, body[0])
+        si
+
+        @Test()
+        continue_from_a_region_inside_a_loop__should_count_the_region() is
+            let loop = new_loop()
+            let region = new_region()
+
+            region.body.add(CONTINUE(loop))
+            loop.body.add(closed(region))
+
+            let outer = body_of(Opcode.BLOCK, lower(closed(loop))[0])
+            let body = body_of(Opcode.LOOP, outer[0])
+            let region_block = body_of(Opcode.BLOCK, body[0])
+
+            assert_branch(1, region_block[0])
+        si
+
+        @Test()
+        a_value_the_lowering_does_not_handle__should_be_reported_rather_than_thrown() is
+            let lowering = WASMGC_LOWERING(MAP[Function, int](), 0, null)
+
+            lowering.lower([IR.Values.Literal.STRING("text", Semantic.Types.ERROR())])
+
+            are_equal(1, lowering.unsupported.count)
+            are_equal("a string literal", lowering.unsupported[0])
+        si
+    si
+si
