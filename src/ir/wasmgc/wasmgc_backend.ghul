@@ -177,26 +177,41 @@ namespace IR.WasmGC is
 
             imports.freeze()
 
-            let indices = MAP[Function, int]()
+            let bodies = MAP[Function, LIST[Value]]()
 
-            for i in 0.._bodies.count do
-                indices[_bodies[i].function] = imports.count + i
+            for (function, values) in _bodies do
+                bodies[function] = values
             od
+
+            let numbering = WASMGC_FUNCTION_NUMBERING(imports.count, f => bodies.contains_key(f))
+
+            // An executable compiles what its entry point reaches; a library
+            // compiles everything, since anything can be called from outside.
+            if let entry = _entry_point then
+                numbering.index_of(entry)
+            else
+                for (function, _) in _bodies do
+                    numbering.index_of(function)
+                od
+            fi
 
             let names = NAME_MAP()
 
-            for i in 0.._bodies.count do
-                let (function, values) = _bodies[i]
+            while let instance = numbering.next() do
+                let function = instance.definition
+                let index = numbering.index_of(instance)!
 
-                module.add_function(_build_function(module, registry, imports, function, values, indices))
+                numbering.place(
+                    instance,
+                    _build_function(module, registry, imports, function, bodies[function], numbering))
 
-                names.add(imports.count + i, function.qualified_name)
+                names.add(index, function.qualified_name)
             od
 
-            if let entry = _entry_point then
-                let index mut = 0
+            numbering.add_to(module)
 
-                if indices.try_get_value(entry, index ref) then
+            if let entry = _entry_point then
+                if let index = numbering.index_of(entry) then
                     WASMGC_ENTRY.add(module, entry, index, names)
                 fi
             fi
@@ -274,7 +289,7 @@ namespace IR.WasmGC is
             imports: WASMGC_IMPORTS,
             function: Function,
             values: LIST[Value],
-            indices: MAP[Function, int]
+            numbering: WASMGC_FUNCTION_NUMBERING
         ) -> FUNCTION is
             let parameters = LIST[VALUE_TYPE]()
 
@@ -305,7 +320,7 @@ namespace IR.WasmGC is
                 fi
             fi
 
-            let lowering = WASMGC_LOWERING(indices, registry, imports, function, parameters)
+            let lowering = WASMGC_LOWERING(numbering, registry, imports, function, parameters)
 
             let body = lowering.lower(values)
 

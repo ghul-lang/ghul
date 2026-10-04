@@ -1,0 +1,137 @@
+namespace IR.WasmGC is
+    use Wasm.MODULE
+    use Wasm.FUNCTION
+
+    use Collections.LIST
+    use Collections.MAP
+
+    use Semantic.Symbols.Function
+
+    /// The function indices of a module, given out as functions are found
+    /// to be needed, so only what is reached is compiled.
+    ///
+    /// A function with a body is numbered the first time something asks
+    /// for it, which also puts it on the list `next` drains. A function the
+    /// target generates for itself is numbered by `reserve` and built when
+    /// the module is assembled. Numbers are never taken back or changed:
+    /// asking twice answers the same number, and `restart` walks the
+    /// numbered functions again, in order, without numbering anything anew.
+    class WASMGC_FUNCTION_NUMBERING is
+        _first_index: int
+        _has_body: (Function) -> bool
+
+        _indices: MAP[WASMGC_FUNCTION, int]
+        _numbered: LIST[WASMGC_FUNCTION?]
+        _reserved: MAP[int, () -> FUNCTION]
+        _placed: MAP[int, FUNCTION]
+
+        _cursor: int
+
+        /// Numbers functions from `first_index` on.
+        ///
+        /// - first_index: the index the first function takes, after the
+        ///   imports
+        /// - has_body: whether a function has a body the module compiles
+        init(first_index: int, has_body: (Function) -> bool) is
+            _first_index = first_index
+            _has_body = has_body
+
+            _indices = MAP[WASMGC_FUNCTION, int]()
+            _numbered = LIST[WASMGC_FUNCTION?]()
+            _reserved = MAP[int, () -> FUNCTION]()
+            _placed = MAP[int, FUNCTION]()
+        si
+
+        /// How many indices have been given out.
+        count: int => _numbered.count
+
+        /// The index of `function`, numbering it the first time it is asked
+        /// for, or null where it has no body to compile.
+        index_of(function: Function) -> int? => index_of(WASMGC_FUNCTION.of(function))
+
+        /// The index of `instance`, numbering it the first time it is asked
+        /// for, or null where its definition has no body to compile.
+        index_of(instance: WASMGC_FUNCTION) -> int? is
+            let index mut = 0
+
+            if _indices.try_get_value(instance, index ref) then
+                return index
+            fi
+
+            if !_has_body(instance.definition) then
+                return null
+            fi
+
+            index = _first_index + _numbered.count
+
+            _indices[instance] = index
+            _numbered.add(instance)
+
+            return index
+        si
+
+        /// Numbers a function the target generates, which `build` makes when
+        /// the module is assembled.
+        reserve(build: () -> FUNCTION) -> int is
+            let index = _first_index + _numbered.count
+
+            _numbered.add(null)
+            _reserved[index] = build
+
+            return index
+        si
+
+        /// The next numbered function not yet handed out, or null when every
+        /// one has been.
+        next() -> WASMGC_FUNCTION? is
+            while _cursor < _numbered.count do
+                let instance = _numbered[_cursor]
+
+                _cursor = _cursor + 1
+
+                if instance? then
+                    return instance
+                fi
+            od
+
+            return null
+        si
+
+        /// Hands out the numbered functions again from the first, in index
+        /// order, keeping every number.
+        restart() is
+            _cursor = 0
+        si
+
+        /// Records the compiled body of `instance`.
+        place(instance: WASMGC_FUNCTION, function: FUNCTION) is
+            _placed[index_of(instance)!] = function
+        si
+
+        /// Adds every numbered function to `module` in index order,
+        /// building the generated ones. Every function with a body must
+        /// have been placed.
+        add_to(module: MODULE) is
+            let i mut = 0
+
+            while i < _numbered.count do
+                let index = _first_index + i
+
+                let build: () -> FUNCTION mut
+
+                let function =
+                    if _reserved.try_get_value(index, build ref) then
+                        build()
+                    else
+                        _placed[index]
+                    fi
+
+                let added = module.add_function(function)
+
+                assert added == index else "function {index} added at {added}"
+
+                i = i + 1
+            od
+        si
+    si
+si
