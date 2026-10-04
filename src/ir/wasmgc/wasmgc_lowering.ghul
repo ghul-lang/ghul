@@ -24,6 +24,7 @@ namespace IR.WasmGC is
     use Wasm.AbstractHeapType
     use Wasm.IF_INSTRUCTION
     use Wasm.CALL_INDIRECT_INSTRUCTION
+    use Wasm.BR_TABLE_INSTRUCTION
 
     use Collections.LIST
     use Collections.MAP
@@ -49,6 +50,11 @@ namespace IR.WasmGC is
         // The instantiation being compiled: the type arguments the body's
         // type parameters stand for.
         _instance: WASMGC_FUNCTION?
+
+        // What the body's type parameters stand for: the instantiation's
+        // arguments, and in a generator frame's member, the generator's own
+        // type parameters too, which its hoisted locals are still typed by.
+        _body_type_map: Collections.Map[Semantic.Symbols.Symbol, Type]
         _imports: WASMGC_IMPORTS
         _strings: WASMGC_STRINGS?
         _exceptions: WASMGC_EXCEPTIONS?
@@ -86,6 +92,13 @@ namespace IR.WasmGC is
         // each structured node's block, and a loop's own `loop` after
         // it, which is where a CONTINUE goes.
         _labels: LIST[(node: Values.Breakable?, is_loop_head: bool, finally_exits: WASMGC_FINALLY_EXITS?)]
+
+        // Inside a resumable body: the dispatch that opens it, the state
+        // each resume point is reached by, and the states whose resume
+        // point lies inside each block, region and loop.
+        _dispatch: Values.DISPATCH?
+        _resume_point_states: MAP[LABEL, int]
+        _resume_states: MAP[Value, LIST[int]]
 
         _unsupported: LIST[string]
         // The struct-typed locals the body declared, and the scalar locals
@@ -153,6 +166,7 @@ namespace IR.WasmGC is
             _exceptions = exceptions
 
             _instance = function
+            _body_type_map = _body_type_map_of(function)
             _receiver_offset = if function.definition.is_emitted_with_receiver then 1 else 0 fi
             _return_type = function.specialize(function.definition.return_type)
         si
@@ -172,9 +186,12 @@ namespace IR.WasmGC is
             _parameter_count = parameter_types.count
 
             _locals = MAP[LOCAL, int]()
+            _body_type_map = MAP[Semantic.Symbols.Symbol, Type]()
             _local_types = LIST[VALUE_TYPE]()
             _bodies = LIST[LIST[INSTRUCTION]]()
             _labels = LIST[(node: Values.Breakable?, is_loop_head: bool, finally_exits: WASMGC_FINALLY_EXITS?)]()
+            _resume_point_states = MAP[LABEL, int]()
+            _resume_states = MAP[Value, LIST[int]]()
             _unsupported = LIST[string]()
             _struct_locals = LIST[(index: int, type: WASMGC_CLASS)]()
         si
@@ -337,6 +354,10 @@ namespace IR.WasmGC is
                 return _local_type(_local(load.local))
             elif let local: WASMGC_LOCAL_VALUE = value then
                 return _local_type(local.index)
+            elif let load: Values.Load.LOCAL_VARIABLE = value /\ Values.state_machine_field_for(load.symbol)? then
+                return _held_type(_frame_field_load(Values.state_machine_field_for(load.symbol)!))
+            elif let load: Values.Load.LOCAL_ARGUMENT = value /\ Values.state_machine_field_for(load.symbol)? then
+                return _held_type(_frame_field_load(Values.state_machine_field_for(load.symbol)!))
             elif let load: Values.Load.LOCAL_VARIABLE = value then
                 if let variable = cast Semantic.Symbols.Variable?(load.symbol) then
                     return _local_type(_local(variable.ir_local))
@@ -437,10 +458,31 @@ namespace IR.WasmGC is
         // `type` with the type parameters of the body being compiled
         // replaced by the arguments of this instantiation.
         _specialize(type: Type?) -> Type? =>
-            if let instance = _instance then instance.specialize(type) else type fi
+            if _instance? then WASMGC_TYPE_MAPS.specialize(type, _body_type_map) else type fi
 
-        _type_map: Collections.Map[Semantic.Symbols.Symbol, Type] =>
-            if let instance = _instance then instance.type_map else MAP[Semantic.Symbols.Symbol, Type]() fi
+        _type_map: Collections.Map[Semantic.Symbols.Symbol, Type] => _body_type_map
+
+        _body_type_map_of(function: WASMGC_FUNCTION) -> Collections.Map[Semantic.Symbols.Symbol, Type] is
+            let frame = cast Semantic.Symbols.STATE_MACHINE_FRAME_BASE?(function.definition.owner)
+
+            if !frame? \/ frame.function_to_class_type_map.count == 0 then
+                return function.type_map
+            fi
+
+            let result = MAP[Semantic.Symbols.Symbol, Type]()
+
+            for (parameter, argument) in function.type_map do
+                result[parameter] = argument
+            od
+
+            for (parameter, mirrored) in frame.function_to_class_type_map do
+                if let argument = WASMGC_TYPE_MAPS.specialize(mirrored, function.type_map) then
+                    result[parameter] = argument
+                fi
+            od
+
+            return result
+        si
 
         // The index of the instantiation of `function` a reference from
         // this body names, numbered the first time it is asked for.
@@ -781,8 +823,8 @@ namespace IR.WasmGC is
         _argument_get(load: Values.Load.LOCAL_ARGUMENT) is
             let symbol = load.symbol
 
-            if Values.state_machine_field_for(symbol)? then
-                _report("a generator or asynchronous function's argument")
+            if let state_machine_field = Values.state_machine_field_for(symbol) then
+                gen(_frame_field_load(state_machine_field))
             elif let packed_local = Values.packed_parameter_local_for(symbol) then
                 _emit(INDEX_INSTRUCTION(Opcode.LOCAL_GET, _local(packed_local)))
             elif let index = _argument_index(symbol) then
@@ -800,14 +842,22 @@ namespace IR.WasmGC is
             fi
         si
 
+        // A generator's arguments and locals live in fields of its frame,
+        // which is the receiver of the frame's methods.
+        _frame_field_load(`field: Semantic.Symbols.Field) -> Value =>
+            Values.Load.INSTANCE_FIELD(Values.Load.REFERENCE_SELF(cast Semantic.Symbols.Classy(`field.owner)), `field)
+
+        _frame_field_store(`field: Semantic.Symbols.Field, value: Value) -> Value =>
+            Values.Store.INSTANCE_FIELD(Values.Load.REFERENCE_SELF(cast Semantic.Symbols.Classy(`field.owner)), `field, value)
+
         visit(load: Values.Load.LOCAL_VARIABLE) is
             _variable_get(load)
             _copy_if_mutable(load.type)
         si
 
         _variable_get(load: Values.Load.LOCAL_VARIABLE) is
-            if Values.state_machine_field_for(load.symbol)? then
-                _report("a generator or asynchronous function's local")
+            if let state_machine_field = Values.state_machine_field_for(load.symbol) then
+                gen(_frame_field_load(state_machine_field))
             elif let variable = cast Semantic.Symbols.Variable?(load.symbol) then
                 _emit(INDEX_INSTRUCTION(Opcode.LOCAL_GET, _local(variable.ir_local)))
 
@@ -965,6 +1015,29 @@ namespace IR.WasmGC is
 
             if let exception = _runtime_exception(runtime.operation) then
                 _construct_runtime_exception(exception, runtime.operands)
+                return
+            fi
+
+            // An object is built whole where it is constructed, so there is
+            // nothing for its constructor to initialise first.
+            if runtime.operation == IR.RuntimeOperation.INIT_OBJECT then
+                return
+            fi
+
+            // A module runs on one thread.
+            if runtime.operation == IR.RuntimeOperation.CURRENT_THREAD_ID then
+                _emit(I32_CONSTANT(0))
+                return
+            fi
+
+            // A range is constructed from its two endpoints.
+            if runtime.operation == IR.RuntimeOperation.NEW_RANGE then
+                if let constructor = _method(runtime.type, "init", 2) then
+                    gen(Values.NEW(runtime.type!, constructor, LIST[Value](runtime.operands)))
+                else
+                    _report("a range, whose type has no constructor taking its endpoints")
+                fi
+
                 return
             fi
 
@@ -2541,9 +2614,224 @@ namespace IR.WasmGC is
                 else
                     _report("a try with no handler")
                 fi
+            elif let resumable: Values.RESUMABLE = node then
+                _lower_resumable(resumable)
             else
                 _report("a generator or asynchronous function")
             fi
+        si
+
+        // A state machine's resumable body is a block. Its dispatch
+        // re-enters the body at the resume point the state names by
+        // descending through each region and loop that holds it, since a
+        // wasm branch can leave a block but never enter one.
+        _lower_resumable(resumable: Values.RESUMABLE) is
+            _dispatch = _find_dispatch(resumable.body.values)
+            _resume_point_states.clear()
+            _resume_states.clear()
+
+            if let dispatch = _dispatch then
+                for (state, target) in dispatch.entries do
+                    _resume_point_states[target] = state
+                od
+
+                // An entry whose target is not a resume point this
+                // lowering can reach - one inside a try, whose own
+                // dispatch it targets instead - is not one it can
+                // re-enter.
+                if _collect_resume_states(resumable).count != dispatch.entries.count then
+                    _report("a yield or await inside try")
+                fi
+            fi
+
+            _push_label(resumable, false)
+            _begin()
+
+            _lower_body(resumable, resumable.body.values)
+
+            let body = _end()
+            _pop_label()
+
+            _emit(BLOCK_INSTRUCTION(Opcode.BLOCK, BLOCK_TYPE(), body))
+
+            // A body no exit leaves ends in a return, which wasm does not
+            // know, since it takes the end of a block to be reachable.
+            if !resumable.is_targeted then
+                _emit(Opcode.UNREACHABLE)
+            fi
+
+            _dispatch = null
+        si
+
+        _find_dispatch(values: Collections.Iterable[Value]) -> Values.DISPATCH? is
+            for value in values do
+                if let dispatch: Values.DISPATCH = value then
+                    return dispatch
+                elif let block: Values.BLOCK = value then
+                    if let dispatch = _find_dispatch(block.values) then
+                        return dispatch
+                    fi
+                fi
+            od
+
+            return null
+        si
+
+        // The states whose resume point lies inside `value`, recorded
+        // against each block, region and loop holding any.
+        _collect_resume_states(value: Value) -> LIST[int] is
+            let result = LIST[int]()
+
+            if let point: Values.RESUME_POINT = value then
+                let state: int mut
+
+                if _resume_point_states.try_get_value(point.label, state ref) then
+                    result.add(state)
+                fi
+
+                return result
+            fi
+
+            let children =
+                if let block: Values.BLOCK = value then
+                    block.values
+                elif let breakable: Values.Breakable = value then
+                    breakable.body.values
+                else
+                    null
+                fi
+
+            if !children? then
+                return result
+            fi
+
+            for child in children do
+                result.add_range(_collect_resume_states(child))
+            od
+
+            if result.count > 0 then
+                _resume_states[value] = result
+            fi
+
+            return result
+        si
+
+        // Lowers `values`, the body of `node`. Where a resume point lies
+        // inside, the body opens with a `br_table` over the state that
+        // branches to just before the resume point, or before the region
+        // or loop holding it, which then does the same. Any other state
+        // falls through to the start of the body.
+        _lower_body(node: Value, values: Collections.Iterable[Value]) is
+            if !_resume_states.contains_key(node) then
+                _lower_all(values)
+                return
+            fi
+
+            let items = LIST[Value]()
+
+            _flatten(values, items)
+
+            // The state is read after the dispatch has loaded it.
+            let start mut = 0
+
+            for i in 0..items.count do
+                if isa Values.DISPATCH(items[i]) then
+                    start = i + 1
+                fi
+            od
+
+            let targets = LIST[int]()
+            let table = LIST[int]()
+
+            for i in start..items.count do
+                let states = _states_inside(items[i])
+
+                if states.count > 0 then
+                    targets.add(i)
+
+                    for state in states do
+                        while table.count <= state do
+                            table.add(0)
+                        od
+
+                        table[state] = targets.count
+                    od
+                fi
+            od
+
+            for i in 0..start do
+                gen(items[i])
+            od
+
+            // One block for each target, ending just before it, and
+            // inside them all one that the default leaves at once.
+            for i in 0::targets.count do
+                _push_label()
+                _begin()
+            od
+
+            _emit(INDEX_INSTRUCTION(Opcode.LOCAL_GET, _local(_dispatch!.state_local)))
+            _emit(BR_TABLE_INSTRUCTION(table.to_array(), 0))
+
+            _end_dispatch_block()
+
+            let next mut = start
+
+            for target in targets do
+                for i in next..target do
+                    gen(items[i])
+                od
+
+                _end_dispatch_block()
+
+                next = target
+            od
+
+            for i in next..items.count do
+                gen(items[i])
+            od
+        si
+
+        _end_dispatch_block() is
+            let body = _end()
+            _pop_label()
+
+            _emit(BLOCK_INSTRUCTION(Opcode.BLOCK, BLOCK_TYPE(), body))
+        si
+
+        // `values` with every block holding a resume point opened up in
+        // place, so that the dispatch can branch to just before it. Only
+        // a block that produces nothing can be opened up.
+        _flatten(values: Collections.Iterable[Value], into: LIST[Value]) is
+            for value in values do
+                if let block: Values.BLOCK = value /\ _resume_states.contains_key(block) then
+                    if !WASMGC_TYPES.is_void(block.type) then
+                        _report("a yield or await inside an expression")
+                    fi
+
+                    _flatten(block.values, into)
+                else
+                    into.add(value)
+                fi
+            od
+        si
+
+        _states_inside(value: Value) -> Collections.List[int] is
+            if let point: Values.RESUME_POINT = value then
+                let state: int mut
+
+                if _resume_point_states.try_get_value(point.label, state ref) then
+                    return [state]
+                fi
+            else
+                let states: LIST[int] mut
+
+                if _resume_states.try_get_value(value, states ref) then
+                    return states
+                fi
+            fi
+
+            return []
         si
 
         _lower_region(region: Values.REGION, result: VALUE_TYPE?) is
@@ -2552,7 +2840,7 @@ namespace IR.WasmGC is
 
             let values = region.body.values
 
-            _lower_all(values)
+            _lower_body(region, values)
 
             // A region that produces a value is left only by its arms,
             // each of which breaks out carrying it, so the end of its
@@ -2581,7 +2869,7 @@ namespace IR.WasmGC is
             _push_label(loop, true)
             _begin()
 
-            _lower_all(loop.body.values)
+            _lower_body(loop, loop.body.values)
 
             _emit(INDEX_INSTRUCTION(Opcode.BR, 0))
 
@@ -2961,8 +3249,15 @@ namespace IR.WasmGC is
             return true
         si
 
-        visit(dispatch: Values.DISPATCH) is _report("a generator or asynchronous function") si
-        visit(resume: Values.RESUME_POINT) is _report("a generator or asynchronous function") si
+        // The resumable body opening with this dispatch re-enters itself
+        // where the state says, so the dispatch emits nothing of its own.
+        visit(dispatch: Values.DISPATCH) is
+            if dispatch != _dispatch then
+                _report("a yield or await inside try")
+            fi
+        si
+
+        visit(resume: Values.RESUME_POINT) is si
 
         visit(call: Values.Call.GLOBAL) is
             _call(call.function, call.arguments)
@@ -3453,8 +3748,8 @@ namespace IR.WasmGC is
         visit(store: Values.Store.SYMBOL) is _report("a store to {store.symbol.name}") si
 
         visit(store: Values.Store.LOCAL_VARIABLE) is
-            if Values.state_machine_field_for(store.symbol)? then
-                _report("a generator or asynchronous function's local")
+            if let state_machine_field = Values.state_machine_field_for(store.symbol) then
+                gen(_frame_field_store(state_machine_field, store.value))
             elif let variable = cast Semantic.Symbols.Variable?(store.symbol) then
                 if let cell = _cell_index(variable.ir_local) then
                     _emit(INDEX_INSTRUCTION(Opcode.LOCAL_GET, _local(variable.ir_local)))
@@ -3477,8 +3772,8 @@ namespace IR.WasmGC is
         visit(store: Values.Store.LOCAL_ARGUMENT) is
             let symbol = store.symbol
 
-            if Values.state_machine_field_for(symbol)? then
-                _report("a generator or asynchronous function's argument")
+            if let state_machine_field = Values.state_machine_field_for(symbol) then
+                gen(_frame_field_store(state_machine_field, store.value))
             elif let packed_local = Values.packed_parameter_local_for(symbol) then
                 gen(store.value)
                 _emit(INDEX_INSTRUCTION(Opcode.LOCAL_SET, _local(packed_local)))

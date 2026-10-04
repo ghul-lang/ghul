@@ -1,0 +1,81 @@
+namespace IR.WasmGC is
+    use Collections.LIST
+
+    use Semantic.Symbols.Classy
+    use Semantic.Symbols.Function
+    use Semantic.Symbols.STATE_MACHINE_FRAME
+    use Semantic.Types.Type
+
+    use Source.LOCATION
+
+    /// The methods a generator's frame has on this target. The frame
+    /// declares no symbol for its iteration members, which the lowering
+    /// builds bodies for, so each is given one here: a method of the frame
+    /// overriding the trait member it implements, which dispatch reaches as
+    /// it reaches any other implementation.
+    class WASMGC_FRAME_MEMBERS is
+        /// The method `member` of `frame` is, or null where no trait the
+        /// frame implements declares a member it stands for.
+        method_for(frame: STATE_MACHINE_FRAME, member: FrameMember) -> Function? static is
+            let lookup = IoC.CONTAINER.instance.innate_symbol_lookup
+
+            let iterator = _definition(lookup.get_unspecialized_iterator_type())
+            let iterable = _definition(lookup.get_unspecialized_iterable_type())
+
+            if !iterator? \/ !iterable? then
+                return null
+            fi
+
+            let (owner, name, return_type) =
+                case member
+                when FrameMember.MOVE_NEXT then
+                    (iterator, "move_next", lookup.get_bool_type())
+                when FrameMember.GET_CURRENT then
+                    (iterator, "current", frame.current_field.type!)
+                when FrameMember.GET_ENUMERATOR then
+                    (iterable, "iterator", Semantic.Types.GENERIC(LOCATION.internal, iterator, [frame.class_element_type]))
+                when FrameMember.DISPOSE then
+                    (iterator, "dispose", lookup.get_void_type())
+                else
+                    return null
+                esac
+
+            let overridee = _member(owner, name)
+
+            if !overridee? then
+                return null
+            fi
+
+            let method = Semantic.Symbols.INSTANCE_METHOD(LOCATION.internal, LOCATION.internal, frame, name, frame)
+
+            method.set_arguments(LIST[string](), LIST[Type]())
+            method.set_return_type(return_type)
+            method.add_overridee(overridee)
+
+            return method
+        si
+
+        _definition(type: Type) -> Classy? static =>
+            cast Classy?(type.symbol?.unspecialized_symbol)
+
+        // The parameterless method `name` of `owner`, or the getter of its
+        // property `name`.
+        _member(owner: Classy, name: string) -> Function? static is
+            let symbol = owner.find_direct(name)
+
+            if let property: Semantic.Symbols.Property = symbol then
+                return property.read_function
+            elif let function: Function = symbol /\ function.arguments.count == 0 then
+                return function
+            elif let group: Semantic.Symbols.FUNCTION_GROUP = symbol then
+                for function in group.functions do
+                    if function.arguments.count == 0 then
+                        return function
+                    fi
+                od
+            fi
+
+            return null
+        si
+    si
+si
