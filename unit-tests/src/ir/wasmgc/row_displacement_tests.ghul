@@ -1,0 +1,87 @@
+namespace IR.WasmGC.UnitTests is
+    use Collections.LIST
+    use Collections.SET
+
+    use TestClass = Microsoft.VisualStudio.TestTools.UnitTesting.TestClassAttribute
+    use Test = Microsoft.VisualStudio.TestTools.UnitTesting.TestMethodAttribute
+    use Assertions
+
+    @TestClass()
+    class ROW_DISPLACEMENT_TESTS is
+        init() is si
+
+        rows() -> LIST[(key: string, columns: int[])] =>
+            LIST[(key: string, columns: int[])]([
+                ("a", [0, 1, 2, 3]),
+                ("b", [1, 3]),
+                ("c", [0, 2]),
+                ("d", [5]),
+                ("e", [0, 1, 2, 3, 4, 5])
+            ])
+
+        packed() -> ROW_DISPLACEMENT[string] is
+            let packing = ROW_DISPLACEMENT[string]()
+
+            for (key, columns) in rows() do
+                packing.add(key, columns)
+            od
+
+            packing.pack()
+
+            return packing
+        si
+
+        @Test()
+        pack__gives_no_two_rows_the_same_slot() is
+            let packing = packed()
+            let claimed = SET[int]()
+
+            for (key, columns) in rows() do
+                for column in columns do
+                    is_true(claimed.add(packing.offset(key) + column))
+                od
+            od
+        si
+
+        @Test()
+        pack__keeps_every_slot_inside_the_table() is
+            let packing = packed()
+
+            for (key, columns) in rows() do
+                for column in columns do
+                    is_true(packing.offset(key) + column < packing.size)
+                od
+            od
+        si
+
+        @Test()
+        pack__fits_interleaving_rows_into_each_other_s_gaps() is
+            let packing = ROW_DISPLACEMENT[string]()
+
+            packing.add("odd", [1, 3, 5])
+            packing.add("even", [0, 2, 4])
+
+            packing.pack()
+
+            are_equal(6, packing.size)
+        si
+
+        @Test()
+        pack__places_the_largest_row_first_at_offset_zero() is
+            are_equal(0, packed().offset("e"))
+        si
+
+        @Test()
+        pack__gives_an_empty_row_an_offset_and_no_slots() is
+            let packing = ROW_DISPLACEMENT[string]()
+
+            packing.add("empty", LIST[int]())
+            packing.add("one", [2])
+
+            packing.pack()
+
+            are_equal(3, packing.size)
+            are_equal(0, packing.offset("empty"))
+        si
+    si
+si

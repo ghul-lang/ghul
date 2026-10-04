@@ -183,6 +183,8 @@ namespace IR.WasmGC is
                 indices[_bodies[i].function] = imports.count + i
             od
 
+            registry.finish(indices, _bodies.count)
+
             let names = NAME_MAP()
 
             for i in 0.._bodies.count do
@@ -191,6 +193,12 @@ namespace IR.WasmGC is
                 module.add_function(_build_function(module, registry, imports, function, values, indices))
 
                 names.add(imports.count + i, function.qualified_name)
+            od
+
+            // The thunks vtable and trait-table entries call through follow
+            // the bodies, in the order the registry numbered them.
+            for thunk in registry.dispatch.thunks(indices) do
+                module.add_function(thunk)
             od
 
             if let entry = _entry_point then
@@ -325,6 +333,10 @@ namespace IR.WasmGC is
                 if let index = registry.type_index(owner) then
                     return VALUE_TYPE.of_type_index(index, true)
                 fi
+            elif let owner: Classy = function.owner /\ owner.is_trait then
+                // A trait's default method runs on any implementing
+                // instance, so it takes its receiver as the root.
+                return registry.object_reference
             fi
 
             return null
