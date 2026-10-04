@@ -46,8 +46,11 @@ namespace IR.WasmGC is
         _concat: int?
         _substring: int?
         _to_host: int?
+        _from_host: int?
 
         _from_char_code_array: int?
+        _length: int?
+        _into_char_code_array: int?
 
         /// Strings for `module`, whose types `registry` holds. Their helper
         /// functions are numbered once `use_numbering` gives the numbering.
@@ -59,9 +62,9 @@ namespace IR.WasmGC is
             _literal_globals = LIST[int]()
         si
 
-        /// Declares the host functions strings need: the builtin that makes
-        /// a JavaScript string from an array of code units. Call before the
-        /// imports are frozen.
+        /// Declares the host functions strings need: the builtins that make a
+        /// JavaScript string from an array of code units, and that read one
+        /// back. Call before the imports are frozen.
         declare_imports(imports: WASMGC_IMPORTS) is
             let chars = VALUE_TYPE.of_type_index(_registry.chars_type_index, true)
             let i32 = VALUE_TYPE.of_numeric(NumericType.I32)
@@ -72,6 +75,20 @@ namespace IR.WasmGC is
                     "wasm:js-string",
                     "fromCharCodeArray",
                     _module.add_type(FUNC_TYPE([chars, i32, i32], [extern])))
+
+            let nullable_extern = VALUE_TYPE.of_abstract(AbstractHeapType.EXTERN)
+
+            _length =
+                imports.function(
+                    "wasm:js-string",
+                    "length",
+                    _module.add_type(FUNC_TYPE([nullable_extern], [i32])))
+
+            _into_char_code_array =
+                imports.function(
+                    "wasm:js-string",
+                    "intoCharCodeArray",
+                    _module.add_type(FUNC_TYPE([nullable_extern, chars, i32], [i32])))
         si
 
         /// Gives the function numbering helper functions are numbered
@@ -92,6 +109,22 @@ namespace IR.WasmGC is
             let index = _helper(() => _build_to_host())
 
             _to_host = index
+
+            return index
+        si
+
+        /// The function making a string from the JavaScript string a host
+        /// import answers with, or an absent one from null.
+        from_host_function: int is
+            if let index = _from_host then
+                return index
+            fi
+
+            assert _length? /\ _into_char_code_array? else "string imports not declared"
+
+            let index = _helper(() => _build_from_host())
+
+            _from_host = index
 
             return index
         si
@@ -326,6 +359,39 @@ namespace IR.WasmGC is
 
             return FUNCTION(
                 _module.add_type(FUNC_TYPE([string_reference], [extern])),
+                [_chars_reference],
+                body)
+        si
+
+        // (externref) -> string: null for null, otherwise a new string holding
+        // the JavaScript string's code units.
+        _build_from_host() -> FUNCTION is
+            let extern = VALUE_TYPE.of_abstract(AbstractHeapType.EXTERN)
+            let chars = _registry.chars_type_index
+
+            // parameter 0; local 1 the code units
+            let body = LIST[INSTRUCTION]([
+                _get(0), _op(Opcode.REF_IS_NULL),
+                IF_INSTRUCTION(
+                    BLOCK_TYPE(),
+                    LIST[INSTRUCTION]([
+                        HEAP_TYPE_INSTRUCTION(Opcode.REF_NULL, HEAP_TYPE.of_type_index(string_type_index)),
+                        _op(Opcode.RETURN)
+                    ]:INSTRUCTION),
+                    LIST[INSTRUCTION]()),
+                _get(0), INDEX_INSTRUCTION(Opcode.CALL, _length!),
+                TYPE_INSTRUCTION(Opcode.ARRAY_NEW_DEFAULT, chars), _set(1),
+                _get(0), _get(1), I32_CONSTANT(0),
+                INDEX_INSTRUCTION(Opcode.CALL, _into_char_code_array!),
+                _op(Opcode.DROP),
+                INDEX_INSTRUCTION(Opcode.GLOBAL_GET, _registry.string_descriptor_global!),
+                I32_CONSTANT(0),
+                _get(1), _op(Opcode.REF_AS_NON_NULL),
+                TYPE_INSTRUCTION(Opcode.STRUCT_NEW, string_type_index)
+            ]:INSTRUCTION)
+
+            return FUNCTION(
+                _module.add_type(FUNC_TYPE([extern], [string_reference])),
                 [_chars_reference],
                 body)
         si

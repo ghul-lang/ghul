@@ -220,6 +220,7 @@ namespace IR.WasmGC is
             // signature. Both declare the same imports in the same order,
             // so the function indices agree.
             let message_getter = _exception_message_getter()
+            let arguments_getter = _arguments_getter()
 
             let discovery_module = MODULE()
             let discovery_imports =
@@ -243,6 +244,10 @@ namespace IR.WasmGC is
                 numbering.index_of(entry)
 
                 if let getter = message_getter then
+                    numbering.index_of(getter)
+                fi
+
+                if let getter = arguments_getter then
                     numbering.index_of(getter)
                 fi
             else
@@ -315,13 +320,15 @@ namespace IR.WasmGC is
             fi
 
             if let entry = _entry_point then
-                // The host has no way yet to hand a program its arguments or
-                // its environment, so an entry point that takes either is not
-                // one this target can start.
-                if entry.arguments.count > 0 then
+                // `_start` passes the entry point the core library's command-line
+                // arguments, so where the core library declares none, an entry
+                // point that takes them cannot be started.
+                if entry.arguments.count > 0 /\ !arguments_getter? then
                     _report(entry.location, "an entry point that takes arguments")
                 elif let index = numbering.index_of(entry) then
-                    WASMGC_ENTRY.add(module, entry, index, names)
+                    let arguments_index = if let getter = arguments_getter then numbering.index_of(getter) else null fi
+
+                    WASMGC_ENTRY.add(module, entry, index, arguments_index, names)
                 fi
             fi
 
@@ -349,7 +356,7 @@ namespace IR.WasmGC is
             // Every other import is declared here, before the defined
             // functions are numbered.
 
-            if let present = strings /\ (_host_takes_a_string() \/ describes_exceptions) then
+            if let present = strings /\ (_host_takes_a_string() \/ _host_answers_a_string() \/ describes_exceptions) then
                 present.declare_imports(imports)
             fi
 
@@ -538,8 +545,8 @@ namespace IR.WasmGC is
             od
 
             if !WASMGC_TYPES.is_void(function.return_type) then
-                if let scalar = WASMGC_TYPES.scalar(function.return_type) then
-                    results.add(WASMGC_TYPES.value_type(scalar))
+                if let type = _host_value_type(function.return_type!) then
+                    results.add(type)
                 else
                     _report(function.location, "a host result of type {function.return_type}")
                     is_valid = false
@@ -551,6 +558,27 @@ namespace IR.WasmGC is
             fi
 
             return FUNC_TYPE(parameters.to_array(), results.to_array())
+        si
+
+        // The getter of the core library's command-line arguments, which
+        // `_start` passes to an entry point that takes them; null where the
+        // entry point takes none, or the core library declares none.
+        _arguments_getter() -> Function? is
+            if !_entry_point? \/ _entry_point.arguments.count == 0 then
+                return null
+            fi
+
+            if let environment = WASMGC_CORE_LIBRARY.find_class("Ghul.ENVIRONMENT") then
+                if let getter = WASMGC_CORE_LIBRARY.find_getter(environment, "arguments") then
+                    for (function, _) in _bodies do
+                        if function == getter then
+                            return getter
+                        fi
+                    od
+                fi
+            fi
+
+            return null
         si
 
         // The getter of the core library's exception message, which an
@@ -573,6 +601,18 @@ namespace IR.WasmGC is
             fi
 
             return null
+        si
+
+        // Whether any host operation the program declares answers with a
+        // string, which the strings have to convert from the host's.
+        _host_answers_a_string() -> bool is
+            for host in _host_declarations do
+                if WASMGC_TYPES.is_string(host.return_type) then
+                    return true
+                fi
+            od
+
+            return false
         si
 
         // Whether any host operation the program declares takes a string,
