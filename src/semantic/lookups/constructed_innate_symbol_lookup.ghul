@@ -26,35 +26,49 @@ namespace Semantic.Lookups is
         _value_type: Type
         _nullable: Semantic.Symbols.Classy
         _iterator: Semantic.Symbols.Classy
+        _array: Semantic.Symbols.Classy
+        _is_array_wired: bool
 
         init(..) is
             let intrinsics = _intrinsics_namespace()
 
-            // Declared before the families, whose parameters take it as
-            // their implicit ancestor.
-            let object_class = _declare_class(intrinsics, "object")
+            // The two roots come first: every other built-in takes one of
+            // them as its implicit ancestor, as a source-declared type of
+            // the same kind does - a class or trait `object`, a struct
+            // `ValueType` - and type parameters take `object`.
+            let object_class =
+                cast Semantic.Symbols.CLASS?(
+                    intrinsics.declare_class(
+                        LOCATION.internal,
+                        LOCATION.internal,
+                        "object",
+                        LIST[string](),
+                        intrinsics,
+                        null))!
+
             object_class.mark_is_object()
             _object_type = Types.NAMED(object_class)
+
+            // The value-type base is constructed rather than declared:
+            // no program names it, and the compiler needs it before any
+            // source could have declared it.
+            let value_type_class =
+                Symbols.CLASS(
+                    LOCATION.internal,
+                    LOCATION.internal,
+                    intrinsics,
+                    "ValueType",
+                    LIST[string](),
+                    intrinsics)
+
+            value_type_class.push_ancestor(_object_type)
+            _value_type = Types.NAMED(value_type_class)
 
             _declare_scalars(intrinsics)
             _declare_families(intrinsics)
 
             _string_type = Types.NAMED(_declare_class(intrinsics, "string"))
             _bigint_type = Types.NAMED(_declare_struct(intrinsics, "bigint", null))
-
-            // The value-type base is constructed rather than declared:
-            // no program names it, and the compiler needs it before any
-            // source could have declared it.
-            _value_type =
-                Types.NAMED(
-                    cast Semantic.Symbols.Classy?(
-                        Symbols.CLASS(
-                            LOCATION.internal,
-                            LOCATION.internal,
-                            intrinsics,
-                            "ValueType",
-                            LIST[string](),
-                            intrinsics))!)
 
             // `T?` over a value type has no user-spellable name, so the
             // carrier is constructed against the namespace without being
@@ -69,6 +83,8 @@ namespace Semantic.Lookups is
                         "NULLABLE",
                         LIST[string](["T"]),
                         intrinsics))!
+
+            _nullable.push_ancestor(_value_type)
 
             // The iterator reset synthesis asks for the iterator type of
             // every class, to decide whether to synthesise a reset. Where
@@ -136,7 +152,7 @@ namespace Semantic.Lookups is
             // source; under this target nothing declares them, so the
             // carrier symbols are constructed here for the lookups
             // below to specialise.
-            _declare_type_arguments(
+            _array =
                 cast Semantic.Symbols.Classy?(
                     intrinsics.declare_trait(
                         LOCATION.internal,
@@ -144,8 +160,10 @@ namespace Semantic.Lookups is
                         "ARRAY",
                         LIST[string](["E"]),
                         intrinsics,
-                        null)),
-                LIST[string](["E"]))
+                        null))!
+
+            _array.push_ancestor(_object_type)
+            _declare_type_arguments(_array, LIST[string](["E"]))
 
             _declare_with_arity(intrinsics, "REFERENCE", 1, true)
             _declare_with_arity(intrinsics, "POINTER", 1, true)
@@ -164,19 +182,20 @@ namespace Semantic.Lookups is
         _declare_with_arity(intrinsics: Semantic.Symbols.NAMESPACE, name: string, arity: int, want_struct: bool) is
             let arguments = _type_argument_names(arity)
 
-            if want_struct then
-                _declare_type_arguments(
-                    cast Semantic.Symbols.Classy?(
-                        intrinsics.declare_struct(
-                            LOCATION.internal, LOCATION.internal, name, arguments, intrinsics, null)),
-                    arguments)
-            else
-                _declare_type_arguments(
-                    cast Semantic.Symbols.Classy?(
-                        intrinsics.declare_class(
-                            LOCATION.internal, LOCATION.internal, name, arguments, intrinsics, null)),
-                    arguments)
-            fi
+            let declared =
+                if want_struct then
+                    intrinsics.declare_struct(
+                        LOCATION.internal, LOCATION.internal, name, arguments, intrinsics, null)
+                else
+                    intrinsics.declare_class(
+                        LOCATION.internal, LOCATION.internal, name, arguments, intrinsics, null)
+                fi
+
+            let family = cast Semantic.Symbols.Classy?(declared)!
+
+            family.push_ancestor(if want_struct then _value_type else _object_type fi)
+
+            _declare_type_arguments(family, arguments)
         si
 
         // A source-declared type's parameters are declared into its own
@@ -219,11 +238,13 @@ namespace Semantic.Lookups is
                 result.built_in_type = marker
             fi
 
+            result.push_ancestor(_value_type)
+
             return result
         si
 
         _declare_class(intrinsics: Semantic.Symbols.NAMESPACE, name: string) -> Semantic.Symbols.CLASS is
-            return
+            let result =
                 cast Semantic.Symbols.CLASS?(
                     intrinsics.declare_class(
                         LOCATION.internal,
@@ -232,6 +253,10 @@ namespace Semantic.Lookups is
                         LIST[string](),
                         intrinsics,
                         null))!
+
+            result.push_ancestor(_object_type)
+
+            return result
         si
 
         // The types this compilation declares, searched by qualified
@@ -361,9 +386,61 @@ namespace Semantic.Lookups is
         si
 
         get_type_type() -> Type => _required("the type of a typeof")
-        get_unspecialized_iterable_type() -> Type => _required("Collections.Iterable")
-        get_unspecialized_list_type() -> Type => _required("Collections.List")
-        get_unspecialized_mutable_list_type() -> Type => _required("Collections.LIST")
+
+        get_unspecialized_iterable_type() -> Type is
+            if let found = _find_declared("Collections.Iterable") then
+                return found
+            fi
+
+            return _required("Collections.Iterable")
+        si
+
+        get_unspecialized_list_type() -> Type is
+            if let found = _find_declared("Collections.List") then
+                return found
+            fi
+
+            return _required("Collections.List")
+        si
+
+        get_unspecialized_mutable_list_type() -> Type is
+            if let found = _find_declared("Collections.LIST") then
+                return found
+            fi
+
+            return _required("Collections.LIST")
+        si
+
+        // The runtime declares the array family as
+        // `trait ARRAY[E]: Collections.List[E]`, so an array is a List
+        // and an Iterable of its element. Under this target the core
+        // library declares List, so the constructed family takes that
+        // ancestor from the compilation once its declarations exist. A
+        // compilation that declares no List leaves arrays without one.
+        wire_declared_ancestry() is
+            if _is_array_wired then
+                return
+            fi
+
+            let list = cast Semantic.Symbols.Classy?(
+                cast Types.NAMED?(_find_declared("Collections.List"))?.symbol)
+
+            if !list? then
+                return
+            fi
+
+            let element = _array.type_parameter_at(0)?.type
+
+            if !element? then
+                return
+            fi
+
+            let arguments = LIST[Type]()
+            arguments.add(element)
+
+            _array.add_ancestor(Types.GENERIC(LOCATION.internal, list, arguments))
+            _is_array_wired = true
+        si
 
         get_int_range_types() -> (exclusive: Type, inclusive: Type)? => null
 
