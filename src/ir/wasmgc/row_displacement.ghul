@@ -1,0 +1,74 @@
+namespace IR.WasmGC is
+    use Collections.LIST
+    use Collections.MAP
+    use Collections.SET
+
+    /// Packs sparse rows into one table so that each row's entries keep
+    /// their columns relative to the row's offset and no two rows claim
+    /// the same slot. Reading `offset(row) + column` then finds exactly the
+    /// entry `row` has at `column`.
+    ///
+    /// Rows are placed largest first, each at the lowest offset where all
+    /// of its columns are free.
+    class ROW_DISPLACEMENT[T] is
+        _rows: LIST[(key: T, columns: LIST[int])]
+        _offsets: MAP[T, int]
+        _size: int
+
+        init() is
+            _rows = LIST[(key: T, columns: LIST[int])]()
+            _offsets = MAP[T, int]()
+        si
+
+        /// Adds a row that has entries at `columns`, each zero or more.
+        add(key: T, columns: Collections.Iterable[int]) is
+            _rows.add((key, LIST[int](columns)))
+        si
+
+        /// Places every row added; call after the last one.
+        pack() is
+            _offsets.clear()
+            _size = 0
+
+            let order = LIST[(key: T, columns: LIST[int])](_rows)
+
+            order.sort((a, b) => b.columns.count - a.columns.count)
+
+            let used = SET[int]()
+
+            for row in order do
+                let offset mut = 0
+
+                while !_fits(row.columns, offset, used) do
+                    offset = offset + 1
+                od
+
+                for column in row.columns do
+                    used.add(offset + column)
+
+                    if offset + column + 1 > _size then
+                        _size = offset + column + 1
+                    fi
+                od
+
+                _offsets[row.key] = offset
+            od
+        si
+
+        _fits(columns: LIST[int], offset: int, used: SET[int]) -> bool is
+            for column in columns do
+                if used.contains(offset + column) then
+                    return false
+                fi
+            od
+
+            return true
+        si
+
+        /// Where the row for `key` starts.
+        offset(key: T) -> int => _offsets[key]
+
+        /// One past the highest slot any row uses.
+        size: int => _size
+    si
+si
