@@ -284,6 +284,14 @@ namespace IR.WasmGC is
                     _boxed[boxed] = scalar
                 fi
             od
+
+            // An enum is boxed as a scalar is, in a box of its own, so a
+            // boxed value says which enum it holds.
+            for type in SRM_MEMBER_ORDER.types(root) do
+                if let declared = type.declared /\ declared.symbol_kind =~ Semantic.Symbols.SymbolKind.ENUM then
+                    _boxed[_intern(WASMGC_CLASS.of(declared))] = Semantic.Types.NAMED(declared)
+                fi
+            od
         si
 
         /// Gives `owner` a method that no symbol of it declares, which
@@ -1548,9 +1556,10 @@ namespace IR.WasmGC is
 
         /// The struct a value of `type` is a box of, or null where `type` is
         /// not a struct the registry holds. An optional struct is not one:
-        /// it is a reference that can be null.
+        /// it is a reference that can be null. Nor is an enum, a value type
+        /// held as its int.
         struct_of(type: Type?) -> WASMGC_CLASS? is
-            if !type? \/ type.is_optional \/ !type.is_value_type \/ WASMGC_TYPES.scalar(type)? then
+            if !type? \/ type.is_optional \/ !type.is_value_type \/ WASMGC_TYPES.scalar(type)? \/ WASMGC_TYPES.is_enum(type) then
                 return null
             fi
 
@@ -1634,6 +1643,11 @@ namespace IR.WasmGC is
 
             if let scalar = WASMGC_TYPES.scalar(type) then
                 return WASMGC_TYPES.value_type(scalar)
+            fi
+
+            // An enum is held as its underlying int, as its members are.
+            if WASMGC_TYPES.is_enum(type) then
+                return VALUE_TYPE.of_numeric(NumericType.I32)
             fi
 
             // The type of `null` itself, such as a tuple literal's element
