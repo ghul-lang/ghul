@@ -178,6 +178,17 @@ namespace IR.WasmGC is
             // Every other import is declared here, before the defined
             // functions are numbered.
 
+            let strings =
+                if registry.string_type_index? then
+                    WASMGC_STRINGS(module, registry)
+                else
+                    null
+                fi
+
+            if let present = strings /\ _host_takes_a_string() then
+                present.declare_imports(imports)
+            fi
+
             imports.freeze()
 
             let bodies = MAP[Function, LIST[Value]]()
@@ -188,12 +199,7 @@ namespace IR.WasmGC is
 
             let numbering = WASMGC_FUNCTION_NUMBERING(imports.count, f => bodies.contains_key(f))
 
-            let strings =
-                if registry.string_type_index? then
-                    WASMGC_STRINGS(module, registry, numbering)
-                else
-                    null
-                fi
+            strings?.use_numbering(numbering)
 
             // An executable compiles what its entry point reaches; a library
             // compiles everything, since anything can be called from outside.
@@ -297,6 +303,20 @@ namespace IR.WasmGC is
             fi
 
             return FUNC_TYPE(parameters.to_array(), results.to_array())
+        si
+
+        // Whether any host operation the program declares takes a string,
+        // which the strings have to convert for it.
+        _host_takes_a_string() -> bool is
+            for host in _host_declarations do
+                for argument in host.arguments do
+                    if WASMGC_TYPES.is_string(argument) then
+                        return true
+                    fi
+                od
+            od
+
+            return false
         si
 
         _host_value_type(type: Semantic.Types.Type) -> VALUE_TYPE? is

@@ -19,6 +19,7 @@ namespace IR.WasmGC is
     use Wasm.BLOCK_INSTRUCTION
     use Wasm.IF_INSTRUCTION
     use Wasm.Opcode
+    use Wasm.AbstractHeapType
 
     use Collections.LIST
 
@@ -39,22 +40,61 @@ namespace IR.WasmGC is
         _pool: WASMGC_LITERAL_POOL
         _literal_globals: LIST[int]
 
-        _numbering: WASMGC_FUNCTION_NUMBERING
+        _numbering: WASMGC_FUNCTION_NUMBERING?
 
         _equals: int?
         _concat: int?
+        _to_host: int?
+
+        _from_char_code_array: int?
 
         /// Strings for `module`, whose types `registry` holds.
         ///
-        /// - numbering: the function indices, which a helper function is
-        ///   numbered from when it is first asked for
-        init(module: MODULE, registry: WASMGC_TYPE_REGISTRY, numbering: WASMGC_FUNCTION_NUMBERING) is
+        /// Strings for `module`, whose types `registry` holds. Their helper
+        /// functions are numbered once `use_numbering` gives the numbering.
+        init(module: MODULE, registry: WASMGC_TYPE_REGISTRY) is
             _module = module
             _registry = registry
-            _numbering = numbering
 
             _pool = WASMGC_LITERAL_POOL()
             _literal_globals = LIST[int]()
+        si
+
+        /// Declares the host functions strings need: the builtin that makes
+        /// a JavaScript string from an array of code units. Call before the
+        /// imports are frozen.
+        declare_imports(imports: WASMGC_IMPORTS) is
+            let chars = VALUE_TYPE.of_type_index(_registry.chars_type_index, true)
+            let i32 = VALUE_TYPE.of_numeric(NumericType.I32)
+            let extern = VALUE_TYPE.of_reference(HEAP_TYPE.of_abstract(AbstractHeapType.EXTERN), false)
+
+            _from_char_code_array =
+                imports.function(
+                    "wasm:js-string",
+                    "fromCharCodeArray",
+                    _module.add_type(FUNC_TYPE([chars, i32, i32], [extern])))
+        si
+
+        /// Gives the function numbering helper functions are numbered
+        /// from when they are first asked for. Call before any helper is.
+        use_numbering(numbering: WASMGC_FUNCTION_NUMBERING) is
+            _numbering = numbering
+        si
+
+        /// The function making the JavaScript string a host import takes
+        /// from a string, or null from an absent one.
+        to_host_function: int is
+            if let index = _to_host then
+                return index
+            fi
+
+            assert _from_char_code_array? else "string imports not declared"
+
+            let index = _helper(() => _build_to_host())
+
+            _to_host = index
+
+            return index
         si
 
         /// The struct type a string is held in.
@@ -114,7 +154,7 @@ namespace IR.WasmGC is
             return index
         si
 
-        _helper(build: () -> FUNCTION) -> int => _numbering.reserve(build)
+        _helper(build: () -> FUNCTION) -> int => _numbering!.reserve(build)
 
         /// Adds the data segment holding every literal, and numbers the
         /// start function that builds them. Call once, after every body has
@@ -145,7 +185,7 @@ namespace IR.WasmGC is
 
             let start_type = _module.add_type(FUNC_TYPE([], []))
 
-            _module.set_start(_numbering.reserve(() => FUNCTION(start_type, [], start)))
+            _module.set_start(_numbering!.reserve(() => FUNCTION(start_type, [], start)))
         si
 
         // (a, b) -> i32: equal when both are the same reference (both
@@ -221,6 +261,33 @@ namespace IR.WasmGC is
             return FUNCTION(
                 _module.add_type(FUNC_TYPE([string_reference, string_reference], [string_reference])),
                 [_chars_reference, _chars_reference, _chars_reference],
+                body)
+        si
+
+        // (s) -> externref: null for an absent string, otherwise the
+        // JavaScript string the host builtin makes from all its code units.
+        _build_to_host() -> FUNCTION is
+            let extern = VALUE_TYPE.of_abstract(AbstractHeapType.EXTERN)
+
+            // parameter 0; local 1 the code units
+            let body = LIST[INSTRUCTION]([
+                _get(0), _op(Opcode.REF_IS_NULL),
+                IF_INSTRUCTION(
+                    BLOCK_TYPE(),
+                    LIST[INSTRUCTION]([
+                        HEAP_TYPE_INSTRUCTION(Opcode.REF_NULL, HEAP_TYPE.of_abstract(AbstractHeapType.EXTERN)),
+                        _op(Opcode.RETURN)
+                    ]:INSTRUCTION),
+                    LIST[INSTRUCTION]()),
+                _get(0), _chars_of(), INDEX_INSTRUCTION(Opcode.LOCAL_TEE, 1),
+                I32_CONSTANT(0),
+                _get(1), _op(Opcode.ARRAY_LEN),
+                INDEX_INSTRUCTION(Opcode.CALL, _from_char_code_array!)
+            ]:INSTRUCTION)
+
+            return FUNCTION(
+                _module.add_type(FUNC_TYPE([string_reference], [extern])),
+                [_chars_reference],
                 body)
         si
 

@@ -394,6 +394,8 @@ namespace IR.WasmGC is
             if WASMGC_IMPORTS.is_host(function.intrinsic_operation) then
                 _call_host(function.intrinsic_operation!, arguments)
                 return
+            elif _lower_representation(function.intrinsic_operation, arguments) then
+                return
             fi
 
             let index_found = _numbering.index_of(function)
@@ -662,34 +664,38 @@ namespace IR.WasmGC is
 
         // The operations the core library declares on strings and objects
         // that read their representation, which no ghūl code can reach.
-        _lower_representation(call: Values.Call.INNATE) -> bool is
+        _lower_representation(operation: string?, arguments: Collections.List[Value]) -> bool is
             let strings = _strings
 
             if !strings? then
                 return false
             fi
 
-            let name = call.innate_name
+            if !operation? then
+                return false
+            fi
+
+            let name = operation
             let string_type = strings.string_type_index
             let chars = _registry.chars_type_index
 
             if name =~ "string.length" then
-                gen(call.arguments[0])
+                gen(arguments[0])
                 _coerce_top(strings.string_reference)
                 _emit(TYPE_FIELD_INSTRUCTION(Opcode.STRUCT_GET, string_type, WASMGC_TYPE_REGISTRY.STRING_CHARS))
                 _emit(Opcode.ARRAY_LEN)
             elif name =~ "string.char_at" then
-                gen(call.arguments[0])
+                gen(arguments[0])
                 _coerce_top(strings.string_reference)
                 _emit(TYPE_FIELD_INSTRUCTION(Opcode.STRUCT_GET, string_type, WASMGC_TYPE_REGISTRY.STRING_CHARS))
-                gen(call.arguments[1])
+                gen(arguments[1])
                 _emit(TYPE_INSTRUCTION(Opcode.ARRAY_GET_U, chars))
             elif name =~ "string.concat" then
-                _call_string_helper(strings.concat_function, strings, call.arguments)
+                _call_string_helper(strings.concat_function, strings, arguments)
             elif name =~ "object.type_name" then
                 _emit(INDEX_INSTRUCTION(Opcode.GLOBAL_GET, _registry.string_descriptor_global!))
                 _emit(I32_CONSTANT(0))
-                gen(call.arguments[0])
+                gen(arguments[0])
                 _coerce_top(_registry.object_reference)
                 _emit(TYPE_FIELD_INSTRUCTION(Opcode.STRUCT_GET, WASMGC_TYPE_REGISTRY.OBJECT_TYPE_INDEX, 0))
                 _emit(
@@ -1674,7 +1680,7 @@ namespace IR.WasmGC is
         visit(call: Values.Call.INNATE) is
             if WASMGC_IMPORTS.is_host(call.innate_name) then
                 _call_host(call.innate_name, call.arguments)
-            elif _lower_representation(call) then
+            elif _lower_representation(call.innate_name, call.arguments) then
                 return
             elif !call.is_lowered then
                 gen(call.lower())
@@ -1703,7 +1709,12 @@ namespace IR.WasmGC is
         // Converts the ghūl string on the stack to the JavaScript string
         // a host import takes.
         _to_host(type: Type?) is
-            _report("a string passed to the host")
+            if let strings = _strings then
+                _coerce_top(strings.string_reference)
+                _emit(INDEX_INSTRUCTION(Opcode.CALL, strings.to_host_function))
+            else
+                _report("a string passed to the host")
+            fi
         si
 
         visit(store: Values.Store.SYMBOL) is _report("a store to {store.symbol.name}") si
