@@ -1422,10 +1422,15 @@ namespace IR.WasmGC is
 
             let discards_result = _discards_result(closure.type, function)
 
+            // A function with no receiver can still be held closed over its
+            // first argument, which the value then carries where a receiver
+            // would go.
+            let closes_over_first = !function.is_emitted_with_receiver /\ !isa Values.NULL(closure.receiver)
+
             let thunk mut = 0
 
             if !is_virtual then
-                thunk = _registry.closure_thunk(signature, instance, discards_result, _numbering)
+                thunk = _registry.closure_thunk(signature, instance, discards_result, closes_over_first, _numbering)
             elif _registry.discovering then
                 _registry.note_dispatched(function)
             elif let slot = _registry.dispatch.slot_of(instance) then
@@ -1440,7 +1445,7 @@ namespace IR.WasmGC is
             _emit(INDEX_INSTRUCTION(Opcode.GLOBAL_GET, _registry.closure_descriptor_global))
             _emit(INDEX_INSTRUCTION(Opcode.REF_FUNC, thunk))
 
-            if function.is_emitted_with_receiver /\ !isa Values.NULL(closure.receiver) then
+            if (function.is_emitted_with_receiver \/ closes_over_first) /\ !isa Values.NULL(closure.receiver) then
                 gen(closure.receiver)
             else
                 _emit(HEAP_TYPE_INSTRUCTION(Opcode.REF_NULL, _registry.object_reference.heap_type()!))

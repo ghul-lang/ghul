@@ -703,9 +703,10 @@ namespace IR.WasmGC is
         /// The thunk a function value of `signature` holding `function`
         /// calls, reserved in `numbering`. It casts the receiver or frame it
         /// is given to the type the function takes, or ignores it where the
-        /// function takes none, and calls the function. Nothing is reserved
-        /// while discovering.
-        closure_thunk(signature: int, function: WASMGC_FUNCTION, discards_result: bool, numbering: WASMGC_FUNCTION_NUMBERING) -> int is
+        /// function takes none, and calls the function. Where the value is
+        /// closed over the function's first argument, what it is given is
+        /// that argument. Nothing is reserved while discovering.
+        closure_thunk(signature: int, function: WASMGC_FUNCTION, discards_result: bool, closes_over_first: bool, numbering: WASMGC_FUNCTION_NUMBERING) -> int is
             if discovering then
                 return 0
             fi
@@ -727,9 +728,21 @@ namespace IR.WasmGC is
                     fi
                 fi
 
-                for i in 0..definition.arguments.count do
-                    body.add(INDEX_INSTRUCTION(Opcode.LOCAL_GET, i + 1))
-                od
+                if closes_over_first then
+                    body.add(INDEX_INSTRUCTION(Opcode.LOCAL_GET, 0))
+
+                    if let first = registry.value_type(function.specialize(definition.arguments[0])), heap_type = first.heap_type() then
+                        body.add(HEAP_TYPE_INSTRUCTION(Opcode.REF_CAST_NULL, heap_type))
+                    fi
+
+                    for i in 1..definition.arguments.count do
+                        body.add(INDEX_INSTRUCTION(Opcode.LOCAL_GET, i))
+                    od
+                else
+                    for i in 0..definition.arguments.count do
+                        body.add(INDEX_INSTRUCTION(Opcode.LOCAL_GET, i + 1))
+                    od
+                fi
 
                 body.add(INDEX_INSTRUCTION(Opcode.CALL, numbering.indexed(function)!))
 
