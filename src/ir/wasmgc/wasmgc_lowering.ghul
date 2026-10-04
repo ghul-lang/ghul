@@ -533,11 +533,17 @@ namespace IR.WasmGC is
             return index
         si
 
+        // The zero of `type`: a default box for a struct, the zero or null
+        // of the wasm type otherwise. The null type has no wasm type of its
+        // own, and its null is the bottom of the reference types, which
+        // any struct or array slot accepts.
         _zero(type: Type?) is
             if let held = _struct_of(type) then
                 _emit_all(_registry.new_instance(held))
             elif let value_type = _value_type(type) then
                 _emit(WASMGC_TYPE_REGISTRY.default_value(value_type))
+            elif type?.is_null ?? false then
+                _emit(HEAP_TYPE_INSTRUCTION(Opcode.REF_NULL, HEAP_TYPE.of_abstract(AbstractHeapType.NONE)))
             else
                 _report("the default value of {type}")
             fi
@@ -1690,7 +1696,43 @@ namespace IR.WasmGC is
             _emit(Opcode.REF_IS_NULL)
             _emit(Opcode.I32_EQZ)
         si
-        visit(check: Values.REFERENCE_NULL_CHECK) is _report("a null check") si
+        // `!` on a reference optional raises the core library's
+        // NullReferenceException where the value is absent, or traps where
+        // the library declares none.
+        visit(check: Values.REFERENCE_NULL_CHECK) is
+            gen(check.inner)
+
+            let held = _top
+
+            if !held? \/ !held.heap_type()? then
+                _report("a null check of {check.inner.type}")
+                return
+            fi
+
+            let tag = _exceptions?.tag_index
+            let exception_type = _exceptions?.exception
+
+            if !tag? \/ !exception_type? \/ !WASMGC_CORE_LIBRARY.find_class("Ghul.NullReferenceException")? \/ _registry.discovering then
+                _emit(Opcode.REF_AS_NON_NULL)
+                return
+            fi
+
+            let value = _temp(held)
+
+            _emit(INDEX_INSTRUCTION(Opcode.LOCAL_TEE, value))
+            _emit(Opcode.REF_IS_NULL)
+
+            _begin()
+            _construct_runtime_exception("Ghul.NullReferenceException", LIST[Value]())
+            _coerce_top(exception_type)
+            _emit(Opcode.REF_AS_NON_NULL)
+            _emit(THROW_INSTRUCTION(tag))
+            let absent = _end()
+
+            _emit(IF_INSTRUCTION(BLOCK_TYPE(), absent, LIST[INSTRUCTION]()))
+            _emit(INDEX_INSTRUCTION(Opcode.LOCAL_GET, value))
+            _emit(Opcode.REF_AS_NON_NULL)
+        si
 
         visit(conversion: Values.SCALAR_CONVERSION) is
             gen(conversion.converted)

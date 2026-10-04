@@ -20,7 +20,8 @@ namespace Syntax.Process is
     // `args: string[]` and `env: Ghul.Environment` - so the statements can
     // read the command line and the process environment directly, and a
     // Main-compatible `_entry` wrapper is synthesised beside it to carry
-    // both in.
+    // both in. Under `--target wasm`, which starts a program with no
+    // arguments, each is declared only where the statements name it.
     class SYNTHESISE_TOP_LEVEL_ENTRY(_entry_point: Compiler.ENTRY_POINT, _logger: Logger) is
         apply(node: Node) is
             if !isa Definitions.LIST(node) then
@@ -65,7 +66,7 @@ namespace Syntax.Process is
             // variables it declares settle their inferred types during the
             // entry's own walk, and every sibling function reads them
             // after that.
-            list.push(_synthesise_entry(statements))
+            list.push(_synthesise_entry(statements, _keeps_both_parameters(list)))
         si
 
         // Whether a file's root definition list carries a synthesised
@@ -117,6 +118,29 @@ namespace Syntax.Process is
             return false
         si
 
+        // Whether the entry keeps both parameters whatever its statements
+        // read. It does on .NET, where a host such as a session calls it
+        // with both and a stack trace names it with both, and beside a
+        // function the file declares under the entry's name, which outranks
+        // the statements and could otherwise collide with a narrower
+        // overload. Only the WebAssembly target, which starts a program
+        // with no arguments, takes the narrower entry.
+        _keeps_both_parameters(list: Definitions.LIST) -> bool is
+            if IoC.CONTAINER.instance.build_flags.target != Compiler.Target.WASM then
+                return true
+            fi
+
+            for d in list do
+                if let function = cast Definitions.FUNCTION?(d.without_pragmas) then
+                    if function.name? /\ function.name.name =~ _entry_point.name then
+                        return true
+                    fi
+                fi
+            od
+
+            return false
+        si
+
         // A submission's entry returns the value of its final expression
         // to whatever ran it, so it is declared to return any value or
         // none and the ordinary tail rule does the rest: a final
@@ -131,7 +155,7 @@ namespace Syntax.Process is
                 TypeExpressions.INFER(location)
             fi
 
-        _synthesise_entry(statements: Statements.LIST) -> Definitions.FUNCTION is
+        _synthesise_entry(statements: Statements.LIST, keep_both: bool) -> Definitions.FUNCTION is
             let location = statements.location
 
             let arguments = Collections.LIST[Variables.VARIABLE]()
@@ -140,7 +164,9 @@ namespace Syntax.Process is
             // "functions"), so the statements can read the command line as
             // `args` and the process environment as `env`. The wrapper
             // synthesise-entry-environment-wrapper builds beside this
-            // function is what carries them in.
+            // function is what carries the environment in. Under
+            // `--target wasm` each is declared only where the statements name
+            // it, so an entry that reads neither takes no arguments.
             //
             // Like the entry's name below, the formals and their types
             // carry an internal location: at the statement span they would
@@ -148,22 +174,29 @@ namespace Syntax.Process is
             // completion anywhere in the statements would land on them.
             let internal = LOCATION.internal
 
-            let args_type = TypeExpressions.ARRAY_(internal, TypeExpressions.NAMED(internal, Identifiers.Identifier(internal, "string")))
-            let args_param = Variables.VARIABLE(internal, Identifiers.Identifier(internal, "args"), args_type, false, true, null)
-            args_param.mark_argument()
-            arguments.add(args_param)
+            let body = Bodies.BLOCK(location, statements)
+            let scanner = NAME_REFERENCE_SCANNER()
 
-            let env_type = TypeExpressions.NAMED(
-                internal,
-                Identifiers.QUALIFIED(
+            if keep_both \/ scanner.body_references(body, "args") then
+                let args_type = TypeExpressions.ARRAY_(internal, TypeExpressions.NAMED(internal, Identifiers.Identifier(internal, "string")))
+                let args_param = Variables.VARIABLE(internal, Identifiers.Identifier(internal, "args"), args_type, false, true, null)
+                args_param.mark_argument()
+                arguments.add(args_param)
+            fi
+
+            if keep_both \/ scanner.body_references(body, "env") then
+                let env_type = TypeExpressions.NAMED(
                     internal,
-                    Identifiers.Identifier(internal, "Ghul"),
-                    "Environment",
-                    internal,
-                    internal))
-            let env_param = Variables.VARIABLE(internal, Identifiers.Identifier(internal, "env"), env_type, false, true, null)
-            env_param.mark_argument()
-            arguments.add(env_param)
+                    Identifiers.QUALIFIED(
+                        internal,
+                        Identifiers.Identifier(internal, "Ghul"),
+                        "Environment",
+                        internal,
+                        internal))
+                let env_param = Variables.VARIABLE(internal, Identifiers.Identifier(internal, "env"), env_type, false, true, null)
+                env_param.mark_argument()
+                arguments.add(env_param)
+            fi
 
             let result = Definitions.FUNCTION(
                 location,
@@ -177,7 +210,7 @@ namespace Syntax.Process is
                 Variables.LIST(location, arguments),
                 _return_type(LOCATION.internal),
                 Modifiers.LIST(location, null, null),
-                Bodies.BLOCK(location, statements)
+                body
             )
 
             result.is_top_level_entry = true
