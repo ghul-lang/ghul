@@ -17,6 +17,7 @@ namespace IR.WasmGC is
     use Wasm.HEAP_TYPE_INSTRUCTION
     use Wasm.CAST_BRANCH_INSTRUCTION
     use Wasm.IF_INSTRUCTION
+    use Wasm.CALL_INDIRECT_INSTRUCTION
 
     use Collections.LIST
     use Collections.MAP
@@ -781,6 +782,11 @@ namespace IR.WasmGC is
                 return
             fi
 
+            if let ids = _trait_class_ids(conversion.type) then
+                _cast_to_trait(value, ids, conversion.faults_on_failure)
+                return
+            fi
+
             let target = _registry.type_index(conversion.type)
 
             if !target? then
@@ -822,6 +828,35 @@ namespace IR.WasmGC is
             _emit(BLOCK_INSTRUCTION(Opcode.BLOCK, BLOCK_TYPE.of_value(VALUE_TYPE.of_type_index(target, true)), body))
         si
 
+        // A cast to a trait answers the value where its class implements
+        // the trait. Otherwise it traps where the cast faults on failure,
+        // and answers null where it declines.
+        _cast_to_trait(value: Value, ids: Collections.List[int], faults: bool) is
+            let held = _temp(_registry.object_reference)
+
+            gen(value)
+            _emit(INDEX_INSTRUCTION(Opcode.LOCAL_TEE, held))
+            _test_class_ids(ids)
+
+            let failed = LIST[INSTRUCTION]()
+
+            if faults then
+                failed.add(INDEX_INSTRUCTION(Opcode.LOCAL_GET, held))
+                failed.add(SIMPLE_INSTRUCTION(Opcode.REF_IS_NULL))
+                failed.add(SIMPLE_INSTRUCTION(Opcode.I32_EQZ))
+                failed.add(IF_INSTRUCTION(BLOCK_TYPE(), [SIMPLE_INSTRUCTION(Opcode.UNREACHABLE)]: INSTRUCTION, LIST[INSTRUCTION]()))
+                failed.add(INDEX_INSTRUCTION(Opcode.LOCAL_GET, held))
+            else
+                failed.add(HEAP_TYPE_INSTRUCTION(Opcode.REF_NULL, _registry.object_reference.heap_type()!))
+            fi
+
+            _emit(
+                IF_INSTRUCTION(
+                    BLOCK_TYPE.of_value(_registry.object_reference),
+                    [INDEX_INSTRUCTION(Opcode.LOCAL_GET, held)]: INSTRUCTION,
+                    failed))
+        si
+
         // An instance of a class the program declares is tested against
         // its struct type; null is not an instance of anything.
         visit(test: Values.ISA) is
@@ -836,9 +871,66 @@ namespace IR.WasmGC is
                 gen(value)
 
                 _emit(HEAP_TYPE_INSTRUCTION(Opcode.REF_TEST, HEAP_TYPE.of_type_index(target)))
+            elif let ids = _trait_class_ids(test.isa_type) then
+                gen(value)
+
+                _test_class_ids(ids)
             else
                 _report("a type test against {test.isa_type}")
             fi
+        si
+
+        // The numbers of the classes implementing `type`, where it is a
+        // trait that is not generic.
+        _trait_class_ids(type: Type?) -> Collections.List[int]? is
+            if !type? \/ !type.is_trait then
+                return null
+            fi
+
+            if !isa Semantic.Symbols.GENERIC(type.symbol) then
+                if let trait_type: Semantic.Symbols.Classy = type.symbol then
+                    let ids = LIST[int]()
+
+                    if let implementors = _registry.dispatch.implementors(trait_type) then
+                        for implementor in implementors do
+                            ids.add(_registry.numbering.id(implementor))
+                        od
+                    fi
+
+                    return ids
+                fi
+            fi
+
+            return null
+        si
+
+        // Replaces the reference on the stack with whether it is an object
+        // whose class number is among `ids`. Null is not.
+        _test_class_ids(ids: Collections.List[int]) is
+            let held = _temp(_registry.object_reference)
+            let id = _temp(VALUE_TYPE.of_numeric(NumericType.I32))
+
+            _emit(INDEX_INSTRUCTION(Opcode.LOCAL_TEE, held))
+            _emit(Opcode.REF_IS_NULL)
+
+            let present = LIST[INSTRUCTION]()
+
+            present.add(INDEX_INSTRUCTION(Opcode.LOCAL_GET, held))
+            present.add(TYPE_FIELD_INSTRUCTION(Opcode.STRUCT_GET, WASMGC_TYPE_REGISTRY.OBJECT_TYPE_INDEX, 0))
+            present.add(TYPE_FIELD_INSTRUCTION(Opcode.STRUCT_GET, WASMGC_TYPE_REGISTRY.DESCRIPTOR_TYPE_INDEX, WASMGC_TYPE_REGISTRY.DESCRIPTOR_CLASS_ID))
+            present.add(INDEX_INSTRUCTION(Opcode.LOCAL_SET, id))
+            present.add(I32_CONSTANT(0))
+
+            for (low, high) in CLASS_ID_RANGES.of(ids) do
+                present.add(INDEX_INSTRUCTION(Opcode.LOCAL_GET, id))
+                present.add(I32_CONSTANT(low))
+                present.add(SIMPLE_INSTRUCTION(Opcode.I32_SUB))
+                present.add(I32_CONSTANT(high - low))
+                present.add(SIMPLE_INSTRUCTION(Opcode.I32_LE_U))
+                present.add(SIMPLE_INSTRUCTION(Opcode.I32_OR))
+            od
+
+            _emit(IF_INSTRUCTION(BLOCK_TYPE.of_value(VALUE_TYPE.of_numeric(NumericType.I32)), [I32_CONSTANT(0)]: INSTRUCTION, present))
         si
 
         // The reference a type test examines: the value itself, or a
@@ -1265,13 +1357,20 @@ namespace IR.WasmGC is
             fi
 
             if dispatch == IR.Dispatch.VIRTUAL /\ !function.has_no_overriders then
-                _report("a virtual call")
+                _call_virtual(call)
+                return
+            elif dispatch == IR.Dispatch.INTERFACE then
+                _call_interface(call)
                 return
             elif dispatch != IR.Dispatch.DIRECT /\ dispatch != IR.Dispatch.VIRTUAL then
                 _report("a {dispatch} call")
                 return
             fi
 
+            _call_direct(call, function)
+        si
+
+        _call_direct(call: Values.Call.INSTANCE, function: Function) is
             let index mut = 0
 
             if !_function_indices.try_get_value(function, index ref) then
@@ -1285,6 +1384,79 @@ namespace IR.WasmGC is
             _lower_arguments(function, call.arguments)
 
             _emit(INDEX_INSTRUCTION(Opcode.CALL, index))
+        si
+
+        // The receiver's vtable is read from its descriptor and the
+        // method's slot called. The receiver is held in a local, since it
+        // is both the first argument and where the vtable comes from.
+        _call_virtual(call: Values.Call.INSTANCE) is
+            let function = call.function
+            let dispatch = _registry.dispatch
+
+            let slot = dispatch.slot_of(function)
+
+            if !slot? then
+                _report("a virtual call to {function.name}")
+                return
+            fi
+
+            let receiver_type = VALUE_TYPE.of_type_index(_registry.type_index(slot.owner)!, true)
+            let receiver = _temp(receiver_type)
+
+            gen(call.from)
+            _coerce_top(receiver_type)
+            _emit(INDEX_INSTRUCTION(Opcode.LOCAL_TEE, receiver))
+
+            _lower_arguments(function, call.arguments)
+
+            let vtable_type = dispatch.vtable_type(slot.owner)!
+
+            _emit(INDEX_INSTRUCTION(Opcode.LOCAL_GET, receiver))
+            _load_descriptor()
+            _emit(TYPE_FIELD_INSTRUCTION(Opcode.STRUCT_GET, WASMGC_TYPE_REGISTRY.DESCRIPTOR_TYPE_INDEX, WASMGC_TYPE_REGISTRY.DESCRIPTOR_VTABLE))
+            _emit(HEAP_TYPE_INSTRUCTION(Opcode.REF_CAST, HEAP_TYPE.of_type_index(vtable_type)))
+            _emit(TYPE_FIELD_INSTRUCTION(Opcode.STRUCT_GET, vtable_type, slot.index))
+            _emit(TYPE_INSTRUCTION(Opcode.CALL_REF, slot.signature))
+        si
+
+        // Reads the descriptor of the object on the stack, which traps
+        // where it is null.
+        _load_descriptor() is
+            _emit(TYPE_FIELD_INSTRUCTION(Opcode.STRUCT_GET, WASMGC_TYPE_REGISTRY.OBJECT_TYPE_INDEX, 0))
+        si
+
+        // A trait call with one possible implementation in the program is
+        // direct. Any other reads the trait table at the selector's row,
+        // offset by the receiver's class number.
+        _call_interface(call: Values.Call.INSTANCE) is
+            let function = call.function
+            let dispatch = _registry.dispatch
+
+            let selector = dispatch.selector_of(function)
+
+            if !selector? then
+                _report("a trait call to {function.name}")
+                return
+            fi
+
+            if let only = dispatch.only_implementation(selector) then
+                _call_direct(call, only)
+                return
+            fi
+
+            let receiver = _temp(_registry.object_reference)
+
+            gen(call.from)
+            _emit(INDEX_INSTRUCTION(Opcode.LOCAL_TEE, receiver))
+
+            _lower_arguments(function, call.arguments)
+
+            _emit(INDEX_INSTRUCTION(Opcode.LOCAL_GET, receiver))
+            _load_descriptor()
+            _emit(TYPE_FIELD_INSTRUCTION(Opcode.STRUCT_GET, WASMGC_TYPE_REGISTRY.DESCRIPTOR_TYPE_INDEX, WASMGC_TYPE_REGISTRY.DESCRIPTOR_CLASS_ID))
+            _emit(I32_CONSTANT(selector.offset))
+            _emit(Opcode.I32_ADD)
+            _emit(CALL_INDIRECT_INSTRUCTION(selector.signature, 0))
         si
 
         _local_type_of_receiver(function: Function) -> VALUE_TYPE? =>
