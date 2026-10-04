@@ -100,7 +100,10 @@ namespace IR.WasmGC is
                 result.add(helpers.begin_members)
 
                 for member in _members(type) do
-                    result.add(member.getter)
+                    if let getter = member.getter then
+                        result.add(getter)
+                    fi
+
                     result.add(helpers.member(member.type))
                 od
 
@@ -185,17 +188,32 @@ namespace IR.WasmGC is
         si
 
         // The public instance properties of `type` and of its ancestors,
-        // each with the getter that reads it at the class's type arguments.
-        _members(type: WASMGC_CLASS) -> Collections.List[(name: string, getter: WASMGC_FUNCTION, type: Type)] is
-            let result = LIST[(name: string, getter: WASMGC_FUNCTION, type: Type)]()
+        // each with the getter that reads it at the class's type arguments,
+        // and then their public instance fields, as .NET lists them.
+        _members(type: WASMGC_CLASS) -> Collections.List[(name: string, getter: WASMGC_FUNCTION?, `field: Symbol?, type: Type)] is
+            let result = LIST[(name: string, getter: WASMGC_FUNCTION?, `field: Symbol?, type: Type)]()
 
             let current: WASMGC_CLASS? mut = type
 
             while current? /\ !current.definition.is_object do
                 for property in SRM_MEMBER_ORDER.properties(SRM_EMITTED_TYPE(current.definition)) do
-                    if let getter = property.read_function /\ _is_shown(property) then
+                    if let getter = property.read_function /\ property.is_instance /\ _is_shown(property.name) then
                         if let member_type = current.specialize(property.type) then
-                            result.add((name = property.name, getter = WASMGC_FUNCTION(getter, current.type_map), type = member_type))
+                            result.add((name = property.name, getter = WASMGC_FUNCTION(getter, current.type_map), `field = null, type = member_type))
+                        fi
+                    fi
+                od
+
+                current = _registry.superclass_of(current)
+            od
+
+            current = type
+
+            while current? /\ !current.definition.is_object do
+                for `field in SRM_MEMBER_ORDER.fields(SRM_EMITTED_TYPE(current.definition)) do
+                    if `field.is_instance /\ _is_shown(`field.name) then
+                        if let member_type = current.specialize(`field.type) then
+                            result.add((name = `field.name, getter = null, `field = `field, type = member_type))
                         fi
                     fi
                 od
@@ -208,8 +226,8 @@ namespace IR.WasmGC is
 
         // A member a program names: public, and not one the compiler made
         // up, which carries a `$`.
-        _is_shown(property: Property) -> bool =>
-            property.is_instance /\ property.name.length > 0 /\ !property.name.starts_with('_') /\ !property.name.contains('$')
+        _is_shown(name: string) -> bool =>
+            name.length > 0 /\ !name.starts_with('_') /\ !name.contains('$')
 
         // The type as a program names it: a variant after its union's
         // name, and the type arguments after a generic's.
@@ -290,21 +308,34 @@ namespace IR.WasmGC is
                 body.add(INDEX_INSTRUCTION(Opcode.CALL, indices[0]))
 
                 let members = LIST[INSTRUCTION]()
-                let shown = _members(type)
 
-                for i in 0..shown.count do
-                    let member = shown[i]
+                // The calls after the opening one, in the order `_calls`
+                // gives them.
+                let next mut = 1
 
+                for member in _members(type) do
                     members.add_range(load_state)
                     members.add(INDEX_INSTRUCTION(Opcode.GLOBAL_GET, strings.literal(member.name)))
                     members.add(INDEX_INSTRUCTION(Opcode.LOCAL_GET, 0))
 
-                    if let receiver = _registry.receiver_type(member.getter)?.heap_type() then
-                        members.add(HEAP_TYPE_INSTRUCTION(Opcode.REF_CAST_NULL, receiver))
+                    if let getter = member.getter then
+                        if let receiver = _registry.receiver_type(getter)?.heap_type() then
+                            members.add(HEAP_TYPE_INSTRUCTION(Opcode.REF_CAST_NULL, receiver))
+                        fi
+
+                        members.add(INDEX_INSTRUCTION(Opcode.CALL, indices[next]))
+                        next = next + 1
+                    elif let `field = member.`field /\ _registry.field_of(`field, type)? then
+                        let location = _registry.field_of(`field, type)!
+
+                        members.add(HEAP_TYPE_INSTRUCTION(Opcode.REF_CAST_NULL, HEAP_TYPE.of_type_index(location.type_index)))
+                        members.add(TYPE_FIELD_INSTRUCTION(Opcode.STRUCT_GET, location.type_index, location.field_index))
+                    else
+                        return null
                     fi
 
-                    members.add(INDEX_INSTRUCTION(Opcode.CALL, indices[1 + 2 * i]))
-                    members.add(INDEX_INSTRUCTION(Opcode.CALL, indices[2 + 2 * i]))
+                    members.add(INDEX_INSTRUCTION(Opcode.CALL, indices[next]))
+                    next = next + 1
 
                     // The state answers false once its element budget is
                     // spent.
