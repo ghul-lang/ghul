@@ -1,6 +1,7 @@
 namespace IR.WasmGC is
     use Wasm.MODULE
     use Wasm.SUB_TYPE
+    use Wasm.FUNC_TYPE
     use Wasm.STRUCT_TYPE
     use Wasm.FIELD_TYPE
     use Wasm.VALUE_TYPE
@@ -101,6 +102,12 @@ namespace IR.WasmGC is
         _unsupported: LIST[(location: LOCATION, construct: string)]
 
         _dispatch: WASMGC_DISPATCH
+
+        _closure_type_index: int
+        _closure_descriptor: LIST[INSTRUCTION]
+        _closure_descriptor_global: int
+        _first_closure_thunk: int
+        _closure_thunks: LIST[(signature: int, function: Function, discards_result: bool)]
         _ordered: Collections.List[Classy]
         _initialisers: MAP[Classy, LIST[INSTRUCTION]]
         _indices: MAP[Function, int]
@@ -143,6 +150,8 @@ namespace IR.WasmGC is
             _unsupported = LIST[(location: LOCATION, construct: string)]()
 
             _dispatch = WASMGC_DISPATCH(self)
+            _closure_descriptor = LIST[INSTRUCTION]()
+            _closure_thunks = LIST[(signature: int, function: Function, discards_result: bool)]()
             _ordered = LIST[Classy]()
             _initialisers = MAP[Classy, LIST[INSTRUCTION]]()
             _indices = MAP[Function, int]()
@@ -186,6 +195,11 @@ namespace IR.WasmGC is
                 _classes_by_index[OBJECT_TYPE_INDEX + i] = ordered[i]
             od
 
+            // The closure type follows the classes, but a field can hold a
+            // function value, so its index is fixed before any class's
+            // fields are laid out.
+            _closure_type_index = OBJECT_TYPE_INDEX + ordered.count
+
             let group = LIST[SUB_TYPE]()
 
             group.add(SUB_TYPE(_descriptor_struct(), true, []))
@@ -196,6 +210,10 @@ namespace IR.WasmGC is
 
             _ordered = ordered
 
+            assert group.count == _closure_type_index else "the closure type follows the classes"
+
+            group.add(SUB_TYPE(_closure_struct(), true, [OBJECT_TYPE_INDEX]))
+
             group.add_range(_dispatch.plan(ordered, group.count))
 
             let first = _module.add_rec_group(group)
@@ -205,6 +223,11 @@ namespace IR.WasmGC is
             for type in ordered do
                 _add_descriptor_global(type)
             od
+
+            _closure_descriptor = LIST[INSTRUCTION]()
+            _closure_descriptor_global =
+                _module.add_global(
+                    GLOBAL(VALUE_TYPE.of_type_index(DESCRIPTOR_TYPE_INDEX, false), false, _closure_descriptor))
 
             for type in emitted do
                 _add_static_globals(type)
@@ -230,6 +253,136 @@ namespace IR.WasmGC is
             for type in _ordered do
                 _fill_descriptor(type)
             od
+
+            // A function value is numbered after every class, so no class
+            // or trait test matches one.
+            let closure_id = _ordered.count
+
+            _closure_descriptor.add(I32_CONSTANT(closure_id))
+            _closure_descriptor.add(I32_CONSTANT(closure_id))
+            _closure_descriptor.add(INDEX_INSTRUCTION(Opcode.GLOBAL_GET, _descriptor_globals[_object!]))
+            _closure_descriptor.add(HEAP_TYPE_INSTRUCTION(Opcode.REF_NULL, HEAP_TYPE.of_abstract(AbstractHeapType.STRUCT)))
+            _closure_descriptor.add(TYPE_INSTRUCTION(Opcode.STRUCT_NEW, DESCRIPTOR_TYPE_INDEX))
+
+            _first_closure_thunk = first_thunk + _dispatch.thunk_count
+        si
+
+        // A function value: its descriptor, the function to call, and the
+        // receiver or captured frame it is called with, null for none.
+        _closure_struct() -> STRUCT_TYPE =>
+            STRUCT_TYPE([
+                FIELD_TYPE.of_reference(VALUE_TYPE.of_type_index(DESCRIPTOR_TYPE_INDEX, false), false),
+                FIELD_TYPE.of_reference(VALUE_TYPE.of_abstract(AbstractHeapType.FUNC), false),
+                FIELD_TYPE.of_reference(VALUE_TYPE.of_type_index(OBJECT_TYPE_INDEX, true), false)
+            ])
+
+        /// The struct type a function value is held in.
+        closure_type_index: int => _closure_type_index
+
+        /// The closure field holding the function to call.
+        CLOSURE_FUNCTION: int static => 1
+
+        /// The closure field holding the receiver or frame, null for none.
+        CLOSURE_RECEIVER: int static => 2
+
+        /// The global holding the descriptor every function value has.
+        closure_descriptor_global: int => _closure_descriptor_global
+
+        /// The signature a call through a value of the function type `type`
+        /// uses: the receiver or frame as the root, then the parameters,
+        /// then the result. Null where one of them cannot be held yet.
+        closure_signature(type: Type) -> int? is
+            let arguments = type.arguments
+            let parameter_count = if type.is_action then arguments.count else arguments.count - 1 fi
+
+            let parameters = LIST[VALUE_TYPE]()
+
+            parameters.add(object_reference)
+
+            for i in 0..parameter_count do
+                if let value_type = value_type(arguments[i]) then
+                    parameters.add(value_type)
+                else
+                    return null
+                fi
+            od
+
+            let results = LIST[VALUE_TYPE]()
+
+            if !type.is_action /\ !WASMGC_TYPES.is_void(arguments[arguments.count - 1]) then
+                if let value_type = value_type(arguments[arguments.count - 1]) then
+                    results.add(value_type)
+                else
+                    return null
+                fi
+            fi
+
+            return _module.add_type(FUNC_TYPE(parameters.to_array(), results.to_array()))
+        si
+
+        /// The thunk a function value of `signature` holding `function`
+        /// calls, numbered after the dispatch thunks the first time it is
+        /// asked for.
+        closure_thunk(signature: int, function: Function, discards_result: bool) -> int is
+            let index = _first_closure_thunk + _closure_thunks.count
+
+            _closure_thunks.add((signature, function, discards_result))
+
+            return index
+        si
+
+        /// The thunks function values call, in index order: each casts the
+        /// receiver or frame it is given to the type the function takes, or
+        /// ignores it where the function takes none, and calls the function.
+        closure_thunks(indices: MAP[Function, int]) -> Collections.List[Wasm.FUNCTION] is
+            let result = LIST[Wasm.FUNCTION]()
+
+            for (signature, function, discards_result) in _closure_thunks do
+                let body = LIST[INSTRUCTION]()
+
+                if function.is_emitted_with_receiver then
+                    body.add(INDEX_INSTRUCTION(Opcode.LOCAL_GET, 0))
+
+                    if let receiver = receiver_type(function) then
+                        if let heap_type = receiver.heap_type() /\ !heap_type.matches(object_reference.heap_type()!) then
+                            body.add(HEAP_TYPE_INSTRUCTION(Opcode.REF_CAST_NULL, heap_type))
+                        fi
+                    fi
+                fi
+
+                for i in 0..function.arguments.count do
+                    body.add(INDEX_INSTRUCTION(Opcode.LOCAL_GET, i + 1))
+                od
+
+                body.add(INDEX_INSTRUCTION(Opcode.CALL, indices[function]))
+
+                if discards_result then
+                    body.add(Wasm.SIMPLE_INSTRUCTION(Opcode.DROP))
+                fi
+
+                result.add(Wasm.FUNCTION(signature, [], body))
+            od
+
+            return result
+        si
+
+        /// The type an instance method of `function`'s owner, or a closure
+        /// body taking its frame, receives `self` as, or null where it has
+        /// no receiver the object model holds.
+        receiver_type(function: Function) -> VALUE_TYPE? is
+            if let closure: Semantic.Symbols.Closure = function /\ closure.frame? then
+                if let index = type_index(closure.frame) then
+                    return VALUE_TYPE.of_type_index(index, true)
+                fi
+            elif let owner: Classy = function.owner /\ is_object_type(owner) then
+                if let index = type_index(owner) then
+                    return VALUE_TYPE.of_type_index(index, true)
+                fi
+            elif let owner: Classy = function.owner /\ owner.is_trait then
+                return object_reference
+            fi
+
+            return null
         si
 
         /// How the program's virtual and trait calls dispatch.
@@ -241,11 +394,16 @@ namespace IR.WasmGC is
         // per instantiation, and the built-in types the compiler constructs
         // are not declared by the program.
         _is_object_type(type: Classy) -> bool is
-            if type.is_object \/ type.is_reflected \/ type.location == LOCATION.internal then
+            let is_frame = isa Semantic.Symbols.FRAME(type)
+
+            // A closure's frame is synthesised, so it has no source
+            // location, as the built-in types the compiler constructs have
+            // none.
+            if type.is_object \/ type.is_reflected \/ !is_frame /\ type.location == LOCATION.internal then
                 return false
             fi
 
-            if !(isa Semantic.Symbols.CLASS(type) \/ type.is_union \/ type.is_variant) then
+            if !(isa Semantic.Symbols.CLASS(type) \/ isa Semantic.Symbols.FRAME(type) \/ type.is_union \/ type.is_variant) then
                 return false
             fi
 
@@ -531,6 +689,10 @@ namespace IR.WasmGC is
 
             if let index = type_index(type) then
                 return VALUE_TYPE.of_type_index(index, true)
+            fi
+
+            if type.is_function \/ type.is_action then
+                return VALUE_TYPE.of_type_index(_closure_type_index, true)
             fi
 
             if type.is_trait \/ (cast Classy?(type.symbol)?.is_object ?? false) then
