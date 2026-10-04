@@ -209,6 +209,7 @@ namespace IR.WasmGC is
 
             let strings = if registry.has_string_type then WASMGC_STRINGS(module, registry) else null fi
             let imports = _declare_imports(module, strings)
+            let exceptions = WASMGC_EXCEPTIONS(module, registry)
 
             assert imports.count == discovery_imports.count else "discovery declared different imports"
 
@@ -223,7 +224,7 @@ namespace IR.WasmGC is
 
                 numbering.place(
                     instance,
-                    _build_function(module, registry, imports, strings, numbering, instance))
+                    _build_function(module, registry, imports, strings, exceptions, numbering, instance))
 
                 names.add(index, instance.to_string())
             od
@@ -249,6 +250,12 @@ namespace IR.WasmGC is
                 if let index = numbering.index_of(entry) then
                     WASMGC_ENTRY.add(module, entry, index, names)
                 fi
+            fi
+
+            // The loader tells an exception the program threw from any
+            // other error by this tag.
+            if let tag = exceptions.declared_tag_index then
+                module.add_export(EXPORT("_exception", ExportKind.TAG, tag))
             fi
 
             module.add_custom_section(
@@ -311,7 +318,7 @@ namespace IR.WasmGC is
                 while let function = numbering.next() do
                     is_done = false
 
-                    _lower(registry, imports, null, numbering, function, LIST[VALUE_TYPE]())
+                    _lower(registry, imports, null, null, numbering, function, LIST[VALUE_TYPE]())
                 od
 
                 for type in registry.take_new_classes() do
@@ -476,6 +483,7 @@ namespace IR.WasmGC is
             registry: WASMGC_TYPE_REGISTRY,
             imports: WASMGC_IMPORTS,
             strings: WASMGC_STRINGS?,
+            exceptions: WASMGC_EXCEPTIONS?,
             numbering: WASMGC_FUNCTION_NUMBERING,
             function: WASMGC_FUNCTION
         ) -> FUNCTION is
@@ -510,7 +518,7 @@ namespace IR.WasmGC is
                 fi
             fi
 
-            let (body, locals) = _lower(registry, imports, strings, numbering, function, parameters)
+            let (body, locals) = _lower(registry, imports, strings, exceptions, numbering, function, parameters)
 
             let type_index = module.add_type(FUNC_TYPE(parameters.to_array(), results.to_array()))
 
@@ -524,6 +532,7 @@ namespace IR.WasmGC is
             registry: WASMGC_TYPE_REGISTRY,
             imports: WASMGC_IMPORTS,
             strings: WASMGC_STRINGS?,
+            exceptions: WASMGC_EXCEPTIONS?,
             numbering: WASMGC_FUNCTION_NUMBERING,
             function: WASMGC_FUNCTION,
             parameters: LIST[VALUE_TYPE]
@@ -544,7 +553,7 @@ namespace IR.WasmGC is
                 od
             fi
 
-            let lowering = WASMGC_LOWERING(numbering, registry, imports, strings, function, parameter_types)
+            let lowering = WASMGC_LOWERING(numbering, registry, imports, strings, exceptions, function, parameter_types)
 
             let body = lowering.lower(_body_of(definition))
 
