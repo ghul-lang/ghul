@@ -853,9 +853,10 @@ namespace IR.WasmGC is
             _emit(Opcode.REF_EQ)
         si
         visit(construct: Values.CONSTRUCT_MAYBE) is _report("an optional value") si
-        visit(stack_top: Values.STACK_TOP) is _report("STACK_TOP") si
-        visit(stack_top: Values.STACK_TOP_ADDRESS) is _report("STACK_TOP_ADDRESS") si
-        visit_address(stack_top: Values.STACK_TOP_ADDRESS) is _report("STACK_TOP_ADDRESS") si
+        // A value an earlier step left on the stack, where it still is.
+        visit(stack_top: Values.STACK_TOP) is si
+        visit(stack_top: Values.STACK_TOP_ADDRESS) is si
+        visit_address(stack_top: Values.STACK_TOP_ADDRESS) is si
 
         /// An `if` or `case` that produces a value is a block whose last
         /// value is the region its arms leave, each carrying the value it
@@ -1175,7 +1176,20 @@ namespace IR.WasmGC is
         si
 
         visit_address(wrapper: Values.WRAPPER) is _report("the address of a value") si
-        visit(wrap: Values.WRAP_OPTIONAL) is _report("an optional value") si
+        // A present value-type optional is the box its value is held in.
+        visit(wrap: Values.WRAP_OPTIONAL) is
+            let value = wrap.value
+
+            if let index = _registry.box_index(_specialize(value.type)) then
+                _emit(INDEX_INSTRUCTION(Opcode.GLOBAL_GET, _registry.descriptor_global(_registry.box_type(_specialize(value.type))!)))
+                gen(value)
+                _emit(TYPE_INSTRUCTION(Opcode.STRUCT_NEW, index))
+            elif _struct_of(value.type)? then
+                gen(value)
+            else
+                _report("an optional value")
+            fi
+        si
 
         visit(projection: Values.NARROW_PROJECT) is
             gen(projection.projected)
@@ -1598,6 +1612,8 @@ namespace IR.WasmGC is
         visit(address: Values.ADDRESS) is
             if _struct_of(address.type)? then
                 _struct_receiver(address.value)
+            elif _optional_inner(address.value.type)? then
+                gen(address.value)
             elif _registry.box_index(_specialize(address.value.type))? then
                 gen_address(address.value)
             else
@@ -2561,15 +2577,14 @@ namespace IR.WasmGC is
         si
 
         // An operation the host provides is a call of its import rather
-        // than an operation the generator lowers. A value-type optional's
-        // members have no representation here yet, so they are reported.
+        // than an operation the generator lowers.
         visit(call: Values.Call.INNATE) is
             if WASMGC_IMPORTS.is_host(call.innate_name) then
                 _call_host(call.innate_name, call.arguments)
             elif _lower_representation(call.innate_name, call.arguments) then
                 return
             elif call.innate_name.starts_with("nullable.") then
-                _report("a value-type optional")
+                _lower_nullable(call.innate_name, call.from)
             elif !call.is_lowered then
                 _registry.note_lowered(call)
                 gen(call.lower())
@@ -2577,6 +2592,65 @@ namespace IR.WasmGC is
                 // Lowered by an earlier pass over the same body: a body is
                 // lowered while discovering and for each instantiation.
                 gen(call.lowering)
+            fi
+        si
+
+        // A value-type optional is a reference to the box its value lives
+        // in, null where it is absent. Its receiver is reached by address,
+        // which for an optional is the reference itself.
+        _lower_nullable(operation: string, from: Value?) is
+            if !from? then
+                _report("the operation {operation}")
+                return
+            fi
+
+            let receiver = from
+            let inner = _optional_inner(receiver.type)
+
+            if operation =~ "nullable.has_value" then
+                _gen_optional(receiver)
+                _emit(Opcode.REF_IS_NULL)
+                _emit(Opcode.I32_EQZ)
+            elif operation =~ "nullable.value" /\ inner? then
+                _gen_optional(receiver)
+
+                if let index = _registry.box_index(_specialize(inner)) then
+                    _emit(HEAP_TYPE_INSTRUCTION(Opcode.REF_CAST, HEAP_TYPE.of_type_index(index)))
+                    _emit(TYPE_FIELD_INSTRUCTION(Opcode.STRUCT_GET, index, WASMGC_TYPE_REGISTRY.BOX_VALUE))
+                elif let held = _struct_of(inner) then
+                    _emit(HEAP_TYPE_INSTRUCTION(Opcode.REF_CAST, HEAP_TYPE.of_type_index(_registry.type_index(held)!)))
+                    _copy_if_mutable(inner)
+                else
+                    _report("a value-type optional of {inner}")
+                fi
+            else
+                _report("the operation {operation}")
+            fi
+        si
+
+        // The value type a value-type optional `type`, or a reference to
+        // one, holds, or null where it is neither.
+        _optional_inner(type: Type?) -> Type? is
+            let specialized mut = _specialize(type)
+
+            if let reference: Semantic.Types.REFERENCE = specialized then
+                specialized = reference.arguments[0]
+            fi
+
+            if specialized? /\ specialized.is_optional /\ specialized.is_value_type then
+                return specialized.optional_inner_type
+            fi
+
+            return null
+        si
+
+        // Lowers `value`, a value-type optional or its address, to the
+        // reference that holds it.
+        _gen_optional(value: Value) is
+            if let address: Values.ADDRESS = value then
+                gen(address.value)
+            else
+                gen(value)
             fi
         si
 
