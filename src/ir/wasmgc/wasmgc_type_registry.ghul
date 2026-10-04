@@ -31,39 +31,47 @@ namespace IR.WasmGC is
     use IR.Emitter.SRM_MEMBER_ORDER
     use IR.Emitter.SRM_EMITTED_TYPE
 
-    // Where a field lives: the struct type that declares it, and its
-    // position in that struct. A subclass repeats its superclass's fields
-    // in the same positions, so the declaring type's index reaches the
-    // field in any instance of it.
+    /// Where an instance field lives: the struct type that declares it and
+    /// its position there. A subclass keeps its superclass's fields in the
+    /// same positions, so this reaches the field in any instance.
+    ///
+    /// - type_index: the declaring class's struct type
+    /// - field_index: the field's position in that struct
+    /// - value_type: the type the field is held in
     class WASMGC_FIELD(type_index: int, field_index: int, value_type: VALUE_TYPE)
 
-    // The program's classes, unions and variants as WasmGC struct types,
-    // and the globals that hold their descriptors, their static fields and
-    // the namespace-level variables.
-    //
-    // All the struct types go in one recursion group at the start of the
-    // type section: WasmGC treats two types as the same when their groups
-    // have the same shape, so separate groups would make classes with the
-    // same fields interchangeable. The group's first type is the
-    // descriptor, its second is the root every class derives from, and the
-    // classes follow, numbered depth first.
-    //
-    // Every object's field 0 holds its type's descriptor, then come its
-    // superclass's fields in order, then its own. A class nothing derives
-    // from is final.
+    /// The program's classes, unions and variants as WasmGC struct types,
+    /// and the globals holding their descriptors, their static fields, the
+    /// namespace-level variables and the unit variants' shared instances.
+    ///
+    /// Field 0 of every object is its type's descriptor, followed by its
+    /// superclass's fields in order, then its own. A class nothing derives
+    /// from is final.
     class WASMGC_TYPE_REGISTRY is
+        // Every struct type goes in one recursion group at the start of the
+        // type section. WasmGC treats two types as the same when their
+        // groups have the same shape, so separate groups would make classes
+        // with the same fields interchangeable.
+
+        /// The descriptor's struct type, first in the recursion group.
         DESCRIPTOR_TYPE_INDEX: int static => 0
+
+        /// The root's struct type, which every class derives from.
         OBJECT_TYPE_INDEX: int static => 1
 
-        // The descriptor's fields, after which the later parts of the
-        // object model (the trait list, type arguments, the vtable and the
-        // type's name) will follow.
+        /// The descriptor field holding the class's number.
         DESCRIPTOR_CLASS_ID: int static => 0
+
+        /// The descriptor field holding the highest number of any class
+        /// derived from it.
         DESCRIPTOR_LAST_DESCENDANT: int static => 1
+
+        /// The descriptor field holding the superclass's descriptor, null
+        /// for the root.
         DESCRIPTOR_SUPERCLASS: int static => 2
 
         _module: MODULE
-        _object: Classy
+        _object: Classy?
 
         _numbering: CLASS_ID_NUMBERING[Classy]
 
@@ -79,15 +87,23 @@ namespace IR.WasmGC is
 
         _unsupported: LIST[(location: LOCATION, construct: string)]
 
-        // The constructs the program uses that the object model cannot
-        // represent yet, each with where it was declared.
+        /// The constructs the program declares that the object model cannot
+        /// represent yet, each with where it was declared.
         unsupported: Collections.List[(location: LOCATION, construct: string)] => _unsupported
 
+        /// The numbers given to the classes.
         numbering: CLASS_ID_NUMBERING[Classy] => _numbering
 
+        /// A nullable reference to the root, which holds any object.
         object_reference: VALUE_TYPE => VALUE_TYPE.of_type_index(OBJECT_TYPE_INDEX, true)
 
-        init(module: MODULE, object: Classy) is
+        /// A registry that knows no classes, and so holds scalars only.
+        init(module: MODULE) is
+            init(module, null)
+        si
+
+        /// A registry for `module`, whose classes derive from `object`.
+        init(module: MODULE, object: Classy?) is
             _module = module
             _object = object
 
@@ -106,18 +122,20 @@ namespace IR.WasmGC is
             _unsupported = LIST[(location: LOCATION, construct: string)]()
         si
 
-        // Builds the recursion group and the globals for every type the
-        // program declares under `root`. Must run before anything else
-        // adds a type to the module, so the group starts at index 0.
+        /// Builds the recursion group and the globals for every type
+        /// declared under `root`. Must run before anything else adds a type
+        /// to the module.
         build(root: Scope) is
             assert _module.type_count() == 0 else "the object model's types must come first"
 
+            let object = _object!
+
             let emitted = SRM_MEMBER_ORDER.types(root)
 
-            _numbering.add_root(_object)
+            _numbering.add_root(object)
 
             let added = Collections.SET[Classy]()
-            added.add(_object)
+            added.add(object)
 
             for type in emitted do
                 if let declared = type.declared /\ _is_object_type(declared) then
@@ -188,7 +206,7 @@ namespace IR.WasmGC is
                 return
             fi
 
-            let parent = _superclass_of(type) ?? _object
+            let parent = _superclass_of(type) ?? _object!
 
             if !added.contains(parent) then
                 _add_class(parent, added)
@@ -247,7 +265,7 @@ namespace IR.WasmGC is
                 return SUB_TYPE(_struct(layout), false, [])
             fi
 
-            let parent = _superclass_of(type) ?? _object
+            let parent = _superclass_of(type) ?? _object!
 
             for inherited in _layouts[parent] do
                 layout.add(inherited)
@@ -312,7 +330,7 @@ namespace IR.WasmGC is
             if type == _object then
                 initialiser.add(HEAP_TYPE_INSTRUCTION(Opcode.REF_NULL, HEAP_TYPE.of_type_index(DESCRIPTOR_TYPE_INDEX)))
             else
-                initialiser.add(INDEX_INSTRUCTION(Opcode.GLOBAL_GET, _descriptor_globals[_superclass_of(type) ?? _object]))
+                initialiser.add(INDEX_INSTRUCTION(Opcode.GLOBAL_GET, _descriptor_globals[_superclass_of(type) ?? _object!]))
             fi
 
             initialiser.add(TYPE_INSTRUCTION(Opcode.STRUCT_NEW, DESCRIPTOR_TYPE_INDEX))
@@ -361,8 +379,8 @@ namespace IR.WasmGC is
                         new_instance(variant)))
         si
 
-        // The instructions that build an instance of `type` with every
-        // field at its default value, as a constant expression.
+        /// The constant expression that builds an instance of `type` with
+        /// every field at its default value.
         new_instance(type: Classy) -> LIST[INSTRUCTION] is
             let result = LIST[INSTRUCTION]()
 
@@ -379,7 +397,7 @@ namespace IR.WasmGC is
             return result
         si
 
-        // The zero of a numeric type, or the null of a reference type.
+        /// The zero of a numeric type, or the null of a reference type.
         default_value(value_type: VALUE_TYPE) -> INSTRUCTION static =>
             case value_type.numeric()
             when NumericType.I64 then I64_CONSTANT(0L)
@@ -389,10 +407,9 @@ namespace IR.WasmGC is
             else HEAP_TYPE_INSTRUCTION(Opcode.REF_NULL, value_type.heap_type()!)
             esac
 
-        // The type a value of `type` is held in, or null where the target
-        // cannot hold it yet. A reference to a class the program declares
-        // is a reference to its struct; any other reference is a reference
-        // to the root.
+        /// The type a value of `type` is held in, or null where the target
+        /// cannot hold it yet. A declared class is a reference to its
+        /// struct; `object` and a trait are references to the root.
         value_type(type: Type?) -> VALUE_TYPE? is
             if !type? \/ type.is_void then
                 return null
@@ -410,14 +427,20 @@ namespace IR.WasmGC is
                 return VALUE_TYPE.of_type_index(index, true)
             fi
 
-            return object_reference
+            if type.is_trait \/ (cast Classy?(type.symbol)?.is_object ?? false) then
+                return object_reference
+            fi
+
+            return null
         si
 
-        // The struct type `type` is held in, where it is one the program
-        // declares.
+        /// The struct type a value of `type` is held in, or null where
+        /// `type` is not a class the program declares.
         type_index(type: Type?) -> int? =>
             if let symbol: Classy = type?.symbol then type_index(symbol) else null fi
 
+        /// The struct type of `type`, or null where the program does not
+        /// declare it as a class.
         type_index(type: Classy) -> int? is
             let index mut = 0
 
@@ -428,8 +451,11 @@ namespace IR.WasmGC is
             return null
         si
 
+        /// Whether `type` has a struct type of its own.
         is_object_type(type: Classy) -> bool => _type_indices.contains_key(type)
 
+        /// Where an instance field lives, or null where it is not a field
+        /// of a class the registry holds.
         field_of(`field: Symbol) -> WASMGC_FIELD? is
             let result: WASMGC_FIELD mut
 
@@ -440,6 +466,7 @@ namespace IR.WasmGC is
             return null
         si
 
+        /// The global holding a static field or namespace-level variable.
         global_of(`field: Symbol) -> int? is
             let index mut = 0
 
@@ -450,6 +477,8 @@ namespace IR.WasmGC is
             return null
         si
 
+        /// The type of the global holding a static field or namespace-level
+        /// variable.
         global_type(`field: Symbol) -> VALUE_TYPE? is
             let result: VALUE_TYPE mut
 
@@ -460,11 +489,11 @@ namespace IR.WasmGC is
             return null
         si
 
+        /// The global holding the descriptor of `type`.
         descriptor_global(type: Classy) -> int => _descriptor_globals[type]
 
-        // Whether a reference held as `held` can be used where `expected`
-        // is wanted without a cast: they are the same type, or `held` is a
-        // struct type derived from `expected`.
+        /// Whether a reference held as `held` is usable as `expected`
+        /// without a cast: the same type, or a class derived from it.
         is_held_as(held: HEAP_TYPE, expected: HEAP_TYPE) -> bool is
             if held.matches(expected) then
                 return true
@@ -490,6 +519,7 @@ namespace IR.WasmGC is
             return is_subclass(derived, base)
         si
 
+        /// The global holding a unit variant's shared instance.
         unit_variant_global(variant: Classy) -> int? is
             let index mut = 0
 
@@ -500,7 +530,7 @@ namespace IR.WasmGC is
             return null
         si
 
-        // Whether every instance of `derived` is an instance of `base`.
+        /// Whether every instance of `derived` is an instance of `base`.
         is_subclass(derived: Classy, base: Classy) -> bool =>
             base == _object \/
             _type_indices.contains_key(derived) /\

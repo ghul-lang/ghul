@@ -51,7 +51,17 @@ namespace IR.WasmGC is
         // reads, which can be wider than the type the IR gives it where
         // flow analysis has narrowed the variable. A consumer that needs
         // the narrower type casts to it.
-        _top: VALUE_TYPE?
+        _top: VALUE_TYPE? =>
+            if let cast_to = _top_cast then
+                cast_to
+            elif let value = _top_value then
+                _held_type(value)
+            else
+                null
+            fi
+
+        _top_value: Value?
+        _top_cast: VALUE_TYPE?
         _locals: MAP[LOCAL, int]
         _local_types: LIST[VALUE_TYPE]
 
@@ -73,18 +83,35 @@ namespace IR.WasmGC is
         /// index order; the first is numbered after the parameters.
         local_types: LIST[VALUE_TYPE] => _local_types
 
+        /// Lowers a body of `function`.
+        ///
+        /// - function_indices: the index every function with a body takes
+        /// - registry: the program's struct types and globals
+        /// - parameter_types: the types of the function's parameters, the
+        ///   receiver first where it takes one
         init(
             function_indices: MAP[Function, int],
             registry: WASMGC_TYPE_REGISTRY,
             function: Function,
             parameter_types: Collections.List[VALUE_TYPE]
         ) is
+            init(function_indices, registry, parameter_types)
+
+            _receiver_offset = if function.is_emitted_with_receiver then 1 else 0 fi
+            _return_type = function.return_type
+        si
+
+        /// Lowers a body that takes no receiver and whose result needs no
+        /// cast.
+        init(
+            function_indices: MAP[Function, int],
+            registry: WASMGC_TYPE_REGISTRY,
+            parameter_types: Collections.List[VALUE_TYPE]
+        ) is
             _function_indices = function_indices
             _registry = registry
-            _receiver_offset = if function.is_emitted_with_receiver then 1 else 0 fi
             _parameter_types = parameter_types
             _parameter_count = parameter_types.count
-            _return_type = function.return_type
 
             _locals = MAP[LOCAL, int]()
             _local_types = LIST[VALUE_TYPE]()
@@ -110,20 +137,21 @@ namespace IR.WasmGC is
             if value? then
                 value.accept(self)
 
-                _top = _held_type(value)
+                _top_value = value
+                _top_cast = null
             fi
         si
 
         // The wasm type `value` leaves on the stack.
         _held_type(value: Value) -> VALUE_TYPE? is
             if let wrapper: Values.TYPE_WRAPPER = value then
-                return _top
-            elif let wrapper: Values.WRAPPER = value then
-                return _top
+                return _held_type(wrapper.value)
+            elif let wrapper: Values.WRAPPER = value /\ wrapper.value? then
+                return _held_type(wrapper.value)
             elif let view: Values.NARROW_VIEW = value then
-                return _top
+                return _held_type(view.underlying)
             elif let projection: Values.NARROW_PROJECT = value then
-                return _top
+                return _held_type(projection.projected)
             elif let load: Values.Load.TEMP = value then
                 return _local_type(_local(load.local))
             elif let load: Values.Load.LOCAL_VARIABLE = value then
@@ -176,7 +204,7 @@ namespace IR.WasmGC is
                     fi
 
                     _emit(HEAP_TYPE_INSTRUCTION(Opcode.REF_CAST_NULL, expected_heap))
-                    _top = expected
+                    _top_cast = expected
                 fi
             fi
         si
