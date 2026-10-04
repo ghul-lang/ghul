@@ -83,6 +83,10 @@ namespace IR.WasmGC is
 
         _unsupported: LIST[string]
 
+        // The struct-typed locals the body declared, each of which holds a
+        // default box from the start, as a .NET local holds a zeroed value.
+        _struct_locals: LIST[(index: int, type: WASMGC_CLASS)]
+
         /// The kinds of construct the lowered values used that this
         /// target cannot generate yet, each once, in the order they were
         /// met. A body with any is not a valid function.
@@ -158,6 +162,7 @@ namespace IR.WasmGC is
             _bodies = LIST[LIST[INSTRUCTION]]()
             _labels = LIST[(node: Values.Breakable, is_loop_head: bool)]()
             _unsupported = LIST[string]()
+            _struct_locals = LIST[(index: int, type: WASMGC_CLASS)]()
         si
 
         /// Lowers a whole body, answering its instructions.
@@ -168,7 +173,22 @@ namespace IR.WasmGC is
                 gen(value)
             od
 
-            return _end()
+            let body = _end()
+
+            if _struct_locals.count == 0 \/ _registry.discovering then
+                return body
+            fi
+
+            let result = LIST[INSTRUCTION]()
+
+            for (index, type) in _struct_locals do
+                result.add_range(_registry.new_instance(type))
+                result.add(INDEX_INSTRUCTION(Opcode.LOCAL_SET, index))
+            od
+
+            result.add_range(body)
+
+            return result
         si
 
         /// Lowers one value into the instructions being built. An absent
@@ -179,6 +199,101 @@ namespace IR.WasmGC is
 
                 _top_value = value
                 _top_cast = null
+            fi
+        si
+
+        /// Lowers the address of `value`, which for a struct is the box the
+        /// value lives in.
+        gen_address(value: Value) is
+            value.accept_address(self)
+
+            _top_value = value
+            _top_cast = null
+        si
+
+        // The struct a value of `type` is a box of, or null.
+        _struct_of(type: Type?) -> WASMGC_CLASS? => _registry.struct_of(_specialize(type))
+
+
+        // The struct a value-type optional `type` holds, or null.
+        _optional_struct_of(type: Type?) -> WASMGC_CLASS? is
+            let specialized = _specialize(type)
+
+            if !specialized? \/ !specialized.is_optional \/ !specialized.is_value_type then
+                return null
+            fi
+
+            return _registry.struct_of(specialized.optional_inner_type)
+        si
+        // Whether a value of `type` is a struct whose box is changed in
+        // place, so that a value read from somewhere is a copy of the box.
+        _is_mutable_struct(type: Type?) -> bool =>
+            if let held = _struct_of(type) then !_registry.is_read_only(held) else false fi
+
+        // A read of a mutable struct, left on the stack, becomes a copy of
+        // its box, so that changing the copy leaves the original alone.
+        // Each struct-typed field of the box is copied in turn.
+        _copy_if_mutable(type: Type?) is
+            if !_is_mutable_struct(type) \/ _registry.discovering then
+                return
+            fi
+
+            _copy_struct(_struct_of(type)!)
+        si
+
+        // As _copy_if_mutable, for a value that may be absent: null stays
+        // null.
+        _copy_if_mutable_or_null(held: WASMGC_CLASS) is
+            if !_registry.is_struct(held) \/ _registry.is_read_only(held) \/ _registry.discovering then
+                return
+            fi
+
+            let index = _registry.type_index(held)!
+            let value_type = VALUE_TYPE.of_type_index(index, true)
+            let source = _temp(value_type)
+
+            _emit(INDEX_INSTRUCTION(Opcode.LOCAL_TEE, source))
+            _emit(Opcode.REF_IS_NULL)
+
+            _begin()
+            _emit(INDEX_INSTRUCTION(Opcode.LOCAL_GET, source))
+            _copy_struct(held)
+            let present = _end()
+
+            _emit(IF_INSTRUCTION(
+                BLOCK_TYPE.of_value(value_type),
+                [HEAP_TYPE_INSTRUCTION(Opcode.REF_NULL, HEAP_TYPE.of_type_index(index))]: INSTRUCTION,
+                present))
+        si
+
+        _copy_struct(held: WASMGC_CLASS) is
+            let index = _registry.type_index(held)!
+            let source = _temp(VALUE_TYPE.of_type_index(index, true))
+            let field_types = _registry.field_types(held)
+            let count = _registry.field_value_types(held).count
+
+            _emit(INDEX_INSTRUCTION(Opcode.LOCAL_SET, source))
+            _emit(INDEX_INSTRUCTION(Opcode.GLOBAL_GET, _registry.descriptor_global(held)))
+
+            for i in 1..count do
+                _emit(INDEX_INSTRUCTION(Opcode.LOCAL_GET, source))
+                _emit(TYPE_FIELD_INSTRUCTION(Opcode.STRUCT_GET, index, i))
+
+                if i < field_types.count then
+                    _copy_if_mutable(field_types[i])
+                fi
+            od
+
+            _emit(TYPE_INSTRUCTION(Opcode.STRUCT_NEW, index))
+        si
+
+        // The receiver of a field access or call on a struct is its box,
+        // read in place where the value has an address.
+        _struct_receiver(from: Value) is
+            if from.has_address /\ _struct_of(from.type)? then
+                gen_address(from)
+            else
+                gen(from)
             fi
         si
 
@@ -382,6 +497,10 @@ namespace IR.WasmGC is
 
             if let type = _value_type(local.type) then
                 _local_types.add(type)
+
+                if let held = _struct_of(local.type) then
+                    _struct_locals.add((index, held))
+                fi
             else
                 _report("a local of type {local.type}")
 
@@ -392,7 +511,9 @@ namespace IR.WasmGC is
         si
 
         _zero(type: Type?) is
-            if let value_type = _value_type(type) then
+            if let held = _struct_of(type) then
+                _emit_all(_registry.new_instance(held))
+            elif let value_type = _value_type(type) then
                 _emit(WASMGC_TYPE_REGISTRY.default_value(value_type))
             else
                 _report("the default value of {type}")
@@ -516,8 +637,13 @@ namespace IR.WasmGC is
         visit(load: Values.Load.SYMBOL) is _report("a load of {load.symbol.name}") si
         visit_address(load: Values.Load.SYMBOL) is _report("the address of {load.symbol.name}") si
         visit(load: Values.Load.INSTANCE_FIELD) is
+            _field_get(load)
+            _copy_if_mutable(load.type)
+        si
+
+        _field_get(load: Values.Load.INSTANCE_FIELD) is
             if let `field = _instance_field(load.from, load.symbol) then
-                gen(load.from)
+                _struct_receiver(load.from!)
                 _coerce_top(VALUE_TYPE.of_type_index(`field.type_index, true))
 
                 _emit(TYPE_FIELD_INSTRUCTION(Opcode.STRUCT_GET, `field.type_index, `field.field_index))
@@ -527,7 +653,7 @@ namespace IR.WasmGC is
         // Where an instance field lives, or null, reported, where the
         // object model does not hold it.
         _instance_field(from: Value?, symbol: Semantic.Symbols.Symbol) -> WASMGC_FIELD? is
-            if !from? \/ from.is_value_type then
+            if !from? \/ (from.is_value_type /\ !_struct_of(from.type)?) then
                 _report("a field of a value type")
                 return null
             fi
@@ -542,18 +668,32 @@ namespace IR.WasmGC is
 
             return null
         si
-        visit_address(load: Values.Load.INSTANCE_FIELD) is _report("the address of a field") si
+        visit_address(load: Values.Load.INSTANCE_FIELD) is
+            if _struct_of(load.type)? then
+                _field_get(load)
+            else
+                _report("the address of a field")
+            fi
+        si
         visit(load: Values.Load.STATIC_ANONYMOUS_FUNCTION) is _report("a function value") si
         visit(load: Values.Load.GLOBAL_ANONYMOUS_FUNCTION) is _report("a function value") si
         visit(load: Values.Load.INSTANCE_ANONYMOUS_FUNCTION) is _report("a function value") si
 
         visit(load: Values.Load.TEMP) is
             _emit(INDEX_INSTRUCTION(Opcode.LOCAL_GET, _local(load.local)))
+            _copy_if_mutable(load.type)
         si
 
-        visit_address(load: Values.Load.TEMP) is _report("the address of a local") si
+        visit_address(load: Values.Load.TEMP) is
+            if _struct_of(load.type)? then
+                _emit(INDEX_INSTRUCTION(Opcode.LOCAL_GET, _local(load.local)))
+            else
+                _report("the address of a local")
+            fi
+        si
         visit(load: Values.Load.STATIC_FIELD) is
             _global_get(load.symbol)
+            _copy_if_mutable(load.type)
         si
 
         _global_get(symbol: Semantic.Symbols.Symbol) is
@@ -576,13 +716,31 @@ namespace IR.WasmGC is
                 _report("a static field of {symbol.owner}")
             fi
         si
-        visit_address(load: Values.Load.STATIC_FIELD) is _report("the address of a static field") si
+        visit_address(load: Values.Load.STATIC_FIELD) is
+            if _struct_of(load.type)? then
+                _global_get(load.symbol)
+            else
+                _report("the address of a static field")
+            fi
+        si
         visit(load: Values.Load.GLOBAL_FIELD) is
             _global_get(load.symbol)
+            _copy_if_mutable(load.type)
         si
-        visit_address(load: Values.Load.GLOBAL_FIELD) is _report("the address of a global variable") si
+        visit_address(load: Values.Load.GLOBAL_FIELD) is
+            if _struct_of(load.type)? then
+                _global_get(load.symbol)
+            else
+                _report("the address of a global variable")
+            fi
+        si
 
         visit(load: Values.Load.LOCAL_ARGUMENT) is
+            _argument_get(load)
+            _copy_if_mutable(load.type)
+        si
+
+        _argument_get(load: Values.Load.LOCAL_ARGUMENT) is
             let symbol = load.symbol
 
             if Values.state_machine_field_for(symbol)? then
@@ -596,9 +754,20 @@ namespace IR.WasmGC is
             fi
         si
 
-        visit_address(load: Values.Load.LOCAL_ARGUMENT) is _report("the address of an argument") si
+        visit_address(load: Values.Load.LOCAL_ARGUMENT) is
+            if _struct_of(load.type)? then
+                _argument_get(load)
+            else
+                _report("the address of an argument")
+            fi
+        si
 
         visit(load: Values.Load.LOCAL_VARIABLE) is
+            _variable_get(load)
+            _copy_if_mutable(load.type)
+        si
+
+        _variable_get(load: Values.Load.LOCAL_VARIABLE) is
             if Values.state_machine_field_for(load.symbol)? then
                 _report("a generator or asynchronous function's local")
             elif let variable = cast Semantic.Symbols.Variable?(load.symbol) then
@@ -608,10 +777,17 @@ namespace IR.WasmGC is
             fi
         si
 
-        visit_address(load: Values.Load.LOCAL_VARIABLE) is _report("the address of a local") si
+        visit_address(load: Values.Load.LOCAL_VARIABLE) is
+            if _struct_of(load.type)? then
+                _variable_get(load)
+            else
+                _report("the address of a local")
+            fi
+        si
 
         visit(load: Values.Load.ARGUMENT) is
             _emit(INDEX_INSTRUCTION(Opcode.LOCAL_GET, load.index + _receiver_offset))
+            _copy_if_mutable(load.type)
         si
 
         visit(load: Values.Load.RECEIVER) is
@@ -691,18 +867,37 @@ namespace IR.WasmGC is
             _load_receiver()
         si
 
-        visit_address(self_load: Values.Load.REFERENCE_SELF) is _report("self") si
-        visit(self_load: Values.Load.OUTER_SELF) is _report("self") si
-        visit_address(self_load: Values.Load.OUTER_SELF) is _report("self") si
-        // A scalar's method takes the value itself as its receiver.
-        visit(self_load: Values.Load.VALUE_SELF) is
-            if WASMGC_TYPES.scalar(self_load.type)? then
-                _emit(INDEX_INSTRUCTION(Opcode.LOCAL_GET, 0))
+        visit_address(self_load: Values.Load.REFERENCE_SELF) is
+            if _struct_of(self_load.type)? then
+                _load_receiver()
             else
                 _report("self")
             fi
         si
-        visit_address(self_load: Values.Load.VALUE_SELF) is _report("self") si
+
+        visit(self_load: Values.Load.OUTER_SELF) is _report("self") si
+        visit_address(self_load: Values.Load.OUTER_SELF) is _report("self") si
+        // A scalar's method takes the value itself as its receiver. A
+        // struct method's receiver is the box its value lives in, so its
+        // address is the receiver and its value a copy.
+        visit(self_load: Values.Load.VALUE_SELF) is
+            if WASMGC_TYPES.scalar(self_load.type)? then
+                _emit(INDEX_INSTRUCTION(Opcode.LOCAL_GET, 0))
+            elif _struct_of(self_load.type)? then
+                _load_receiver()
+                _copy_if_mutable(self_load.type)
+            else
+                _report("self")
+            fi
+        si
+
+        visit_address(self_load: Values.Load.VALUE_SELF) is
+            if _struct_of(self_load.type)? then
+                _load_receiver()
+            else
+                _report("self")
+            fi
+        si
         visit(runtime: Values.RUNTIME) is
             if _lower_builder(runtime) then
                 return
@@ -907,7 +1102,31 @@ namespace IR.WasmGC is
             assert false else "unresolved need store"
         si
 
-        visit(store: Values.Store.INDIRECT) is _report("a store through a reference") si
+        // A store through a reference to a struct changes the box it refers
+        // to in place, field by field, so whatever else holds that box
+        // sees the new value, as it would on .NET.
+        visit(store: Values.Store.INDIRECT) is
+            if let held = _struct_of(store.type) then
+                let index = _registry.type_index(held)!
+                let target = _temp(VALUE_TYPE.of_type_index(index, true))
+                let source = _temp(VALUE_TYPE.of_type_index(index, true))
+
+                gen(store.address)
+                _emit(INDEX_INSTRUCTION(Opcode.LOCAL_SET, target))
+
+                gen(store.value)
+                _emit(INDEX_INSTRUCTION(Opcode.LOCAL_SET, source))
+
+                for i in 1.._registry.field_value_types(held).count do
+                    _emit(INDEX_INSTRUCTION(Opcode.LOCAL_GET, target))
+                    _emit(INDEX_INSTRUCTION(Opcode.LOCAL_GET, source))
+                    _emit(TYPE_FIELD_INSTRUCTION(Opcode.STRUCT_GET, index, i))
+                    _emit(TYPE_FIELD_INSTRUCTION(Opcode.STRUCT_SET, index, i))
+                od
+            else
+                _report("a store through a reference")
+            fi
+        si
 
         visit(wrapper: Values.TYPE_WRAPPER) is
             gen(wrapper.value)
@@ -1303,10 +1522,38 @@ namespace IR.WasmGC is
         si
 
         visit_address(default_value: Values.DEFAULT) is _report("the address of a default value") si
-        visit(deref: Values.DEREF) is _report("a reference") si
-        visit_address(deref: Values.DEREF) is _report("a reference") si
-        visit(address: Values.ADDRESS) is _report("a reference") si
-        visit_address(address: Values.ADDRESS) is _report("a reference") si
+        // A reference to a struct is its box. Dereferencing one reads it,
+        // which for a mutable struct is a copy.
+        visit(deref: Values.DEREF) is
+            if _struct_of(deref.type)? then
+                gen(deref.value)
+                _copy_if_mutable(deref.type)
+            else
+                _report("a reference")
+            fi
+        si
+
+        visit_address(deref: Values.DEREF) is
+            if _struct_of(deref.type)? then
+                gen(deref.value)
+            else
+                _report("a reference")
+            fi
+        si
+
+        // The address of a struct is the box it lives in, or for a value
+        // with no location of its own, the box the value already is.
+        visit(address: Values.ADDRESS) is
+            if _struct_of(address.type)? then
+                _struct_receiver(address.value)
+            else
+                _report("a reference")
+            fi
+        si
+
+        visit_address(address: Values.ADDRESS) is
+            visit(address)
+        si
 
         visit(steps: Values.STEPS) is
             _lower_all(steps.steps)
@@ -1352,6 +1599,18 @@ namespace IR.WasmGC is
 
                 _emit(HEAP_TYPE_INSTRUCTION(Opcode.REF_CAST, HEAP_TYPE.of_type_index(index)))
                 _emit(TYPE_FIELD_INSTRUCTION(Opcode.STRUCT_GET, index, WASMGC_TYPE_REGISTRY.BOX_VALUE))
+            elif let held = _struct_of(unbox.type) then
+                // A boxed struct is the struct's own box, so unboxing it
+                // is a cast, and for a mutable struct a copy.
+                gen(unbox.value)
+
+                _emit(HEAP_TYPE_INSTRUCTION(Opcode.REF_CAST, HEAP_TYPE.of_type_index(_registry.type_index(held)!)))
+                _copy_if_mutable(unbox.type)
+            elif let held = _optional_struct_of(unbox.type) then
+                gen(unbox.value)
+
+                _emit(HEAP_TYPE_INSTRUCTION(Opcode.REF_CAST_NULL, HEAP_TYPE.of_type_index(_registry.type_index(held)!)))
+                _copy_if_mutable_or_null(held)
             else
                 _report("unboxing a {unbox.type}")
             fi
@@ -1370,6 +1629,11 @@ namespace IR.WasmGC is
 
             if let ids = _trait_class_ids(conversion.type) then
                 _cast_to_trait(value, ids, conversion.faults_on_failure)
+                return
+            fi
+
+            if let held = _optional_struct_of(conversion.type) then
+                _cast_to_optional_struct(value, held, conversion.faults_on_failure)
                 return
             fi
 
@@ -1412,6 +1676,36 @@ namespace IR.WasmGC is
             body.add(HEAP_TYPE_INSTRUCTION(Opcode.REF_NULL, target_heap))
 
             _emit(BLOCK_INSTRUCTION(Opcode.BLOCK, BLOCK_TYPE.of_value(VALUE_TYPE.of_type_index(target, true)), body))
+        si
+
+        // A cast to an optional struct answers its box, or null where the
+        // value is some other type, and copies a mutable struct as an
+        // unbox does.
+        _cast_to_optional_struct(value: Value, held: WASMGC_CLASS, faults: bool) is
+            let index = _registry.type_index(held)!
+            let target_heap = HEAP_TYPE.of_type_index(index)
+
+            gen(value)
+
+            if faults then
+                _emit(HEAP_TYPE_INSTRUCTION(Opcode.REF_CAST_NULL, target_heap))
+            else
+                let source_type = _top!
+                let source = _temp(source_type)
+
+                _emit(INDEX_INSTRUCTION(Opcode.LOCAL_SET, source))
+
+                let body = LIST[INSTRUCTION]()
+
+                body.add(INDEX_INSTRUCTION(Opcode.LOCAL_GET, source))
+                body.add(CAST_BRANCH_INSTRUCTION(Opcode.BR_ON_CAST, 0, source_type.heap_type()!, true, target_heap, false))
+                body.add(SIMPLE_INSTRUCTION(Opcode.DROP))
+                body.add(HEAP_TYPE_INSTRUCTION(Opcode.REF_NULL, target_heap))
+
+                _emit(BLOCK_INSTRUCTION(Opcode.BLOCK, BLOCK_TYPE.of_value(VALUE_TYPE.of_type_index(index, true)), body))
+            fi
+
+            _copy_if_mutable_or_null(held)
         si
 
         // A cast to a trait answers the value where its class implements
@@ -1933,9 +2227,29 @@ namespace IR.WasmGC is
         si
 
         // A method the core library gives a scalar takes the value itself
-        // as its receiver, where a struct's takes its address.
+        // as its receiver. A struct method takes the box as its receiver,
+        // so a call on a struct changes it in place.
         visit(call: Values.Call.STRUCT) is
-            let instance = _instance_of(call.function)
+            let function = call.function
+            let instance = _instance_of(function)
+
+            if _struct_of(cast Semantic.Types.Typed?(function.owner)?.type)? then
+                let index = _index_of(function)
+
+                if !index? then
+                    _report("a call to {function.name}")
+                    return
+                fi
+
+                gen(call.from)
+                _coerce_top(_local_type_of_receiver(instance))
+
+                _lower_arguments(function, call.arguments)
+
+                _emit(INDEX_INSTRUCTION(Opcode.CALL, index))
+                return
+            fi
+
             let receiver = _registry.receiver_type(instance)
 
             if !receiver? \/ !receiver.numeric()? then
@@ -2250,7 +2564,7 @@ namespace IR.WasmGC is
 
         visit(store: Values.Store.INSTANCE_FIELD) is
             if let `field = _instance_field(store.from, store.symbol) then
-                gen(store.from)
+                _struct_receiver(store.from!)
                 _coerce_top(VALUE_TYPE.of_type_index(`field.type_index, true))
 
                 gen(store.value)

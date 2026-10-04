@@ -134,6 +134,13 @@ namespace IR.WasmGC is
 
         _type_indices: MAP[WASMGC_CLASS, int]
         _layouts: MAP[WASMGC_CLASS, LIST[VALUE_TYPE]]
+
+        // The ghūl type of each field in a class's layout, null for the
+        // descriptor, which says where a struct-typed field needs a box.
+        _layout_types: MAP[WASMGC_CLASS, LIST[Type?]]
+
+        // Whether each struct is read-only, inferred once.
+        _read_only: MAP[WASMGC_CLASS, bool]
         _descriptor_globals: MAP[WASMGC_CLASS, int]
         _unit_variant_globals: MAP[WASMGC_CLASS, int]
         _classes_by_index: MAP[int, WASMGC_CLASS]
@@ -207,6 +214,8 @@ namespace IR.WasmGC is
 
             _type_indices = MAP[WASMGC_CLASS, int]()
             _layouts = MAP[WASMGC_CLASS, LIST[VALUE_TYPE]]()
+            _layout_types = MAP[WASMGC_CLASS, LIST[Type?]]()
+            _read_only = MAP[WASMGC_CLASS, bool]()
             _descriptor_globals = MAP[WASMGC_CLASS, int]()
             _unit_variant_globals = MAP[WASMGC_CLASS, int]()
             _classes_by_index = MAP[int, WASMGC_CLASS]()
@@ -927,7 +936,7 @@ namespace IR.WasmGC is
                 return false
             fi
 
-            return isa Semantic.Symbols.CLASS(type) \/ is_frame \/ type.is_union \/ type.is_variant
+            return isa Semantic.Symbols.CLASS(type) \/ isa Semantic.Symbols.STRUCT(type) \/ is_frame \/ type.is_union \/ type.is_variant
         si
 
         _add_class(type: WASMGC_CLASS, added: Collections.SET[WASMGC_CLASS]) is
@@ -1005,6 +1014,10 @@ namespace IR.WasmGC is
                 layout.add(value_type(boxed)!)
 
                 _layouts[type] = layout
+                let box_types = LIST[Type?]()
+                box_types.add(null)
+                box_types.add(boxed)
+                _layout_types[type] = box_types
 
                 return SUB_TYPE(_struct(layout), true, [OBJECT_TYPE_INDEX])
             fi
@@ -1013,6 +1026,9 @@ namespace IR.WasmGC is
                 layout.add(VALUE_TYPE.of_type_index(DESCRIPTOR_TYPE_INDEX, false))
 
                 _layouts[type] = layout
+                let root_types = LIST[Type?]()
+                root_types.add(null)
+                _layout_types[type] = root_types
 
                 return SUB_TYPE(_struct(layout), false, [])
             fi
@@ -1035,9 +1051,14 @@ namespace IR.WasmGC is
             fi
 
             let parent = _superclass_of(type) ?? _object!
+            let layout_types = LIST[Type?]()
 
             for inherited in _layouts[parent] do
                 layout.add(inherited)
+            od
+
+            for inherited in _layout_types_of(parent) do
+                layout_types.add(inherited)
             od
 
             for `field in SRM_MEMBER_ORDER.fields(SRM_EMITTED_TYPE(type.definition)) do
@@ -1045,10 +1066,12 @@ namespace IR.WasmGC is
                     _field_positions[`field] = layout.count
 
                     layout.add(_field_value_type(`field, type))
+                    layout_types.add(type.specialize(`field.type))
                 fi
             od
 
             _layouts[type] = layout
+            _layout_types[type] = layout_types
 
             return SUB_TYPE(
                 _struct(layout),
@@ -1204,9 +1227,16 @@ namespace IR.WasmGC is
             result.add(INDEX_INSTRUCTION(Opcode.GLOBAL_GET, _descriptor_globals[type]))
 
             let layout = _layouts[type]
+            let layout_types = _layout_types_of(type)
 
             for i in 1..layout.count do
-                result.add(default_value(layout[i]))
+                // A struct-typed field holds a box from the start, so it is
+                // never null where a value of its type is expected.
+                if let held = if i < layout_types.count then struct_of(layout_types[i]) else null fi then
+                    result.add_range(new_instance(held))
+                else
+                    result.add(default_value(layout[i]))
+                fi
             od
 
             result.add(TYPE_INSTRUCTION(Opcode.STRUCT_NEW, _type_indices[type]))
@@ -1231,6 +1261,61 @@ namespace IR.WasmGC is
         /// core library declares one.
         has_string_type: bool => _string?
 
+        _layout_types_of(type: WASMGC_CLASS) -> LIST[Type?] is
+            let result: LIST[Type?] mut
+
+            if _layout_types.try_get_value(type, result ref) then
+                return result
+            fi
+
+            return LIST[Type?]()
+        si
+
+        /// The ghūl types of a class's fields, in layout order, with null for
+        /// the descriptor.
+        field_types(type: WASMGC_CLASS) -> Collections.List[Type?] => _layout_types_of(type)
+
+        /// The wasm types of a class's fields, in layout order, the
+        /// descriptor first.
+        field_value_types(type: WASMGC_CLASS) -> Collections.List[VALUE_TYPE] => _layouts[type]
+
+        /// Whether `type` is a struct, which is held in a box of its own. A
+        /// scalar's box is not one: its definition is the scalar's.
+        is_struct(type: WASMGC_CLASS) -> bool =>
+            isa Semantic.Symbols.STRUCT(type.definition) /\ !is_box(type) /\ _is_object_type(type.definition)
+
+        /// The struct a value of `type` is a box of, or null where `type` is
+        /// not a struct the registry holds. An optional struct is not one:
+        /// it is a reference that can be null.
+        struct_of(type: Type?) -> WASMGC_CLASS? is
+            if !type? \/ type.is_optional \/ !type.is_value_type then
+                return null
+            fi
+
+            if let held = class_of(type) /\ is_struct(held) then
+                return held
+            fi
+
+            return null
+        si
+
+        /// Whether a struct's box is never changed once built, so a value
+        /// of it can share the box rather than copy it. That holds where
+        /// every field backs a property and no instance member but a
+        /// constructor stores anything.
+        is_read_only(type: WASMGC_CLASS) -> bool is
+            let result: bool mut
+
+            if _read_only.try_get_value(type, result ref) then
+                return result
+            fi
+
+            result = _infer_read_only(type)
+            _read_only[type] = result
+
+            return result
+        si
+
         /// The struct type a string is held in, or null where the registry
         /// knows no string type.
         string_type_index: int? => if let string_type = _string then type_index(string_type) else null fi
@@ -1242,6 +1327,24 @@ namespace IR.WasmGC is
         /// the registry knows no string type.
         string_descriptor_global: int? =>
             if let string_type = _string then _descriptor_globals[string_type] else null fi
+
+        _infer_read_only(type: WASMGC_CLASS) -> bool is
+            let emitted = SRM_EMITTED_TYPE(type.definition)
+
+            for `field in SRM_MEMBER_ORDER.fields(emitted) do
+                if `field.is_instance /\ !`field.name.starts_with('$') then
+                    return false
+                fi
+            od
+
+            for method in SRM_MEMBER_ORDER.methods(emitted) do
+                if method.is_instance /\ !method.is_constructor /\ !method.is_proven_store_free then
+                    return false
+                fi
+            od
+
+            return true
+        si
 
         /// The zero of a numeric type, or the null of a reference type.
         default_value(value_type: VALUE_TYPE) -> INSTRUCTION static =>
@@ -1264,6 +1367,24 @@ namespace IR.WasmGC is
 
             if let scalar = WASMGC_TYPES.scalar(type) then
                 return WASMGC_TYPES.value_type(scalar)
+            fi
+
+            // A value-type optional is a reference to the box of its value,
+            // null where it is absent, as boxing it on .NET gives.
+            if type.is_optional /\ type.is_value_type then
+                let inner = type.optional_inner_type
+
+                if let index = box_index(inner) then
+                    return VALUE_TYPE.of_type_index(index, true)
+                elif let held = struct_of(inner) then
+                    return VALUE_TYPE.of_type_index(type_index(held)!, true)
+                fi
+
+                return null
+            fi
+
+            if let held = struct_of(type) then
+                return VALUE_TYPE.of_type_index(type_index(held)!, true)
             fi
 
             if type.is_value_type \/ type.is_type_variable then

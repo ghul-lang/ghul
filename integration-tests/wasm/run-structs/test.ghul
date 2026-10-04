@@ -1,0 +1,117 @@
+// Structs as boxes: each check sets one bit of the exit status, so 255
+// means every check passed and a missing bit names the one that failed.
+// Each struct holds a private member, which leaves its equality to be
+// declared rather than synthesised: synthesised equality is not part of
+// what this tests.
+namespace Test is
+    struct POINT is
+        x: int field
+        y: int public
+        _tag: int
+
+        init(x: int, y: int) is
+            self.x = x
+            self.y = y
+        si
+
+        shift(by: int) is
+            x = x + by
+        si
+    si
+
+    struct LINE is
+        from: POINT field
+        to: POINT field
+        _tag: int
+
+        init(from: POINT, to: POINT) is
+            self.from = from
+            self.to = to
+        si
+    si
+
+    // Read-only: nothing but its constructor stores, so its box is shared.
+    struct SIZE is
+        _width: int
+
+        init(width: int) is
+            _width = width
+        si
+
+        doubled() -> int => _width + _width
+    si
+
+    class HOLDER is
+        origin: POINT field
+
+        corner: POINT => origin
+
+        init() is
+            origin = POINT(1, 1)
+        si
+    si
+
+    bit(passed: bool, value: int) -> int => if passed then value else 0 fi
+
+    move_copy(p: POINT) -> int is
+        p.shift(100)
+        return p.x
+    si
+
+    entry() -> int is
+        let result mut = 0
+
+        // 1: mutating a copy leaves the original alone
+        let a = POINT(1, 2)
+        let b mut = a
+        b.shift(10)
+        result = result + bit(a.x == 1 /\ b.x == 11, 1)
+
+        // 2: a method changes the struct it is called on, in place
+        let c mut = POINT(3, 4)
+        c.shift(1)
+        c.y = 40
+        result = result + bit(c.x == 4 /\ c.y == 40, 2)
+
+        // 4: an argument is a copy
+        let d = POINT(5, 5)
+        let moved = move_copy(d)
+        result = result + bit(moved == 105 /\ d.x == 5, 4)
+
+        // 8: a `field` struct member changes in place; a property hands
+        // back a copy
+        let holder = HOLDER()
+        holder.origin.shift(2)
+        holder.corner.shift(50)
+        result = result + bit(holder.origin.x == 3, 8)
+
+        // 16: a default struct local holds the default value
+        let e: POINT mut = _
+        e.shift(7)
+        result = result + bit(e.x == 7 /\ e.y == 0, 16)
+
+        // 32: a struct inside a struct is copied with it
+        let line = LINE(POINT(1, 1), POINT(2, 2))
+        let other mut = line
+        other.from.shift(10)
+        result = result + bit(line.from.x == 1 /\ other.from.x == 11, 32)
+
+        // 64: a read-only struct
+        let size = SIZE(21)
+        result = result + bit(size.doubled() == 42, 64)
+
+        // 128: a boxed struct is tested and unboxed, and the unboxed value
+        // is a copy
+        let boxed: object = POINT(8, 9)
+        if let unboxed: POINT = boxed then
+            let changed mut = unboxed
+            changed.shift(1)
+
+            if let again: POINT = boxed then
+                result = result + bit(isa POINT(boxed) /\ again.x == 8 /\ changed.x == 9, 128)
+            fi
+        fi
+
+        return result
+    si
+si
