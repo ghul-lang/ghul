@@ -109,6 +109,10 @@ namespace IR.WasmGC is
         /// `typeof` answer for the type, null until one is first asked for.
         DESCRIPTOR_TYPE_OBJECT: int static => 5
 
+        /// The descriptor field holding the function that writes a value of
+        /// the class for display, null where the class has none.
+        DESCRIPTOR_DISPLAY: int static => 6
+
         /// The closure field holding the function to call.
         CLOSURE_FUNCTION: int static => 1
 
@@ -180,6 +184,10 @@ namespace IR.WasmGC is
         _ordered: Collections.List[WASMGC_CLASS]
         _initialisers: MAP[WASMGC_CLASS, LIST[INSTRUCTION]]
         _functions: WASMGC_FUNCTION_NUMBERING?
+        _display_state: WASMGC_CLASS?
+        _display_signature: int?
+        _displayers: MAP[WASMGC_CLASS, int]
+        _boxes_made: Collections.SET[WASMGC_CLASS]
 
         /// The constructs the program declares that the object model cannot
         /// represent yet, each with where it was declared.
@@ -230,6 +238,8 @@ namespace IR.WasmGC is
             _namespace_globals = MAP[Symbol, (index: int, type: VALUE_TYPE)]()
 
             _boxed = MAP[WASMGC_CLASS, Type]()
+            _displayers = MAP[WASMGC_CLASS, int]()
+            _boxes_made = Collections.SET[WASMGC_CLASS]()
             _cells = Collections.SET[IR.LOCAL]()
             _static_constructors = MAP[WASMGC_CLASS, (constructor: WASMGC_FUNCTION, initialised: int)]()
 
@@ -550,11 +560,57 @@ namespace IR.WasmGC is
             else
                 _closure_descriptor.add(HEAP_TYPE_INSTRUCTION(Opcode.REF_NULL, HEAP_TYPE.of_abstract(AbstractHeapType.STRUCT)))
             fi
-            _end_descriptor(_closure_descriptor)
+            _end_descriptor(_closure_descriptor, _no_displayer)
         si
 
         // A function value: its descriptor, the function to call, and the
         // receiver or captured frame it is called with, null for none.
+        /// Records that the program renders values for display, through
+        /// the core library's state class `state`.
+        note_display(state: WASMGC_CLASS) is
+            _display_state = state
+        si
+
+        /// The core library's display state class, where something the
+        /// program reaches renders values for display.
+        display_state: WASMGC_CLASS? => _display_state
+
+        /// The signature of a displayer: the value and the display state,
+        /// both as objects.
+        display_signature: int is
+            if discovering then
+                return 0
+            fi
+
+            if let signature = _display_signature then
+                return signature
+            fi
+
+            let signature = _module.add_type(FUNC_TYPE([object_reference, object_reference], []))
+
+            _display_signature = signature
+
+            return signature
+        si
+
+        /// Makes the function numbered `index` the displayer of `type`.
+        set_displayer(type: WASMGC_CLASS, index: int) is
+            _displayers[type] = index
+            _closure_thunks.add(index)
+        si
+
+        _displayer_of(type: WASMGC_CLASS) -> INSTRUCTION is
+            let index mut = 0
+
+            if _displayers.try_get_value(type, index ref) then
+                return INDEX_INSTRUCTION(Opcode.REF_FUNC, index)
+            fi
+
+            return _no_displayer
+        si
+
+        _no_displayer: INSTRUCTION => HEAP_TYPE_INSTRUCTION(Opcode.REF_NULL, HEAP_TYPE.of_abstract(AbstractHeapType.FUNC))
+
         _closure_struct() -> STRUCT_TYPE =>
             STRUCT_TYPE([
                 FIELD_TYPE.of_reference(VALUE_TYPE.of_type_index(DESCRIPTOR_TYPE_INDEX, false), false),
@@ -979,7 +1035,7 @@ namespace IR.WasmGC is
                 initialiser.add(HEAP_TYPE_INSTRUCTION(Opcode.REF_NULL, HEAP_TYPE.of_abstract(AbstractHeapType.STRUCT)))
             fi
 
-            _end_descriptor(initialiser)
+            _end_descriptor(initialiser, _displayer_of(array))
         si
 
         /// The global holding the descriptor of the class the elements of
@@ -1082,9 +1138,11 @@ namespace IR.WasmGC is
         superclass_of(type: WASMGC_CLASS) -> WASMGC_CLASS? => _superclass_of(type)
 
         // A descriptor's type object is made the first time one is asked
-        // for, so every descriptor starts without one.
-        _end_descriptor(initialiser: LIST[INSTRUCTION]) is
+        // for, so every descriptor starts without one; its displayer is
+        // known when the descriptor is built.
+        _end_descriptor(initialiser: LIST[INSTRUCTION], displayer: INSTRUCTION) is
             initialiser.add(HEAP_TYPE_INSTRUCTION(Opcode.REF_NULL, HEAP_TYPE.of_abstract(AbstractHeapType.STRUCT)))
+            initialiser.add(displayer)
             initialiser.add(TYPE_INSTRUCTION(Opcode.STRUCT_NEW, DESCRIPTOR_TYPE_INDEX))
         si
 
@@ -1156,7 +1214,8 @@ namespace IR.WasmGC is
                 FIELD_TYPE.of_reference(VALUE_TYPE.of_type_index(DESCRIPTOR_TYPE_INDEX, true), false),
                 FIELD_TYPE.of_reference(VALUE_TYPE.of_type_index(CHARS_TYPE_INDEX, false), false),
                 FIELD_TYPE.of_reference(VALUE_TYPE.of_abstract(AbstractHeapType.STRUCT), false),
-                FIELD_TYPE.of_reference(VALUE_TYPE.of_abstract(AbstractHeapType.STRUCT), true)
+                FIELD_TYPE.of_reference(VALUE_TYPE.of_abstract(AbstractHeapType.STRUCT), true),
+                FIELD_TYPE.of_reference(VALUE_TYPE.of_abstract(AbstractHeapType.FUNC), false)
             ])
 
         // Every scalar a program can box: a box is a final struct holding
@@ -1316,7 +1375,7 @@ namespace IR.WasmGC is
                 initialiser.add(HEAP_TYPE_INSTRUCTION(Opcode.REF_NULL, HEAP_TYPE.of_abstract(AbstractHeapType.STRUCT)))
             fi
 
-            _end_descriptor(initialiser)
+            _end_descriptor(initialiser, _displayer_of(type))
         si
 
         // A class's static fields are globals, each instantiation of a
@@ -1462,7 +1521,7 @@ namespace IR.WasmGC is
         /// not a struct the registry holds. An optional struct is not one:
         /// it is a reference that can be null.
         struct_of(type: Type?) -> WASMGC_CLASS? is
-            if !type? \/ type.is_optional \/ !type.is_value_type then
+            if !type? \/ type.is_optional \/ !type.is_value_type \/ WASMGC_TYPES.scalar(type)? then
                 return null
             fi
 
@@ -1765,6 +1824,17 @@ namespace IR.WasmGC is
         ///
         /// - local: the local to ask about
         is_cell(local: IR.LOCAL) -> bool => _cells.contains(local)
+
+        /// Records that the program boxes a value in `box`, which makes the
+        /// methods the box answers reachable.
+        note_boxed(box: WASMGC_CLASS) is
+            _boxes_made.add(box)
+        si
+
+        /// Whether a value of `type` can exist: a box only where something
+        /// boxes a value in it.
+        is_instantiated(type: WASMGC_CLASS) -> bool =>
+            !_boxed.contains_key(type) \/ _boxes_made.contains(type)
 
         /// The struct type a value of the scalar `type` is boxed in, or null
         /// where `type` is not a scalar.

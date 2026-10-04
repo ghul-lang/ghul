@@ -1,0 +1,250 @@
+namespace IR.WasmGC is
+    use Wasm.FUNCTION
+    use Wasm.FUNC_TYPE
+    use Wasm.INSTRUCTION
+    use Wasm.SIMPLE_INSTRUCTION
+    use Wasm.INDEX_INSTRUCTION
+    use Wasm.HEAP_TYPE_INSTRUCTION
+    use Wasm.BLOCK_INSTRUCTION
+    use Wasm.BLOCK_TYPE
+    use Wasm.Opcode
+
+    use Collections.LIST
+
+    use Semantic.Symbols.Function
+    use Semantic.Symbols.Property
+
+    use IR.Emitter.SRM_MEMBER_ORDER
+    use IR.Emitter.SRM_EMITTED_TYPE
+
+    /// The displayers: for each class with no text of its own, a function
+    /// that writes a value of it for display through the core library's
+    /// display state, as its type and its public members.
+    ///
+    /// A displayer is reached through its class's descriptor, and only
+    /// where the program renders values for display at all.
+    class WASMGC_DISPLAY is
+        _registry: WASMGC_TYPE_REGISTRY
+
+        init(registry: WASMGC_TYPE_REGISTRY) is
+            _registry = registry
+        si
+
+        /// Numbers every function a displayer calls, for each class the
+        /// walk has reached so far.
+        number(numbering: WASMGC_FUNCTION_NUMBERING) is
+            if let helpers = _helpers() then
+                numbering.index_of(helpers.begin)
+                numbering.index_of(helpers.end)
+
+                for type in _registry.classes do
+                    if _shows_members(type) then
+                        for member in _members(type) do
+                            numbering.index_of(member.getter)
+                            numbering.index_of(_member_helper(helpers.member, member.type))
+                        od
+                    fi
+                od
+            fi
+        si
+
+        /// Reserves the displayer of each class that has one, once the walk
+        /// has numbered everything they call, and records it in the class's
+        /// descriptor.
+        reserve(numbering: WASMGC_FUNCTION_NUMBERING, strings: WASMGC_STRINGS?) is
+            let helpers = _helpers()
+
+            if !helpers? \/ !strings? then
+                return
+            fi
+
+            for type in _registry.classes do
+                if _shows_members(type) then
+                    if let body = _body(type, helpers, numbering, strings) then
+                        let signature = _registry.display_signature
+
+                        _registry.set_displayer(
+                            type,
+                            numbering.reserve(() -> FUNCTION => FUNCTION(signature, [], body)))
+                    fi
+                fi
+            od
+        si
+
+        // The display state's methods a displayer calls: the opening with
+        // the type's name, one member, and the close.
+        _helpers() -> (state: WASMGC_CLASS, begin: WASMGC_FUNCTION, member: Function, end: WASMGC_FUNCTION)? is
+            if let state = _registry.display_state then
+                let methods = SRM_MEMBER_ORDER.methods(SRM_EMITTED_TYPE(state.definition))
+
+                let begin = _named(methods, "_begin_members")
+                let member = _named(methods, "_member")
+                let end = _named(methods, "_end_members")
+
+                if begin? /\ member? /\ end? then
+                    return (
+                        state = state,
+                        begin = WASMGC_FUNCTION(begin, state.type_map),
+                        member = member,
+                        end = WASMGC_FUNCTION(end, state.type_map))
+                fi
+            fi
+
+            return null
+        si
+
+        _named(methods: Collections.Iterable[Function], name: string) -> Function? is
+            for method in methods do
+                if method.name =~ name then
+                    return method
+                fi
+            od
+
+            return null
+        si
+
+        // The display state's member method, at the type of one member.
+        _member_helper(member: Function, type: Semantic.Types.Type) -> WASMGC_FUNCTION is
+            let map = Collections.MAP[Semantic.Symbols.Symbol, Semantic.Types.Type]()
+
+            map[member.generic_arguments[0].symbol] = type
+
+            return WASMGC_FUNCTION(member, map)
+        si
+
+        // Whether a value of `type` is displayed as its type and members:
+        // a class of the program's own, with no `to_string` of its own or
+        // inherited from anything but the root.
+        _shows_members(type: WASMGC_CLASS) -> bool is
+            let definition = type.definition
+
+            if !_registry.is_object_type(type) \/ _registry.is_box(type) \/ _registry.is_array(type) \/
+                definition.is_trait \/ definition.is_object \/ type.definition == _registry.display_state?.definition
+            then
+                return false
+            fi
+
+            if _registry.string_type_index? /\ _registry.type_index(type) =~ _registry.string_type_index then
+                return false
+            fi
+
+            let current: WASMGC_CLASS? mut = type
+
+            while current? /\ !current.definition.is_object do
+                for method in SRM_MEMBER_ORDER.methods(SRM_EMITTED_TYPE(current.definition)) do
+                    if method.name =~ "to_string" /\ method.is_instance /\ method.arguments.count == 0 then
+                        return false
+                    fi
+                od
+
+                current = _registry.superclass_of(current)
+            od
+
+            return true
+        si
+
+        // The public instance properties of `type` and of its ancestors,
+        // each with the getter that reads it at the class's type arguments.
+        _members(type: WASMGC_CLASS) -> Collections.List[(name: string, getter: WASMGC_FUNCTION, type: Semantic.Types.Type)] is
+            let result = LIST[(name: string, getter: WASMGC_FUNCTION, type: Semantic.Types.Type)]()
+
+            let current: WASMGC_CLASS? mut = type
+
+            while current? /\ !current.definition.is_object do
+                for property in SRM_MEMBER_ORDER.properties(SRM_EMITTED_TYPE(current.definition)) do
+                    if let getter = property.read_function /\ _is_shown(property) then
+                        if let member_type = current.specialize(property.type) then
+                            result.add((name = property.name, getter = WASMGC_FUNCTION(getter, current.type_map), type = member_type))
+                        fi
+                    fi
+                od
+
+                current = _registry.superclass_of(current)
+            od
+
+            return result
+        si
+
+        // A member a program names: public, and not one the compiler made
+        // up, which carries a `$`.
+        _is_shown(property: Property) -> bool =>
+            property.is_instance /\ property.name.length > 0 /\ !property.name.starts_with('_') /\ !property.name.contains('$')
+
+        // The type as a program names it: a variant after its union's
+        // name, and the type arguments after a generic's.
+        _display_name(type: WASMGC_CLASS) -> string is
+            let name mut = type.definition.name
+
+            if type.definition.is_variant then
+                if let owner = _registry.superclass_of(type) then
+                    name = "{owner.definition.name}.{name}"
+                fi
+            fi
+
+            if type.arguments.count > 0 then
+                name = "{name}[{type.arguments |> Ghul.Pipes.map(a => a.short_description) |> Ghul.Pipes.join(", ")}]"
+            fi
+
+            return name
+        si
+
+        _body(
+            type: WASMGC_CLASS,
+            helpers: (state: WASMGC_CLASS, begin: WASMGC_FUNCTION, member: Function, end: WASMGC_FUNCTION),
+            numbering: WASMGC_FUNCTION_NUMBERING,
+            strings: WASMGC_STRINGS
+        ) -> LIST[INSTRUCTION]? is
+            let state_type = Wasm.HEAP_TYPE.of_type_index(_registry.type_index(helpers.state)!)
+
+            let begin = numbering.indexed(helpers.begin)
+            let end = numbering.indexed(helpers.end)
+
+            if !begin? \/ !end? then
+                return null
+            fi
+
+            let body = LIST[INSTRUCTION]()
+
+            body.add(INDEX_INSTRUCTION(Opcode.LOCAL_GET, 1))
+            body.add(HEAP_TYPE_INSTRUCTION(Opcode.REF_CAST_NULL, state_type))
+            body.add(INDEX_INSTRUCTION(Opcode.GLOBAL_GET, strings.literal(_display_name(type))))
+            body.add(INDEX_INSTRUCTION(Opcode.CALL, begin))
+
+            let members = LIST[INSTRUCTION]()
+
+            for member in _members(type) do
+                let getter = numbering.indexed(member.getter)
+                let helper = numbering.indexed(_member_helper(helpers.member, member.type))
+
+                if !getter? \/ !helper? then
+                    return null
+                fi
+
+                members.add(INDEX_INSTRUCTION(Opcode.LOCAL_GET, 1))
+                members.add(HEAP_TYPE_INSTRUCTION(Opcode.REF_CAST_NULL, state_type))
+                members.add(INDEX_INSTRUCTION(Opcode.GLOBAL_GET, strings.literal(member.name)))
+                members.add(INDEX_INSTRUCTION(Opcode.LOCAL_GET, 0))
+
+                if let receiver = _registry.receiver_type(member.getter)?.heap_type() then
+                    members.add(HEAP_TYPE_INSTRUCTION(Opcode.REF_CAST_NULL, receiver))
+                fi
+
+                members.add(INDEX_INSTRUCTION(Opcode.CALL, getter))
+                members.add(INDEX_INSTRUCTION(Opcode.CALL, helper))
+
+                // The state answers false once its element budget is
+                // spent.
+                members.add(SIMPLE_INSTRUCTION(Opcode.I32_EQZ))
+                members.add(INDEX_INSTRUCTION(Opcode.BR_IF, 0))
+            od
+
+            body.add(BLOCK_INSTRUCTION(Opcode.BLOCK, BLOCK_TYPE(), members))
+
+            body.add(INDEX_INSTRUCTION(Opcode.LOCAL_GET, 1))
+            body.add(HEAP_TYPE_INSTRUCTION(Opcode.REF_CAST_NULL, state_type))
+            body.add(INDEX_INSTRUCTION(Opcode.CALL, end))
+
+            return body
+        si
+    si
+si
