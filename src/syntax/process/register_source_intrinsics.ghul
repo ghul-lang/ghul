@@ -18,16 +18,19 @@ namespace Syntax.Process is
     // from the declaration.
     class REGISTER_SOURCE_INTRINSICS: ScopedVisitor is
         _namespaces: Semantic.NAMESPACES
+        _innate_symbol_lookup: Semantic.Lookups.InnateSymbolLookup
 
         init(
             logger: Logger,
             symbol_table: Semantic.SYMBOL_TABLE,
-            namespaces: Semantic.NAMESPACES
+            namespaces: Semantic.NAMESPACES,
+            innate_symbol_lookup: Semantic.Lookups.InnateSymbolLookup
         )
         is
             super.init(logger, symbol_table, namespaces)
 
             _namespaces = namespaces
+            _innate_symbol_lookup = innate_symbol_lookup
         si
 
         apply(root: Trees.Node) is
@@ -44,6 +47,14 @@ namespace Syntax.Process is
             fi
 
             let declaration = cast Semantic.Symbols.Function(symbol)
+
+            // A scalar type orders by an opcode, so an operator expression
+            // reaches the intrinsic rather than a `<>` member the type
+            // declares for its `Comparable` implementation, as it does for the
+            // member reflected from a .NET scalar.
+            if declaration.name =~ "<>" /\ _orders_by_opcode(declaration.owner) then
+                declaration.is_hidden_from_operator_resolution = true
+            fi
 
             if !declaration.intrinsic_operation? \/ declaration.is_innate then
                 return
@@ -110,6 +121,18 @@ namespace Syntax.Process is
                 intrinsic.generic_argument_constraint_kinds = declaration.generic_argument_constraint_kinds
                 intrinsic.generic_argument_has_constructor_constraint = declaration.generic_argument_has_constructor_constraint
             fi
+        si
+
+        _orders_by_opcode(owner: Semantic.Scope?) -> bool is
+            if let classy = cast Semantic.Symbols.Classy?(owner) then
+                if let built_in = classy.built_in_type then
+                    return built_in != Semantic.Symbols.BuiltInType.VOID /\ built_in != Semantic.Symbols.BuiltInType.BOOL
+                fi
+
+                return classy == _innate_symbol_lookup.get_decimal_type().symbol
+            fi
+
+            return false
         si
 
         _operator_home(declaration: Semantic.Symbols.Function) -> Semantic.Symbols.Classy? is
