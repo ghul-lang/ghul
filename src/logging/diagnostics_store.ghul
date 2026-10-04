@@ -656,6 +656,18 @@ namespace Logging is
             get_diagnostics_list(source_path).add(message)
         si
 
+        // Whether the file at `source_path` already carries a diagnostic
+        // with the code `code`.
+        has_code(source_path: string, code: string) -> bool is
+            for d in get_diagnostics_list(source_path).diagnostics do
+                if d.code =~ code then
+                    return true
+                fi
+            od
+
+            return false
+        si
+
         add_inlay(source_path: string, inlay: INLAY) is
             get_diagnostics_list(source_path).add_inlay(inlay)
         si
@@ -1044,6 +1056,22 @@ namespace Logging is
 
         exception(location: LOCATION, exception: Exception, message: string) is
             debug_always("{location} exception: {exception.to_string().replace_line_endings(" ")}")
+
+            // Every pass over every file fails the same way when a built-in
+            // type is missing, so the file carries the cause once, at its
+            // start, as an error an editor shows. It goes to the base state,
+            // since the failure can leave speculation open.
+            if let missing: MissingBuiltInException = exception then
+                let start = LOCATION(location.file_name, 1, 1, 1, 1)
+
+                if !_base_state.has_code(location.file_name, MissingBuiltInException.CODE) then
+                    _base_state.add_diagnostic_message(
+                        location.file_name,
+                        DIAGNOSTIC_MESSAGE(is_analysis, is_compile_expressions, DiagnosticSeverity.ERROR, start, MissingBuiltInException.CODE, missing.message))
+                fi
+
+                return
+            fi
 
             if _states.count == 0 then
                 debug_always("diagnostics store: exception depth {_states.count}: {location}: {message}: {exception}")
