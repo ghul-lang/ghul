@@ -208,6 +208,21 @@ non-obvious invariant, an ordering requirement, a workaround whose reason isn't
 visible from the code. Don't narrate what the code does, and don't write
 comments that only make sense to someone who read the pull request.
 
+Doc comments (`///`) are the exception, and are required rather than
+discouraged on anything that is, or is meant to become, a stable interface: the
+public types and members of the runtime and the core library, the `wasm/`
+library, the IR nodes, the `Backend` trait and its peers, the analysis
+protocol, and the `ghul-cli` surface. New public declarations there ship with
+one, and a change that touches an existing undocumented one adds it. They are
+not needed on `_`-prefixed declarations, locals or test code.
+
+A doc comment says what a user of the declaration needs: what it does, its
+arguments as `- name: description` bullets, and its contract and edge cases. It
+does not say how the declaration is implemented or why it changed. Keep it
+brief, since it is what an editor shows on hover: a sentence or two plus the
+argument bullets. The format is described under "comments" in
+[GHUL.md](./GHUL.md).
+
 ## Pull requests
 
 Pull requests are squash-merged, so **the description becomes the commit message

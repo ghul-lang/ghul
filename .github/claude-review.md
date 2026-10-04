@@ -51,6 +51,10 @@ For changes here, CONTRIBUTING.md requires:
 
 Flag type-system PRs that don't follow this.
 
+### Doc comments on stable interfaces
+
+Flag a new public declaration without a `///` doc comment where it forms a stable interface: an IR node, a member of the `Backend` trait or its peers, the public surface of the `wasm/` library, the analysis protocol, or the `ghul-cli` surface. Also flag a doc comment that describes implementation or history rather than the contract, or that runs past a sentence or two plus `- name: description` argument bullets - it renders on hover. Don't flag `_`-prefixed declarations, locals or test code, or an existing undocumented declaration the diff doesn't touch. CONTRIBUTING.md, under "Documentation", is the authority.
+
 ### Rendered text is never identity
 
 **Reject any new code that renders a symbol, type, function, signature or other semantic entity to text and then uses that text as the entity's identity.** That covers a `to_string()`, qualified name, description or mangled name used as a map or cache key, a set member, a dedup discriminator, an equality or "is this the same thing?" test, or a match against a literal name. The correct spelling is the entity itself - reference identity, or `=~` plus `get_hash_code` - or an explicit non-text key type built from the fields that actually distinguish it.
