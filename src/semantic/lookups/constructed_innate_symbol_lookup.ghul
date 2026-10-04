@@ -30,6 +30,13 @@ namespace Semantic.Lookups is
         _iterator: Semantic.Symbols.Classy
         _array: Semantic.Symbols.Classy
         _is_array_wired: bool
+        _wired_list_ancestor: Type?
+
+        // What construction declared into `Ghul.Intrinsics`, and the
+        // members each of those started with, so that a rebuild can put
+        // back exactly that.
+        _built_ins: LIST[Semantic.Symbols.Symbol]
+        _built_in_members: LIST[(scope: Semantic.Symbols.Scoped, names: Collections.SET[string])]
         _reported_missing: Collections.SET[string]
 
         init(..) is
@@ -128,6 +135,21 @@ namespace Semantic.Lookups is
                         "Iterator",
                         LIST[string](["T"]),
                         intrinsics))!
+
+            _built_ins = LIST[Semantic.Symbols.Symbol](intrinsics.symbols)
+            _built_in_members = LIST[(scope: Semantic.Symbols.Scoped, names: Collections.SET[string])]()
+
+            for symbol in _built_ins do
+                if let scoped: Semantic.Symbols.Scoped = symbol then
+                    let names = Collections.SET[string]()
+
+                    for member in scoped.symbols do
+                        names.add(member.name)
+                    od
+
+                    _built_in_members.add((scoped, names))
+                fi
+            od
         si
 
         // `Ghul.Intrinsics` is materialised before any pass runs on
@@ -512,8 +534,41 @@ namespace Semantic.Lookups is
             let arguments = LIST[Type]()
             arguments.add(element)
 
-            _array.add_ancestor(Types.GENERIC(LOCATION.internal, list, arguments))
+            let ancestor = Types.GENERIC(LOCATION.internal, list, arguments)
+
+            _array.add_ancestor(ancestor)
+            _wired_list_ancestor = ancestor
             _is_array_wired = true
+        si
+
+        // Puts the built-ins back as construction left them: what the
+        // last build pulled down into them, what its partial blocks added
+        // and the List it wired arrays to all belong to symbols the
+        // rebuild has abandoned.
+        redeclare_built_ins() is
+            for (scope, names) in _built_in_members do
+                if let classy: Semantic.Symbols.Classy = scope then
+                    classy.reset_pulled_down_symbols()
+                fi
+
+                for member in LIST[Semantic.Symbols.Symbol](scope.symbols) do
+                    if !names.contains(member.name) then
+                        scope.remove_direct(member.name)
+                    fi
+                od
+            od
+
+            if let wired = _wired_list_ancestor then
+                _array.remove_ancestor(wired)
+                _wired_list_ancestor = null
+                _is_array_wired = false
+            fi
+
+            let intrinsics = _intrinsics_namespace()
+
+            for symbol in _built_ins do
+                intrinsics.put_direct(symbol.name, symbol)
+            od
         si
 
         get_int_range_types() -> (exclusive: Type, inclusive: Type)? is
