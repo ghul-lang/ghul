@@ -105,6 +105,9 @@ namespace IR.WasmGC is
         // that live in cells, each of which holds a default box from the
         // start, as a .NET local holds a zeroed value.
         _struct_locals: LIST[(index: int, type: WASMGC_CLASS)]
+        // The reference-typed locals that live in cells, each of which
+        // holds an empty cell from the start.
+        _reference_cell_locals: LIST[int]
 
         // Set while a call is lowered as the receiver of a call on a struct,
         // where an array element it reads is changed in place, not copied.
@@ -194,6 +197,7 @@ namespace IR.WasmGC is
             _resume_states = MAP[Value, LIST[int]]()
             _unsupported = LIST[string]()
             _struct_locals = LIST[(index: int, type: WASMGC_CLASS)]()
+            _reference_cell_locals = LIST[int]()
         si
 
         /// Lowers a whole body, answering its instructions.
@@ -206,7 +210,7 @@ namespace IR.WasmGC is
 
             let body = _end()
 
-            if _struct_locals.count == 0 \/ _registry.discovering then
+            if (_struct_locals.count == 0 /\ _reference_cell_locals.count == 0) \/ _registry.discovering then
                 return body
             fi
 
@@ -214,6 +218,12 @@ namespace IR.WasmGC is
 
             for (index, type) in _struct_locals do
                 result.add_range(_registry.new_instance(type))
+                result.add(INDEX_INSTRUCTION(Opcode.LOCAL_SET, index))
+            od
+
+            for index in _reference_cell_locals do
+                result.add(HEAP_TYPE_INSTRUCTION(Opcode.REF_NULL, HEAP_TYPE.of_abstract(AbstractHeapType.NONE)))
+                result.add(TYPE_INSTRUCTION(Opcode.STRUCT_NEW, _registry.reference_cell_type_index))
                 result.add(INDEX_INSTRUCTION(Opcode.LOCAL_SET, index))
             od
 
@@ -628,6 +638,9 @@ namespace IR.WasmGC is
             if let cell = _cell_index(local) then
                 _local_types.add(VALUE_TYPE.of_type_index(cell, true))
                 _struct_locals.add((index, _registry.box_type(_specialize(local.type))!))
+            elif _reference_cell_of(local)? then
+                _local_types.add(VALUE_TYPE.of_type_index(_registry.reference_cell_type_index, true))
+                _reference_cell_locals.add(index)
             elif let type = _value_type(local.type) then
                 _local_types.add(type)
 
@@ -931,20 +944,22 @@ namespace IR.WasmGC is
 
                 if let cell = _cell_index(variable.ir_local) then
                     _emit(TYPE_FIELD_INSTRUCTION(Opcode.STRUCT_GET, cell, WASMGC_TYPE_REGISTRY.BOX_VALUE))
+                elif let held = _reference_cell_of(variable.ir_local) then
+                    _reference_cell_get(held)
                 fi
             else
                 _report("a load of {load.symbol.name}")
             fi
         si
 
-        // The address of a scalar local is the cell it lives in, which the
-        // local holds in place of the value.
+        // The address of a scalar or reference-typed local is the cell it
+        // lives in, which the local holds in place of the value.
         visit_address(load: Values.Load.LOCAL_VARIABLE) is
             if _struct_of(load.type)? then
                 _variable_get(load)
             elif Values.state_machine_field_for(load.symbol)? then
                 _report("a generator or asynchronous function's local")
-            elif let variable = cast Semantic.Symbols.Variable?(load.symbol) /\ _registry.box_index(_specialize(load.type))? then
+            elif let variable = cast Semantic.Symbols.Variable?(load.symbol) /\ _has_cell(load.type) then
                 _registry.mark_cell(variable.ir_local)
                 _emit(INDEX_INSTRUCTION(Opcode.LOCAL_GET, _local(variable.ir_local)))
             else
@@ -956,6 +971,23 @@ namespace IR.WasmGC is
         // its value directly.
         _cell_index(local: IR.LOCAL) -> int? =>
             if _registry.is_cell(local) then _registry.box_index(_specialize(local.type)) else null fi
+
+        // The type the reference cell `local` lives in holds its value as,
+        // or null where it is not in a reference cell.
+        _reference_cell_of(local: IR.LOCAL) -> VALUE_TYPE? =>
+            if _registry.is_cell(local) then _registry.reference_cell_value_type(_specialize(local.type)) else null fi
+
+        // Whether a reference to a value of `type` is a cell: a box for a
+        // scalar, or a reference cell for a value of reference type.
+        _has_cell(type: Type?) -> bool =>
+            _registry.box_index(_specialize(type))? \/ _registry.reference_cell_value_type(_specialize(type))?
+
+        // Reads the value out of the reference cell on the stack, cast back
+        // to `held`, the type it was stored as.
+        _reference_cell_get(held: VALUE_TYPE) is
+            _emit(TYPE_FIELD_INSTRUCTION(Opcode.STRUCT_GET, _registry.reference_cell_type_index, WASMGC_TYPE_REGISTRY.REFERENCE_CELL_VALUE))
+            _emit(HEAP_TYPE_INSTRUCTION(Opcode.REF_CAST_NULL, held.heap_type()!))
+        si
 
         visit(load: Values.Load.ARGUMENT) is
             _emit(INDEX_INSTRUCTION(Opcode.LOCAL_GET, load.index + _receiver_offset))
@@ -1334,10 +1366,10 @@ namespace IR.WasmGC is
             assert false else "unresolved need store"
         si
 
-        // A store through a reference to a scalar sets the cell's value. One
-        // through a reference to a struct changes the box it refers
-        // to in place, field by field, so whatever else holds that box
-        // sees the new value, as it would on .NET.
+        // A store through a reference to a scalar or to a value of reference
+        // type sets the cell's value. One through a reference to a struct
+        // changes the box it refers to in place, field by field, so whatever
+        // else holds that box sees the new value, as it would on .NET.
         visit(store: Values.Store.INDIRECT) is
             if let held = _struct_of(store.type) then
                 let index = _registry.type_index(held)!
@@ -1368,6 +1400,11 @@ namespace IR.WasmGC is
 
                 _normalise_for(store.type)
                 _emit(TYPE_FIELD_INSTRUCTION(Opcode.STRUCT_SET, cell, WASMGC_TYPE_REGISTRY.BOX_VALUE))
+            elif _registry.reference_cell_value_type(_specialize(store.type))? then
+                gen(store.address)
+                gen(store.value)
+
+                _emit(TYPE_FIELD_INSTRUCTION(Opcode.STRUCT_SET, _registry.reference_cell_type_index, WASMGC_TYPE_REGISTRY.REFERENCE_CELL_VALUE))
             else
                 _report("a store through a reference")
             fi
@@ -1969,8 +2006,9 @@ namespace IR.WasmGC is
                 _report("the address of a default value")
             fi
         si
-        // A reference to a struct is its box, and one to a scalar the cell
-        // the scalar lives in. Dereferencing one reads it,
+        // A reference to a struct is its box, and one to a scalar or a value
+        // of reference type the cell the value lives in. Dereferencing one
+        // reads it,
         // which for a mutable struct is a copy.
         visit(deref: Values.DEREF) is
             if _struct_of(deref.type)? then
@@ -1979,6 +2017,9 @@ namespace IR.WasmGC is
             elif let cell = _registry.box_index(_specialize(deref.type)) then
                 gen(deref.value)
                 _emit(TYPE_FIELD_INSTRUCTION(Opcode.STRUCT_GET, cell, WASMGC_TYPE_REGISTRY.BOX_VALUE))
+            elif let held = _registry.reference_cell_value_type(_specialize(deref.type)) then
+                gen(deref.value)
+                _reference_cell_get(held)
             else
                 _report("a reference")
             fi
@@ -1999,7 +2040,7 @@ namespace IR.WasmGC is
                 _struct_receiver(address.value)
             elif _optional_inner(address.value.type)? then
                 gen(address.value)
-            elif _registry.box_index(_specialize(address.value.type))? then
+            elif _has_cell(address.value.type) then
                 gen_address(address.value)
             else
                 _report("a reference")
@@ -3919,6 +3960,14 @@ namespace IR.WasmGC is
 
                     _normalise_for(variable.ir_local.type)
                     _emit(TYPE_FIELD_INSTRUCTION(Opcode.STRUCT_SET, cell, WASMGC_TYPE_REGISTRY.BOX_VALUE))
+                    return
+                fi
+
+                if _reference_cell_of(variable.ir_local)? then
+                    _emit(INDEX_INSTRUCTION(Opcode.LOCAL_GET, _local(variable.ir_local)))
+                    gen(store.value)
+
+                    _emit(TYPE_FIELD_INSTRUCTION(Opcode.STRUCT_SET, _registry.reference_cell_type_index, WASMGC_TYPE_REGISTRY.REFERENCE_CELL_VALUE))
                     return
                 fi
 

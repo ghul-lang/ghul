@@ -122,6 +122,9 @@ namespace IR.WasmGC is
         /// The field of a box holding the value.
         BOX_VALUE: int static => 1
 
+        /// The field of a reference cell holding the value.
+        REFERENCE_CELL_VALUE: int static => 0
+
         _module: MODULE
         _object_definition: Classy?
         _object: WASMGC_CLASS?
@@ -181,6 +184,8 @@ namespace IR.WasmGC is
         _dispatch: WASMGC_DISPATCH
 
         _closure_type_index: int
+        _reference_cell_type_index: int
+        _reference_cells_wanted: bool
         _closure_descriptor: LIST[INSTRUCTION]
         _closure_descriptor_global: int
         _closure_thunks: LIST[int]
@@ -524,6 +529,21 @@ namespace IR.WasmGC is
             group.add(SUB_TYPE(_closure_struct(), true, [OBJECT_TYPE_INDEX]))
 
             _add_array_types(group)
+
+            // A reference to a value of reference type is a cell holding the
+            // value. One cell type serves every such type, so a read casts the
+            // value back to the type it was stored as. Its index is fixed
+            // before the trait table, whose signatures can take one, and it is
+            // added only where discovery found a use for it.
+            if _reference_cells_wanted then
+                _reference_cell_type_index = DESCRIPTOR_TYPE_INDEX + group.count
+
+                group.add(
+                    SUB_TYPE(
+                        STRUCT_TYPE([FIELD_TYPE.of_reference(VALUE_TYPE.of_abstract(AbstractHeapType.ANY), true)]),
+                        true,
+                        []))
+            fi
 
             // An array type implements the traits the array family declares
             // as a class does, so it is planned with the classes.
@@ -1699,6 +1719,8 @@ namespace IR.WasmGC is
                     return VALUE_TYPE.of_type_index(index, true)
                 elif let held = struct_of(element) then
                     return VALUE_TYPE.of_type_index(type_index(held)!, true)
+                elif reference_cell_value_type(element)? then
+                    return VALUE_TYPE.of_type_index(reference_cell_type_index, true)
                 fi
 
                 return null
@@ -1922,6 +1944,39 @@ namespace IR.WasmGC is
         /// boxes a value in it.
         is_instantiated(type: WASMGC_CLASS) -> bool =>
             !_boxed.contains_key(type) \/ _boxes_made.contains(type)
+
+        /// The struct type a reference to a value of reference type is held
+        /// in: a cell with one field, `REFERENCE_CELL_VALUE`, holding any
+        /// reference. While discovering, the root's.
+        reference_cell_type_index: int is
+            if discovering then
+                _reference_cells_wanted = true
+
+                return OBJECT_TYPE_INDEX
+            fi
+
+            assert _reference_cells_wanted else "a reference cell discovery did not find"
+
+            return _reference_cell_type_index
+        si
+
+        /// The type a value of `type` is held in where a reference to it is
+        /// a reference cell, or null where `type` is a scalar or a struct,
+        /// whose references are their boxes, or a type the target cannot
+        /// hold.
+        ///
+        /// - type: the type referred to, with no type parameters left in it
+        reference_cell_value_type(type: Type?) -> VALUE_TYPE? is
+            if box_index(type)? \/ struct_of(type)? then
+                return null
+            fi
+
+            if let held = value_type(type) /\ held.heap_type()? then
+                return held
+            fi
+
+            return null
+        si
 
         /// The struct type a value of the scalar `type` is boxed in, or null
         /// where `type` is not a scalar.
