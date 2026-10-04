@@ -14,7 +14,7 @@ ghūl keywords are lowercase. Identifiers follow a convention that the compiler 
 - `PascalCase` — namespaces, traits, abstract classes, exception classes, unions, enums
 - `UPPER_SNAKE_CASE` — concrete classes, structs, variants, enum members
 
-An exception class, one that derives from `Exception` directly or through other classes, is `PascalCase` whether or not it is abstract: it is named where it is thrown and where it is caught, which is where naming the concrete type is right, and every exception imported from .NET is spelled that way already.
+An exception class, `Exception` itself or one that derives from it directly or through other classes, is `PascalCase` whether or not it is abstract: it is named where it is thrown and where it is caught, which is where naming the concrete type is right, and every exception imported from .NET is spelled that way already.
 
 A `static` field or property reads as a named constant, so it accepts either `snake_case` or `UPPER_SNAKE_CASE`.
 
