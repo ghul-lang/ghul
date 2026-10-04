@@ -3,6 +3,9 @@ namespace IR.WasmGC is
     use Wasm.SUB_TYPE
     use Wasm.STRUCT_TYPE
     use Wasm.FIELD_TYPE
+    use Wasm.ARRAY_TYPE
+    use Wasm.PackedType
+    use Wasm.TYPE_LENGTH_INSTRUCTION
     use Wasm.VALUE_TYPE
     use Wasm.HEAP_TYPE
     use Wasm.NumericType
@@ -48,16 +51,22 @@ namespace IR.WasmGC is
     /// superclass's fields in order, then its own. A class nothing derives
     /// from is final.
     class WASMGC_TYPE_REGISTRY is
-        // Every struct type goes in one recursion group at the start of the
-        // type section. WasmGC treats two types as the same when their
+        // Every struct type goes in one recursion group near the start of
+        // the type section. WasmGC treats two types as the same when their
         // groups have the same shape, so separate groups would make classes
         // with the same fields interchangeable.
 
+        /// The array of UTF-16 code units a string holds, first in the type
+        /// section and in a group of its own. It has to be exactly the
+        /// standalone mutable array of i16 the host's string builtins take,
+        /// though nothing writes one after it is built.
+        CHARS_TYPE_INDEX: int static => 0
+
         /// The descriptor's struct type, first in the recursion group.
-        DESCRIPTOR_TYPE_INDEX: int static => 0
+        DESCRIPTOR_TYPE_INDEX: int static => 1
 
         /// The root's struct type, which every class derives from.
-        OBJECT_TYPE_INDEX: int static => 1
+        OBJECT_TYPE_INDEX: int static => 2
 
         /// The descriptor field holding the class's number.
         DESCRIPTOR_CLASS_ID: int static => 0
@@ -70,8 +79,19 @@ namespace IR.WasmGC is
         /// for the root.
         DESCRIPTOR_SUPERCLASS: int static => 2
 
+        /// The descriptor field holding the type's name, as the UTF-16 code
+        /// units a string holds.
+        DESCRIPTOR_NAME: int static => 3
+
+        /// The string field caching its hash code.
+        STRING_HASH: int static => 1
+
+        /// The string field holding its UTF-16 code units.
+        STRING_CHARS: int static => 2
+
         _module: MODULE
         _object: Classy?
+        _string: Classy?
 
         _numbering: CLASS_ID_NUMBERING[Classy]
 
@@ -104,8 +124,15 @@ namespace IR.WasmGC is
 
         /// A registry for `module`, whose classes derive from `object`.
         init(module: MODULE, object: Classy?) is
+            init(module, object, null)
+        si
+
+        /// A registry for `module`, whose classes derive from `object`, and
+        /// whose strings are instances of `string_type`.
+        init(module: MODULE, object: Classy?, string_type: Classy?) is
             _module = module
             _object = object
+            _string = string_type
 
             _numbering = CLASS_ID_NUMBERING[Classy]()
 
@@ -137,6 +164,11 @@ namespace IR.WasmGC is
             let added = Collections.SET[Classy]()
             added.add(object)
 
+            if let string_type = _string then
+                _numbering.add(string_type, object)
+                added.add(string_type)
+            fi
+
             for type in emitted do
                 if let declared = type.declared /\ _is_object_type(declared) then
                     _add_class(declared, added)
@@ -151,6 +183,10 @@ namespace IR.WasmGC is
                 _type_indices[ordered[i]] = OBJECT_TYPE_INDEX + i
                 _classes_by_index[OBJECT_TYPE_INDEX + i] = ordered[i]
             od
+
+            let chars = _module.add_sub_type(SUB_TYPE(ARRAY_TYPE(FIELD_TYPE.of_packed(PackedType.I16, true)), true, []))
+
+            assert chars == CHARS_TYPE_INDEX else "the code unit array must come first"
 
             let group = LIST[SUB_TYPE]()
 
@@ -250,7 +286,8 @@ namespace IR.WasmGC is
             STRUCT_TYPE([
                 FIELD_TYPE(NumericType.I32, false),
                 FIELD_TYPE(NumericType.I32, false),
-                FIELD_TYPE.of_reference(VALUE_TYPE.of_type_index(DESCRIPTOR_TYPE_INDEX, true), false)
+                FIELD_TYPE.of_reference(VALUE_TYPE.of_type_index(DESCRIPTOR_TYPE_INDEX, true), false),
+                FIELD_TYPE.of_reference(VALUE_TYPE.of_type_index(CHARS_TYPE_INDEX, false), false)
             ])
 
         _sub_type(type: Classy) -> SUB_TYPE is
@@ -263,6 +300,23 @@ namespace IR.WasmGC is
                 _layouts[type] = layout
 
                 return SUB_TYPE(_struct(layout), false, [])
+            fi
+
+            if type == _string then
+                layout.add(VALUE_TYPE.of_type_index(DESCRIPTOR_TYPE_INDEX, false))
+                layout.add(VALUE_TYPE.of_numeric(NumericType.I32))
+                layout.add(VALUE_TYPE.of_type_index(CHARS_TYPE_INDEX, false))
+
+                _layouts[type] = layout
+
+                return SUB_TYPE(
+                    STRUCT_TYPE([
+                        FIELD_TYPE.of_reference(layout[0], false),
+                        FIELD_TYPE(NumericType.I32, true),
+                        FIELD_TYPE.of_reference(layout[2], false)
+                    ]),
+                    true,
+                    [OBJECT_TYPE_INDEX])
             fi
 
             let parent = _superclass_of(type) ?? _object!
@@ -333,6 +387,10 @@ namespace IR.WasmGC is
                 initialiser.add(INDEX_INSTRUCTION(Opcode.GLOBAL_GET, _descriptor_globals[_superclass_of(type) ?? _object!]))
             fi
 
+            for instruction in chars_of(type.qualified_name) do
+                initialiser.add(instruction)
+            od
+
             initialiser.add(TYPE_INSTRUCTION(Opcode.STRUCT_NEW, DESCRIPTOR_TYPE_INDEX))
 
             _descriptor_globals[type] =
@@ -396,6 +454,31 @@ namespace IR.WasmGC is
 
             return result
         si
+
+        /// The constant expression that builds the code units of `text`.
+        chars_of(text: string) -> LIST[INSTRUCTION] is
+            let result = LIST[INSTRUCTION]()
+
+            for c in text do
+                result.add(I32_CONSTANT(int(c)))
+            od
+
+            result.add(TYPE_LENGTH_INSTRUCTION(Opcode.ARRAY_NEW_FIXED, CHARS_TYPE_INDEX, text.length))
+
+            return result
+        si
+
+        /// The struct type a string is held in, or null where the registry
+        /// knows no string type.
+        string_type_index: int? => if let string_type = _string then type_index(string_type) else null fi
+
+        /// The array type holding a string's UTF-16 code units.
+        chars_type_index: int => CHARS_TYPE_INDEX
+
+        /// The global holding the string type's descriptor, or null where
+        /// the registry knows no string type.
+        string_descriptor_global: int? =>
+            if let string_type = _string then _descriptor_globals[string_type] else null fi
 
         /// The zero of a numeric type, or the null of a reference type.
         default_value(value_type: VALUE_TYPE) -> INSTRUCTION static =>
