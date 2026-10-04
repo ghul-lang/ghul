@@ -4,7 +4,7 @@ namespace Syntax.Process is
 
     use Logging.Logger
 
-    // Walks the AST after declare-symbols and emits warnings for
+    // Walks the AST after resolve-ancestors and emits warnings for
     // ghūl-source declarations whose names don't match the case
     // convention for their kind:
     //
@@ -13,7 +13,9 @@ namespace Syntax.Process is
     //                       methods, free functions.
     //                       Slug: non-snake-case-name.
     //
-    //   PascalCase        — abstract classes, traits, unions, enums.
+    //   PascalCase        — abstract classes, exception classes (any
+    //                       class with Exception among its ancestors),
+    //                       traits, unions, enums.
     //                       Slug: non-pascal-case-name.
     //
     //   UPPER_SNAKE_CASE  — concrete (instantiable) classes, structs,
@@ -37,12 +39,18 @@ namespace Syntax.Process is
     class CHECK_NAME_CONVENTIONS: Visitor is
         _logger: Logger
         _symbol_table: Semantic.SYMBOL_TABLE
+        _innate_symbol_lookup: Semantic.Lookups.InnateSymbolLookup
 
-        init(logger: Logger, symbol_table: Semantic.SYMBOL_TABLE) is
+        init(
+            logger: Logger,
+            symbol_table: Semantic.SYMBOL_TABLE,
+            innate_symbol_lookup: Semantic.Lookups.InnateSymbolLookup
+        ) is
             super.init()
 
             _logger = logger
             _symbol_table = symbol_table
+            _innate_symbol_lookup = innate_symbol_lookup
         si
 
         apply(source_file: Compiler.SOURCE_FILE) is
@@ -105,7 +113,12 @@ namespace Syntax.Process is
             // member is `static` is a static-utility container — never
             // constructed — and conventionally either PascalCase or
             // UPPER_SNAKE_CASE, so either passes.
-            if _is_abstract_class(`class) then
+            // An exception class is named where it is thrown and where it
+            // is caught, which is where naming the concrete type is right,
+            // and every exception imported from .NET is PascalCase already.
+            if _is_exception_class(`class) then
+                _check_pascal(`class.name, "exception class")
+            elif _is_abstract_class(`class) then
                 _check_pascal(`class.name, "abstract class")
             elif _is_static_only_class(`class) then
                 _check_pascal_or_upper_snake(`class.name, "class")
@@ -191,6 +204,45 @@ namespace Syntax.Process is
             fi
 
             _warn(identifier, kind, "non-snake-case-name", "snake_case")
+        si
+
+        // A class is an exception when Exception is among its resolved
+        // ancestors, at any depth. A class whose ancestors did not resolve
+        // has none to find it among, so it is checked as any other class.
+        _is_exception_class(`class: Trees.Definitions.CLASS) -> bool is
+            let classy = cast Semantic.Symbols.Classy?(_symbol_table.scope_for(`class))
+
+            if !classy? \/ classy.ancestors.count == 0 then
+                return false
+            fi
+
+            let exception = _innate_symbol_lookup.get_exception_type().symbol
+            let seen = Collections.SET[Semantic.Symbols.Classy]()
+            let pending = Collections.STACK[Semantic.Symbols.Classy]()
+
+            pending.push(classy)
+
+            while pending.count > 0 do
+                let next = pending.pop()
+
+                if !seen.add(next) then
+                    continue
+                fi
+
+                for ancestor in next.ancestors do
+                    let symbol = ancestor.symbol
+
+                    if symbol == exception then
+                        return true
+                    fi
+
+                    if let ancestor_classy: Semantic.Symbols.Classy = symbol then
+                        pending.push(ancestor_classy)
+                    fi
+                od
+            od
+
+            return false
         si
 
         // A class is abstract — and so follows PascalCase — when its

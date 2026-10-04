@@ -11,8 +11,10 @@ This file is a condensed single-file reference. The full documentation, with a p
 ghūl keywords are lowercase. Identifiers follow a convention that the compiler partly enforces:
 
 - `snake_case` — variables, functions, methods, properties
-- `PascalCase` — namespaces, traits, abstract classes, unions, enums
+- `PascalCase` — namespaces, traits, abstract classes, exception classes, unions, enums
 - `UPPER_SNAKE_CASE` — concrete classes, structs, variants, enum members
+
+An exception class, one that derives from `Exception` directly or through other classes, is `PascalCase` whether or not it is abstract: it is named where it is thrown and where it is caught, which is where naming the concrete type is right, and every exception imported from .NET is spelled that way already.
 
 A `static` field or property reads as a named constant, so it accepts either `snake_case` or `UPPER_SNAKE_CASE`.
 
@@ -31,7 +33,7 @@ An out-of-policy reference from elsewhere *inside* the assembly is reported as a
 The compiler warns when a ghūl-source declaration doesn't match the convention for its kind. Each rule has its own slug, suppressible per declaration, per file, or project-wide:
 
 - `non-snake-case-name` — variables (including `let`, `for` and `catch` locals, and function arguments), functions, methods, properties.
-- `non-pascal-case-name` — abstract classes, traits, unions, enums.
+- `non-pascal-case-name` — abstract classes, exception classes, traits, unions, enums.
 - `non-upper-snake-case-name` — concrete classes, structs, variants, enum members.
 
 An identifier is written in whatever script its author writes in. A letter of any script starts one, and a letter, a digit, a combining mark or a connecting punctuation mark continues one, which is the set C# admits less the format characters: a zero-width joiner or a bidirectional control renders as nothing, so a name carrying one reads as a name it is not, and one inside an identifier is an error naming the character. Only the basic plane is covered, since a character above it is written as a surrogate pair and the scanner reads that as two characters. A symbol is an operator character and a letter is an identifier character, so no character is ever both, and an operator spelled `×` and an identifier spelled `naïve` are each what they look like.
