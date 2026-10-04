@@ -150,6 +150,8 @@ namespace IR.WasmGC is
         // Whether each struct is read-only, inferred once.
         _read_only: MAP[WASMGC_CLASS, bool]
         _cells: Collections.SET[IR.LOCAL]
+        _unbounded: Collections.SET[Classy]
+        _instantiations: Collections.MAP[Classy, int]
         _descriptor_globals: MAP[WASMGC_CLASS, int]
         _unit_variant_globals: MAP[WASMGC_CLASS, int]
         _classes_by_index: MAP[int, WASMGC_CLASS]
@@ -251,6 +253,8 @@ namespace IR.WasmGC is
             _array_storage_types = MAP[int, int]()
 
             _unsupported = LIST[(location: LOCATION, construct: string)]()
+            _unbounded = Collections.SET[Classy]()
+            _instantiations = Collections.MAP[Classy, int]()
 
             _synthesised_methods = MAP[Classy, LIST[Function]]()
 
@@ -370,6 +374,8 @@ namespace IR.WasmGC is
             _classes[type] = type
             _new_classes.add(type)
 
+            _instantiations[type.definition] = _instantiation_count(type.definition) + 1
+
             _superclass_of(type)
 
             return type
@@ -417,7 +423,72 @@ namespace IR.WasmGC is
                 fi
             od
 
+            // A class whose methods instantiate it at a type argument built
+            // from its own, as NODE[T] returning NODE[(T, int)] does, has no
+            // finite set of instantiations to compile. Past either bound, on
+            // how deeply the arguments nest or on how many instantiations
+            // the class has, it is reported once rather than followed.
+            if _exceeds_bounds(definition, arguments) then
+                if _unbounded.add(definition) then
+                    _unsupported.add((definition.location, "{definition.name} instantiated at type arguments nested without bound"))
+                fi
+
+                return null
+            fi
+
             return _intern(key)
+        si
+
+        /// Whether some generic class was instantiated past the bounds the
+        /// registry follows, which it has reported.
+        has_unbounded_instantiation: bool => _unbounded.count > 0
+
+        /// How deeply the type arguments of an instantiation may nest before
+        /// the registry stops following them.
+        MAXIMUM_TYPE_ARGUMENT_NESTING: int static => 8
+
+        /// How many instantiations of one generic class the registry follows.
+        MAXIMUM_INSTANTIATIONS: int static => 256
+
+        _exceeds_bounds(definition: Classy, arguments: Collections.List[Type]) -> bool is
+            if _instantiation_count(definition) >= MAXIMUM_INSTANTIATIONS then
+                return true
+            fi
+
+            for argument in arguments do
+                if _nesting(argument, 0) > MAXIMUM_TYPE_ARGUMENT_NESTING then
+                    return true
+                fi
+            od
+
+            return false
+        si
+
+        _instantiation_count(definition: Classy) -> int is
+            let count mut = 0
+            _instantiations.try_get_value(definition, count ref)
+            return count
+        si
+
+        // How deeply `type`'s arguments nest, counting from `depth`. Stops
+        // counting once past the bound, so a type that refers to itself
+        // through its arguments ends.
+        _nesting(type: Type, depth: int) -> int is
+            if depth > MAXIMUM_TYPE_ARGUMENT_NESTING then
+                return depth
+            fi
+
+            let deepest mut = depth
+
+            for argument in type.arguments do
+                let nested = _nesting(argument, depth + 1)
+
+                if nested > deepest then
+                    deepest = nested
+                fi
+            od
+
+            return deepest
         si
 
         /// The class a value of `type` is an instance of, or null where it
@@ -1538,8 +1609,10 @@ namespace IR.WasmGC is
         field_types(type: WASMGC_CLASS) -> Collections.List[Type?] => _layout_types_of(type)
 
         /// The wasm types of a class's fields, in layout order, the
-        /// descriptor first.
-        field_value_types(type: WASMGC_CLASS) -> Collections.List[VALUE_TYPE] => _layouts[type]
+        /// descriptor first. Empty while discovering, before any class is
+        /// laid out.
+        field_value_types(type: WASMGC_CLASS) -> Collections.List[VALUE_TYPE] =>
+            if discovering then LIST[VALUE_TYPE]() else _layouts[type] fi
 
         /// Whether `type` is a struct, which is held in a box of its own. A
         /// scalar's box is not one: its definition is the scalar's.
