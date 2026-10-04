@@ -145,6 +145,8 @@ namespace IR.WasmGC is
         _build_module() -> MODULE is
             let module = MODULE()
 
+            let registry = _build_registry(module)
+
             let indices = MAP[Function, int]()
 
             for i in 0.._bodies.count do
@@ -156,7 +158,7 @@ namespace IR.WasmGC is
             for i in 0.._bodies.count do
                 let (function, values) = _bodies[i]
 
-                module.add_function(_build_function(module, function, values, indices))
+                module.add_function(_build_function(module, registry, function, values, indices))
 
                 names.add(i, function.qualified_name)
             od
@@ -175,16 +177,46 @@ namespace IR.WasmGC is
             return module
         si
 
-        _build_function(module: MODULE, function: Function, values: LIST[Value], indices: MAP[Function, int]) -> FUNCTION is
+        // The struct types and globals for every class the program
+        // declares. They take the first type indices, so they are built
+        // before any function's signature is added.
+        _build_registry(module: MODULE) -> WASMGC_TYPE_REGISTRY is
+            let container = IoC.CONTAINER.instance
+
+            let object = cast Classy?(container.innate_symbol_lookup.get_object_type().symbol)!
+
+            let registry = WASMGC_TYPE_REGISTRY(module, object)
+
+            registry.build(container.symbol_table.global_scope)
+
+            for (location, construct) in registry.unsupported do
+                _report(location, construct)
+            od
+
+            return registry
+        si
+
+        _build_function(
+            module: MODULE,
+            registry: WASMGC_TYPE_REGISTRY,
+            function: Function,
+            values: LIST[Value],
+            indices: MAP[Function, int]
+        ) -> FUNCTION is
             let parameters = LIST[VALUE_TYPE]()
 
             if function.is_emitted_with_receiver then
-                _report(function.location, "an instance method")
+                if let receiver = _receiver_type(registry, function) then
+                    parameters.add(receiver)
+                else
+                    _report(function.location, "an instance method of {function.owner}")
+                    parameters.add(registry.object_reference)
+                fi
             fi
 
             for argument in function.arguments do
-                if let scalar = WASMGC_TYPES.scalar(argument) then
-                    parameters.add(WASMGC_TYPES.value_type(scalar))
+                if let value_type = registry.value_type(argument) then
+                    parameters.add(value_type)
                 else
                     _report(function.location, "an argument of type {argument}")
                 fi
@@ -193,14 +225,14 @@ namespace IR.WasmGC is
             let results = LIST[VALUE_TYPE]()
 
             if !WASMGC_TYPES.is_void(function.return_type) then
-                if let scalar = WASMGC_TYPES.scalar(function.return_type) then
-                    results.add(WASMGC_TYPES.value_type(scalar))
+                if let value_type = registry.value_type(function.return_type) then
+                    results.add(value_type)
                 else
                     _report(function.location, "a result of type {function.return_type}")
                 fi
             fi
 
-            let lowering = WASMGC_LOWERING(indices, parameters.count, function.return_type)
+            let lowering = WASMGC_LOWERING(indices, registry, function, parameters)
 
             let body = lowering.lower(values)
 
@@ -211,6 +243,18 @@ namespace IR.WasmGC is
             let type_index = module.add_type(FUNC_TYPE(parameters.to_array(), results.to_array()))
 
             return FUNCTION(type_index, lowering.local_types.to_array(), body)
+        si
+
+        // An instance method takes its receiver as its first parameter,
+        // typed as the class that declares the method.
+        _receiver_type(registry: WASMGC_TYPE_REGISTRY, function: Function) -> VALUE_TYPE? is
+            if let owner: Classy = function.owner then
+                if let index = registry.type_index(owner) then
+                    return VALUE_TYPE.of_type_index(index, true)
+                fi
+            fi
+
+            return null
         si
     si
 si
