@@ -1,0 +1,124 @@
+namespace IR.WasmGC.UnitTests is
+    use Collections.LIST
+
+    use Source.LOCATION
+
+    use Semantic.Symbols.CLASS
+    use Semantic.Symbols.Function
+    use Semantic.Symbols.INSTANCE_METHOD
+
+    use Wasm.FUNCTION
+    use Wasm.FUNC_TYPE
+    use Wasm.INSTRUCTION
+    use Wasm.MODULE
+
+    use TestClass = Microsoft.VisualStudio.TestTools.UnitTesting.TestClassAttribute
+    use Test = Microsoft.VisualStudio.TestTools.UnitTesting.TestMethodAttribute
+    use Assertions
+
+    @TestClass()
+    class WASMGC_FUNCTION_NUMBERING_TESTS is
+        _owner: CLASS
+
+        init() is
+            _owner = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "OWNER", LIST[string](), Semantic.BLOCK_SCOPE())
+        si
+
+        loc() -> LOCATION => LOCATION("test.ghul", 1, 1, 1, 1)
+
+        method(name: string) -> Function =>
+            INSTANCE_METHOD(loc(), loc(), _owner, name, Semantic.BLOCK_SCOPE())
+
+        numbering(first_index: int) -> WASMGC_FUNCTION_NUMBERING =>
+            WASMGC_FUNCTION_NUMBERING(first_index, f => !f.name.starts_with("bodiless"))
+
+        @Test()
+        index_of__numbers_from_the_first_index_in_the_order_asked() is
+            let numbers = numbering(3)
+
+            are_equal(3, numbers.index_of(method("a"))!)
+            are_equal(4, numbers.index_of(method("b"))!)
+        si
+
+        @Test()
+        index_of__the_same_function_twice__gives_the_same_number() is
+            let numbers = numbering(0)
+            let a = method("a")
+
+            are_equal(0, numbers.index_of(a)!)
+            are_equal(0, numbers.index_of(a)!)
+            are_equal(1, numbers.count)
+        si
+
+        @Test()
+        index_of__a_function_with_no_body__is_null_and_numbers_nothing() is
+            let numbers = numbering(0)
+
+            is_false(numbers.index_of(method("bodiless"))?)
+            are_equal(0, numbers.count)
+        si
+
+        @Test()
+        next__hands_out_each_numbered_function_once_and_skips_reserved_ones() is
+            let numbers = numbering(0)
+            let a = method("a")
+            let b = method("b")
+
+            numbers.index_of(a)
+            numbers.reserve(() => FUNCTION(0, [], LIST[INSTRUCTION]()))
+            numbers.index_of(b)
+
+            is_true(numbers.next()!.definition == a)
+            is_true(numbers.next()!.definition == b)
+            is_false(numbers.next()?)
+        si
+
+        @Test()
+        next__hands_out_a_function_numbered_while_draining() is
+            let numbers = numbering(0)
+            let a = method("a")
+            let b = method("b")
+
+            numbers.index_of(a)
+
+            is_true(numbers.next()!.definition == a)
+
+            numbers.index_of(b)
+
+            is_true(numbers.next()!.definition == b)
+            is_false(numbers.next()?)
+        si
+
+        @Test()
+        restart__walks_the_numbered_functions_again_with_the_same_numbers() is
+            let numbers = numbering(2)
+            let a = method("a")
+
+            numbers.index_of(a)
+            numbers.next()
+            numbers.restart()
+
+            is_true(numbers.next()!.definition == a)
+            are_equal(2, numbers.index_of(a)!)
+            are_equal(1, numbers.count)
+        si
+
+        @Test()
+        add_to__adds_placed_and_reserved_functions_in_index_order() is
+            let module = MODULE()
+            let type_index = module.add_type(FUNC_TYPE([], []))
+
+            let numbers = numbering(0)
+            let a = method("a")
+
+            numbers.index_of(a)
+            numbers.reserve(() => FUNCTION(type_index, [], LIST[INSTRUCTION]()))
+
+            numbers.place(WASMGC_FUNCTION.of(a), FUNCTION(type_index, [], LIST[INSTRUCTION]()))
+
+            numbers.add_to(module)
+
+            are_equal(2, module.function_count())
+        si
+    si
+si

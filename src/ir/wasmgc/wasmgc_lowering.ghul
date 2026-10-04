@@ -35,7 +35,7 @@ namespace IR.WasmGC is
         // between an exit and its target, so they are found from the nodes
         // open when the exit is lowered.
 
-        _function_indices: MAP[Function, int]
+        _numbering: WASMGC_FUNCTION_NUMBERING
         _registry: WASMGC_TYPE_REGISTRY
         _imports: WASMGC_IMPORTS
 
@@ -86,20 +86,21 @@ namespace IR.WasmGC is
 
         /// Lowers a body of `function`.
         ///
-        /// - function_indices: the index every function with a body takes
+        /// - numbering: the function indices, which a call numbers the function
+        ///   it reaches with
         /// - registry: the program's struct types and globals
         /// - imports: the module's imports, which a call to a host
         ///   operation is a call of
         /// - parameter_types: the types of the function's parameters, the
         ///   receiver first where it takes one
         init(
-            function_indices: MAP[Function, int],
+            numbering: WASMGC_FUNCTION_NUMBERING,
             registry: WASMGC_TYPE_REGISTRY,
             imports: WASMGC_IMPORTS,
             function: Function,
             parameter_types: Collections.List[VALUE_TYPE]
         ) is
-            init(function_indices, registry, imports, parameter_types)
+            init(numbering, registry, imports, parameter_types)
 
             _receiver_offset = if function.is_emitted_with_receiver then 1 else 0 fi
             _return_type = function.return_type
@@ -108,12 +109,12 @@ namespace IR.WasmGC is
         /// Lowers a body that takes no receiver and whose result needs no
         /// cast.
         init(
-            function_indices: MAP[Function, int],
+            numbering: WASMGC_FUNCTION_NUMBERING,
             registry: WASMGC_TYPE_REGISTRY,
             imports: WASMGC_IMPORTS,
             parameter_types: Collections.List[VALUE_TYPE]
         ) is
-            _function_indices = function_indices
+            _numbering = numbering
             _registry = registry
             _imports = imports
             _parameter_types = parameter_types
@@ -360,12 +361,14 @@ namespace IR.WasmGC is
                 return
             fi
 
-            let index mut = 0
+            let index_found = _numbering.index_of(function)
 
-            if !_function_indices.try_get_value(function, index ref) then
+            if !index_found? then
                 _report("a call to {function.name}, which has no body on this target")
                 return
             fi
+
+            let index = index_found
 
             _lower_arguments(function, arguments)
 
@@ -842,12 +845,14 @@ namespace IR.WasmGC is
                 return
             fi
 
-            let index mut = 0
+            let index_found = _numbering.index_of(constructor)
 
-            if !_function_indices.try_get_value(constructor, index ref) then
+            if !index_found? then
                 _report("a constructor of {type}, which has no body on this target")
                 return
             fi
+
+            let index = index_found
 
             let instance = _temp(VALUE_TYPE.of_type_index(_registry.type_index(type)!, true))
 
@@ -1206,12 +1211,14 @@ namespace IR.WasmGC is
                 return
             fi
 
-            let index mut = 0
+            let index_found = _numbering.index_of(function)
 
-            if !_function_indices.try_get_value(function, index ref) then
+            if !index_found? then
                 _report("a call to {function.name}, which has no body on this target")
                 return
             fi
+
+            let index = index_found
 
             gen(call.from)
             _coerce_top(_local_type_of_receiver(function))
