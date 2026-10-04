@@ -12,13 +12,22 @@ namespace Analysis.Tests is
     use Assertions;
 
     // An analyser whose environment declares none of the built-in types
-    // cannot analyse anything. The file it is sent says so, once, as an
+    // cannot analyse anything. Each file it is sent says so, once, as an
     // error an editor shows, rather than coming back clean - and the
     // analyser keeps answering rather than restarting into the same
     // failure.
     @TestClass()
     class MISSING_BUILT_IN_TESTS is
         init() is si
+
+        // A core library that declares the namespace the built-in types
+        // live in, and none of them.
+        core_source() -> string =>
+            "namespace Ghul.Intrinsics is\n"
+            "    class PLACEHOLDER is\n"
+            "        init() is si\n"
+            "    si\n"
+            "si\n";
 
         source() -> string =>
             "entry() is\n"
@@ -27,9 +36,9 @@ namespace Analysis.Tests is
 
         @Test()
         A_missing_built_in_type_is_reported_once_as_an_error() is
-            let use analyser = ANALYSER_PROCESS(["--target", "wasm"], ["ghul-runtime.dll"]);
+            let use analyser = ANALYSER_PROCESS(["--target", "wasm"]);
 
-            analyser.send_edit_files([EDIT_FILE("main.ghul", source())]);
+            analyser.send_edit_files([EDIT_FILE("core.ghul", core_source()), EDIT_FILE("main.ghul", source())]);
 
             let response = analyser.read_response();
 
@@ -40,7 +49,7 @@ namespace Analysis.Tests is
             let missing = LIST[DIAGNOSTIC]();
 
             for d in response.diagnostics do
-                if let code = d.code /\ code =~ "missing-built-in" then
+                if let code = d.code /\ code =~ "missing-built-in" /\ d.path.ends_with("main.ghul") then
                     missing.add(d);
                 fi
             od
@@ -68,7 +77,7 @@ namespace Analysis.Tests is
 
             if let frame: Response.DIAGNOSTICS = response then
                 for d in frame.diagnostics do
-                    if let code = d.code /\ code =~ "missing-built-in" then
+                    if let code = d.code /\ code =~ "missing-built-in" /\ d.path.ends_with("main.ghul") then
                         missing.add(d);
                     fi
                 od
@@ -79,9 +88,9 @@ namespace Analysis.Tests is
 
         @Test()
         A_COMPILE_after_the_edit_reports_it_too() is
-            let use analyser = ANALYSER_PROCESS(["--target", "wasm"], ["ghul-runtime.dll"]);
+            let use analyser = ANALYSER_PROCESS(["--target", "wasm"]);
 
-            analyser.send_edit_files([EDIT_FILE("main.ghul", source())]);
+            analyser.send_edit_files([EDIT_FILE("core.ghul", core_source()), EDIT_FILE("main.ghul", source())]);
 
             let _ = analyser.read_response();
 
