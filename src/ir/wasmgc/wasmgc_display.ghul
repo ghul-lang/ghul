@@ -7,6 +7,8 @@ namespace IR.WasmGC is
     use Wasm.TYPE_FIELD_INSTRUCTION
     use Wasm.BLOCK_INSTRUCTION
     use Wasm.BLOCK_TYPE
+    use Wasm.I32_CONSTANT
+    use Wasm.IF_INSTRUCTION
     use Wasm.HEAP_TYPE
     use Wasm.Opcode
 
@@ -77,6 +79,15 @@ namespace IR.WasmGC is
         _calls(type: WASMGC_CLASS, helpers: _DISPLAY_HELPERS) -> Collections.List[WASMGC_FUNCTION] is
             let result = LIST[WASMGC_FUNCTION]()
 
+            if _enum_members(type)? then
+                if let append = helpers.append, to_string = _int_to_string() then
+                    result.add(append)
+                    result.add(to_string)
+                fi
+
+                return result
+            fi
+
             if let element = _element_type(type) then
                 result.add(helpers.elements(element))
             elif _is_tuple(type) then
@@ -135,6 +146,93 @@ namespace IR.WasmGC is
                     fi
                 fi
             od
+
+            return null
+        si
+
+        // The members of the enum `type` is a box of, in the order they are
+        // declared, or null where `type` is not an enum's box. A boxed enum
+        // is displayed as the name of the member its value is, as .NET
+        // writes one.
+        _enum_members(type: WASMGC_CLASS) -> Collections.List[(name: string, value: int)]? is
+            let boxed = _registry.boxed_type(type)
+
+            if !WASMGC_TYPES.is_enum(boxed) then
+                return null
+            fi
+
+            let declared = cast Semantic.Symbols.ENUM_STRUCT?(boxed?.symbol)
+
+            if !declared? then
+                return null
+            fi
+
+            let members = LIST[Semantic.Symbols.ENUM_STRUCT_MEMBER]()
+
+            for symbol in SRM_EMITTED_TYPE(declared).scope.symbols do
+                if let member: Semantic.Symbols.ENUM_STRUCT_MEMBER = symbol /\ member.numeric_value? then
+                    members.add(member)
+                fi
+            od
+
+            members.sort((a: Semantic.Symbols.ENUM_STRUCT_MEMBER, b: Semantic.Symbols.ENUM_STRUCT_MEMBER) -> int =>
+                if a.location.start_line != b.location.start_line then
+                    a.location.start_line - b.location.start_line
+                else
+                    a.location.start_column - b.location.start_column
+                fi)
+
+            let result = LIST[(name: string, value: int)]()
+
+            for member in members do
+                result.add((name = member.name, value = member.numeric_value!))
+            od
+
+            return result
+        si
+
+        // The instructions leaving the name of the member whose value
+        // `read_value` reads, tried from member `i` on, and the value in
+        // decimal where it is no member's, as .NET writes it.
+        _enum_name(
+            members: Collections.List[(name: string, value: int)],
+            i: int,
+            read_value: Collections.List[INSTRUCTION],
+            int_to_string: int,
+            strings: WASMGC_STRINGS
+        ) -> LIST[INSTRUCTION] is
+            let result = LIST[INSTRUCTION]()
+
+            result.add_range(read_value)
+
+            if i >= members.count then
+                result.add(INDEX_INSTRUCTION(Opcode.CALL, int_to_string))
+
+                return result
+            fi
+
+            result.add(I32_CONSTANT(members[i].value))
+            result.add(SIMPLE_INSTRUCTION(Opcode.I32_EQ))
+            result.add(
+                IF_INSTRUCTION(
+                    BLOCK_TYPE.of_value(strings.string_reference),
+                    LIST[INSTRUCTION]([INDEX_INSTRUCTION(Opcode.GLOBAL_GET, strings.literal(members[i].name))]: INSTRUCTION),
+                    _enum_name(members, i + 1, read_value, int_to_string, strings)))
+
+            return result
+        si
+
+        // `int`'s own `to_string`, which writes a value that is no member's.
+        _int_to_string() -> WASMGC_FUNCTION? is
+            let int_type = IoC.CONTAINER.instance.innate_symbol_lookup.get_int_type()
+
+            if let group: Semantic.Symbols.FUNCTION_GROUP = int_type.find_member("to_string") then
+                for function in group.functions do
+                    if function.is_instance /\ function.arguments.count == 0 then
+                        return WASMGC_FUNCTION(function, MAP[Symbol, Type]())
+                    fi
+                od
+            fi
 
             return null
         si
@@ -272,6 +370,22 @@ namespace IR.WasmGC is
 
             let body = LIST[INSTRUCTION]()
 
+            if let members = _enum_members(type) then
+                let box_index = _registry.type_index(type)!
+
+                let read_value = [
+                    INDEX_INSTRUCTION(Opcode.LOCAL_GET, 0),
+                    HEAP_TYPE_INSTRUCTION(Opcode.REF_CAST_NULL, HEAP_TYPE.of_type_index(box_index)),
+                    TYPE_FIELD_INSTRUCTION(Opcode.STRUCT_GET, box_index, 1)
+                ]: INSTRUCTION
+
+                body.add_range(load_state)
+                body.add_range(_enum_name(members, 0, read_value, indices[1], strings))
+                body.add(INDEX_INSTRUCTION(Opcode.CALL, indices[0]))
+
+                return body
+            fi
+
             if _element_type(type)? then
                 body.add_range(load_state)
                 body.add(INDEX_INSTRUCTION(Opcode.LOCAL_GET, 0))
@@ -354,6 +468,10 @@ namespace IR.WasmGC is
         begin_parts: WASMGC_FUNCTION
         end_parts: WASMGC_FUNCTION
 
+        // The state's `append`, which writes a piece of text as it stands,
+        // or null where the state has none.
+        append: WASMGC_FUNCTION?
+
         _member: Function
         _part: Function
         _elements: Function
@@ -366,9 +484,11 @@ namespace IR.WasmGC is
             begin_parts: Function,
             part: Function,
             end_parts: Function,
-            elements: Function
+            elements: Function,
+            append: Function?
         ) is
             self.state = state
+            self.append = if let text = append then WASMGC_FUNCTION(text, state.type_map) else null fi
             self.begin_members = WASMGC_FUNCTION(begin_members, state.type_map)
             self.end_members = WASMGC_FUNCTION(end_members, state.type_map)
             self.begin_parts = WASMGC_FUNCTION(begin_parts, state.type_map)
@@ -391,9 +511,10 @@ namespace IR.WasmGC is
             let part = _named(methods, "_part")
             let end_parts = _named(methods, "_end_parts")
             let elements = _named(methods, "_elements")
+            let append = _named_with_arity(methods, "append", 1)
 
             if begin_members? /\ member? /\ end_members? /\ begin_parts? /\ part? /\ end_parts? /\ elements? then
-                return _DISPLAY_HELPERS(state, begin_members, member, end_members, begin_parts, part, end_parts, elements)
+                return _DISPLAY_HELPERS(state, begin_members, member, end_members, begin_parts, part, end_parts, elements, append)
             fi
 
             return null
@@ -414,6 +535,16 @@ namespace IR.WasmGC is
             map[method.generic_arguments[0].symbol] = type
 
             return WASMGC_FUNCTION(method, map)
+        si
+
+        _named_with_arity(methods: Collections.Iterable[Function], name: string, arity: int) -> Function? static is
+            for method in methods do
+                if method.name =~ name /\ method.arguments.count == arity then
+                    return method
+                fi
+            od
+
+            return null
         si
 
         _named(methods: Collections.Iterable[Function], name: string) -> Function? static is
