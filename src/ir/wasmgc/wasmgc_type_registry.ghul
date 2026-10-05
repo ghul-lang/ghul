@@ -173,6 +173,7 @@ namespace IR.WasmGC is
         // an array of a class is usable where an array of its superclass
         // is expected.
         _arrays: MAP[WASMGC_CLASS, Type]
+        _fields_left: Collections.SET[WASMGC_CLASS]
         _array_storages: Collections.SET[int]
         _array_storage_types: MAP[int, int]
 
@@ -252,6 +253,7 @@ namespace IR.WasmGC is
             _static_constructors = MAP[WASMGC_CLASS, (constructor: WASMGC_FUNCTION, initialised: int)]()
 
             _arrays = MAP[WASMGC_CLASS, Type]()
+            _fields_left = Collections.SET[WASMGC_CLASS]()
             _array_storages = Collections.SET[int]()
             _array_storage_types = MAP[int, int]()
 
@@ -328,18 +330,9 @@ namespace IR.WasmGC is
 
         /// The classes added since this was last asked, each once.
         take_new_classes() -> Collections.List[WASMGC_CLASS] is
-            let result = LIST[WASMGC_CLASS]()
+            let result = LIST[WASMGC_CLASS](_new_classes)
 
-            while _new_classes.count > 0 do
-                let batch = LIST[WASMGC_CLASS](_new_classes)
-
-                _new_classes.clear()
-
-                for type in batch do
-                    result.add(type)
-                    _add_field_types(type)
-                od
-            od
+            _new_classes.clear()
 
             return result
         si
@@ -397,10 +390,22 @@ namespace IR.WasmGC is
             return type
         si
 
-        // A class's fields, instance and static, are laid out wherever the
-        // class is, so the type each field holds is one the registry holds
-        // too, whether or not anything creates a value of it.
-        _add_field_types(type: WASMGC_CLASS) is
+        /// Records that the types `type`'s fields hold are not added, because
+        /// the class is already reported as instantiating itself without end.
+        /// A field whose type is then missing is laid out as an object
+        /// reference rather than reported again.
+        ///
+        /// - type: the class whose field types are left out
+        leave_field_types(type: WASMGC_CLASS) =>
+            _fields_left.add(type)
+
+        /// Adds the type each of `type`'s fields holds, instance and static,
+        /// since the fields are laid out wherever the class is, whether or
+        /// not anything creates a value of those types. A class this adds is
+        /// taken by the next `take_new_classes`.
+        ///
+        /// - type: the class whose fields to add the types of
+        add_field_types(type: WASMGC_CLASS) is
             for `field in SRM_MEMBER_ORDER.fields(SRM_EMITTED_TYPE(type.definition)) do
                 _add_held(type.specialize(`field.type))
             od
@@ -1496,7 +1501,9 @@ namespace IR.WasmGC is
                 return value_type
             fi
 
-            _unsupported.add((`field.location, "a field of type {type}"))
+            if !owner? \/ !_fields_left.contains(owner) then
+                _unsupported.add((`field.location, "a field of type {type}"))
+            fi
 
             return object_reference
         si
