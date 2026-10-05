@@ -140,18 +140,61 @@ namespace Syntax.Process is
         si
 
         // Adds an `init` to the class `target` returns that calls `target`, as
-        // the reflected path does for a constructor intrinsic. A target that
-        // returns a generic instance or an array is left as a method.
+        // the reflected path does for a constructor intrinsic. Where `target`
+        // returns a generic instance, the class is the generic definition and
+        // the `init` belongs to it, so the target's type parameters must be
+        // the class's own, in order, as in `from_pairs[K, V]() -> MAP[K, V]`;
+        // a target that returns its parameters in any other shape is left as
+        // a method.
         _offer_as_constructor(target: Semantic.Symbols.Function) is
+            if let generic: Semantic.Types.GENERIC = target.return_type then
+                _offer_as_generic_constructor(target, generic)
+                return
+            fi
+
             let owner = cast Semantic.Symbols.Classy?(cast Semantic.Types.NAMED?(target.return_type)?.symbol)
 
             if !owner? \/ owner.is_generic then
                 return
             fi
 
+            _add_constructor(target, owner, target.arguments)
+        si
+
+        // The `init` is phrased in the class's own type parameters, so the
+        // arguments are the target's with its type parameters replaced by
+        // the class's. A call constructing the class specialises the target
+        // by the constructed type's arguments.
+        _offer_as_generic_constructor(target: Semantic.Symbols.Function, returned: Semantic.Types.GENERIC) is
+            let owner = cast Semantic.Symbols.GENERIC?(returned.symbol)?.symbol
+
+            if !owner? \/ !target.is_generic \/ target.generic_arguments.count != returned.arguments.count then
+                return
+            fi
+
+            let parameters = Collections.LIST[Semantic.Types.Type]()
+
+            for i in 0..returned.arguments.count do
+                let returned_parameter = cast Semantic.Symbols.GenericArgument?(cast Semantic.Types.NAMED?(returned.arguments[i])?.symbol)
+                let target_parameter = cast Semantic.Symbols.GenericArgument?(cast Semantic.Types.NAMED?(target.generic_arguments[i])?.symbol)
+                let owner_parameter = owner.type_parameter_at(i)?.type
+
+                if !returned_parameter? \/ returned_parameter != target_parameter \/ !owner_parameter? then
+                    return
+                fi
+
+                parameters.add(owner_parameter)
+            od
+
+            let phrased = cast Semantic.Symbols.Function(target.specialize(parameters))
+
+            _add_constructor(target, owner, phrased.arguments)
+        si
+
+        _add_constructor(target: Semantic.Symbols.Function, owner: Semantic.Symbols.Classy, arguments: Collections.List[Semantic.Types.Type]) is
             let result = Semantic.Symbols.INSTANCE_METHOD(target.location, target.location, owner, "init", owner)
 
-            result.arguments = target.arguments
+            result.arguments = arguments
             result.argument_names = target.argument_names
             result.return_type = _innate_symbol_lookup.get_void_type()
             result.constructor_target = target
@@ -160,7 +203,7 @@ namespace Syntax.Process is
                 result.mark_declared_pure()
             fi
 
-            if target.is_generic then
+            if target.is_generic /\ !owner.is_generic then
                 result.is_generic = true
                 result.generic_arguments = target.generic_arguments
                 result.generic_argument_names = target.generic_argument_names
