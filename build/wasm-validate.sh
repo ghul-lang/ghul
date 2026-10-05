@@ -50,7 +50,9 @@ while IFS= read -r flags_file; do
 
     read -r -a flags < "$flags_file"
 
-    if ! (cd "$out" && dotnet "$compiler" "${flags[@]}" -o module.wasm "$dir"/*.ghul) >"$out/compiler.out" 2>&1; then
+    # Compiled from the test's own directory, as ghul-test compiles it, so
+    # a path its ghulflags name is read from there.
+    if ! (cd "$dir" && dotnet "$compiler" "${flags[@]}" -o "$out/module.wasm" ./*.ghul) >"$out/compiler.out" 2>&1; then
         echo "wasm-validate: $dir did not compile:" >&2
         head -5 "$out/compiler.out" >&2
         failed=$((failed + 1))
