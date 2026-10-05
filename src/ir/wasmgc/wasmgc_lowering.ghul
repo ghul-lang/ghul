@@ -1687,8 +1687,12 @@ namespace IR.WasmGC is
 
             _emit(INDEX_INSTRUCTION(Opcode.GLOBAL_GET, _registry.descriptor_global(type)))
 
+            // An element of a value type in an array of a reference type,
+            // an int in an object[], is boxed as it is stored.
+            let boxer = IoC.CONTAINER.instance.value_boxer
+
             for value in sequence.values do
-                gen(value)
+                gen(boxer.box_if_needed(value, sequence.element_type))
                 _normalise_for(sequence.element_type)
             od
 
@@ -2259,9 +2263,38 @@ namespace IR.WasmGC is
             _lower_all(steps.steps)
         si
 
-        visit(decrement: Values.DECREMENT) is _report("decrement") si
-        visit(increment: Values.POST_INCREMENT) is _report("increment") si
-        visit(decrement: Values.PRE_DECREMENT) is _report("decrement") si
+        // Decrements the counter in place, leaving nothing.
+        visit(decrement: Values.DECREMENT) is
+            let counter = _local(decrement.counter)
+
+            _emit(INDEX_INSTRUCTION(Opcode.LOCAL_GET, counter))
+            _emit(I32_CONSTANT(1))
+            _emit(Opcode.I32_SUB)
+            _emit(INDEX_INSTRUCTION(Opcode.LOCAL_SET, counter))
+        si
+
+        // Leaves the counter's value before the increment, and stores the
+        // incremented value back.
+        visit(increment: Values.POST_INCREMENT) is
+            let counter = _local(increment.counter)
+
+            _emit(INDEX_INSTRUCTION(Opcode.LOCAL_GET, counter))
+            _emit(INDEX_INSTRUCTION(Opcode.LOCAL_GET, counter))
+            _emit(I32_CONSTANT(1))
+            _emit(Opcode.I32_ADD)
+            _emit(INDEX_INSTRUCTION(Opcode.LOCAL_SET, counter))
+        si
+
+        // Leaves the counter's value after the decrement.
+        visit(decrement: Values.PRE_DECREMENT) is
+            let counter = _local(decrement.counter)
+
+            _emit(INDEX_INSTRUCTION(Opcode.LOCAL_GET, counter))
+            _emit(I32_CONSTANT(1))
+            _emit(Opcode.I32_SUB)
+            _emit(INDEX_INSTRUCTION(Opcode.LOCAL_TEE, counter))
+        si
+
         // The source is held in a local and the target built from its
         // elements.
         visit(repack: Values.TUPLE_REPACK) is
