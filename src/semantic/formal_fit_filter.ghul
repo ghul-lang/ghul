@@ -61,20 +61,21 @@ namespace Semantic is
             return result
         si
 
-        // Whether some formal of the candidate cannot accept its actual at
-        // all. A candidate the resolver scored exact before its type
-        // arguments were bound can turn out not to fit once they are, as
-        // `f[T](g: T -> double)` does for a `g` returning `int`, and such a
-        // candidate is not a match. Only what is already known decides: a
-        // formal still carrying a type variable, and the part of an actual
-        // that inference has not settled, never reject.
+        // Whether some function-typed formal of the candidate cannot accept
+        // its function-typed actual: function-type assignability, as the
+        // type checker applies it, over the parts of the two that are
+        // already settled. A candidate the resolver scored exact before its
+        // type arguments were bound can turn out not to fit once they are,
+        // as `f[T](g: T -> double)` does for a `g` known to return `int`,
+        // and such a candidate is not a match. A part still carrying a type
+        // variable or an unsettled inference decides nothing.
         rejects(candidate: Symbols.Function, arguments: Collections.List[Type]) -> bool static is
             if candidate.arguments.count != arguments.count then
                 return false
             fi
 
             for i in 0..arguments.count do
-                if _rejects(candidate.arguments[i], arguments[i]) then
+                if _function_rejects(candidate.arguments[i], arguments[i]) then
                     return true
                 fi
             od
@@ -82,32 +83,59 @@ namespace Semantic is
             return false
         si
 
-        // A function type is compared part by part when the actual is only
-        // partly known, so that a function literal whose result is already
-        // settled is held to it while its parameters are still open.
         @suppress("presence-test-non-optional")
-        _rejects(formal: Type?, actual: Type?) -> bool static is
-            if !formal? \/ !actual? \/ formal.is_wild \/ actual.is_error \/ actual.is_sentinel then
+        _function_rejects(formal: Type?, actual: Type?) -> bool static is
+            if
+                !formal? \/ !actual? \/
+                !formal.is_function \/ !actual.is_function \/
+                formal.is_action != actual.is_action \/
+                formal.arguments.count != actual.arguments.count
+            then
                 return false
             fi
 
-            if !actual.contains_inferred then
-                return formal.compare(actual) == Types.MATCH.DIFFERENT
-            fi
+            // A `void` function type carries its parameters alone; any other
+            // carries its result last.
+            let last = if formal.is_action then formal.arguments.count else formal.arguments.count - 1 fi
 
-            if
-                formal.is_function /\ actual.is_function /\
-                formal.arguments.count == actual.arguments.count
-            then
-                for i in 0..formal.arguments.count do
-                    if _rejects(formal.arguments[i], actual.arguments[i]) then
+            for i in 0..formal.arguments.count do
+                let f = formal.arguments[i]
+                let a = actual.arguments[i]
+
+                if _function_rejects(f, a) then
+                    return true
+                fi
+
+                if !_is_settled(f) \/ !_is_settled(a) then
+                    continue
+                fi
+
+                if i < last then
+                    // A parameter: the argument the formal passes must be
+                    // one the actual takes.
+                    if a.compare(f) == Types.MATCH.DIFFERENT then
                         return true
                     fi
-                od
-            fi
+                elif !_result_can_settle(f, a) /\ f.compare(a) == Types.MATCH.DIFFERENT then
+                    return true
+                fi
+            od
 
             return false
         si
+
+        // A function literal is typed again against the formal it is passed
+        // to once the overload is chosen, and its result then settles as a
+        // `void` the formal returns, or as the optional carrier the formal
+        // returns, whatever the literal's own result was typed as before.
+        _result_can_settle(formal: Type, actual: Type) -> bool static =>
+            formal.is_void \/
+            formal.is_optional \/ actual.is_optional \/
+            isa Types.MAYBE(formal) \/ isa Types.MAYBE(actual)
+
+        @suppress("presence-test-non-optional")
+        _is_settled(type: Type?) -> bool static =>
+            type? /\ !type.is_wild /\ !type.is_error /\ !type.is_sentinel /\ !type.contains_inferred
 
         // Summed match quality over the formals, lower being closer.
         // Negative when the candidate cannot be scored this way - a
