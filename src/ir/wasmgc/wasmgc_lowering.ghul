@@ -99,6 +99,7 @@ namespace IR.WasmGC is
         _dispatch: Values.DISPATCH?
         _resume_point_states: MAP[LABEL, int]
         _resume_states: MAP[Value, LIST[int]]
+        _folded_dispatches: LIST[Values.DISPATCH]
 
         _unsupported: LIST[string]
         // The struct-typed locals the body declared, and the scalar locals
@@ -195,6 +196,7 @@ namespace IR.WasmGC is
             _labels = LIST[(node: Values.Breakable?, is_loop_head: bool, finally_exits: WASMGC_FINALLY_EXITS?)]()
             _resume_point_states = MAP[LABEL, int]()
             _resume_states = MAP[Value, LIST[int]]()
+            _folded_dispatches = LIST[Values.DISPATCH]()
             _unsupported = LIST[string]()
             _struct_locals = LIST[(index: int, type: WASMGC_CLASS)]()
             _reference_cell_locals = LIST[int]()
@@ -2979,18 +2981,29 @@ namespace IR.WasmGC is
             _dispatch = _find_dispatch(resumable.body.values)
             _resume_point_states.clear()
             _resume_states.clear()
+            _folded_dispatches.clear()
 
-            if let dispatch = _dispatch then
-                for (state, target) in dispatch.entries do
-                    _resume_point_states[target] = state
+            if _dispatch? then
+                // A try body carries a dispatch of its own, which the
+                // entry dispatch reaches through the try's first
+                // instruction. The descent can enter a try_table as it
+                // enters any block, so every dispatch's entries map a
+                // state to its resume point directly. The entry
+                // dispatch's targets for states inside a try are no
+                // resume point, so they map nothing.
+                _collect_dispatches(resumable.body.values, _folded_dispatches)
+
+                let states = Collections.SET[int]()
+
+                for dispatch in _folded_dispatches do
+                    for (state, target) in dispatch.entries do
+                        _resume_point_states[target] = state
+                        states.add(state)
+                    od
                 od
 
-                // An entry whose target is not a resume point this
-                // lowering can reach - one inside a try, whose own
-                // dispatch it targets instead - is not one it can
-                // re-enter.
-                if _collect_resume_states(resumable).count != dispatch.entries.count then
-                    _report("a yield or await inside try")
+                if _collect_resume_states(resumable).count != states.count then
+                    _report("a yield or await with no resume point")
                 fi
             fi
 
@@ -3025,6 +3038,20 @@ namespace IR.WasmGC is
             od
 
             return null
+        si
+
+        // Every dispatch in `values`, the entry dispatch first and then
+        // those opening the try bodies inside.
+        _collect_dispatches(values: Collections.Iterable[Value], into: LIST[Values.DISPATCH]) is
+            for value in values do
+                if let dispatch: Values.DISPATCH = value then
+                    into.add(dispatch)
+                elif let block: Values.BLOCK = value then
+                    _collect_dispatches(block.values, into)
+                elif let breakable: Values.Breakable = value then
+                    _collect_dispatches(breakable.body.values, into)
+                fi
+            od
         si
 
         // The states whose resume point lies inside `value`, recorded
@@ -3380,7 +3407,7 @@ namespace IR.WasmGC is
             _push_label()
             _begin()
 
-            _lower_all(`try.body.values)
+            _lower_body(`try, `try.body.values)
 
             let guarded = _end()
             _pop_label()
@@ -3480,7 +3507,7 @@ namespace IR.WasmGC is
             _push_label(finally_exits)
             _begin()
 
-            _lower_all(`try.body.values)
+            _lower_body(`try, `try.body.values)
 
             let guarded = _end()
             _pop_label()
@@ -3536,7 +3563,7 @@ namespace IR.WasmGC is
             _push_label(`try, false)
             _begin()
 
-            _lower_all(`try.body.values)
+            _lower_body(`try, `try.body.values)
 
             for `catch in `try.catches do
                 _lower_all(`catch.body.values)
@@ -3617,11 +3644,12 @@ namespace IR.WasmGC is
             return true
         si
 
-        // The resumable body opening with this dispatch re-enters itself
-        // where the state says, so the dispatch emits nothing of its own.
+        // The resumable body re-enters itself where the state says, by
+        // descent from its start, so a dispatch it holds - its own or one
+        // opening a try body inside it - emits nothing of its own.
         visit(dispatch: Values.DISPATCH) is
-            if dispatch != _dispatch then
-                _report("a yield or await inside try")
+            if !_folded_dispatches.contains(dispatch) then
+                _report("a yield or await with no resume point")
             fi
         si
 
