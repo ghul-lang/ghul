@@ -2647,4 +2647,4 @@ Not yet supported on the `wasm` target:
 - asynchronous functions and `await`
 - `decimal`
 - an interpolated number formatted other than by the standard formats `D`, `E`, `F`, `G`, `N`, `R` and `X` or a custom pattern of `0`, `#`, `.` and `,`, and an interpolated enum given any format
-- reading standard input, files and directories, and the rest of `IO` beyond writing to standard output
+- files and directories. `File`, `Directory` and the readers and writers over a file compile, but act on an empty file system that cannot be changed: `exists` answers false, reading a file throws `IO.FileNotFoundException`, and creating, writing or deleting one throws `Ghul.NotSupportedException`. `Path` works as it does on .NET, and standard input and output are read and written as on .NET
