@@ -27,6 +27,9 @@ class Exit extends Error {
 //   by default the module beside this file
 // - options.args: the program's command-line arguments
 // - options.env: the program's environment, as an object of strings
+// - options.stdin: the program's standard input, as a string, or as a
+//   function answering the next piece of it each time it is called, and
+//   null once there is no more; by default the program reads no input
 // - options.stdout, options.stderr: called with each piece of text the
 //   program writes to that stream
 //
@@ -38,6 +41,7 @@ export async function run(options = {}) {
     const stderr = options.stderr ?? (() => {});
 
     const sinks = [null, stdout, stderr];
+    const input = input_reader(options.stdin);
 
     const started = performance.now();
 
@@ -49,6 +53,11 @@ export async function run(options = {}) {
             (sinks[stream] ?? stdout)(String(text));
         },
         flush(_stream) {},
+
+        stdin_read_line: () => input.read_line(),
+        stdin_read: () => input.read(),
+        stdin_peek: () => input.peek(),
+        stdin_read_to_end: () => input.read_to_end(),
 
         argument_count: () => args.length,
         argument: (index) => args[index],
@@ -190,6 +199,174 @@ export async function run(options = {}) {
     }
 }
 
+// Standard input, read as the program asks for it: a line, a character,
+// or everything left. Text is pulled from `source` a piece at a time, so a
+// program reading a line at a time from a terminal gets each line as it is
+// typed rather than waiting for the end of the input. Lines end at \n,
+// \r\n or \r, as .NET's ReadLine ends them, and a character is a UTF-16
+// code unit, as .NET's Read answers one.
+function input_reader(source) {
+    let pull;
+
+    if (typeof source === "function") {
+        pull = source;
+    } else {
+        let rest = source ?? null;
+
+        pull = () => {
+            const piece = rest;
+            rest = null;
+            return piece;
+        };
+    }
+
+    let text = "";
+    let at = 0;
+    let ended = false;
+
+    // Adds the next piece of input to what is buffered, answering whether
+    // there was one.
+    const more = () => {
+        while (!ended) {
+            const piece = pull();
+
+            if (piece === null || piece === undefined) {
+                ended = true;
+                break;
+            }
+
+            if (piece.length > 0) {
+                text = text.slice(at) + piece;
+                at = 0;
+                return true;
+            }
+        }
+
+        return false;
+    };
+
+    return {
+        read_line() {
+            let from = at;
+
+            for (;;) {
+                let end = -1;
+
+                for (let i = from; i < text.length; i++) {
+                    const c = text.charCodeAt(i);
+
+                    if (c === 10 || c === 13) {
+                        end = i;
+                        break;
+                    }
+                }
+
+                if (end >= 0) {
+                    // A \r at the end of what is buffered may be the first
+                    // half of a \r\n, so the next piece decides.
+                    if (text.charCodeAt(end) === 13 && end + 1 === text.length && !ended) {
+                        const offset = end - at;
+
+                        more();
+                        end = at + offset;
+                    }
+
+                    const line = text.slice(at, end);
+                    const crlf = text.charCodeAt(end) === 13 && text.charCodeAt(end + 1) === 10;
+
+                    at = end + (crlf ? 2 : 1);
+
+                    return line;
+                }
+
+                const scanned = text.length - at;
+
+                if (!more()) {
+                    if (at < text.length) {
+                        const line = text.slice(at);
+                        at = text.length;
+                        return line;
+                    }
+
+                    return null;
+                }
+
+                from = at + scanned;
+            }
+        },
+
+        read() {
+            if (at >= text.length && !more()) {
+                return -1;
+            }
+
+            return text.charCodeAt(at++);
+        },
+
+        peek() {
+            if (at >= text.length && !more()) {
+                return -1;
+            }
+
+            return text.charCodeAt(at);
+        },
+
+        read_to_end() {
+            while (more()) {}
+
+            const rest = text.slice(at);
+            at = text.length;
+
+            return rest;
+        },
+    };
+}
+
+// Node's standard input as pieces of text, read synchronously so the
+// program can block on it. Input arriving on a non-blocking descriptor is
+// waited for rather than taken as the end.
+function node_stdin(readSync) {
+    const buffer = Buffer.alloc(65536);
+    const decoder = new TextDecoder();
+    const pause = new Int32Array(new SharedArrayBuffer(4));
+    let done = false;
+
+    return () => {
+        while (!done) {
+            let count;
+
+            try {
+                count = readSync(0, buffer, 0, buffer.length, null);
+            } catch (error) {
+                if (error.code === "EAGAIN") {
+                    Atomics.wait(pause, 0, 0, 5);
+                    continue;
+                }
+
+                if (error.code === "EOF") {
+                    count = 0;
+                } else {
+                    throw error;
+                }
+            }
+
+            if (count === 0) {
+                done = true;
+                const rest = decoder.decode();
+                return rest.length > 0 ? rest : null;
+            }
+
+            const piece = decoder.decode(buffer.subarray(0, count), { stream: true });
+
+            if (piece.length > 0) {
+                return piece;
+            }
+        }
+
+        return null;
+    };
+}
+
 async function load(module) {
     if (module instanceof ArrayBuffer || ArrayBuffer.isView(module)) {
         return module;
@@ -224,9 +401,12 @@ function describe(error, instance) {
 }
 
 if (is_node && process.argv[1] && import.meta.url === (await import("node:url")).pathToFileURL(process.argv[1]).href) {
+    const { readSync } = await import("node:fs");
+
     process.exitCode = await run({
         args: process.argv.slice(2),
         env: { ...process.env },
+        stdin: node_stdin(readSync),
         stdout: (text) => process.stdout.write(text),
         stderr: (text) => process.stderr.write(text),
     });
