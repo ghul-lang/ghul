@@ -328,9 +328,18 @@ namespace IR.WasmGC is
 
         /// The classes added since this was last asked, each once.
         take_new_classes() -> Collections.List[WASMGC_CLASS] is
-            let result = LIST[WASMGC_CLASS](_new_classes)
+            let result = LIST[WASMGC_CLASS]()
 
-            _new_classes.clear()
+            while _new_classes.count > 0 do
+                let batch = LIST[WASMGC_CLASS](_new_classes)
+
+                _new_classes.clear()
+
+                for type in batch do
+                    result.add(type)
+                    _add_field_types(type)
+                od
+            od
 
             return result
         si
@@ -386,6 +395,33 @@ namespace IR.WasmGC is
             _superclass_of(type)
 
             return type
+        si
+
+        // A class's fields are laid out wherever the class is, so the type
+        // each field holds is one the registry holds too, whether or not
+        // anything creates a value of it.
+        _add_field_types(type: WASMGC_CLASS) is
+            for `field in SRM_MEMBER_ORDER.fields(SRM_EMITTED_TYPE(type.definition)) do
+                if `field.is_instance then
+                    _add_held(type.specialize(`field.type))
+                fi
+            od
+        si
+
+        // An array's element type is added before the array, which needs it
+        // to choose how its elements are stored.
+        _add_held(held: Type?) is
+            if !held? then
+                return
+            fi
+
+            let type = if held.is_optional /\ !held.is_value_type then held.optional_inner_type ?? held else held fi
+
+            if let generic: GENERIC = type.symbol /\ cast Classy?(generic.unspecialized_symbol) == _array_definition /\ type.arguments.count == 1 then
+                _add_held(type.arguments[0])
+            fi
+
+            class_of(type)
         si
 
         /// The class `definition` at the type arguments `type_map` gives its
