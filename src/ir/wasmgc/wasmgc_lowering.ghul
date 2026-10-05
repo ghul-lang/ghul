@@ -1195,12 +1195,14 @@ namespace IR.WasmGC is
                     _report("an interpolation, whose builder has no to_string")
                 fi
 
-            when
-                IR.RuntimeOperation.APPEND_ALIGNED_VALUE,
-                IR.RuntimeOperation.APPEND_FORMATTED_VALUE,
-                IR.RuntimeOperation.APPEND_ALIGNED_FORMATTED_VALUE
-            then
-                _report("an interpolated value with an alignment or a format")
+            when IR.RuntimeOperation.APPEND_ALIGNED_VALUE then
+                _append_aligned(operands[0], _text_of(operands[1]), operands[2])
+
+            when IR.RuntimeOperation.APPEND_FORMATTED_VALUE then
+                _append(operands[0], _formatted_text_of(operands[1], operands[2]))
+
+            when IR.RuntimeOperation.APPEND_ALIGNED_FORMATTED_VALUE then
+                _append_aligned(operands[0], _formatted_text_of(operands[1], operands[3]), operands[2])
 
             else
                 return false
@@ -1215,6 +1217,60 @@ namespace IR.WasmGC is
             else
                 _report("an interpolation, whose builder has no append")
             fi
+        si
+
+        _append_aligned(builder: Value, text: Value, alignment: Value) is
+            if let append = _method(builder.type, "_append_aligned", 2) then
+                gen(Values.Call.INSTANCE(builder, append, LIST[Value]([text, alignment]), null))
+            else
+                _report("an interpolated value with an alignment")
+            fi
+        si
+
+        // The text of `value` under the format string `format`. A numeric
+        // value is written by its type's `to_string(format)`. .NET ignores
+        // the format of a value that is not formattable, so a string, a bool,
+        // a char or an object of a class is written as it is without one.
+        // Enums and decimals are formattable on .NET and have no formatter
+        // here, so they are reported rather than given different text.
+        _formatted_text_of(value: Value, format: Value) -> Value is
+            let type = _specialize(value.type)
+
+            if WASMGC_TYPES.is_enum(type) then
+                _report("an interpolated enum with a format")
+
+                return value
+            fi
+
+            if type? /\ type.symbol == IoC.CONTAINER.instance.innate_symbol_lookup.get_decimal_type().symbol then
+                _report("an interpolated decimal with a format")
+
+                return value
+            fi
+
+            let scalar = WASMGC_TYPES.scalar(type)
+
+            if !scalar? \/ scalar == Scalar.BOOL \/ scalar == Scalar.CHAR then
+                return _text_of(value)
+            fi
+
+            if let literal: Values.Literal.STRING = format then
+                let integer = !WASMGC_TYPES.is_float(scalar)
+
+                if !WASMGC_NUMERIC_FORMAT.is_covered(literal.value, integer) then
+                    _report("the numeric format {literal.value} for {type}")
+
+                    return value
+                fi
+            fi
+
+            if let to_string = _method(type, "to_string", 1) then
+                return Values.Call.INSTANCE(value, to_string, LIST[Value]([format]), null)
+            fi
+
+            _report("an interpolated value of type {type} with a format")
+
+            return value
         si
 
         // The text of `value`: a string as itself, anything else through
