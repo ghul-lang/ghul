@@ -89,6 +89,61 @@ export async function run(options = {}) {
         math_log2: Math.log2,
         math_pow: Math.pow,
 
+        // The arbitrary-precision integer bigint is a box around, with the
+        // semantics of .NET's BigInteger: division truncates, a remainder
+        // takes the dividend's sign, and shifts are arithmetic.
+        bigint_is_integer_text: (text) => /^\s*[+-]?[0-9]+\s*$/.test(text),
+        bigint_parse: (text) => BigInt(text.trim()),
+        bigint_from_int: (value) => BigInt(value),
+        bigint_from_long: (value) => value,
+        bigint_from_double: (value) => BigInt(Math.trunc(value)),
+        bigint_to_long: (value) => BigInt.asIntN(64, value),
+        bigint_to_double: (value) => Number(value),
+        bigint_to_string: (value) => value.toString(),
+        bigint_add: (a, b) => a + b,
+        bigint_subtract: (a, b) => a - b,
+        bigint_multiply: (a, b) => a * b,
+        bigint_divide: (a, b) => a / b,
+        bigint_remainder: (a, b) => a % b,
+        bigint_negate: (a) => -a,
+        bigint_compare: (a, b) => (a < b ? -1 : a > b ? 1 : 0),
+        bigint_equals: (a, b) => a === b,
+        bigint_hash: (a) => Number(BigInt.asIntN(32, a ^ (a >> 32n))),
+        bigint_pow: (a, exponent) => a ** BigInt(exponent),
+        bigint_mod_pow(value, exponent, modulus) {
+            let result = 1n % modulus;
+            let base = value % modulus;
+            let rest = exponent;
+
+            while (rest > 0n) {
+                if (rest & 1n) {
+                    result = (result * base) % modulus;
+                }
+
+                base = (base * base) % modulus;
+                rest >>= 1n;
+            }
+
+            return result;
+        },
+        bigint_gcd(a, b) {
+            let x = a < 0n ? -a : a;
+            let y = b < 0n ? -b : b;
+
+            while (y !== 0n) {
+                [x, y] = [y, x % y];
+            }
+
+            return x;
+        },
+        bigint_shift_left: (a, places) => a << BigInt(places),
+        bigint_shift_right: (a, places) => a >> BigInt(places),
+        bigint_and: (a, b) => a & b,
+        bigint_or: (a, b) => a | b,
+        bigint_xor: (a, b) => a ^ b,
+        bigint_not: (a) => ~a,
+        bigint_bit_length: (a) => (a < 0n ? ~a : a) === 0n ? 0 : (a < 0n ? ~a : a).toString(2).length,
+
         schedule_timer(delay_milliseconds, id) {
             setTimeout(() => callbacks(id), delay_milliseconds);
         },

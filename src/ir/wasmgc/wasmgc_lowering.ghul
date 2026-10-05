@@ -793,7 +793,17 @@ namespace IR.WasmGC is
             fi
         si
         visit(decimal: Values.Literal.DECIMAL) is _report("a decimal literal") si
-        visit(bigint: Values.Literal.BIGINT) is _report("a bigint literal") si
+        // A bigint literal is built at run time from its decimal digits,
+        // through the static `parse` the core library gives `bigint`.
+        visit(bigint: Values.Literal.BIGINT) is
+            if let parse = _static_method(bigint.type, "parse", 1) then
+                let string_type = IoC.CONTAINER.instance.innate_symbol_lookup.get_string_type()
+
+                gen(Values.Call.STATIC(parse, LIST[Value]([Values.Literal.STRING(bigint.value, string_type)]), bigint.type, null))
+            else
+                _report("a bigint literal, whose type has no parse")
+            fi
+        si
 
         visit(load: Values.Load.SYMBOL) is _report("a load of {load.symbol.name}") si
         visit_address(load: Values.Load.SYMBOL) is _report("the address of {load.symbol.name}") si
@@ -1336,6 +1346,24 @@ namespace IR.WasmGC is
                     fi
                 od
             elif let function: Function = found /\ function.arguments.count == arity then
+                return function
+            fi
+
+            return null
+        si
+
+        // The static method of `type` named `name` that takes `arity`
+        // arguments.
+        _static_method(type: Type?, name: string, arity: int) -> Function? is
+            let found = type?.find_member(name)
+
+            if let group: Semantic.Symbols.FUNCTION_GROUP = found then
+                for function in group.functions do
+                    if !function.is_instance /\ function.arguments.count == arity then
+                        return function
+                    fi
+                od
+            elif let function: Function = found /\ !function.is_instance /\ function.arguments.count == arity then
                 return function
             fi
 
@@ -2572,6 +2600,13 @@ namespace IR.WasmGC is
         // the one shared instance.
         visit(construction: Values.NEW) is
             let constructor = construction.constructor
+
+            // A constructor the host provides answers the whole value, as a
+            // bigint built from a scalar does.
+            if WASMGC_IMPORTS.is_host(constructor.intrinsic_operation) then
+                _call_host(constructor.intrinsic_operation!, construction.arguments, construction.type)
+                return
+            fi
 
             let type = _owner_class(constructor.owner)
 
@@ -4093,6 +4128,8 @@ namespace IR.WasmGC is
 
                 if WASMGC_TYPES.is_string(argument.type) then
                     _to_host(argument.type)
+                elif WASMGC_TYPES.is_bigint(argument.type) then
+                    _bigint_to_host(argument.type!)
                 fi
             od
 
@@ -4100,6 +4137,40 @@ namespace IR.WasmGC is
 
             if result? /\ WASMGC_TYPES.is_string(result) then
                 _from_host()
+            elif result? /\ WASMGC_TYPES.is_bigint(result) then
+                _bigint_from_host(result)
+            fi
+        si
+
+        // Unwraps the bigint on the stack to the host integer its box holds.
+        _bigint_to_host(type: Type) is
+            if let held = _registry.class_of(type) then
+                let index = _registry.type_index(held)!
+
+                _coerce_top(VALUE_TYPE.of_type_index(index, false))
+                _emit(TYPE_FIELD_INSTRUCTION(Opcode.STRUCT_GET, index, 1))
+            else
+                _report("a bigint passed to the host")
+            fi
+        si
+
+        // Wraps the host integer on the stack in a new bigint box.
+        _bigint_from_host(type: Type) is
+            let held = _registry.class_of(type)
+
+            if _registry.discovering then
+                return
+            fi
+
+            if held? then
+                let value = _temp(VALUE_TYPE.of_abstract(AbstractHeapType.EXTERN))
+
+                _emit(INDEX_INSTRUCTION(Opcode.LOCAL_SET, value))
+                _emit(INDEX_INSTRUCTION(Opcode.GLOBAL_GET, _registry.descriptor_global(held)))
+                _emit(INDEX_INSTRUCTION(Opcode.LOCAL_GET, value))
+                _emit(TYPE_INSTRUCTION(Opcode.STRUCT_NEW, _registry.type_index(held)!))
+            else
+                _report("a bigint the host answers with")
             fi
         si
 
