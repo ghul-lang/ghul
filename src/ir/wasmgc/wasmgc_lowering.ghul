@@ -1211,9 +1211,17 @@ namespace IR.WasmGC is
             return true
         si
 
+        // Appends `text` through the builder's `append` taking a string. A
+        // builder may overload `append` and return itself from it, as .NET's
+        // does, so the overload is chosen by its argument and any result is
+        // dropped.
         _append(builder: Value, text: Value) is
-            if let append = _method(builder.type, "append", 1) then
+            if let append = _string_append(builder.type) then
                 gen(Values.Call.INSTANCE(builder, append, LIST[Value]([text]), null))
+
+                if !WASMGC_TYPES.is_void(append.return_type) then
+                    _emit(Opcode.DROP)
+                fi
             else
                 _report("an interpolation, whose builder has no append")
             fi
@@ -1298,6 +1306,23 @@ namespace IR.WasmGC is
             _report("an interpolated value of type {value.type}")
 
             return value
+        si
+
+        // The builder's one-argument `append` whose argument is a string.
+        _string_append(type: Type?) -> Function? is
+            if let group: Semantic.Symbols.FUNCTION_GROUP = type?.find_member("append") then
+                for function in group.functions do
+                    if function.arguments.count == 1 /\ WASMGC_TYPES.is_string(function.arguments[0]) then
+                        return function
+                    fi
+                od
+            elif let function: Function = type?.find_member("append") /\
+                function.arguments.count == 1 /\ WASMGC_TYPES.is_string(function.arguments[0])
+            then
+                return function
+            fi
+
+            return null
         si
 
         // The method of `type` named `name` that takes `arity` arguments.
