@@ -91,11 +91,17 @@ namespace Semantic.Lookups is
             enum_class.push_ancestor(_value_type)
             _enum_type = Types.NAMED(enum_class)
 
-            _declare_scalars(intrinsics)
+            let scalars = _declare_scalars(intrinsics)
             _declare_families(intrinsics)
 
             _string_type = Types.NAMED(_declare_class(intrinsics, "string"))
-            _bigint_type = Types.NAMED(_declare_struct(intrinsics, "bigint", null))
+            let bigint_struct = _declare_struct(intrinsics, "bigint", null)
+
+            _bigint_type = Types.NAMED(bigint_struct)
+
+            // A scalar is constructed from a bigint too, converting as `cast`
+            // does through the conversion the core library declares.
+            _declare_scalar_conversions(scalars.structs, LIST[Semantic.Symbols.STRUCT]([bigint_struct]), scalars.void_type)
 
             // `T?` over a value type has no user-spellable name, so the
             // carrier is constructed against the namespace without being
@@ -162,7 +168,9 @@ namespace Semantic.Lookups is
             return intrinsics!
         si
 
-        _declare_scalars(intrinsics: Semantic.Symbols.NAMESPACE) is
+        // Declares the scalar types, and answers them and void for the
+        // conversions declared from types constructed later.
+        _declare_scalars(intrinsics: Semantic.Symbols.NAMESPACE) -> (structs: List[Semantic.Symbols.STRUCT], void_type: Type) is
             // A VOID_STRUCT, as the reflected void is, since that is what
             // answers is_void.
             let void_struct =
@@ -194,15 +202,19 @@ namespace Semantic.Lookups is
 
             _declare_struct(intrinsics, "decimal", null)
 
-            _declare_scalar_conversions(scalars, Types.NAMED(void_struct))
+            let void_type = Types.NAMED(void_struct)
+
+            _declare_scalar_conversions(scalars, scalars, void_type)
+
+            return (structs = scalars, void_type = void_type)
         si
 
         // A scalar type is constructed from any other scalar, converting the
         // way `cast` does: `double(n)` is `cast double(n)`. The .NET target
         // gives the reflected scalar types the same constructors.
-        _declare_scalar_conversions(scalars: List[Semantic.Symbols.STRUCT], void_type: Type) is
-            for owner in scalars do
-                for source in scalars do
+        _declare_scalar_conversions(owners: List[Semantic.Symbols.STRUCT], sources: List[Semantic.Symbols.STRUCT], void_type: Type) is
+            for owner in owners do
+                for source in sources do
                     let result = Symbols.STRUCT_METHOD(LOCATION.internal, LOCATION.internal, owner, "init", owner)
 
                     result.argument_names = LIST[string](["value"])

@@ -96,6 +96,7 @@ export async function run(options = {}) {
         bigint_parse: (text) => BigInt(text.trim()),
         bigint_from_int: (value) => BigInt(value),
         bigint_from_long: (value) => value,
+        bigint_from_ulong: (value) => BigInt.asUintN(64, value),
         bigint_from_double: (value) => BigInt(Math.trunc(value)),
         bigint_to_long: (value) => BigInt.asIntN(64, value),
         bigint_to_double: (value) => Number(value),
@@ -142,6 +143,22 @@ export async function run(options = {}) {
         bigint_or: (a, b) => a | b,
         bigint_xor: (a, b) => a ^ b,
         bigint_not: (a) => ~a,
+        // Two's complement in as few hex digits as hold the value and its
+        // sign, as .NET writes a BigInteger under `X`.
+        bigint_to_hex(value, upper) {
+            let digits = (value < 0n ? ~value : value).toString(16).length;
+            let text = value < 0n ? ((1n << (4n * BigInt(digits))) + value).toString(16).padStart(digits, "0") : value.toString(16);
+
+            if (value === 0n) {
+                text = "0";
+            } else if (parseInt(text[0], 16) >= 8 && value > 0n) {
+                text = "0" + text;
+            } else if (parseInt(text[0], 16) < 8 && value < 0n) {
+                text = "f" + text;
+            }
+
+            return upper ? text.toUpperCase() : text;
+        },
         bigint_bit_length: (a) => (a < 0n ? ~a : a) === 0n ? 0 : (a < 0n ? ~a : a).toString(2).length,
 
         schedule_timer(delay_milliseconds, id) {
