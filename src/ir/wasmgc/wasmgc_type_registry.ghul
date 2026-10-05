@@ -173,6 +173,7 @@ namespace IR.WasmGC is
         // an array of a class is usable where an array of its superclass
         // is expected.
         _arrays: MAP[WASMGC_CLASS, Type]
+        _fields_left: Collections.SET[WASMGC_CLASS]
         _array_storages: Collections.SET[int]
         _array_storage_types: MAP[int, int]
 
@@ -252,6 +253,7 @@ namespace IR.WasmGC is
             _static_constructors = MAP[WASMGC_CLASS, (constructor: WASMGC_FUNCTION, initialised: int)]()
 
             _arrays = MAP[WASMGC_CLASS, Type]()
+            _fields_left = Collections.SET[WASMGC_CLASS]()
             _array_storages = Collections.SET[int]()
             _array_storage_types = MAP[int, int]()
 
@@ -386,6 +388,43 @@ namespace IR.WasmGC is
             _superclass_of(type)
 
             return type
+        si
+
+        /// Records that the types `type`'s fields hold are not added, because
+        /// the class is already reported as instantiating itself without end.
+        /// A field whose type is then missing is laid out as an object
+        /// reference rather than reported again.
+        ///
+        /// - type: the class whose field types are left out
+        leave_field_types(type: WASMGC_CLASS) =>
+            _fields_left.add(type)
+
+        /// Adds the type each of `type`'s fields holds, instance and static,
+        /// since the fields are laid out wherever the class is, whether or
+        /// not anything creates a value of those types. A class this adds is
+        /// taken by the next `take_new_classes`.
+        ///
+        /// - type: the class whose fields to add the types of
+        add_field_types(type: WASMGC_CLASS) is
+            for `field in SRM_MEMBER_ORDER.fields(SRM_EMITTED_TYPE(type.definition)) do
+                _add_held(type.specialize(`field.type))
+            od
+        si
+
+        // An array's element type is added before the array, which needs it
+        // to choose how its elements are stored.
+        _add_held(held: Type?) is
+            if !held? then
+                return
+            fi
+
+            let type = if held.is_optional /\ !held.is_value_type then held.optional_inner_type ?? held else held fi
+
+            if let generic: GENERIC = type.symbol /\ cast Classy?(generic.unspecialized_symbol) == _array_definition /\ type.arguments.count == 1 then
+                _add_held(type.arguments[0])
+            fi
+
+            class_of(type)
         si
 
         /// The class `definition` at the type arguments `type_map` gives its
@@ -1462,7 +1501,9 @@ namespace IR.WasmGC is
                 return value_type
             fi
 
-            _unsupported.add((`field.location, "a field of type {type}"))
+            if !owner? \/ !_fields_left.contains(owner) then
+                _unsupported.add((`field.location, "a field of type {type}"))
+            fi
 
             return object_reference
         si
