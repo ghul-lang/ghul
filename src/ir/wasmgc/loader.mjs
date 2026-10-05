@@ -14,6 +14,9 @@ const UNHANDLED_EXCEPTION_EXIT_CODE = 134;
 
 const is_node = typeof process !== "undefined" && process.versions?.node !== undefined;
 
+const node_fs = is_node ? await import("node:fs") : null;
+const node_path = is_node ? await import("node:path") : null;
+
 class Exit extends Error {
     constructor(code) {
         super(`exit ${code}`);
@@ -32,6 +35,10 @@ class Exit extends Error {
 //   null once there is no more; by default the program reads no input
 // - options.stdout, options.stderr: called with each piece of text the
 //   program writes to that stream
+// - options.onfile: called with the path and the whole content, as a
+//   Uint8Array, each time the program writes a file; without it a program
+//   run by Node has the file written relative to the working directory,
+//   and one run anywhere else has its files discarded
 //
 // Answers the program's exit status.
 export async function run(options = {}) {
@@ -41,6 +48,7 @@ export async function run(options = {}) {
     const stderr = options.stderr ?? (() => {});
 
     const sinks = [null, stdout, stderr];
+    const onfile = options.onfile ?? (is_node ? node_file_writer(stderr) : () => {});
     const input = input_reader(options.stdin);
 
     const started = performance.now();
@@ -53,6 +61,10 @@ export async function run(options = {}) {
             (sinks[stream] ?? stdout)(String(text));
         },
         flush(_stream) {},
+
+        file_written(path, content) {
+            onfile(String(path), base64_bytes(String(content)));
+        },
 
         stdin_read_line: () => input.read_line(),
         stdin_read: () => input.read(),
@@ -319,6 +331,45 @@ function input_reader(source) {
 
             return rest;
         },
+    };
+}
+
+// The bytes standard, padded base64 text stands for.
+function base64_bytes(text) {
+    if (is_node) {
+        return new Uint8Array(Buffer.from(text, "base64"));
+    }
+
+    if (typeof Uint8Array.fromBase64 === "function") {
+        return Uint8Array.fromBase64(text);
+    }
+
+    const binary = atob(text);
+    const bytes = new Uint8Array(binary.length);
+
+    for (let i = 0; i < binary.length; i++) {
+        bytes[i] = binary.charCodeAt(i);
+    }
+
+    return bytes;
+}
+
+// Writes each file the program writes under the working directory,
+// creating the directories it names. A path that is absolute or climbs
+// with `..` would reach outside it, so it is reported on standard error
+// and not written, and the program carries on.
+function node_file_writer(stderr) {
+    return (path, bytes) => {
+        const segments = path.split(/[\\/]/);
+
+        if (node_path.isAbsolute(path) || /^[A-Za-z]:/.test(path) || segments.includes("..")) {
+            stderr(`file ${path} not written: only a path within the working directory can be written\n`);
+
+            return;
+        }
+
+        node_fs.mkdirSync(node_path.dirname(path), { recursive: true });
+        node_fs.writeFileSync(path, bytes);
     };
 }
 
