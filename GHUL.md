@@ -2647,4 +2647,4 @@ Not yet supported on the `wasm` target:
 - asynchronous functions and `await`
 - `decimal`
 - an interpolated number formatted other than by the standard formats `D`, `E`, `F`, `G`, `N`, `R` and `X` or a custom pattern of `0`, `#`, `.` and `,`, and an interpolated enum given any format
-- files and directories. `File`, `Directory` and the readers and writers over a file compile, but act on an empty file system that cannot be changed: `exists` answers false, reading a file throws `IO.FileNotFoundException`, and creating, writing or deleting one throws `Ghul.NotSupportedException`. `Path` works as it does on .NET, and standard input and output are read and written as on .NET
+- reading a file the program did not write itself. `File`, `Directory`, `MemoryStream` and the readers and writers over a file work on a file system held in memory, which starts empty and holds what the program writes. Each file written is also handed to the host: under Node it is written beneath the working directory, so a program that writes `fern.png` leaves `fern.png` there. `Path` works as it does on .NET, and standard input and output are read and written as on .NET
