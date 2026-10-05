@@ -1,0 +1,56 @@
+namespace Syntax.Process is
+    use Ghul.Pipes
+
+    // The operators in scope under an operator's name that take every
+    // operand as an argument: global operators, the innates, and static
+    // members brought in by `use`.
+    //
+    // A group holding only instance operators, as inside a type that
+    // declares the operator as a member, does not hide one further out:
+    // an instance operator takes its left operand as the receiver, so it
+    // can never answer an operator whose operands are all arguments, and
+    // is a candidate only through the operand's own type.
+    //
+    // The operator compiler gathers its candidates here, and the
+    // store-free analysis bounds an operator expression by the same
+    // candidates. Sharing the lookup keeps the analysis from charging
+    // an operator with a member it cannot call.
+    class SCOPE_OPERATOR_CANDIDATES is
+        // Whether `function` takes the left operand as its receiver
+        // rather than as an argument.
+        takes_receiver(function: Semantic.Symbols.Function) -> bool static =>
+            function.is_instance \/ isa Semantic.Symbols.INNATE_METHOD(function)
+
+        // The nearest group in scope under `name` holding an operator that
+        // takes its operands as arguments, reduced to those, or null when
+        // there is none.
+        find(symbol_table: Semantic.SYMBOL_TABLE, location: Source.LOCATION, name: string) -> Semantic.Symbols.FUNCTION_GROUP? static is
+            let found =
+                symbol_table.find_enclosing_matching(
+                    name,
+                    symbol =>
+                        if let group: Semantic.Symbols.FUNCTION_GROUP = symbol then
+                            group.functions |> any(f => !takes_receiver(f))
+                        else
+                            false
+                        fi
+                )
+
+            let group = cast Semantic.Symbols.FUNCTION_GROUP?(found)
+
+            if !group? \/ group.functions |> all(f => !takes_receiver(f)) then
+                return group
+            fi
+
+            let result = Semantic.Symbols.FUNCTION_GROUP(location, symbol_table.current_scope, name)
+
+            for function in group.functions do
+                if !takes_receiver(function) then
+                    result.add(function)
+                fi
+            od
+
+            return result
+        si
+    si
+si
