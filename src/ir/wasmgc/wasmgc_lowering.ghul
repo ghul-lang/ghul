@@ -742,7 +742,7 @@ namespace IR.WasmGC is
             let index_found = _index_of(function)
 
             if !index_found? then
-                _report("a call to {function.name}")
+                _report_uncompiled_call(_instance_of(function))
                 return
             fi
 
@@ -848,8 +848,19 @@ namespace IR.WasmGC is
                 _report("a reference to a field or array element")
             fi
         si
-        visit(load: Values.Load.STATIC_ANONYMOUS_FUNCTION) is _report("a function value") si
-        visit(load: Values.Load.GLOBAL_ANONYMOUS_FUNCTION) is _report("a function value") si
+        // A literal that captures nothing but its enclosing body's type
+        // parameters is a function value with no receiver.
+        visit(load: Values.Load.STATIC_ANONYMOUS_FUNCTION) is _anonymous_function(load.symbol, load.func_type) si
+        visit(load: Values.Load.GLOBAL_ANONYMOUS_FUNCTION) is _anonymous_function(load.symbol, load.func_type) si
+
+        _anonymous_function(symbol: Semantic.Symbols.Symbol, type: Type) is
+            if let function: Semantic.Symbols.Function = symbol then
+                gen(Values.MAKE_CLOSURE(type, function, Values.NULL(Semantic.Types.NULL())))
+            else
+                _report("a function value")
+            fi
+        si
+
         visit(load: Values.Load.INSTANCE_ANONYMOUS_FUNCTION) is _report("a function value") si
 
         visit(load: Values.Load.TEMP) is
@@ -3862,11 +3873,22 @@ namespace IR.WasmGC is
             return null
         si
 
+        // A function past the instantiation depth the target follows calls
+        // itself at ever deeper type arguments; anything else uncompiled
+        // is reported as the call it is.
+        _report_uncompiled_call(instance: WASMGC_FUNCTION) is
+            if WASMGC_TYPE_MAPS.depth(instance.type_map.values) > WASMGC_BACKEND.MAXIMUM_TYPE_ARGUMENT_DEPTH then
+                _report("{instance.definition.name} calling itself at ever deeper type arguments")
+            else
+                _report("a call to {instance.definition.name}")
+            fi
+        si
+
         _call_direct(call: Values.Call.INSTANCE, function: WASMGC_FUNCTION) is
             let index_found = _numbering.index_of(function)
 
             if !index_found? then
-                _report("a call to {function.definition.name}")
+                _report_uncompiled_call(function)
                 return
             fi
 

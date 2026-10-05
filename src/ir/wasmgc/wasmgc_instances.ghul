@@ -63,7 +63,78 @@ namespace IR.WasmGC is
         /// `type` with every type parameter `map` names replaced, or `type`
         /// itself where the map is empty.
         specialize(type: Type?, map: Collections.Map[Symbol, Type]) -> Type? static =>
-            if !type? \/ map.count == 0 then type else type.specialize(map) fi
+            if !type? \/ map.count == 0 then type else type.specialize(_with_copies(type, map)) fi
+
+        // A type parameter can be named by its declared symbol or by a
+        // frozen copy of it, which a closure's frame holds, and the map is
+        // keyed by the declared one. Each parameter in `type` the map does
+        // not name directly takes the argument of the parameter it is a
+        // copy of.
+        _with_copies(type: Type, map: Collections.Map[Symbol, Type]) -> Collections.Map[Symbol, Type] static is
+            let unmapped = LIST[Semantic.Symbols.GenericArgument]()
+
+            _collect_unmapped(type, map, unmapped, 0)
+
+            if unmapped.count == 0 then
+                return map
+            fi
+
+            let result = MAP[Symbol, Type]()
+
+            for (parameter, argument) in map do
+                result[parameter] = argument
+            od
+
+            for copy in unmapped do
+                let key = Semantic.Symbols.TYPE_PARAMETER_KEY.of(copy)
+
+                for (parameter, argument) in map do
+                    if let declared: Semantic.Symbols.GenericArgument = parameter /\ Semantic.Symbols.TYPE_PARAMETER_KEY.of(declared) =~ key then
+                        result[copy] = argument
+                    fi
+                od
+            od
+
+            return result
+        si
+
+        /// The argument `map` gives `parameter`, or the parameter it is a
+        /// copy of, or null where it gives neither.
+        argument_of(parameter: Symbol, map: Collections.Map[Symbol, Type]) -> Type? static is
+            let argument: Type mut
+
+            if map.try_get_value(parameter, argument ref) then
+                return argument
+            fi
+
+            if let copy: Semantic.Symbols.GenericArgument = parameter then
+                let key = Semantic.Symbols.TYPE_PARAMETER_KEY.of(copy)
+
+                for (declared, value) in map do
+                    if let declared_argument: Semantic.Symbols.GenericArgument = declared /\ Semantic.Symbols.TYPE_PARAMETER_KEY.of(declared_argument) =~ key then
+                        return value
+                    fi
+                od
+            fi
+
+            return null
+        si
+
+        _collect_unmapped(type: Type, map: Collections.Map[Symbol, Type], into: LIST[Semantic.Symbols.GenericArgument], depth: int) static is
+            if depth > 16 then
+                return
+            fi
+
+            if let parameter: Semantic.Symbols.GenericArgument = type.symbol then
+                if !map.contains_key(parameter) /\ !into.contains(parameter) then
+                    into.add(parameter)
+                fi
+            fi
+
+            for argument in type.arguments do
+                _collect_unmapped(argument, map, into, depth + 1)
+            od
+        si
 
         /// Whether two type maps bind the same parameters to the same types.
         /// A type is the same as another only where each matches the other:

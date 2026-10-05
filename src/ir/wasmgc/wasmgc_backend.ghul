@@ -369,9 +369,10 @@ namespace IR.WasmGC is
         // Finds every class instantiation the program uses, before the
         // recursion group is built, by compiling what the walk reaches and
         // throwing the code away; the function numbers it gives out stay.
-        // Every method of a generic class found is numbered, and so is
-        // every known class's implementation of a method called through a
-        // vtable or the trait table, since dispatch can reach it.
+        // Every method of an array type found is numbered, since the trait
+        // table reaches them at the element type, and so is every known
+        // class's implementation of a method called through a vtable or the
+        // trait table, since dispatch can reach it.
         _discover(
             registry: WASMGC_TYPE_REGISTRY,
             imports: WASMGC_IMPORTS,
@@ -391,6 +392,7 @@ namespace IR.WasmGC is
 
             let too_deep = Collections.SET[Classy]()
             let instantiations = Collections.MAP[Classy, int]()
+            let reference_parameters_found = Collections.SET[WASMGC_CLASS]()
 
             registry.discovering = true
 
@@ -419,35 +421,26 @@ namespace IR.WasmGC is
                         if too_deep.add(type.definition) then
                             _report(type.definition.location, "a generic class that instantiates itself at ever deeper type arguments")
                         fi
-                    elif type.definition.is_generic then
-                        is_done = false
-
-                        let class_methods: LIST[Function] mut
-
-                        // A generic method is compiled only at the type
-                        // arguments a call gives it.
-                        if methods.try_get_value(type.definition, class_methods ref) then
-                            for method in class_methods do
-                                if method.generic_arguments.count == 0 then
-                                    numbering.index_of(WASMGC_FUNCTION(method, type.type_map))
-                                fi
-                            od
-                        fi
                     fi
                 od
 
                 let count = numbering.count
+                let reference_parameters_count = reference_parameters_found.count
 
                 for type in registry.classes_and_arrays do
                     if !registry.is_instantiated(type) then
                         continue
                     fi
 
+                    if reference_parameters_found.add(type) then
+                        registry.dispatch.discover_reference_parameters(type)
+                    fi
+
                     let class_methods: LIST[Function] mut
 
                     if methods.try_get_value(type.definition, class_methods ref) then
                         for method in class_methods do
-                            if method.generic_arguments.count == 0 /\ registry.is_dispatched_to(method) then
+                            if (method.generic_arguments.count == 0 /\ registry.is_dispatched_to(method)) \/ registry.is_array(type) then
                                 numbering.index_of(WASMGC_FUNCTION(method, type.type_map))
                             fi
                         od
@@ -466,7 +459,7 @@ namespace IR.WasmGC is
 
                 display.number(numbering)
 
-                if numbering.count != count then
+                if numbering.count != count \/ reference_parameters_found.count != reference_parameters_count then
                     is_done = false
                 fi
             od

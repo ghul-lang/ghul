@@ -328,6 +328,42 @@ namespace IR.WasmGC is
             return _add_type(SUB_TYPE(FUNC_TYPE(parameters.to_array(), results.to_array()), true, []))
         si
 
+        /// Asks the registry, while it is discovering, for the cells and
+        /// boxes the by-reference parameters of the slots and selectors
+        /// `type` takes a place in are held in, which `plan` needs before
+        /// any body that reaches them is compiled.
+        ///
+        /// - type: an instantiated class, box, string or array type
+        discover_reference_parameters(type: WASMGC_CLASS) is
+            _discover_reference_parameters(type, SET[WASMGC_CLASS]())
+        si
+
+        _discover_reference_parameters(type: WASMGC_CLASS, seen: SET[WASMGC_CLASS]) is
+            if !seen.add(type) then
+                return
+            fi
+
+            for method in _methods(type.definition) do
+                if _is_dispatched(method) then
+                    let function = WASMGC_FUNCTION(method, type.type_map)
+
+                    for argument in method.arguments do
+                        if let reference: Semantic.Types.REFERENCE = function.specialize(argument) then
+                            _registry.value_type(reference)
+                        fi
+                    od
+                fi
+            od
+
+            for ancestor in type.definition.ancestors do
+                let specialized = WASMGC_TYPE_MAPS.specialize(ancestor, type.type_map)!
+
+                if let ancestor_type = trait_of(specialized) ?? _registry.class_of(specialized) then
+                    _discover_reference_parameters(ancestor_type, seen)
+                fi
+            od
+        si
+
         _add_vtable_type(type: WASMGC_CLASS) is
             let fields = LIST[FIELD_TYPE]()
 

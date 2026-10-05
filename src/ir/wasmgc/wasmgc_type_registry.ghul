@@ -410,6 +410,23 @@ namespace IR.WasmGC is
                 od
             od
 
+            // A closure's frame declares no type parameters of its own: its
+            // parameters are the enclosing function's, so they are owned by
+            // the function rather than by the frame.
+            if isa Semantic.Symbols.FRAME(definition) /\ arguments.count != definition.argument_names.count then
+                arguments.clear()
+                map.clear()
+
+                for i in 0..definition.argument_names.count do
+                    if let parameter = definition.type_parameter_at(i) then
+                        if let argument = WASMGC_TYPE_MAPS.argument_of(parameter, type_map) then
+                            map[parameter] = argument
+                            arguments.add(argument)
+                        fi
+                    fi
+                od
+            fi
+
             let key = WASMGC_CLASS(definition, arguments, map)
 
             let existing: WASMGC_CLASS mut
@@ -851,10 +868,10 @@ namespace IR.WasmGC is
             let definition = function.definition
 
             if let closure: Semantic.Symbols.Closure = definition /\ closure.frame? then
-                if let frame_type = closure.frame.type then
-                    if let index = type_index(function.specialize(frame_type)) then
-                        return VALUE_TYPE.of_type_index(index, true)
-                    fi
+                // A generic body's frame is instantiated at the arguments the
+                // closure was compiled with, which its own type does not carry.
+                if let frame = class_of(closure.frame, function.type_map) /\ is_object_type(frame) then
+                    return VALUE_TYPE.of_type_index(type_index(frame)!, true)
                 fi
             elif let owner: Classy = definition.owner /\ owner == _array_definition then
                 for (parameter, element) in function.type_map do
