@@ -903,6 +903,19 @@ namespace IR.WasmGC is
         /// class, or the frame of a closure body, or the root for a trait's
         /// default method. Null where it has no receiver the object model
         /// holds.
+        /// The class a member belongs to: its owner, or, for a member a
+        /// `partial` or `impl` block declares, such as a function literal
+        /// written in one of the block's methods, the class the block
+        /// reopens. Null where the owner is not a class.
+        ///
+        /// - definition: the member
+        owning_class(definition: Function) -> Classy? static =>
+            if let injection: Semantic.INJECTION_SCOPE = definition.owner then
+                injection.target
+            else
+                cast Classy?(definition.owner)
+            fi
+
         receiver_type(function: WASMGC_FUNCTION) -> VALUE_TYPE? is
             let definition = function.definition
 
@@ -912,7 +925,7 @@ namespace IR.WasmGC is
                 if let frame = class_of(closure.frame, function.type_map) /\ is_object_type(frame) then
                     return VALUE_TYPE.of_type_index(type_index(frame)!, true)
                 fi
-            elif let owner: Classy = definition.owner /\ owner == _array_definition then
+            elif let owner = owning_class(definition) /\ owner == _array_definition then
                 for (parameter, element) in function.type_map do
                     if parameter.owner == owner then
                         let lookup = IoC.CONTAINER.instance.innate_symbol_lookup
@@ -922,9 +935,9 @@ namespace IR.WasmGC is
                         fi
                     fi
                 od
-            elif let owner: Classy = definition.owner /\ (owner.is_trait \/ owner.is_object) then
+            elif let owner = owning_class(definition) /\ (owner.is_trait \/ owner.is_object) then
                 return object_reference
-            elif let owner: Classy = definition.owner then
+            elif let owner = owning_class(definition) then
                 if let type = class_of(owner, function.type_map) /\ is_object_type(type) then
                     return VALUE_TYPE.of_type_index(type_index(type)!, true)
                 elif owner == _string?.definition /\ string_type_index? then
