@@ -1868,9 +1868,12 @@ namespace IR.WasmGC is
 
             let value_type = _value_type(type)
 
-            // A tuple declares no `=~` and is compared element by element,
-            // which is not lowered yet.
-            if !value_type? \/ !value_type.heap_type()? \/ isa Semantic.Types.TUPLE(type) then
+            if let tuple: Semantic.Types.TUPLE = type then
+                _equal_tuples(left, right, tuple)
+                return
+            fi
+
+            if !value_type? \/ !value_type.heap_type()? then
                 _report("an equality comparison of {type}")
                 return
             fi
@@ -1935,6 +1938,84 @@ namespace IR.WasmGC is
                         SIMPLE_INSTRUCTION(Opcode.REF_IS_NULL)
                     ]: INSTRUCTION),
                     right_present))
+        si
+
+        // A tuple declares no `=~` and is compared element by element, each
+        // element as `=~` compares its own type, stopping at the first that
+        // differs. A tuple is a struct and is never absent.
+        _equal_tuples(left: Value, right: Value, tuple: Semantic.Types.TUPLE) is
+            let held = _struct_of(tuple)
+
+            if !held? then
+                _report("an equality comparison of {tuple}")
+                return
+            fi
+
+            if _registry.discovering then
+                gen(left)
+                gen(right)
+                return
+            fi
+
+            let type_index = _registry.type_index(held)!
+            let tuple_type = VALUE_TYPE.of_type_index(type_index, true)
+            let field_types = _registry.field_value_types(held)
+            let element_types = tuple.arguments
+            let left_local = _temp(tuple_type)
+            let right_local = _temp(tuple_type)
+
+            gen(left)
+            _coerce_top(tuple_type)
+            _emit(INDEX_INSTRUCTION(Opcode.LOCAL_SET, left_local))
+
+            gen(right)
+            _coerce_top(tuple_type)
+            _emit(INDEX_INSTRUCTION(Opcode.LOCAL_SET, right_local))
+
+            for instruction in _equal_tuple_elements(left_local, right_local, type_index, field_types, element_types, 0) do
+                _emit(instruction)
+            od
+        si
+
+        // The instructions answering whether elements `i` onwards are equal,
+        // as nested ifs so that a difference skips the rest.
+        _equal_tuple_elements(
+            left_local: int,
+            right_local: int,
+            type_index: int,
+            field_types: Collections.List[VALUE_TYPE],
+            element_types: Collections.List[Type],
+            i: int
+        ) -> Collections.List[INSTRUCTION] is
+            if i >= element_types.count then
+                return LIST[INSTRUCTION]([I32_CONSTANT(1)]: INSTRUCTION)
+            fi
+
+            let element_type = element_types[i]
+            let field_type = field_types[i + 1]
+            let left_element = _temp(field_type)
+            let right_element = _temp(field_type)
+
+            _begin()
+
+            _emit(INDEX_INSTRUCTION(Opcode.LOCAL_GET, left_local))
+            _emit(TYPE_FIELD_INSTRUCTION(Opcode.STRUCT_GET, type_index, i + 1))
+            _emit(INDEX_INSTRUCTION(Opcode.LOCAL_SET, left_element))
+            _emit(INDEX_INSTRUCTION(Opcode.LOCAL_GET, right_local))
+            _emit(TYPE_FIELD_INSTRUCTION(Opcode.STRUCT_GET, type_index, i + 1))
+            _emit(INDEX_INSTRUCTION(Opcode.LOCAL_SET, right_element))
+
+            _equal_values(WASMGC_LOCAL_VALUE(left_element, element_type), WASMGC_LOCAL_VALUE(right_element, element_type), element_type)
+
+            let rest = _equal_tuple_elements(left_local, right_local, type_index, field_types, element_types, i + 1)
+
+            _emit(
+                IF_INSTRUCTION(
+                    BLOCK_TYPE.of_value(VALUE_TYPE.of_numeric(NumericType.I32)),
+                    rest,
+                    LIST[INSTRUCTION]([I32_CONSTANT(0)]: INSTRUCTION)))
+
+            return _end()
         si
 
         // Integers are equal where their bits are; floating values where
@@ -3560,7 +3641,7 @@ namespace IR.WasmGC is
             let function = call.function
             let instance = _instance_of(function)
 
-            if _struct_of(cast Semantic.Types.Typed?(function.owner)?.type)? then
+            if let owner = _owner_class(function.owner) /\ _registry.is_struct(owner) then
                 let index = _index_of(function)
 
                 if !index? then
