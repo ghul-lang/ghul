@@ -1163,6 +1163,12 @@ namespace IR.WasmGC is
                 return false
             fi
 
+            // bigint is constructed with no fields, and held as a box around
+            // the host's integer once the core library gives it members.
+            if type == IoC.CONTAINER.instance.innate_symbol_lookup.get_bigint_type().symbol then
+                return SRM_MEMBER_ORDER.methods(SRM_EMITTED_TYPE(type)) |> Ghul.Pipes.any(m => true)
+            fi
+
             // A tuple family is constructed too, but held as a struct once
             // the core library gives it fields.
             if !is_frame /\ type.location == LOCATION.internal then
@@ -1367,6 +1373,21 @@ namespace IR.WasmGC is
                     ]),
                     true,
                     [OBJECT_TYPE_INDEX])
+            fi
+
+            // A bigint is a box around the host's arbitrary-precision
+            // integer, which no ghūl type describes.
+            if is_bigint(type) then
+                layout.add(VALUE_TYPE.of_type_index(DESCRIPTOR_TYPE_INDEX, false))
+                layout.add(VALUE_TYPE.of_abstract(AbstractHeapType.EXTERN))
+
+                _layouts[type] = layout
+                let bigint_types = LIST[Type?]()
+                bigint_types.add(null)
+                bigint_types.add(null)
+                _layout_types[type] = bigint_types
+
+                return SUB_TYPE(_struct(layout), true, [OBJECT_TYPE_INDEX])
             fi
 
             let parent = _superclass_of(type) ?? _object!
@@ -1582,6 +1603,11 @@ namespace IR.WasmGC is
 
         /// Whether `type` is the string type.
         is_string(type: WASMGC_CLASS) -> bool => type == _string
+
+        /// Whether `type` is `bigint`, whose box holds the host's integer as an
+        /// `externref` in field 1.
+        is_bigint(type: WASMGC_CLASS) -> bool =>
+            type.definition == IoC.CONTAINER.instance.innate_symbol_lookup.get_bigint_type().symbol
 
         _layout_types_of(type: WASMGC_CLASS) -> LIST[Type?] is
             let result: LIST[Type?] mut
