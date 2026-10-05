@@ -33,7 +33,14 @@ namespace Syntax.Process is
             _innate_symbol_lookup = innate_symbol_lookup
         si
 
-        apply(root: Trees.Node) is
+        _offers_constructors: bool
+
+        // Registers the intrinsics `root` declares. Where `offers_constructors`
+        // is set, each constructor intrinsic is also offered as a constructor
+        // of the type it returns.
+        apply(root: Trees.Node, offers_constructors: bool) is
+            _offers_constructors = offers_constructors
+
             root.walk(self)
         si
 
@@ -60,9 +67,14 @@ namespace Syntax.Process is
                 return
             fi
 
-            // A constructor intrinsic stays an ordinary method, offered as a
-            // constructor only to the assemblies that reflect it.
+            // A constructor intrinsic stays an ordinary method. It is offered
+            // as a constructor to the assemblies that reflect it, and, from a
+            // source library, to the program compiled with it.
             if declaration.intrinsic_operation.starts_with("constructor.") then
+                if _offers_constructors then
+                    _offer_as_constructor(declaration)
+                fi
+
                 return
             fi
 
@@ -125,6 +137,38 @@ namespace Syntax.Process is
                 intrinsic.generic_argument_constraint_kinds = declaration.generic_argument_constraint_kinds
                 intrinsic.generic_argument_has_constructor_constraint = declaration.generic_argument_has_constructor_constraint
             fi
+        si
+
+        // Adds an `init` to the class `target` returns that calls `target`, as
+        // the reflected path does for a constructor intrinsic. A target that
+        // returns a generic instance or an array is left as a method.
+        _offer_as_constructor(target: Semantic.Symbols.Function) is
+            let owner = cast Semantic.Symbols.Classy?(cast Semantic.Types.NAMED?(target.return_type)?.symbol)
+
+            if !owner? \/ owner.is_generic then
+                return
+            fi
+
+            let result = Semantic.Symbols.INSTANCE_METHOD(target.location, target.location, owner, "init", owner)
+
+            result.arguments = target.arguments
+            result.argument_names = target.argument_names
+            result.return_type = _innate_symbol_lookup.get_void_type()
+            result.constructor_target = target
+
+            if target.is_declared_pure then
+                result.mark_declared_pure()
+            fi
+
+            if target.is_generic then
+                result.is_generic = true
+                result.generic_arguments = target.generic_arguments
+                result.generic_argument_names = target.generic_argument_names
+            fi
+
+            result.mark_synthesized()
+
+            owner.add_member(result)
         si
 
         _orders_by_opcode(owner: Semantic.Scope?) -> bool is
