@@ -66,6 +66,29 @@ export async function run(options = {}) {
 
         random_u32: () => crypto.getRandomValues(new Uint32Array(1))[0] | 0,
 
+        // The floating-point functions the core library's Math does not
+        // compute in ghūl, each taking and answering doubles.
+        math_sqrt: Math.sqrt,
+        math_cbrt: Math.cbrt,
+        math_floor: Math.floor,
+        math_ceiling: Math.ceil,
+        math_truncate: Math.trunc,
+        math_sin: Math.sin,
+        math_cos: Math.cos,
+        math_tan: Math.tan,
+        math_asin: Math.asin,
+        math_acos: Math.acos,
+        math_atan: Math.atan,
+        math_atan2: Math.atan2,
+        math_sinh: Math.sinh,
+        math_cosh: Math.cosh,
+        math_tanh: Math.tanh,
+        math_exp: Math.exp,
+        math_log: Math.log,
+        math_log10: Math.log10,
+        math_log2: Math.log2,
+        math_pow: Math.pow,
+
         schedule_timer(delay_milliseconds, id) {
             setTimeout(() => callbacks(id), delay_milliseconds);
         },
