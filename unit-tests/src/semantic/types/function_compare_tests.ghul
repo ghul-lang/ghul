@@ -1,0 +1,108 @@
+namespace Semantic.UnitTests is
+    use Collections.LIST
+
+    use Source.LOCATION
+
+    use Semantic.Symbols.CLASS
+    use Semantic.Symbols.CLASSY_GENERIC_ARGUMENT
+    use Semantic.Types.ACTION
+    use Semantic.Types.MATCH
+    use Semantic.Types.Type
+    use TestClass = Microsoft.VisualStudio.TestTools.UnitTesting.TestClassAttribute
+    use Test = Microsoft.VisualStudio.TestTools.UnitTesting.TestMethodAttribute
+    use Assertions
+
+    // How a formal function type compares against an actual one, which is
+    // how a function-typed argument is scored before and after the formal's
+    // type arguments are bound.
+    @TestClass()
+    class FUNCTION_COMPARE_TESTS is
+        init() is si
+
+        loc() -> LOCATION => LOCATION("test.ghul", 1, 1, 1, 1)
+
+        lookup() -> Lookups.InnateSymbolLookup => TEST_INNATE_SYMBOL_LOOKUP()
+
+        a_scalar(name: string, kind: Semantic.Symbols.BuiltInType) -> Type is
+            let result = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), name, LIST[string](), Semantic.BLOCK_SCOPE())
+
+            result.built_in_type = kind
+
+            return result.type!
+        si
+
+        int_type: Type => a_scalar("int", Semantic.Symbols.BuiltInType.INT)
+
+        double_type: Type => a_scalar("double", Semantic.Symbols.BuiltInType.DOUBLE)
+
+        a_wild_type() -> Type is
+            let owner =
+                CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "OWNER", LIST[string](["T"]), Semantic.BLOCK_SCOPE())
+
+            return CLASSY_GENERIC_ARGUMENT(loc(), owner, "T", 0).type!
+        si
+
+        a_function_type(parameter: Type, result: Type) -> Type =>
+            lookup().get_function_type(LIST[Type]([parameter, result]))
+
+        an_action_type(parameter: Type) -> Type =>
+            ACTION(
+                loc(),
+                CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "action", LIST[string](["T"]), Semantic.BLOCK_SCOPE()),
+                LIST[Type]([parameter]))
+
+        @Test()
+        given_concrete_functions_returning_different_scalars__compare_is_different() is
+            let whole = int_type
+            let real = double_type
+
+            are_equal(MATCH.DIFFERENT, a_function_type(whole, real).compare(a_function_type(whole, whole)))
+        si
+
+        // The result positions are both concrete and differ, but a type
+        // variable elsewhere in the formal turns the answer into WILD.
+        @Test()
+        given_a_wild_parameter_and_a_different_concrete_result__compare_is_wild() is
+            let whole = int_type
+            let real = double_type
+
+            are_equal(MATCH.WILD, a_function_type(a_wild_type(), real).compare(a_function_type(whole, whole)))
+        si
+
+        @Test()
+        given_wild_parameter_and_result__compare_is_wild() is
+            let whole = int_type
+            let wild = a_wild_type()
+
+            are_equal(MATCH.WILD, a_function_type(wild, wild).compare(a_function_type(whole, whole)))
+        si
+
+        @Test()
+        given_a_concrete_void_formal_against_a_function_returning_a_value__compare_is_different() is
+            let whole = int_type
+
+            are_equal(MATCH.DIFFERENT, an_action_type(whole).compare(a_function_type(whole, whole)))
+        si
+
+        @Test()
+        given_a_wild_void_formal_against_a_function_returning_a_value__compare_is_wild() is
+            let whole = int_type
+
+            are_equal(MATCH.WILD, an_action_type(a_wild_type()).compare(a_function_type(whole, whole)))
+        si
+
+        @Test()
+        given_a_concrete_optional_result_formal__compare_is_different() is
+            let whole = int_type
+
+            are_equal(MATCH.DIFFERENT, a_function_type(whole, whole.as_optional()).compare(a_function_type(whole, whole)))
+        si
+
+        @Test()
+        given_a_wild_parameter_and_an_optional_result_formal__compare_is_wild() is
+            let whole = int_type
+
+            are_equal(MATCH.WILD, a_function_type(a_wild_type(), whole.as_optional()).compare(a_function_type(whole, whole)))
+        si
+    si
+si
