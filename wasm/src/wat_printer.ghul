@@ -75,19 +75,43 @@ namespace Wasm is
     class WAT_PRINTER is
         _lines: Collections.LIST[string]
         _indent: int
+        _annotations: WatAnnotations?
 
         init() is
             _lines = Collections.LIST[string]()
             _indent = 0
         si
 
-        print(module: MODULE) -> string is
+        /// The text form of `module`.
+        ///
+        /// - module: the module to print
+        print(module: MODULE) -> string => print(module, null)
+
+        /// The text form of `module`, with the comments `annotations` gives
+        /// and leaving out what it excludes.
+        ///
+        /// - module: the module to print
+        /// - annotations: what to add and leave out, or null for the whole
+        ///   module as it is
+        print(module: MODULE, annotations: WatAnnotations?) -> string is
+            _annotations = annotations
+
             let names = NAMES.of_module(module)
             let types = _flatten_types(module)
 
             _line("(module{_declared_name(names.module_name())}")
 
             _indent = _indent + 1
+
+            if annotations? /\ !annotations.includes_declarations then
+                _print_functions(module, names, types)
+
+                _indent = _indent - 1
+
+                _line(")")
+
+                return _joined()
+            fi
 
             let type_index mut = 0
 
@@ -152,13 +176,7 @@ namespace Wasm is
                 data_index = data_index + 1
             od
 
-            let index mut = functions_imported
-
-            for function in module.functions() do
-                _print_function(function, index, names, types)
-
-                index = index + 1
-            od
+            _print_functions(module, names, types)
 
             // A module with no parts is one line, which is what a reader
             // of the text expects the empty module to be.
@@ -372,13 +390,55 @@ namespace Wasm is
             return text.to_string()
         si
 
+        // The functions the module defines, each one the annotations
+        // include, and a count of those they leave out.
+        _print_functions(module: MODULE, names: NAMES, types: Collections.LIST[SUB_TYPE]) is
+            let index mut = _count_imports(module, ImportKind.FUNCTION)
+            let omitted mut = 0
+
+            for function in module.functions() do
+                if _annotations?.includes_function(index) ?? true then
+                    _print_function(function, index, names, types)
+                else
+                    omitted = omitted + 1
+                fi
+
+                index = index + 1
+            od
+
+            if omitted > 0 then
+                _line(";; {omitted} more functions not shown")
+            fi
+        si
+
+        // The names the annotations give the first `count` locals of the
+        // function with index `index`, or null where they give none.
+        _annotated_locals(index: int, count: int) -> NAME_MAP? is
+            if let annotations = _annotations then
+                let result = NAME_MAP()
+                let any mut = false
+
+                for local in 0..count do
+                    if let name = annotations.local_name(index, local) then
+                        result.add(local, name)
+                        any = true
+                    fi
+                od
+
+                if any then
+                    return result
+                fi
+            fi
+
+            return null
+        si
+
         _print_function(function: FUNCTION, index: int, names: NAMES, types: Collections.LIST[SUB_TYPE]) is
             let type_index = function.type_index()
-            let local_names = names.locals_of(index)
-            let header mut = "(func {_declared_function(names, index)}(type {type_index})"
-
             let locals = function.locals()
             let param_count = _param_count(types, type_index)
+            let local_names = names.locals_of(index) ?? _annotated_locals(index, param_count + locals.count)
+            let header mut = "(func {_declared_function(names, index)}(type {type_index})"
             let i mut = 0
 
             while i < locals.count do
@@ -411,6 +471,10 @@ namespace Wasm is
         si
 
         _print_instruction(instruction: INSTRUCTION, names: NAMES, local_names: NAME_MAP?) is
+            if let comment = _annotations?.comment_before(instruction) then
+                _line(";; {comment}")
+            fi
+
             if isa BLOCK_INSTRUCTION(instruction) then
                 _line("{_mnemonic(instruction.opcode)}{_block_type_text(instruction.block_type())}")
 

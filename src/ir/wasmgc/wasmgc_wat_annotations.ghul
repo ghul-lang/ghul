@@ -1,0 +1,83 @@
+namespace IR.WasmGC is
+    use Collections.MAP
+    use Collections.SET
+
+    use Wasm.INSTRUCTION
+
+    /// What `--wat-lines` and `--wat-program-only` add to and leave out of
+    /// the text form of a module: the source position each statement's
+    /// first instruction came from, and which functions the program's own
+    /// sources compiled to. The binary module is the same either way.
+    class WASMGC_WAT_ANNOTATIONS: Wasm.WatAnnotations is
+        _positions: MAP[INSTRUCTION, string]
+        _program_functions: SET[int]
+        _local_names: MAP[int, MAP[int, string]]
+        _program_only: bool
+
+        /// - program_only: whether only the program's own functions are
+        ///   printed, with none of the module's declarations
+        init(program_only: bool) is
+            _positions = MAP[INSTRUCTION, string]()
+            _program_functions = SET[int]()
+            _local_names = MAP[int, MAP[int, string]]()
+            _program_only = program_only
+        si
+
+        /// Records that `instruction` is the first a statement at
+        /// `location` was lowered to.
+        ///
+        /// - instruction: the instruction, as the body holds it
+        /// - location: where the statement is in its source file
+        note_position(instruction: INSTRUCTION, location: Source.LOCATION) is
+            if !_positions.contains_key(instruction) then
+                _positions[instruction] = "{location.file_name}:{location.start_line}"
+            fi
+        si
+
+        /// Records the name of a local of a function.
+        ///
+        /// - function_index: the function's index, counting imported functions
+        /// - local_index: the local's index, counting the parameters
+        /// - name: the name the source gave it
+        note_local_name(function_index: int, local_index: int, name: string) is
+            if !_local_names.contains_key(function_index) then
+                _local_names[function_index] = MAP[int, string]()
+            fi
+
+            _local_names[function_index][local_index] = name
+        si
+
+        /// Records that the function with index `index` was compiled from
+        /// the program's own sources.
+        ///
+        /// - index: the function's index, counting imported functions
+        note_program_function(index: int) is
+            _program_functions.add(index)
+        si
+
+        comment_before(instruction: INSTRUCTION) -> string? is
+            let position: string mut
+
+            if _positions.try_get_value(instruction, position ref) then
+                return position
+            fi
+
+            return null
+        si
+
+        local_name(function_index: int, local_index: int) -> string? is
+            let names: MAP[int, string] mut
+            let name: string mut
+
+            if _local_names.try_get_value(function_index, names ref) /\ names.try_get_value(local_index, name ref) then
+                return name
+            fi
+
+            return null
+        si
+
+        includes_function(index: int) -> bool => !_program_only \/ _program_functions.contains(index)
+
+        includes_declarations: bool => !_program_only
+    si
+si

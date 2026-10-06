@@ -261,5 +261,97 @@ namespace Wasm.UnitTests is
                 is_true(text.ends_with(")\n"))
             od
         si
+
+        // Annotations add comments before the instructions they name, give
+        // names to locals the name section does not, and can leave out
+        // functions and the module's declarations, counting what they
+        // leave out.
+        @Test()
+        print__with_annotations__adds_comments_and_local_names() is
+            let module = MODULE()
+
+            module.add_type(FUNC_TYPE([], []))
+
+            let marked = I32_CONSTANT(1)
+
+            module.add_function(FUNCTION(0, [_i32(0)], _run([marked, SIMPLE_INSTRUCTION(Opcode.DROP)])))
+
+            let annotations = TEST_ANNOTATIONS(true)
+
+            annotations.comments[marked] = "main.ghul:3"
+            annotations.locals[0] = "count"
+
+            are_equal(
+                "(module\n"
+                "  (type (;0;) (func))\n"
+                "  (func (;0;) (type 0) (local $count i32)\n"
+                "    ;; main.ghul:3\n"
+                "    i32.const 1\n"
+                "    drop\n"
+                "  )\n"
+                ")\n",
+                WAT_PRINTER().print(module, annotations))
+        si
+
+        @Test()
+        print__with_annotations_that_leave_out_declarations__prints_only_the_included_functions() is
+            let module = MODULE()
+
+            module.add_type(FUNC_TYPE([], []))
+            module.add_function(FUNCTION(0, [], _run([I32_CONSTANT(0)])))
+            module.add_function(FUNCTION(0, [], _run([I32_CONSTANT(1)])))
+            module.add_function(FUNCTION(0, [], _run([I32_CONSTANT(2)])))
+
+            let annotations = TEST_ANNOTATIONS(false)
+
+            annotations.included.add(1)
+
+            are_equal(
+                "(module\n"
+                "  (func (;1;) (type 0)\n"
+                "    i32.const 1\n"
+                "  )\n"
+                "  ;; 2 more functions not shown\n"
+                ")\n",
+                WAT_PRINTER().print(module, annotations))
+        si
+    si
+
+    class TEST_ANNOTATIONS: Wasm.WatAnnotations is
+        comments: Collections.MAP[INSTRUCTION, string]
+        locals: Collections.MAP[int, string]
+        included: Collections.SET[int]
+        _declarations: bool
+
+        init(declarations: bool) is
+            comments = Collections.MAP[INSTRUCTION, string]()
+            locals = Collections.MAP[int, string]()
+            included = Collections.SET[int]()
+            _declarations = declarations
+        si
+
+        comment_before(instruction: INSTRUCTION) -> string? is
+            let comment: string mut
+
+            if comments.try_get_value(instruction, comment ref) then
+                return comment
+            fi
+
+            return null
+        si
+
+        local_name(function_index: int, local_index: int) -> string? is
+            let name: string mut
+
+            if locals.try_get_value(local_index, name ref) then
+                return name
+            fi
+
+            return null
+        si
+
+        includes_function(index: int) -> bool => _declarations \/ included.contains(index)
+
+        includes_declarations: bool => _declarations
     si
 si
