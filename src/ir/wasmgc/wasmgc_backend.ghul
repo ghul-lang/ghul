@@ -55,6 +55,7 @@ namespace IR.WasmGC is
 
         _entry_point: Function?
         _module: MODULE?
+        _wat_annotations: WASMGC_WAT_ANNOTATIONS?
         _want_library: bool
 
         init() is
@@ -110,7 +111,7 @@ namespace IR.WasmGC is
             fi
 
             if let wat_path = IoC.CONTAINER.instance.build_flags.wat_output then
-                File.write_all_text(wat_path, WAT_PRINTER().print(module))
+                File.write_all_text(wat_path, WAT_PRINTER().print(module, _wat_annotations))
             fi
         si
 
@@ -277,10 +278,20 @@ namespace IR.WasmGC is
 
             let names = NAME_MAP()
 
+            let flags = IoC.CONTAINER.instance.build_flags
+
+            if flags.wat_output? /\ (flags.want_wat_lines \/ flags.want_wat_program_only) then
+                _wat_annotations = WASMGC_WAT_ANNOTATIONS(flags.want_wat_program_only)
+            fi
+
             numbering.restart()
 
             while let instance = numbering.next() do
                 let index = numbering.index_of(instance)!
+
+                if let annotations = _wat_annotations /\ _is_program_function(instance.definition) then
+                    annotations.note_program_function(index)
+                fi
 
                 numbering.place(
                     instance,
@@ -727,7 +738,17 @@ namespace IR.WasmGC is
 
             let lowering = WASMGC_LOWERING(numbering, registry, imports, strings, exceptions, function, parameter_types)
 
+            if !registry.discovering /\ IoC.CONTAINER.instance.build_flags.want_wat_lines then
+                lowering.source_lines = _wat_annotations
+            fi
+
             let body = lowering.lower(_body_of(definition))
+
+            if let annotations = lowering.source_lines, index = numbering.indexed(function) then
+                for (local, name) in lowering.local_names do
+                    annotations.note_local_name(index, local, name)
+                od
+            fi
 
             if !registry.discovering then
                 for construct in lowering.unsupported do
@@ -736,6 +757,26 @@ namespace IR.WasmGC is
             fi
 
             return (body, lowering.local_types.to_array())
+        si
+
+        // Whether `function` was compiled from one of the program's own
+        // source files, rather than from a source library's or from
+        // nothing the program wrote. The entry the top-level statements
+        // are gathered into is the program's, though it has no position.
+        _is_program_function(function: Function) -> bool is
+            if function.is_top_level_entry then
+                return true
+            fi
+
+            let location = _source_location(function)
+
+            if location.is_internal \/ location.is_reflected \/ location.is_unknown then
+                return false
+            fi
+
+            let libraries = IoC.CONTAINER.instance.build_flags.library_sources
+
+            return !(libraries?.library_for(IO.Path.get_full_path(location.file_name))? ?? false)
         si
 
         // Where a report about `function` points: a generator frame's

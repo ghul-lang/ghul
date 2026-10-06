@@ -123,6 +123,18 @@ namespace IR.WasmGC is
         /// index order; the first is numbered after the parameters.
         local_types: LIST[VALUE_TYPE] => _local_types
 
+        /// Where the source position of each statement is recorded, for
+        /// the text form of the module, or null where it is not wanted.
+        source_lines: WASMGC_WAT_ANNOTATIONS? public
+
+        /// The names of the locals this body declared, by local index,
+        /// recorded where source positions are.
+        local_names: Collections.List[(index: int, name: string)] => _local_names
+
+        _local_names: LIST[(index: int, name: string)]
+        _pending_position: Source.LOCATION?
+        _last_line: int
+
         /// Lowers a body of `function`.
         ///
         /// - numbering: the function indices, which a call numbers the function
@@ -192,6 +204,7 @@ namespace IR.WasmGC is
             _locals = MAP[LOCAL, int]()
             _body_type_map = MAP[Semantic.Symbols.Symbol, Type]()
             _local_types = LIST[VALUE_TYPE]()
+            _local_names = LIST[(index: int, name: string)]()
             _bodies = LIST[LIST[INSTRUCTION]]()
             _labels = LIST[(node: Values.Breakable?, is_loop_head: bool, finally_exits: WASMGC_FINALLY_EXITS?)]()
             _resume_point_states = MAP[LABEL, int]()
@@ -207,6 +220,7 @@ namespace IR.WasmGC is
             _begin()
 
             for value in values do
+                _mark(value)
                 gen(value)
             od
 
@@ -460,7 +474,23 @@ namespace IR.WasmGC is
         si
 
         _emit(instruction: INSTRUCTION) is
+            if let position = _pending_position then
+                source_lines?.note_position(instruction, position)
+
+                _pending_position = null
+            fi
+
             _bodies[_bodies.count - 1].add(instruction)
+        si
+
+        // Records where `value` is, as the position of the first
+        // instruction lowered after it, where positions are wanted and the
+        // line differs from the last one recorded.
+        _mark(value: Value) is
+            if source_lines? /\ value.has_location /\ value.location.start_line != _last_line then
+                _pending_position = value.location
+                _last_line = value.location.start_line
+            fi
         si
 
         _emit(opcode: Opcode) is
@@ -636,6 +666,10 @@ namespace IR.WasmGC is
             index = _parameter_count + _local_types.count
 
             _locals[local] = index
+
+            if source_lines? then
+                _local_names.add((index, local.name))
+            fi
 
             if let cell = _cell_index(local) then
                 _local_types.add(VALUE_TYPE.of_type_index(cell, true))
@@ -1070,6 +1104,8 @@ namespace IR.WasmGC is
 
             for i in 0..values.count do
                 let value = values[i]
+
+                _mark(value)
 
                 if i == values.count - 1 /\ _produces_value(block) /\ isa Values.REGION(value) then
                     let result = _value_type(block.type)
@@ -3159,7 +3195,11 @@ namespace IR.WasmGC is
         // falls through to the start of the body.
         _lower_body(node: Value, values: Collections.Iterable[Value]) is
             if !_resume_states.contains_key(node) then
-                _lower_all(values)
+                for value in values do
+                    _mark(value)
+                    gen(value)
+                od
+
                 return
             fi
 
@@ -3288,6 +3328,7 @@ namespace IR.WasmGC is
 
             if let last = last_region then
                 for i in 0..values.count - 1 do
+                    _mark(values[i])
                     gen(values[i])
                 od
 
