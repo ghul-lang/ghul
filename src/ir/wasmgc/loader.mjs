@@ -35,6 +35,10 @@ class Exit extends Error {
 //   null once there is no more; by default the program reads no input
 // - options.stdout, options.stderr: called with each piece of text the
 //   program writes to that stream
+// - options.files: the files the program starts with, as an object from
+//   path to content, each content text, which is read as UTF-8, or bytes;
+//   by default it starts with none. A path is relative to the program's
+//   root directory, which is also its current directory
 // - options.onfile: called with the path and the whole content, as a
 //   Uint8Array, each time the program writes a file; without it a program
 //   run by Node has the file written relative to the working directory,
@@ -50,6 +54,7 @@ export async function run(options = {}) {
     const sinks = [null, stdout, stderr];
     const onfile = options.onfile ?? (is_node ? node_file_writer(stderr) : () => {});
     const input = input_reader(options.stdin);
+    const input_files = Object.entries(options.files ?? {}).map(([path, content]) => [path, file_bytes(content)]);
 
     const started = performance.now();
 
@@ -65,6 +70,10 @@ export async function run(options = {}) {
         file_written(path, content) {
             onfile(String(path), base64_bytes(String(content)));
         },
+
+        input_file_count: () => input_files.length,
+        input_file_path: (index) => input_files[index][0],
+        input_file_content: (index) => byte_text(input_files[index][1]),
 
         stdin_read_line: () => input.read_line(),
         stdin_read: () => input.read(),
@@ -332,6 +341,32 @@ function input_reader(source) {
             return rest;
         },
     };
+}
+
+// The bytes a file's content stands for: text is UTF-8, and bytes are as
+// they are.
+function file_bytes(content) {
+    if (typeof content === "string") {
+        return new TextEncoder().encode(content);
+    }
+
+    if (content instanceof ArrayBuffer) {
+        return new Uint8Array(content);
+    }
+
+    return new Uint8Array(content.buffer, content.byteOffset, content.byteLength);
+}
+
+// Text with one code unit for each of `bytes`, which is how the program is
+// handed a file's content.
+function byte_text(bytes) {
+    let text = "";
+
+    for (let at = 0; at < bytes.length; at += 8192) {
+        text += String.fromCharCode.apply(null, bytes.subarray(at, at + 8192));
+    }
+
+    return text;
 }
 
 // The bytes standard, padded base64 text stands for.
