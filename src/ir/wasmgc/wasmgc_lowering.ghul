@@ -101,6 +101,10 @@ namespace IR.WasmGC is
         _resume_states: MAP[Value, LIST[int]]
         _folded_dispatches: LIST[Values.DISPATCH]
 
+        // The region each await is lowered as, made once so that every
+        // lowering of the body sees the same resume point.
+        _await_structures: MAP[Values.AWAIT_SUSPEND, Values.REGION]
+
         _unsupported: LIST[string]
         // The struct-typed locals the body declared, and the scalar locals
         // that live in cells, each of which holds a default box from the
@@ -209,6 +213,7 @@ namespace IR.WasmGC is
             _labels = LIST[(node: Values.Breakable?, is_loop_head: bool, finally_exits: WASMGC_FINALLY_EXITS?)]()
             _resume_point_states = MAP[LABEL, int]()
             _resume_states = MAP[Value, LIST[int]]()
+            _await_structures = MAP[Values.AWAIT_SUSPEND, Values.REGION]()
             _folded_dispatches = LIST[Values.DISPATCH]()
             _unsupported = LIST[string]()
             _struct_locals = LIST[(index: int, type: WASMGC_CLASS)]()
@@ -1072,11 +1077,261 @@ namespace IR.WasmGC is
 
         visit_address(coalesce: Values.COALESCE_LOAD) is _report("the address of a coalesced load") si
 
-        visit(launch: Values.ASYNC_METHOD_LAUNCH) is _report("an asynchronous function") si
-        visit(completion: Values.ASYNC_COMPLETION) is _report("an asynchronous function") si
-        visit(completed: Values.COMPLETED_TASK_LIKE) is _report("an asynchronous function") si
-        visit(suspend: Values.AWAIT_SUSPEND) is _report("await") si
-        visit(step: Values.AWAIT_SUSPEND_STEP) is _report("await") si
+        // An asynchronous function's body constructs its frame, marks it not
+        // yet started, gives it a builder, starts it through the builder,
+        // and answers the builder's task, as the .NET async builder protocol
+        // has it. The builder's members are found as the .NET backend finds
+        // them, by name and argument count on the builder type the frame
+        // was given.
+        visit(launch: Values.ASYNC_METHOD_LAUNCH) is
+            let builder_type = launch.builder_field.type!
+            let local = launch.state_machine_local
+            let frame = Values.Load.TEMP(local, launch.state_machine_type)
+
+            let arguments =
+                if let block: Values.BLOCK = launch.ctor_arg_loads then
+                    LIST[Value](block.values)
+                else
+                    LIST[Value]([launch.ctor_arg_loads])
+                fi
+
+            gen(Values.DECLARE_LOCAL(local))
+            gen(Values.NEW(launch.state_machine_type, launch.constructor, arguments))
+            gen(Values.STORE_TEMP(local))
+
+            gen(Values.Store.INSTANCE_FIELD(frame, launch.state_field, Values.Literal.NUMBER(-1, IoC.CONTAINER.instance.innate_symbol_lookup.get_int_type())))
+
+            if let create = _builder_member(builder_type, "create", 0) then
+                gen(Values.Store.INSTANCE_FIELD(frame, launch.builder_field, Values.Call.STATIC(create, LIST[Value](), builder_type, null)))
+            fi
+
+            let builder = Values.Load.INSTANCE_FIELD(frame, launch.builder_field)
+
+            if let start = _builder_generic_member(builder_type, "start", 1, LIST[Type]([launch.state_machine_type])) then
+                _call_builder(builder, start, LIST[Value]([frame]), LIST[bool]([true]))
+            fi
+
+            _builder_task(builder, builder_type)
+        si
+
+        // The end of a frame's `move_next`: the machine is finished, and the
+        // builder is handed the result, or the exception the handler caught,
+        // which the handler leaves on the stack.
+        visit(completion: Values.ASYNC_COMPLETION) is
+            let builder_type = completion.builder_field.type!
+
+            let exception =
+                if let exception_type = completion.exception_type then
+                    let local = _temp(_value_type(exception_type) ?? _registry.object_reference)
+
+                    _emit(INDEX_INSTRUCTION(Opcode.LOCAL_SET, local))
+
+                    local
+                else
+                    null
+                fi
+
+            gen(_frame_field_store(completion.state_field, Values.Literal.NUMBER(-1, IoC.CONTAINER.instance.innate_symbol_lookup.get_int_type())))
+
+            let builder = _frame_field_load(completion.builder_field)
+
+            if let local = exception then
+                if let set_exception = _builder_member(builder_type, "set_exception", 1) then
+                    let instance = _instance_of(set_exception)
+
+                    if let index = _numbering.index_of(instance) then
+                        gen(builder)
+                        _coerce_top(_local_type_of_receiver(instance))
+                        _emit(INDEX_INSTRUCTION(Opcode.LOCAL_GET, local))
+                        _coerce_top(_value_type(instance.specialize(set_exception.arguments[0])))
+                        _emit(INDEX_INSTRUCTION(Opcode.CALL, index))
+                    else
+                        _report_uncompiled_call(instance)
+                    fi
+                fi
+            else
+                let arguments =
+                    if let result = completion.result_field then
+                        LIST[Value]([_frame_field_load(result)])
+                    else
+                        LIST[Value]()
+                    fi
+
+                if let set_result = _builder_member(builder_type, "set_result", arguments.count) then
+                    gen(Values.Call.INSTANCE(builder, set_result, arguments, null))
+                fi
+            fi
+        si
+
+        // A task-like that is complete from the start: a builder is created,
+        // given its result at once, and asked for its task.
+        visit(completed: Values.COMPLETED_TASK_LIKE) is
+            let builder_type = completed.builder_type
+
+            let create = _builder_member(builder_type, "create", 0)
+            let set_result = _builder_member(builder_type, "set_result", 0)
+
+            if !create? \/ !set_result? then
+                return
+            fi
+
+            let local = IR.LOCAL(".completed_builder", builder_type)
+            let builder = Values.Load.TEMP(local, builder_type)
+
+            gen(Values.DECLARE_LOCAL(local))
+            gen(Values.Call.STATIC(create, LIST[Value](), builder_type, null))
+            gen(Values.STORE_TEMP(local))
+
+            gen(Values.Call.INSTANCE(builder, set_result, LIST[Value](), null))
+
+            _builder_task(builder, builder_type)
+        si
+
+        // An await is a region holding its steps and the resume point a
+        // later `move_next` re-enters at, and then the awaiter's result.
+        // The region is made once for each await, since every lowering of
+        // the body has to see the same resume point.
+        visit(suspend: Values.AWAIT_SUSPEND) is
+            gen(_await_structure(suspend))
+            gen(suspend.get_result)
+        si
+
+        _await_structure(suspend: Values.AWAIT_SUSPEND) -> Values.REGION is
+            let structure: Values.REGION mut
+
+            if !_await_structures.try_get_value(suspend, structure ref) then
+                structure = suspend.structure()
+                _await_structures[suspend] = structure
+            fi
+
+            return structure
+        si
+
+        visit(step: Values.AWAIT_SUSPEND_STEP) is
+            let suspend = step.suspend
+
+            case step.kind
+            when Values.AwaitSuspendStep.CAPTURE_AWAITER then
+                gen(_frame_field_store(suspend.awaiter_field, suspend.get_awaiter))
+
+            when Values.AwaitSuspendStep.REGISTER_CONTINUATION then
+                _stamp_state(suspend, suspend.state_number)
+                _register_continuation(suspend)
+
+            when Values.AwaitSuspendStep.CLEAR_STATE then
+                _stamp_state(suspend, -1)
+            esac
+        si
+
+        // The state goes to both the local the dispatch reads and the
+        // frame's field, which the next `move_next` starts from.
+        _stamp_state(suspend: Values.AWAIT_SUSPEND, state: int) is
+            gen(Values.Literal.NUMBER(state, IoC.CONTAINER.instance.innate_symbol_lookup.get_int_type()))
+            _emit(INDEX_INSTRUCTION(Opcode.LOCAL_SET, _local(suspend.state_local)))
+
+            gen(_frame_field_store(suspend.state_field, Values.Literal.NUMBER(state, IoC.CONTAINER.instance.innate_symbol_lookup.get_int_type())))
+        si
+
+        // Registers the frame's resumption with the awaiter through the
+        // builder's `await_on_completed`, or `await_unsafe_on_completed` for
+        // an awaiter implementing `ICriticalNotifyCompletion`. The awaiter
+        // goes by reference, as a cell holding the frame's copy, and the
+        // machine by reference or as the interface, as the member takes it.
+        _register_continuation(suspend: Values.AWAIT_SUSPEND) is
+            let builder_type = suspend.builder_field.type!
+            let name = if suspend.is_critical then "await_unsafe_on_completed" else "await_on_completed" fi
+
+            let member = Semantic.TASK_LIKE.member_of_arity(builder_type, name, 2)
+
+            if !member? then
+                _report("a builder with no {name}")
+                return
+            fi
+
+            let machine_by_reference = isa Semantic.Types.REFERENCE(member.arguments[1])
+
+            let type_arguments = LIST[Type]([suspend.awaiter_type])
+
+            if member.generic_arguments.count > 1 then
+                type_arguments.add(suspend.state_machine_type)
+            fi
+
+            if let await_on_completed = _builder_generic_member(builder_type, name, 2, type_arguments) then
+                let frame = Values.Load.REFERENCE_SELF(cast Semantic.Symbols.Classy(suspend.state_field.owner), suspend.state_machine_type)
+
+                _call_builder(
+                    _frame_field_load(suspend.builder_field),
+                    await_on_completed,
+                    LIST[Value]([_frame_field_load(suspend.awaiter_field), frame]),
+                    LIST[bool]([true, machine_by_reference]))
+            fi
+        si
+
+        // The builder member `name` taking `arity` arguments, or null, with
+        // the build reported, where the builder declares none.
+        _builder_member(builder_type: Type, name: string, arity: int) -> Semantic.Symbols.Function? is
+            let member = Semantic.TASK_LIKE.member_of_arity(builder_type, name, arity)
+
+            if !member? then
+                _report("a builder with no {name} taking {arity} arguments")
+            fi
+
+            return member
+        si
+
+        // The generic builder member `name`, at `type_arguments`.
+        _builder_generic_member(builder_type: Type, name: string, arity: int, type_arguments: Collections.List[Type]) -> Semantic.Symbols.Function? is
+            if let member = _builder_member(builder_type, name, arity) then
+                return cast Semantic.Symbols.Function?(member.specialize(type_arguments))
+            fi
+
+            return null
+        si
+
+        _builder_task(builder: Value, builder_type: Type) is
+            if let property: Semantic.Symbols.Property = builder_type.find_member("task") /\ property.read_function? then
+                gen(Values.Call.INSTANCE(builder, property.read_function, LIST[Value](), null))
+            else
+                _report("a builder with no task")
+            fi
+        si
+
+        // Calls a builder member whose `ref` arguments, those `by_cell`
+        // marks, are each given a cell of their own holding the value: a
+        // struct's box, or a reference cell for a value of reference type.
+        // The builder reads through the reference and does not write back.
+        _call_builder(from: Value, function: Semantic.Symbols.Function, arguments: Collections.List[Value], by_cell: Collections.List[bool]) is
+            let instance = _instance_of(function)
+            let index = _numbering.index_of(instance)
+
+            if !index? then
+                _report_uncompiled_call(instance)
+                return
+            fi
+
+            gen(from)
+            _coerce_top(_local_type_of_receiver(instance))
+
+            for i in 0..arguments.count do
+                let argument = arguments[i]
+
+                gen(argument)
+
+                if by_cell[i] then
+                    if _struct_of(argument.type)? then
+                        // A reference to a struct is its box, which the value is.
+                    elif _registry.reference_cell_value_type(_specialize(argument.type))? then
+                        _emit(TYPE_INSTRUCTION(Opcode.STRUCT_NEW, _registry.reference_cell_type_index))
+                    else
+                        _report("a reference to a {argument.type} passed to a builder")
+                    fi
+                else
+                    _coerce_top(_value_type(instance.specialize(function.arguments[i])))
+                fi
+            od
+
+            _emit(INDEX_INSTRUCTION(Opcode.CALL, index))
+        si
 
         visit(max_stack: Values.MAX_STACK) is si
 
@@ -1144,8 +1399,16 @@ namespace IR.WasmGC is
             fi
         si
 
-        visit(self_load: Values.Load.OUTER_SELF) is _report("self") si
-        visit_address(self_load: Values.Load.OUTER_SELF) is _report("self") si
+        // `self` inside a generator's or an asynchronous function's frame
+        // is the instance the frame was made for, which the frame holds in
+        // a field of its own, as the .NET target reads it.
+        visit(self_load: Values.Load.OUTER_SELF) is
+            gen(_frame_field_load(self_load.outer_self_field))
+        si
+
+        visit_address(self_load: Values.Load.OUTER_SELF) is
+            visit(self_load)
+        si
         // A scalar's method takes the value itself as its receiver. A
         // struct method's receiver is the box its value lives in, so its
         // address is the receiver and its value a copy.
@@ -1617,12 +1880,14 @@ namespace IR.WasmGC is
         visit(closure: Values.MAKE_CLOSURE) is
             let function = closure.function
 
-            let is_virtual = closure.is_virtual /\ !function.has_no_overriders
-
-            if is_virtual /\ _is_trait_method(function) then
-                _report("a function value of a trait method")
+            // A method reached through a trait is dispatched, as a call
+            // through the trait is, whatever is recorded as overriding it.
+            if (closure.is_virtual \/ function.is_abstract) /\ _is_trait_method(function) then
+                _trait_method_closure(closure)
                 return
             fi
+
+            let is_virtual = closure.is_virtual /\ !function.has_no_overriders
 
             let instance = _instance_of(function)
 
@@ -1675,6 +1940,57 @@ namespace IR.WasmGC is
                 _emit(HEAP_TYPE_INSTRUCTION(Opcode.REF_NULL, _registry.object_reference.heap_type()!))
             fi
 
+            _emit(TYPE_INSTRUCTION(Opcode.STRUCT_NEW, _registry.closure_type_index))
+        si
+
+        // A function value holding a trait method: a thunk that calls
+        // through the dispatch table row the method's selector names, and
+        // the receiver it calls on.
+        _trait_method_closure(closure: Values.MAKE_CLOSURE) is
+            let function = closure.function
+            let dispatch = _registry.dispatch
+            let trait_type = _trait_instance(function.owner)
+            let root = cast Function?(function.root_specialized_from)!
+
+            if _registry.discovering then
+                _registry.note_dispatched(function)
+
+                if trait_type? then
+                    dispatch.selector_of(root, trait_type)
+                fi
+
+                gen(closure.receiver)
+                return
+            fi
+
+            let signature = _registry.closure_signature(_specialize(closure.type)!)
+
+            if !signature? then
+                _report("a function value of type {closure.type}")
+                return
+            fi
+
+            let selector = if trait_type? then dispatch.selector_of(root, trait_type) else null fi
+
+            if !selector? then
+                _report("a function value of a trait method nothing implements")
+                return
+            fi
+
+            dispatch.use_selector(selector, _numbering)
+
+            let instance = _instance_of(function)
+            let parameter_types = LIST[VALUE_TYPE?]()
+
+            for argument in function.arguments do
+                parameter_types.add(_value_type(instance.specialize(argument)))
+            od
+
+            let thunk = _registry.closure_interface_thunk(signature, selector, parameter_types, _discards_result(closure.type, function), _numbering)
+
+            _emit(INDEX_INSTRUCTION(Opcode.GLOBAL_GET, _registry.closure_descriptor_global))
+            _emit(INDEX_INSTRUCTION(Opcode.REF_FUNC, thunk))
+            gen(closure.receiver)
             _emit(TYPE_INSTRUCTION(Opcode.STRUCT_NEW, _registry.closure_type_index))
         si
 
@@ -3121,12 +3437,19 @@ namespace IR.WasmGC is
             _dispatch = null
         si
 
+        // The first dispatch in `values`. An asynchronous function's body
+        // is inside the try that hands an escaping exception to its builder,
+        // and the try's body opens with the dispatch.
         _find_dispatch(values: Collections.Iterable[Value]) -> Values.DISPATCH? is
             for value in values do
                 if let dispatch: Values.DISPATCH = value then
                     return dispatch
                 elif let block: Values.BLOCK = value then
                     if let dispatch = _find_dispatch(block.values) then
+                        return dispatch
+                    fi
+                elif let breakable: Values.Breakable = value then
+                    if let dispatch = _find_dispatch(breakable.body.values) then
                         return dispatch
                     fi
                 fi
@@ -3159,6 +3482,22 @@ namespace IR.WasmGC is
 
                 if _resume_point_states.try_get_value(point.label, state ref) then
                     result.add(state)
+                fi
+
+                return result
+            fi
+
+            // An await's resume point is in the region it is lowered as, and
+            // a statement holding an await is entered through the await: the
+            // .NET target re-enters at the same point with nothing evaluated
+            // before it, so nothing in the statement comes before the await
+            // either, and lowering the statement again reaches the region,
+            // whose own dispatch goes on to the resume point.
+            if let suspend = _await_in(value) then
+                result.add_range(_collect_resume_states(_await_structure(suspend)))
+
+                if result.count > 0 then
+                    _resume_states[value] = result
                 fi
 
                 return result
@@ -3290,6 +3629,27 @@ namespace IR.WasmGC is
                     into.add(value)
                 fi
             od
+        si
+
+        // The await `value` is or holds as the value it computes: the await
+        // itself, or the await a discarded value, a store or a return is
+        // made from.
+        _await_in(value: Value?) -> Values.AWAIT_SUSPEND? is
+            if let suspend: Values.AWAIT_SUSPEND = value then
+                return suspend
+            elif let discard: Values.DISCARD = value then
+                return _await_in(discard.value)
+            elif let store: Values.Store.INSTANCE_FIELD = value then
+                return _await_in(store.value)
+            elif let store: Values.Store.LOCAL_VARIABLE = value then
+                return _await_in(store.value)
+            elif let store: Values.Store.LOCAL_ARGUMENT = value then
+                return _await_in(store.value)
+            elif let tee: Values.TEE_TEMP = value then
+                return _await_in(tee.value)
+            fi
+
+            return null
         si
 
         _states_inside(value: Value) -> Collections.List[int] is

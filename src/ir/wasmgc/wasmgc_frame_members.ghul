@@ -4,6 +4,7 @@ namespace IR.WasmGC is
     use Semantic.Symbols.Classy
     use Semantic.Symbols.Function
     use Semantic.Symbols.STATE_MACHINE_FRAME
+    use Semantic.Symbols.ASYNC_STATE_MACHINE_FRAME
     use Semantic.Types.Type
 
     use Source.LOCATION
@@ -53,6 +54,65 @@ namespace IR.WasmGC is
             method.add_overridee(overridee)
 
             return method
+        si
+
+        /// The method `member` of the frame of an asynchronous function is:
+        /// one of the two the frame implements `IAsyncStateMachine` with, or
+        /// null where the core library declares no such trait.
+        method_for(frame: ASYNC_STATE_MACHINE_FRAME, member: FrameMember) -> Function? static is
+            let lookup = IoC.CONTAINER.instance.innate_symbol_lookup
+
+            let state_machine_type = lookup.get_async_state_machine_interface_type()
+
+            if !state_machine_type? then
+                return null
+            fi
+
+            let state_machine = _definition(state_machine_type)
+
+            if !state_machine? then
+                return null
+            fi
+
+            let (name, argument_names, argument_types) =
+                case member
+                when FrameMember.MOVE_NEXT then
+                    ("move_next", LIST[string](), LIST[Type]())
+                when FrameMember.SET_STATE_MACHINE then
+                    ("set_state_machine", LIST[string](["state_machine"]), LIST[Type]([state_machine_type]))
+                else
+                    return null
+                esac
+
+            let overridee = _member_of_arity(state_machine, name, argument_types.count)
+
+            if !overridee? then
+                return null
+            fi
+
+            let method = Semantic.Symbols.INSTANCE_METHOD(LOCATION.internal, LOCATION.internal, frame, name, frame)
+
+            method.set_arguments(argument_names, argument_types)
+            method.set_return_type(lookup.get_void_type())
+            method.add_overridee(overridee)
+
+            return method
+        si
+
+        _member_of_arity(owner: Classy, name: string, arity: int) -> Function? static is
+            let symbol = owner.find_direct(name)
+
+            if let function: Function = symbol /\ function.arguments.count == arity then
+                return function
+            elif let group: Semantic.Symbols.FUNCTION_GROUP = symbol then
+                for function in group.functions do
+                    if function.arguments.count == arity then
+                        return function
+                    fi
+                od
+            fi
+
+            return null
         si
 
         _definition(type: Type) -> Classy? static =>

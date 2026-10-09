@@ -1,0 +1,254 @@
+// Runs asynchronous functions through a library's own task-like types and
+// builders: two that interleave at their awaits, one that awaits another's
+// value, an instance method that reaches `self` from its frame, and one
+// whose exception is handed to its builder. Each await registers the
+// frame's `move_next` as a function value taken through the trait. The
+// exit status is 100 plus a bit for each check that failed.
+namespace Test is
+    use System.Runtime.CompilerServices.IAsyncStateMachine
+    use System.Runtime.CompilerServices.INotifyCompletion
+    use System.Runtime.CompilerServices.ICriticalNotifyCompletion
+
+    // The continuations waiting for their turn, oldest first.
+    class TURN(action: () -> void, next: TURN? public) is si
+
+    class READY is
+        _first: TURN? static
+        _last: TURN? static
+
+        add(action: () -> void) static is
+            let turn = TURN(action, null)
+
+            if let last = _last then
+                last.next = turn
+            else
+                _first = turn
+            fi
+
+            _last = turn
+        si
+
+        run() static is
+            while let turn = _first do
+                _first = turn.next
+
+                if !_first? then
+                    _last = null
+                fi
+
+                turn.action()
+            od
+        si
+    si
+
+    // An awaiter that gives every other waiting function a turn first.
+    struct PASS: ICriticalNotifyCompletion is
+        init() is si
+
+        get_awaiter() -> PASS => self
+        is_completed: bool => false
+        get_result() is si
+
+        on_completed(continuation: () -> void) is
+            READY.add(continuation)
+        si
+
+        unsafe_on_completed(continuation: () -> void) is
+            READY.add(continuation)
+        si
+    si
+
+    @System.Runtime.CompilerServices.AsyncMethodBuilder(typeof(TASK_BUILDER))
+    class TASK is
+        done: bool public
+        failed: bool public
+
+        init() is si
+    si
+
+    class TASK_BUILDER is
+        _task: TASK
+
+        init() is
+            _task = TASK()
+        si
+
+        create() -> TASK_BUILDER static => TASK_BUILDER()
+
+        start[A: IAsyncStateMachine](state_machine: A ref) is
+            state_machine!.move_next()
+        si
+
+        task: TASK => _task
+
+        set_result() is
+            _task.done = true
+        si
+
+        set_exception(e: Ghul.Exception) is
+            _task.failed = true
+        si
+
+        await_on_completed[A: INotifyCompletion](awaiter: A ref, state_machine: IAsyncStateMachine) is
+            awaiter!.on_completed(state_machine.move_next)
+        si
+
+        await_unsafe_on_completed[A: ICriticalNotifyCompletion](awaiter: A ref, state_machine: IAsyncStateMachine) is
+            awaiter!.unsafe_on_completed(state_machine.move_next)
+        si
+    si
+
+    @System.Runtime.CompilerServices.AsyncMethodBuilder(typeof(VALUE_BUILDER[_]))
+    class VALUE[T]: ICriticalNotifyCompletion is
+        done: bool
+        result: T
+        _waiting: TURN?
+
+        init() is si
+
+        get_awaiter() -> VALUE[T] => self
+        is_completed: bool => done
+        get_result() -> T => result
+
+        on_completed(continuation: () -> void) is
+            _waiting = TURN(continuation, _waiting)
+        si
+
+        unsafe_on_completed(continuation: () -> void) is
+            _waiting = TURN(continuation, _waiting)
+        si
+
+        complete(value: T) is
+            result = value
+            done = true
+
+            while let turn = _waiting do
+                _waiting = turn.next
+                READY.add(turn.action)
+            od
+        si
+    si
+
+    class VALUE_BUILDER[T] is
+        _value: VALUE[T]
+
+        init() is
+            _value = VALUE[T]()
+        si
+
+        create() -> VALUE_BUILDER[T] static => VALUE_BUILDER[T]()
+
+        start[A: IAsyncStateMachine](state_machine: A ref) is
+            state_machine!.move_next()
+        si
+
+        task: VALUE[T] => _value
+
+        set_result(value: T) is
+            _value.complete(value)
+        si
+
+        set_exception(e: Ghul.Exception) is si
+
+        await_on_completed[A: INotifyCompletion](awaiter: A ref, state_machine: IAsyncStateMachine) is
+            awaiter!.on_completed(state_machine.move_next)
+        si
+
+        await_unsafe_on_completed[A: ICriticalNotifyCompletion](awaiter: A ref, state_machine: IAsyncStateMachine) is
+            awaiter!.unsafe_on_completed(state_machine.move_next)
+        si
+    si
+
+    class LOG is
+        digits: int static
+
+        add(digit: int) static is
+            digits = digits * 10 + digit
+        si
+    si
+
+    worker(first: int, turns: int) -> TASK is
+        let i mut = 0
+
+        while i < turns do
+            LOG.add(first + i * 2)
+            await PASS()
+            i = i + 1
+        od
+    si
+
+    square_later(n: int) -> VALUE[int] is
+        await PASS()
+
+        return n * n
+    si
+
+    sum_of_squares() -> VALUE[int] is
+        let a = await square_later(3)
+        let b = await square_later(4)
+
+        return a + b
+    si
+
+    class COUNTER is
+        count: int
+
+        init() is si
+
+        bump(times: int) -> TASK is
+            let i mut = 0
+
+            while i < times do
+                count = count + 1
+                await PASS()
+                i = i + 1
+            od
+        si
+    si
+
+    fails() -> TASK is
+        await PASS()
+
+        throw Ghul.Exception()
+    si
+
+    entry() -> int is
+        let failures mut = 0
+
+        let a = worker(1, 3)
+        let b = worker(2, 2)
+
+        READY.run()
+
+        if LOG.digits != 12345 \/ !a.done \/ !b.done then
+            failures = failures + 1
+        fi
+
+        let total = sum_of_squares()
+
+        READY.run()
+
+        if !total.done \/ total.result != 25 then
+            failures = failures + 2
+        fi
+
+        let counter = COUNTER()
+        let bumped = counter.bump(3)
+
+        READY.run()
+
+        if counter.count != 3 \/ !bumped.done then
+            failures = failures + 4
+        fi
+
+        let failed = fails()
+
+        READY.run()
+
+        if !failed.failed \/ failed.done then
+            failures = failures + 8
+        fi
+
+        return 100 + failures
+    si
+si
