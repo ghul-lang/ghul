@@ -6,8 +6,8 @@ namespace Driver.UnitTests is
 
     // Pins SDK_REFERENCE_PATH_RESOLVER's contract: the target-framework moniker
     // it will and won't derive a pack version from, the walk from the runtime
-    // directory up to the install root, and an end-to-end resolution against
-    // the SDK this test is running on.
+    // directory up to the install root, the search for a `dotnet` host on
+    // PATH, and an end-to-end resolution against the SDK this test is running on.
     @TestClass()
     class SDK_REFERENCE_PATH_RESOLVER_TESTS is
         init() is si
@@ -110,6 +110,86 @@ namespace Driver.UnitTests is
             is_true(IO.File.exists(IO.Path.join(reference_path, "System.Runtime.dll")))
             is_true(IO.File.exists(IO.Path.join(reference_path, "System.Console.dll")))
         si
+
+        @Test()
+        is_install_root_needs_the_shared_runtime_directory() is
+            let root = temp_directory()
+
+            try
+                is_false(resolver().is_install_root(root))
+
+                IO.Directory.create_directory(IO.Path.join([root, "shared", "Microsoft.NETCore.App"]))
+
+                is_true(resolver().is_install_root(root))
+            finally
+                IO.Directory.delete(root, true)
+            yrt
+        si
+
+        @Test()
+        install_root_from_search_path_skips_a_host_outside_an_install_root() is
+            let stray = temp_directory()
+            let root = fake_install_root()
+
+            try
+                IO.File.write_all_text(IO.Path.join(stray, host_name()), "")
+
+                are_equal(
+                    root,
+                    resolver().install_root_from_search_path("{stray}{IO.Path.path_separator}{root}"))
+            finally
+                IO.Directory.delete(stray, true)
+                IO.Directory.delete(root, true)
+            yrt
+        si
+
+        @Test()
+        install_root_from_search_path_follows_a_link_to_the_host() is
+            let bin = temp_directory()
+            let root = fake_install_root()
+
+            try
+                IO.File.create_symbolic_link(IO.Path.join(bin, host_name()), IO.Path.join(root, host_name()))
+
+                are_equal(root, resolver().install_root_from_search_path(bin))
+            finally
+                IO.Directory.delete(bin, true)
+                IO.Directory.delete(root, true)
+            yrt
+        si
+
+        @Test()
+        install_root_from_search_path_is_null_without_a_host() is
+            let empty = temp_directory()
+
+            try
+                is_null(resolver().install_root_from_search_path(empty))
+                is_null(resolver().install_root_from_search_path(""))
+                is_null(resolver().install_root_from_search_path(null))
+            finally
+                IO.Directory.delete(empty, true)
+            yrt
+        si
+
+        temp_directory() -> string is
+            let result = IO.Path.join(IO.Path.get_temp_path(), System.Guid.new_guid().to_string())
+
+            IO.Directory.create_directory(result)
+
+            return result
+        si
+
+        fake_install_root() -> string is
+            let result = temp_directory()
+
+            IO.Directory.create_directory(IO.Path.join([result, "shared", "Microsoft.NETCore.App"]))
+            IO.File.write_all_text(IO.Path.join(result, host_name()), "")
+
+            return result
+        si
+
+        host_name() -> string =>
+            if System.OperatingSystem.is_windows() then "dotnet.exe" else "dotnet" fi
 
         @Test()
         resolve_is_null_for_a_moniker_with_no_pack_layout() is
