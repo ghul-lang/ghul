@@ -18,6 +18,7 @@ namespace IR.WasmGC is
     use Wasm.HEAP_TYPE_INSTRUCTION
     use Wasm.I32_CONSTANT
     use Wasm.I64_CONSTANT
+    use Wasm.CALL_INDIRECT_INSTRUCTION
     use Wasm.F32_CONSTANT
     use Wasm.F64_CONSTANT
     use Wasm.Opcode
@@ -895,6 +896,48 @@ namespace IR.WasmGC is
             return index
         si
 
+        /// The thunk a function value of `signature` holding a trait method
+        /// calls, reserved in `numbering`. It calls through the dispatch table
+        /// row `selector` names, at the receiver's class, so the value runs
+        /// whichever implementation the receiver has. Nothing is reserved
+        /// while discovering.
+        closure_interface_thunk(signature: int, selector: WASMGC_SELECTOR, parameter_types: Collections.List[VALUE_TYPE?], discards_result: bool, numbering: WASMGC_FUNCTION_NUMBERING) -> int is
+            if discovering then
+                return 0
+            fi
+
+            let registry = self
+
+            let index = numbering.reserve(() is
+                let body = LIST[INSTRUCTION]()
+
+                body.add(INDEX_INSTRUCTION(Opcode.LOCAL_GET, 0))
+                body.add(HEAP_TYPE_INSTRUCTION(Opcode.REF_CAST_NULL, HEAP_TYPE.of_type_index(OBJECT_TYPE_INDEX)))
+
+                for i in 0..parameter_types.count do
+                    registry._forward(body, i + 1, parameter_types[i])
+                od
+
+                body.add(INDEX_INSTRUCTION(Opcode.LOCAL_GET, 0))
+                body.add(HEAP_TYPE_INSTRUCTION(Opcode.REF_CAST, HEAP_TYPE.of_type_index(OBJECT_TYPE_INDEX)))
+                body.add(TYPE_FIELD_INSTRUCTION(Opcode.STRUCT_GET, OBJECT_TYPE_INDEX, 0))
+                body.add(TYPE_FIELD_INSTRUCTION(Opcode.STRUCT_GET, DESCRIPTOR_TYPE_INDEX, DESCRIPTOR_CLASS_ID))
+                body.add(I32_CONSTANT(selector.offset))
+                body.add(Wasm.SIMPLE_INSTRUCTION(Opcode.I32_ADD))
+                body.add(CALL_INDIRECT_INSTRUCTION(selector.signature, 0))
+
+                if discards_result then
+                    body.add(Wasm.SIMPLE_INSTRUCTION(Opcode.DROP))
+                fi
+
+                return Wasm.FUNCTION(signature, [], body)
+            si)
+
+            _closure_thunks.add(index)
+
+            return index
+        si
+
         /// The thunks function values hold, which a module has to declare,
         /// since bodies name them with ref.func.
         closure_thunks: LIST[int] => _closure_thunks
@@ -1226,7 +1269,7 @@ namespace IR.WasmGC is
         // with a representation of their own, and the built-in types the
         // compiler constructs are not declared by the program.
         _is_object_type(type: Classy) -> bool is
-            let is_frame = isa Semantic.Symbols.FRAME(type) \/ isa Semantic.Symbols.STATE_MACHINE_FRAME(type)
+            let is_frame = isa Semantic.Symbols.FRAME(type) \/ isa Semantic.Symbols.STATE_MACHINE_FRAME_BASE(type)
 
             if type.is_object \/ type.is_reflected then
                 return false
