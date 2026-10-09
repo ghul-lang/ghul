@@ -248,36 +248,28 @@ namespace IR.WasmGC is
                 fi
             od
 
-            // A box answers with its scalar's own methods where they stand
-            // in for the root's, as the scalar would on .NET, and so does
-            // bigint. A built-in type's members are not recorded as
-            // overriding the root's, so a member is matched to the slot by
-            // its name and arity.
+            // A box answers with its scalar's own methods where they override
+            // the root's, as the scalar would on .NET, and so does bigint.
+            // Their methods are not the box's own to dispatch, so they only
+            // fill the slots they override.
             if _registry.is_box(type) \/ _registry.is_bigint(type) then
                 for method in _methods(type.definition) do
                     if !method.is_instance \/ method.is_constructor then
                         continue
                     fi
 
-                    for i in 0..entries.count do
-                        if let inherited = entries[i] /\ _stands_in_for(method, inherited.definition) then
-                            let key = WASMGC_FUNCTION(method, type.type_map)
+                    if let slot = _overridden_slot(type, method) then
+                        let key = WASMGC_FUNCTION(method, type.type_map)
 
-                            _slot_of[key] = slots[i]
-                            entries[i] = key
-                        fi
-                    od
+                        _slot_of[key] = slot
+                        entries[slot.index] = key
+                    fi
                 od
             fi
 
             _slots[type] = slots
             _slot_entries[type] = entries
         si
-
-        // Whether `method` takes the place of the root's `inherited`: the
-        // same name and the same number of arguments.
-        _stands_in_for(method: Function, inherited: Function) -> bool =>
-            method.name =~ inherited.name /\ method.arguments.count == inherited.arguments.count
 
         _overridden_slot(type: WASMGC_CLASS, method: Function) -> WASMGC_SLOT? is
             if let overridees = method.overridees then
