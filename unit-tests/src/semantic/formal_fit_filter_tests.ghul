@@ -12,6 +12,8 @@ namespace Semantic.UnitTests is
     use Semantic.Symbols.Function
     use Semantic.Symbols.GLOBAL_FUNCTION
     use Semantic.Types.Type
+    use Semantic.Types.INFERRED_VARIABLE_TYPE
+    use Semantic.Symbols.INFERRED_TYPE_ARG_ORIGIN
     use TestClass = Microsoft.VisualStudio.TestTools.UnitTesting.TestClassAttribute
     use Test = Microsoft.VisualStudio.TestTools.UnitTesting.TestMethodAttribute
     use Assertions
@@ -150,6 +152,143 @@ namespace Semantic.UnitTests is
             let cat = a_type("CAT")
 
             is_null(FORMAL_FIT_FILTER.pick(candidates([a_function("f", [cat])]), actuals([cat])))
+        si
+
+        lookup() -> Lookups.InnateSymbolLookup => TEST_INNATE_SYMBOL_LOOKUP()
+
+        // A built-in scalar type, as the innate lookup marks one.
+        a_scalar(name: string, kind: Semantic.Symbols.BuiltInType) -> Type is
+            let result = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), name, empty_names(), Semantic.BLOCK_SCOPE())
+
+            result.built_in_type = kind
+
+            return result.type!
+        si
+
+        int_type: Type => a_scalar("int", Semantic.Symbols.BuiltInType.INT)
+
+        double_type: Type => a_scalar("double", Semantic.Symbols.BuiltInType.DOUBLE)
+
+        // A function type taking `parameter` and returning `result`.
+        a_function_type(parameter: Type, result: Type) -> Type =>
+            lookup().get_function_type(LIST[Type]([parameter, result]))
+
+        // A type inference has not settled yet.
+        unsettled() -> Type =>
+            INFERRED_VARIABLE_TYPE(INFERRED_TYPE_ARG_ORIGIN(loc(), Semantic.BLOCK_SCOPE(), "p"))
+
+        rejects(formal: Type, actual: Type) -> bool =>
+            FORMAL_FIT_FILTER.rejects(a_function("f", [formal]), actuals([actual]))
+
+        @Test()
+        given_a_function_returning_a_different_scalar__rejects() is
+            let whole = int_type
+            let real = double_type
+
+            is_true(rejects(a_function_type(whole, real), a_function_type(whole, whole)))
+        si
+
+        @Test()
+        given_a_function_returning_the_same_scalar__does_not_reject() is
+            let whole = int_type
+
+            is_false(rejects(a_function_type(whole, whole), a_function_type(whole, whole)))
+        si
+
+        // A function literal whose parameter is still being inferred has
+        // already settled what it returns, and is held to that.
+        @Test()
+        given_an_unsettled_parameter_and_a_settled_different_result__rejects() is
+            let whole = int_type
+            let real = double_type
+
+            is_true(rejects(a_function_type(whole, real), a_function_type(unsettled(), whole)))
+        si
+
+        @Test()
+        given_an_unsettled_result__does_not_reject() is
+            let whole = int_type
+            let real = double_type
+
+            is_false(rejects(a_function_type(whole, real), a_function_type(whole, unsettled())))
+        si
+
+        // A type variable inside the formal function type says nothing
+        // about fit yet.
+        @Test()
+        given_a_type_variable_inside_the_formal__does_not_reject() is
+            let whole = int_type
+
+            is_false(rejects(a_function_type(whole, a_wild_type()), a_function_type(whole, whole)))
+        si
+
+        @Test()
+        given_a_nested_function_returning_a_different_scalar__rejects() is
+            let whole = int_type
+            let real = double_type
+
+            is_true(
+                rejects(
+                    a_function_type(whole, a_function_type(whole, real)),
+                    a_function_type(whole, a_function_type(whole, whole))))
+        si
+
+        // A literal's result can settle as the optional a slot asks for,
+        // so an optional result is left to the scoring.
+        @Test()
+        given_an_optional_formal_result__does_not_reject() is
+            let whole = int_type
+
+            is_false(rejects(a_function_type(whole, whole.as_optional()), a_function_type(whole, whole)))
+        si
+
+        @Test()
+        given_a_function_returning_an_unrelated_class__rejects() is
+            let whole = int_type
+
+            is_true(rejects(a_function_type(whole, a_type("DOG")), a_function_type(whole, a_type("CAT"))))
+        si
+
+        @Test()
+        given_a_function_returning_a_subclass__does_not_reject() is
+            let whole = int_type
+            let animal = a_type("ANIMAL")
+
+            is_false(rejects(a_function_type(whole, animal), a_function_type(whole, a_child("CAT", animal))))
+        si
+
+        // Parameters go the other way: the actual must take what the formal
+        // passes it.
+        @Test()
+        given_a_function_taking_a_wider_parameter__does_not_reject() is
+            let whole = int_type
+            let animal = a_type("ANIMAL")
+
+            is_false(rejects(a_function_type(a_child("CAT", animal), whole), a_function_type(animal, whole)))
+        si
+
+        @Test()
+        given_a_function_taking_a_narrower_parameter__rejects() is
+            let whole = int_type
+            let animal = a_type("ANIMAL")
+
+            is_true(rejects(a_function_type(animal, whole), a_function_type(a_child("CAT", animal), whole)))
+        si
+
+        // Only function types decide: a formal and actual that are not
+        // function types are left to the scoring, however different they
+        // are.
+        @Test()
+        given_formals_that_are_not_function_types__does_not_reject() is
+            is_false(rejects(a_type("DOG"), a_type("CAT")))
+        si
+
+        @Test()
+        given_a_different_number_of_actuals__does_not_reject() is
+            let cat = a_type("CAT")
+            let dog = a_type("DOG")
+
+            is_false(FORMAL_FIT_FILTER.rejects(a_function("f", [dog]), actuals([cat, cat])))
         si
     si
 si
