@@ -90,6 +90,12 @@ namespace IR.Emitter is
         // a frame's members are synthesised straight into metadata, so
         // there is no symbol for the bridge to resolve.
         _frame_enumerator_members: Collections.MAP[FrameMember, EntityHandle]
+
+        // What a frame's bridges call to reach the same members. For a
+        // generic frame that is a reference through the frame applied to
+        // its own parameters: a definition row names the open type, which
+        // is not a type an instance can have.
+        _frame_enumerator_targets: Collections.MAP[FrameMember, EntityHandle]
         _frame_element_type: Semantic.Types.Type?
 
         _pending_overrides: Collections.LIST[SRM_BOUND_METHOD]
@@ -107,6 +113,7 @@ namespace IR.Emitter is
             _type_parameters = Collections.LIST[SRM_TYPE_PARAMETER]()
             _pending_overrides = Collections.LIST[SRM_BOUND_METHOD]()
             _frame_enumerator_members = Collections.MAP[FrameMember, EntityHandle]()
+            _frame_enumerator_targets = Collections.MAP[FrameMember, EntityHandle]()
 
             if let doc_type = IoC.CONTAINER.instance.assemblies.find_type(DOC_ATTRIBUTE_NAME) then
                 _doc_attribute_assembly = doc_type.assembly.get_name().name
@@ -297,6 +304,7 @@ namespace IR.Emitter is
         // was deposited by the tree walk against the same key.
         _write_frame_members(type: SRM_EMITTED_TYPE) is
             _frame_enumerator_members.clear()
+            _frame_enumerator_targets.clear()
 
             let frame = cast Semantic.Symbols.STATE_MACHINE_FRAME?(type.declared)
 
@@ -313,13 +321,14 @@ namespace IR.Emitter is
             let iterator = _iterator_ancestor(frame)
 
             for member in FRAME_MEMBERS do
+                let signature = _frame_member_signature(member, element, iterator)
+
                 let handle =
                     _assembly.add_method_definition(
                         SRM_FLAGS.frame_member_attributes(member),
                         cast System.Reflection.MethodImplAttributes(0),   // IL, managed
                         _assembly.get_or_add_string(_frame_member_name(member)),
-                        _assembly.get_or_add_blob(
-                            _frame_member_signature(member, element, iterator)),
+                        _assembly.get_or_add_blob(signature),
                         _handles.frame_member_body(frame, member) ?? -1,
                         MetadataTokens.parameter_handle(_assembly.next_parameter_row))
 
@@ -327,6 +336,18 @@ namespace IR.Emitter is
 
                 if member == FrameMember.GET_ENUMERATOR \/ member == FrameMember.GET_CURRENT then
                     _frame_enumerator_members[member] = cast EntityHandle(handle)
+
+                    _frame_enumerator_targets[member] =
+                        if frame.is_generic then
+                            cast EntityHandle(
+                                _assembly.add_named_member_reference(
+                                    IoC.CONTAINER.instance.cil_context.resolve_type_token(frame.own_instantiation),
+                                    _frame_member_name(member),
+                                    "{_frame_member_name(member)} {frame.own_instantiation}",
+                                    signature))
+                        else
+                            cast EntityHandle(handle)
+                        fi
                 fi
             od
 
@@ -1666,9 +1687,9 @@ namespace IR.Emitter is
             let frame_member =
                 if wants_object then FrameMember.GET_CURRENT else FrameMember.GET_ENUMERATOR fi
 
-            if _frame_enumerator_members.contains_key(frame_member) then
+            if _frame_enumerator_targets.contains_key(frame_member) then
                 body.ldarg(0)
-                body.call_virtual(_frame_enumerator_members[frame_member])
+                body.call_virtual(_frame_enumerator_targets[frame_member])
 
                 if wants_object then
                     if let element = _frame_element_type /\ (element.is_value_type \/ element.is_type_variable) then

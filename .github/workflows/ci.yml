@@ -828,6 +828,95 @@ jobs:
         dotnet ghul-compiler --help > help.txt
         grep -q "usage: ghul-compiler" help.txt
 
+  native_aot_test:
+    needs: [version, bootstrap]
+    if: needs.version.outputs.full_suite == 'true'
+    name: Run Native AOT test
+
+    runs-on: ubuntu-latest
+
+    timeout-minutes: 15
+
+    # Publish a program with PublishAot and run it. The Native AOT compiler
+    # accepts IL the JIT runs differently, and nothing else here compiles
+    # through it. The project is written outside the checkout so that the
+    # repository's own Directory.*.props do not apply to it, and the program
+    # runs under a timeout because the failures seen so far were hangs.
+    steps:
+    - uses: actions/checkout@v7
+
+    - name: Set up .NET 10
+      uses: actions/setup-dotnet@v6
+      with:
+        dotnet-version: '10.0.x'
+
+    - name: Download ghul.compiler package
+      uses: actions/download-artifact@v8
+      with:
+        name: ghul-compiler-package
+        path: nupkg
+
+    - name: Install the freshly-built compiler
+      run: dotnet tool install ghul.compiler --tool-path "${RUNNER_TEMP}/ghul-compiler" --version ${{ needs.version.outputs.package }} --add-source nupkg
+
+    - name: Publish and run a program with Native AOT
+      shell: bash
+      run: |
+        set -euo pipefail
+        runtime_version=$(grep -oP 'Include="ghul.runtime" Version="\K[^"]+' Directory.Packages.props)
+        project="${RUNNER_TEMP}/native-aot"
+        mkdir -p "${project}"
+        cat > "${project}/native-aot.ghulproj" <<EOF
+        <Project Sdk="Microsoft.NET.Sdk">
+          <PropertyGroup>
+            <OutputType>Exe</OutputType>
+            <TargetFramework>net10.0</TargetFramework>
+            <PublishAot>true</PublishAot>
+            <GhulCompiler>${RUNNER_TEMP}/ghul-compiler/ghul-compiler</GhulCompiler>
+          </PropertyGroup>
+          <ItemGroup>
+            <PackageReference Include="ghul.runtime" Version="${runtime_version}" />
+            <GhulSources Include="*.ghul" />
+          </ItemGroup>
+        </Project>
+        EOF
+        cat > "${project}/program.ghul" <<'EOF'
+        use IO.Std.write_line;
+        use Collections.LIST;
+
+        narrow(o: object) -> string is
+            if let flag: bool = o then
+                return "bool {flag}";
+            fi
+
+            return "not a bool";
+        si
+
+        twice[T](source: Collections.Iterable[T]) -> Collections.Iterable[T] is
+            for item in source do
+                yield item;
+                yield item;
+            od
+        si
+
+        entry() is
+            let yes: object = true;
+            let number: object = 42;
+
+            write_line(narrow(yes));
+            write_line(narrow(number));
+            write_line("isa int?: {isa int?(number)}");
+
+            for value in System.Linq.Enumerable.of_type[object](twice(LIST([1, 2]))) do
+                write_line("{cast int(value)}");
+            od
+        si
+        EOF
+        dotnet publish "${project}/native-aot.ghulproj" -r linux-x64 -o "${project}/out"
+        actual=$(timeout 30 "${project}/out/native-aot")
+        echo "${actual}"
+        test "${actual}" = "$(printf 'bool true\nnot a bool\nisa int?: true\n1\n1\n2\n2')"
+
   # Builds ghul-runtime against the freshly built compiler, so it needs
   # the emission surface to be complete rather than merely correct.
   runtime_tests:
@@ -1129,7 +1218,7 @@ jobs:
   # then a skipped job satisfies it. This job runs regardless and checks
   # that nothing was skipped that should have run.
   gate:
-    needs: [version, bootstrap, unit_tests, unit_tests_gate, analysis_tests, integration_tests, wasm_validation, cross_assembly_tests, bare_invocation_test, runtime_tests, examples_tests, format_round_trip, rosetta_tests]
+    needs: [version, bootstrap, unit_tests, unit_tests_gate, analysis_tests, integration_tests, wasm_validation, cross_assembly_tests, bare_invocation_test, native_aot_test, runtime_tests, examples_tests, format_round_trip, rosetta_tests]
     name: Gate
 
     if: always()

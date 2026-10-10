@@ -2,7 +2,9 @@ namespace Driver is
     // Locates the .NET reference-assembly directory to compile against when the
     // compiler is invoked with source files but neither `-a` nor
     // `--sdk-ref-path`. The install root comes from DOTNET_ROOT, or is derived
-    // from the runtime directory the compiler is itself running on; under it,
+    // from the runtime directory the compiler is itself running on, or failing
+    // that from the `dotnet` host on PATH, which is where a natively compiled
+    // compiler, running on no shared runtime, finds it; under it,
     // the highest Microsoft.NETCore.App.Ref pack matching the target
     // framework's version supplies `ref/<tfm>/`. Every step answers null rather
     // than throwing, so a layout this doesn't recognise surfaces as the
@@ -145,11 +147,54 @@ namespace Driver is
                 install_root_from_runtime_directory(
                     System.Runtime.InteropServices.RuntimeEnvironment.get_runtime_directory())
 
-            if !derived? \/ !IO.Directory.exists(derived) then
+            if derived? /\ is_install_root(derived) then
+                return derived
+            fi
+
+            return install_root_from_search_path(System.Environment.get_environment_variable("PATH"))
+        si
+
+        // A natively compiled compiler's runtime directory is its own, so the
+        // walk up from it lands somewhere that is not an install root at all.
+        is_install_root(directory: string) -> bool =>
+            IO.Directory.exists(IO.Path.join([directory, "shared", "Microsoft.NETCore.App"]))
+
+        // The directory of the first `dotnet` host on `search_path` that sits
+        // in an install root. A package manager's host is usually a symbolic
+        // link into the install root, so the link is followed first.
+        install_root_from_search_path(search_path: string?) -> string? is
+            if !search_path? then
                 return null
             fi
 
-            return derived
+            let host_name =
+                if System.OperatingSystem.is_windows() then "dotnet.exe" else "dotnet" fi
+
+            for directory in search_path.split([IO.Path.path_separator], System.StringSplitOptions.REMOVE_EMPTY_ENTRIES) do
+                let candidate = IO.Path.join(directory, host_name)
+
+                if !IO.File.exists(candidate) then
+                    continue
+                fi
+
+                let host_path mut = candidate
+
+                try
+                    if let target = IO.File.resolve_link_target(candidate, true) then
+                        host_path = target.full_name
+                    fi
+                catch ex: System.Exception
+                    // an unresolvable link is tried as it stands
+                yrt
+
+                if let root = IO.Path.get_directory_name(IO.Path.get_full_path(host_path)) then
+                    if is_install_root(root) then
+                        return root
+                    fi
+                fi
+            od
+
+            return null
         si
     si
 si

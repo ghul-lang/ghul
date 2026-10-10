@@ -447,6 +447,17 @@ namespace IR.Emitter is
         _type_token(type: Semantic.Types.Type) -> System.Reflection.Metadata.EntityHandle =>
             _context.resolve_type_token(type)
 
+        // `isinst Nullable[T]` tests for a boxed T (ECMA-335 III.4.6), the
+        // same as `isinst T`. Native AOT's ILC through .NET 10 folds a branch
+        // on the former to always-false, so a successful test never returns
+        // (dotnet/runtime#134799). Naming T avoids it.
+        _type_test_token(type: Semantic.Types.Type) -> System.Reflection.Metadata.EntityHandle =>
+            if isa Semantic.Types.NULLABLE(type) then
+                _type_token(type.optional_inner_type!)
+            else
+                _type_token(type)
+            fi
+
         visit(null_value: Values.NULL) is
             _body.ldnull()
         si
@@ -467,14 +478,14 @@ namespace IR.Emitter is
             if conversion.faults_on_failure then
                 _body.cast_class(_type_token(conversion.type))
             else
-                _body.is_instance(_type_token(conversion.type))
+                _body.is_instance(_type_test_token(conversion.type))
             fi
         si
 
         visit(test: Values.ISA) is
             gen(Values.TYPE_TEST_OPERAND.operand(test.value))
 
-            _body.is_instance(_type_token(test.isa_type))
+            _body.is_instance(_type_test_token(test.isa_type))
             _body.ldnull()
             _body.op(System.Reflection.Metadata.ILOpCode.CGT_UN)
         si
