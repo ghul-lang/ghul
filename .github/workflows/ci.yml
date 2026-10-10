@@ -196,8 +196,10 @@ jobs:
              && gh run download "${run}" -n bootstrap-compiler-version -D carried 2>/dev/null \
              && gh run download "${run}" -n ghul-compiler-package -D carried/nupkg 2>/dev/null \
              && gh run download "${run}" -n ghul-analysis-protocol-package -D carried/nupkg 2>/dev/null \
+             && gh run download "${run}" -n ghul-compiler-aot -D carried/aot 2>/dev/null \
              && [ -f "carried/nupkg/ghul.compiler.${{ steps.version.outputs.package }}.nupkg" ] \
-             && [ -f "carried/nupkg/ghul.analysis.protocol.${{ steps.version.outputs.package }}.nupkg" ]; then
+             && [ -f "carried/nupkg/ghul.analysis.protocol.${{ steps.version.outputs.package }}.nupkg" ] \
+             && [ -f "carried/aot/ghul-compiler-linux-x64.tar.gz" ]; then
             compiler=$(tr -d '[:space:]' < carried/bootstrap-compiler-version.txt)
             build=false
             full_suite=false
@@ -235,6 +237,16 @@ jobs:
       with:
         name: ghul-analysis-protocol-package
         path: carried/nupkg/ghul.analysis.protocol.${{ steps.version.outputs.package }}.nupkg
+
+    # Carried like the packages: the release build does not run the AOT job,
+    # so the archive the merge queue built and smoke-tested is what the
+    # release publishes.
+    - name: Upload the carried AOT compiler archive
+      if: steps.compiler_version.outputs.build == 'false'
+      uses: actions/upload-artifact@v7
+      with:
+        name: ghul-compiler-aot
+        path: carried/aot/
 
     - name: Upload bootstrap compiler version
       uses: actions/upload-artifact@v7
@@ -835,13 +847,19 @@ jobs:
 
     runs-on: ubuntu-latest
 
-    timeout-minutes: 15
+    timeout-minutes: 25
 
-    # Publish a program with PublishAot and run it. The Native AOT compiler
-    # accepts IL the JIT runs differently, and nothing else here compiles
-    # through it. The project is written outside the checkout so that the
-    # repository's own Directory.*.props do not apply to it, and the program
-    # runs under a timeout because the failures seen so far were hangs.
+    # Two things, both compiled by the Native AOT compiler rather than run
+    # under the JIT: a program, which is the one the compiler's own emitted
+    # IL is checked against, and the compiler itself, run over the smoke
+    # integration tests. The first is written outside the checkout so that
+    # the repository's own Directory.*.props do not apply to it. Each runs
+    # under a timeout because the failures seen so far were hangs.
+    #
+    # Only the smoke subset of the integration tests, because the whole suite
+    # under a compiler whose start-up is measured in milliseconds still
+    # takes long enough to be worth not doing, and the subset covers every
+    # feature tag.
     steps:
     - uses: actions/checkout@v7
 
@@ -849,6 +867,9 @@ jobs:
       uses: actions/setup-dotnet@v6
       with:
         dotnet-version: '10.0.x'
+
+    - name: Restore local .NET tools
+      run: dotnet tool restore
 
     - name: Download ghul.compiler package
       uses: actions/download-artifact@v8
@@ -916,6 +937,65 @@ jobs:
         actual=$(timeout 30 "${project}/out/native-aot")
         echo "${actual}"
         test "${actual}" = "$(printf 'bool true\nnot a bool\nisa int?: true\n1\n1\n2\n2')"
+
+    # The compiler compiled by the bootstrap compiler, so that its emitted IL
+    # carries the emission fixes this branch made; built by a published
+    # compiler it would carry the IL those fixes replace.
+    - name: Download bootstrap compiler tool tree
+      uses: actions/download-artifact@v8
+      with:
+        name: ghul-compiler-tool
+        path: bootstrap-tool
+
+    - name: Publish the compiler with Native AOT
+      shell: bash
+      run: |
+        set -euo pipefail
+        mkdir -p publish
+        # ghul-runtime.dll is read as a reference assembly rather than
+        # loaded, and wasm.dll is data the wasm target reads, so neither is
+        # carried by the publish. Both come from the compiler package the
+        # bootstrap job packed.
+        for file in ghul-runtime.dll wasm.dll analysis-protocol.runtimeconfig.json; do
+          cp "bootstrap-tool/${file}" publish/
+        done
+        dotnet publish ghul.ghulproj -c Release -r linux-x64 \
+          -p:PublishAot=true \
+          "-p:GhulCompiler=dotnet ${GITHUB_WORKSPACE}/bootstrap-tool/ghul.dll" \
+          -o publish/
+
+    # --no-ci, because this job is in CI but wants the compiler published
+    # above rather than the ghul-compiler tool. Without it the runner takes
+    # the tool and tests nothing this job published.
+    - name: Run the smoke integration tests under it
+      shell: bash
+      run: dotnet ghul-test --no-ci --tag smoke integration-tests
+
+    # The archive the installer script and ghul-cli fetch. Renamed to
+    # `ghul-compiler`, the command of the .NET tool it stands in for, and
+    # packed with the sibling files it needs: the compiler is statically
+    # linked and carries its own runtime, so those four files are the whole
+    # payload. Built here rather than in a job of its own so that what the
+    # smoke tests exercised is what ships, and carried by the release build
+    # from the merge queue run that produced it.
+    - name: Pack the AOT compiler
+      shell: bash
+      run: |
+        set -euo pipefail
+        mkdir -p aot/ghul-compiler
+        cp publish/ghul aot/ghul-compiler/ghul-compiler
+        for file in ghul-runtime.dll wasm.dll analysis-protocol.runtimeconfig.json; do
+          cp "publish/${file}" aot/ghul-compiler/
+        done
+        tar -C aot -czf ghul-compiler-linux-x64.tar.gz ghul-compiler
+        sha256sum ghul-compiler-linux-x64.tar.gz > ghul-compiler-linux-x64.tar.gz.sha256
+
+    - uses: actions/upload-artifact@v7
+      with:
+        name: ghul-compiler-aot
+        path: |
+          ghul-compiler-linux-x64.tar.gz
+          ghul-compiler-linux-x64.tar.gz.sha256
 
   # Builds ghul-runtime against the freshly built compiler, so it needs
   # the emission surface to be complete rather than merely correct.
@@ -1375,6 +1455,12 @@ jobs:
         name: ghul-compiler-package
         path: nupkg
 
+    - name: Download the AOT compiler archive
+      uses: actions/download-artifact@v8
+      with:
+        name: ghul-compiler-aot
+        path: aot
+
     # A push from the merge queue can carry several squashed pull requests,
     # one commit each; the notes list every one of them.
     - name: Create changelog
@@ -1389,5 +1475,7 @@ jobs:
       run: |
         gh release create "${{ needs.version.outputs.tag }}" \
           ./nupkg/ghul.compiler.${{ needs.version.outputs.package }}.nupkg \
+          ./aot/ghul-compiler-linux-x64.tar.gz \
+          ./aot/ghul-compiler-linux-x64.tar.gz.sha256 \
           --title "${{ needs.version.outputs.tag }}" \
           --notes-file changelog.txt
