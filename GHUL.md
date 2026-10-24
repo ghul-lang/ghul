@@ -106,6 +106,8 @@ use Console = IO.Std;             // import under a different name
 
 A `use` applies only within the namespace block that contains it. If a namespace is split across several blocks or files, each block needs its own `use` statements.
 
+A qualified `use` names its target inside its qualifier: in `use IO.Std.write_line`, `write_line` is a member of `IO.Std`. The qualifier itself is relative, like any name - inside `namespace A.B.C`, `use B.E` means `A.B.E`. A target that is not a member of its qualifier but resolves through an enclosing namespace is accepted with a `use-outside-qualifier` warning; naming the namespace that declares the symbol silences it.
+
 One namespace needs no `use`: `Ghul.Intrinsics`. It holds the names the language supplies: the built-in types such as `int` and `string`, the function and tuple types, and the operators on them. Every namespace block sees `Ghul.Intrinsics` as if the block started with `use Ghul.Intrinsics;`. The runtime declares everything else in `Ghul` and its nested namespaces, and code imports these like any other library: `use Ghul;` imports the functional combinators such as `apply`, and `use Ghul.Pipes;` imports the pipe combinators. Your own definition can have the same name as one of these, such as your own `apply`. A file that does not import that name sees only your definition. A file that also imports the name sees both: your function and the imported function form one overload group, and the compiler resolves each call against both.
 
 A `use` with a type expression on the right defines a *type alias*. A type alias names a type; it does not import a symbol:

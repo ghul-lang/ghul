@@ -20,6 +20,10 @@ namespace Syntax.Process is
         _symbol_use_locations: Semantic.SYMBOL_USE_LOCATIONS
         _final: bool
 
+        // Set by `_lookup_use_target` when the target resolved by leaving
+        // its qualifier rather than inside it.
+        _use_escaped: bool
+
         init(
             logger: Logger,
             symbol_table: Semantic.SYMBOL_TABLE,
@@ -174,7 +178,7 @@ namespace Syntax.Process is
                         continue
                     fi
 
-                    if !find_enclosing(identifier)? then
+                    if !_find_use_target(identifier)? then
                         if _final then
                             _logger.error(u.location, "the default use set names {name}, which is not defined")
                         fi
@@ -204,6 +208,60 @@ namespace Syntax.Process is
             return result
         si
 
+        // A qualified use names its final segment inside its qualifier. The
+        // qualifier itself resolves relatively through enclosing namespaces -
+        // inside `A.B.C`, a use of `B.E` means `A.B.E` - but `E` is then a
+        // member of that qualifier, not whatever an enclosing scope happens
+        // to declare under the name.
+        //
+        // A final segment that resolves only by leaving its qualifier is
+        // recorded in `_use_escaped`: the caller leaves the clause for the
+        // final round rather than binding what may be the wrong symbol -
+        // a static method of the qualifier that shares its name with a
+        // namespace global only exists once declare-members has run - and
+        // the final round warns before accepting it, while source written
+        // when the enclosing lookup was the rule is corrected.
+        _lookup_use_target(used_name: Identifiers.Identifier) -> Semantic.Symbols.Symbol? is
+            _use_escaped = false
+
+            let qualifier = used_name.qualifier
+
+            if !qualifier? then
+                return find_enclosing(used_name)
+            fi
+
+            let qualifier_symbol = find_enclosing(qualifier)
+
+            if !qualifier_symbol? then
+                return null
+            fi
+
+            let member = qualifier_symbol.find_member(used_name.name)
+
+            if member? then
+                return member
+            fi
+
+            let escaped = qualifier_symbol.find_enclosing(used_name.name)
+
+            _use_escaped = escaped?
+
+            return escaped
+        si
+
+        _find_use_target(used_name: Identifiers.Identifier) -> Semantic.Symbols.Symbol? is
+            let found = _lookup_use_target(used_name)
+
+            if _use_escaped /\ _final then
+                _logger.warn(
+                    used_name.right_location,
+                    "use-outside-qualifier",
+                    "{used_name} is not declared in {used_name.qualifier}; it resolves through an enclosing namespace")
+            fi
+
+            return found
+        si
+
         // Returns true when the clause was definitively handled - a
         // successful import or, in the final round, a reported error.
         _resolve_use(u: Definitions.USE, namespace_scope: Semantic.NAMESPACE_SCOPE) -> bool is
@@ -213,7 +271,7 @@ namespace Syntax.Process is
                 return true
             fi
 
-            let found = find_enclosing(used_name)
+            let found = _find_use_target(used_name)
             let used_symbol = found ?? _find_attribute_type(used_name)
 
             if !used_symbol? then
@@ -221,6 +279,15 @@ namespace Syntax.Process is
                     _logger.error(used_name.location, "used identifier {used_name} is not defined ")
                 fi
 
+                return false
+            fi
+
+            // A target that left its qualifier may be the wrong symbol: a
+            // member of the qualifier itself with the same name exists only
+            // once declare-members has run. Leave the clause for the final
+            // round, which prefers the member and warns before accepting the
+            // escape.
+            if _use_escaped /\ !_final then
                 return false
             fi
 
@@ -266,7 +333,7 @@ namespace Syntax.Process is
                     Identifiers.Identifier(used_name.location, suffixed_name)
                 fi
 
-            let found = find_enclosing(suffixed)
+            let found = _find_use_target(suffixed)
 
             if isa Semantic.Symbols.Classy(found) then
                 return found
@@ -290,7 +357,7 @@ namespace Syntax.Process is
                 return true
             fi
 
-            let container = u.wildcard_target ?? find_enclosing(used_name)
+            let container = u.wildcard_target ?? _find_use_target(used_name)
 
             if !container? then
                 if _final then
@@ -308,6 +375,15 @@ namespace Syntax.Process is
                 _logger.error(used_name.location, "cannot use all members of {used_name}")
 
                 return true
+            fi
+
+            // A container that left its qualifier may be the wrong symbol -
+            // a member of the qualifier itself may appear once
+            // declare-members has run. Leave the clause for the final
+            // round rather than caching the escape, so the member wins and
+            // the final round warns before accepting it.
+            if _use_escaped /\ !_final then
+                return false
             fi
 
             u.wildcard_target = container
