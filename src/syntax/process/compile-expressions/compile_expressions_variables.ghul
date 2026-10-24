@@ -513,6 +513,25 @@ namespace Syntax.Process is
                 let values = _operators.build_sequence_pattern(type, head_count, has_rest, left.location)
 
                 if !values? then
+                    let lazy_values = _try_build_lazy_sequence_pattern(left, type, head_count, has_rest)
+
+                    if lazy_values? then
+                        _variable_left_state.get_or_add(left).lazy_sequence = lazy_values
+
+                        for i in 0..elements.count do
+                            let element_type =
+                                if has_rest /\ i == head_count then
+                                    lazy_values.rest_type
+                                else
+                                    lazy_values.element_type
+                                fi
+
+                            if !elements[i].is_simple_name then
+                                _prepare_argument_sequences(elements[i], element_type)
+                            fi
+                        od
+                    fi
+
                     return
                 fi
 
@@ -549,6 +568,48 @@ namespace Syntax.Process is
             fi
         si
 
+        // The element walk of a sequence pattern over a lazy sequence:
+        // the same shape as `_destructure_sequence`'s, but each leaf's
+        // source is a placeholder of its type - the values the leaves
+        // bind from are the probe's locals, which only exist once IL
+        // generation lowers the pull.
+        _destructure_lazy_sequence_elements(
+            left: Trees.Variables.DESTRUCTURING_VARIABLE_LEFT,
+            left_state: VARIABLE_LEFT_STATE,
+            lazy_values: LAZY_SEQUENCE_PATTERN_VALUES
+        ) is
+            let elements = left.elements
+
+            let block = IR.Values.BLOCK(_innate_symbol_lookup.get_void_type())
+
+            left_state.lazy_sequence = lazy_values
+
+            for i in 0..elements.count do
+                let element = elements[i]
+                let element_state = _variable_left_state.get_or_add(element)
+
+                element_state.right_value =
+                    if lazy_values.has_rest /\ i == lazy_values.head_count then
+                        DUMMY(lazy_values.rest_type, element.location)
+                    else
+                        DUMMY(lazy_values.element_type, element.location)
+                    fi
+
+                element_state.variable_location = left_state.variable_location
+                element_state.right_location = left_state.right_location
+
+                element.walk(self)
+
+                if element_state.value? then
+                    block.add(element_state.value)
+                fi
+            od
+
+            block.close()
+
+            left_state.value = block
+        si
+
         // A sequence pattern: each leading element binds from the source's
         // element at its position, and a rest element from the slice that
         // starts where the leading ones stop. The reads are built over a hole
@@ -568,8 +629,21 @@ namespace Syntax.Process is
             let values = _operators.build_sequence_pattern(from_type, head_count, has_rest, left.location)
 
             if !values? then
+                if _operators.lazy_sequence_element_type(from_type)? then
+                    // the builder reports what it cannot build
+                    let lazy_values = _try_build_lazy_sequence_pattern(left, from_type, head_count, has_rest)
+
+                    if lazy_values? then
+                        block.close()
+
+                        _destructure_lazy_sequence_elements(left, left_state, lazy_values!)
+                    fi
+
+                    return
+                fi
+
                 if !from_type.is_error then
-                    _logger.error(left.location, "cannot match a sequence pattern against {from_type}: it is not a list or an array")
+                    _report_unmatchable_sequence_source(left.location, from_type)
                 fi
 
                 block.close()
@@ -1064,6 +1138,45 @@ namespace Syntax.Process is
             od
         si
 
+        // The leaf typing of a sequence pattern over a lazy sequence whose
+        // source has no initializer to walk (a loop variable, a formal
+        // argument): each leaf from the element type, a rest leaf from
+        // the remainder's, and generate-il lowers the pull.
+        _set_lazy_sequence_symbol_types(
+            left: Trees.Variables.VariableLeft,
+            elements: Collections.List[Trees.Variables.VariableLeft],
+            lazy_values: LAZY_SEQUENCE_PATTERN_VALUES
+        ) is
+            _variable_left_state.get_or_add(left).lazy_sequence = lazy_values
+
+            for i in 0..elements.count do
+                let element = elements[i]
+
+                let element_type =
+                    if lazy_values.has_rest /\ i == lazy_values.head_count then
+                        lazy_values.rest_type
+                    else
+                        lazy_values.element_type
+                    fi
+
+                if element.is_simple_name then
+                    let symbol = find(element.name!)
+
+                    if symbol? /\ isa Semantic.Types.SettableTyped(symbol) then
+                        let typed_symbol = cast Semantic.Types.SettableTyped(symbol)
+
+                        symbol.define()
+
+                        typed_symbol.set_type(element_type)
+                    else
+                        _logger.error(element.location, "couldn't find typed symbol for destructuring element {element.name}")
+                    fi
+                else
+                    set_symbol_destructure_types(element, element_type)
+                fi
+            od
+        si
+
         // The leaves of a sequence pattern that has no initializer to walk (a
         // loop variable) take their types from the source's element type, a
         // rest leaf from the remainder's. The reads IL generation emits are
@@ -1079,8 +1192,18 @@ namespace Syntax.Process is
             let values = _operators.build_sequence_pattern(from_type, head_count, has_rest, left.location)
 
             if !values? then
+                if _operators.lazy_sequence_element_type(from_type)? then
+                    let lazy_values = _try_build_lazy_sequence_pattern(left, from_type, head_count, has_rest)
+
+                    if lazy_values? then
+                        _set_lazy_sequence_symbol_types(left, elements, lazy_values!)
+                    fi
+
+                    return
+                fi
+
                 if !from_type.is_error then
-                    _logger.error(left.location, "cannot match a sequence pattern against {from_type}: it is not a list or an array")
+                    _report_unmatchable_sequence_source(left.location, from_type)
                 fi
 
                 return

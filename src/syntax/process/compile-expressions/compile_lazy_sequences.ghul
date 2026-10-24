@@ -1,0 +1,263 @@
+namespace Syntax.Process is
+    use Source
+
+    use Semantic.Types.Type
+
+    use IR.Values
+
+    // Sequence patterns over lazy sequences (an `Iterable[T]` that is
+    // neither a list nor an array): what the compile side builds. The
+    // matching itself - one pull of the source's iterator, hoisted so
+    // every arm of the statement tests against the same elements - is
+    // lowered by generate-il from the probe; see
+    // lazy_sequence_pattern_values.ghul for the shapes.
+    partial COMPILE_EXPRESSIONS is
+
+        // The lazy-match state for a sequence pattern group over
+        // `from_type`, or null when it is not an `Iterable[T]`. The
+        // group joins the `case` being compiled when there is one and
+        // the group is at the scrutinee itself, sharing the case's
+        // single pull; otherwise it takes a probe of its own. Null is
+        // also returned - after reporting - for the shapes that are
+        // not built yet: a `while let` test, a group nested inside a
+        // case pattern, and any group in a generator or asynchronous
+        // body, whose locals would not survive a suspend.
+        _try_build_lazy_sequence_pattern(
+            left: Trees.Variables.VariableLeft,
+            from_type: Type,
+            head_count: int,
+            has_rest: bool
+        ) -> LAZY_SEQUENCE_PATTERN_VALUES? is
+            let element_type = _operators.lazy_sequence_element_type(from_type)
+
+            if !element_type? then
+                return null
+            fi
+
+            if _conditionals.in_while_let_binding then
+                _logger.error(
+                    left.location,
+                    "a sequence pattern over {from_type} cannot match in a while let: each test reads the sequence from its beginning")
+
+                return null
+            fi
+
+            if _enclosing_state_machine_frame()? then
+                _logger.error(
+                    left.location,
+                    "a sequence pattern over {from_type} is not yet supported in a generator or async body")
+
+                return null
+            fi
+
+            let probe: LAZY_SEQUENCE_PROBE? mut = null
+
+            if _conditionals.in_case_pattern then
+                let scrutinee_type = _conditionals.current_case_scrutinee_type()
+
+                // A group at the scrutinee itself joins the case's
+                // pull. A group nested deeper would need its own pull
+                // before the arm's test, which is not built yet.
+                if scrutinee_type? /\ !scrutinee_type.matches(from_type) then
+                    _logger.error(
+                        left.location,
+                        "a sequence pattern over {from_type} nested in a case pattern is not yet supported")
+
+                    return null
+                fi
+
+                for p in _conditionals.current_lazy_probes() do
+                    if p.source_type.matches(from_type) then
+                        probe = p
+                        break
+                    fi
+                od
+            fi
+
+            let rest_type = _iterable_of(element_type!, left.location)
+
+            if !probe? then
+                probe = _new_lazy_probe(from_type, element_type!, left.location)
+
+                if _conditionals.in_case_pattern then
+                    _conditionals.current_lazy_probes().add(probe!)
+                fi
+            fi
+
+            probe.register(head_count, has_rest)
+
+            let result = LAZY_SEQUENCE_PATTERN_VALUES(probe!, element_type!, head_count, has_rest, rest_type)
+
+            // Outside a `case` no later group can widen the pull, so
+            // the rest-element calls it needs can be resolved now.
+            if !_conditionals.in_case_pattern then
+                _resolve_lazy_rest_calls(probe!)
+            fi
+
+            return result
+        si
+
+        // A fresh probe over `source_type`, with the calls that will
+        // drive it: an iterator taken from the source when it is a
+        // reference type (a value type that is its own iterator, such
+        // as a range, is driven directly, through a copy the lowering
+        // makes), then the advance and read on whatever is driven.
+        _new_lazy_probe(
+            source_type: Type,
+            element_type: Type,
+            location: Source.LOCATION
+        ) -> LAZY_SEQUENCE_PROBE is
+            let drive_type: Type mut = source_type
+            let read_iterator: Semantic.Symbols.Function? mut = null
+
+            if !source_type.is_value_type then
+                read_iterator = get_zero_argument_function(source_type, "$get_iterator")
+
+                if read_iterator? then
+                    drive_type = read_iterator.return_type!
+                fi
+            fi
+
+            let move_next = get_zero_argument_function(drive_type, "move_next")
+            let read_current =
+                get_zero_argument_function(drive_type, "$get_current") ??
+                get_zero_argument_function(drive_type, "$get_Current")
+
+            if !move_next? \/ !read_current? then
+                _logger.error(
+                    location,
+                    "cannot match a sequence pattern over {source_type}: it is not iterable")
+
+                return LAZY_SEQUENCE_PROBE(
+                    source_type,
+                    element_type,
+                    IR.Values.WRAPPER(DUMMY(source_type, location)),
+                    0,
+                    null,
+                    move_next,
+                    read_current,
+                    drive_type,
+                    location)
+            fi
+
+            return LAZY_SEQUENCE_PROBE(
+                source_type,
+                element_type,
+                IR.Values.WRAPPER(DUMMY(source_type, location)),
+                0,
+                read_iterator,
+                move_next,
+                read_current,
+                drive_type,
+                location)
+        si
+
+        // `Iterable[element]`, the type a rest element binds.
+        _iterable_of(element: Type, location: Source.LOCATION) -> Type is
+            let iterable = _innate_symbol_lookup.get_unspecialized_iterable_type()
+            let classy = cast Semantic.Symbols.Classy?(iterable.symbol.unspecialized_symbol)!
+
+            return Semantic.Types.GENERIC(location, classy, Collections.LIST[Type]([element]))
+        si
+
+        // Resolve the Ghul.Pipes buffered pipe stages a probe's rest
+        // elements are constructed from, one per count of unmatched
+        // pulled elements up to three. Reported here rather than at
+        // generation, where a missing stage would be an internal error.
+        _resolve_lazy_rest_calls(probe: LAZY_SEQUENCE_PROBE) is
+            if !probe.has_rest_group then
+                return
+            fi
+
+            let classes = _innate_symbol_lookup.get_buffered_pipe_classes()
+
+            if !classes? then
+                _logger.environment_error(
+                    probe.location,
+                    "the runtime library does not declare the Ghul.Pipes buffered pipe stages")
+
+                return
+            fi
+
+            let stages = Collections.LIST[LAZY_REST_STAGE?]()
+
+            for classy in classes! do
+                let stage: LAZY_REST_STAGE? mut = null
+
+                if let c = classy then
+                    let stage_type =
+                        Semantic.Types.GENERIC(
+                            probe.location,
+                            c,
+                            Collections.LIST[Type]([probe.element_type]))
+
+                    // The stage's constructor takes its prefix
+                    // elements, the source, the skip and the live
+                    // iterator; an older runtime's constructor over a
+                    // memo cache is not it.
+                    if let group: Semantic.Symbols.FUNCTION_GROUP = stage_type.find_member("init") then
+                        let wanted = 3 + stages.count
+
+                        for init in group.functions do
+                            if init.arguments.count == wanted then
+                                stage = LAZY_REST_STAGE(stage_type, init)
+                            fi
+                        od
+                    fi
+                fi
+
+                stages.add(stage)
+            od
+
+            for stage in stages do
+                if !stage? then
+                    _logger.environment_error(
+                        probe.location,
+                        "the runtime library does not declare the Ghul.Pipes buffered pipe stages")
+
+                    return
+                fi
+            od
+
+            probe.rest_stages = stages
+        si
+
+        // What a source that no sequence pattern can match is told.
+        _report_unmatchable_sequence_source(location: Source.LOCATION, from_type: Type) is
+            _logger.error(location, "cannot match a sequence pattern against {from_type}: it is not a list or an array")
+        si
+
+        // Whether any group in `left`'s pattern matches over a lazy
+        // sequence, by the state the compile side recorded for it.
+        _has_lazy_sequence_group(left: Trees.Variables.VariableLeft) -> bool is
+            if _variable_left_state.get(left)?.lazy_sequence? then
+                return true
+            fi
+
+            let elements = left.elements
+
+            if !elements? then
+                return false
+            fi
+
+            for e in elements do
+                if _has_lazy_sequence_group(e) then
+                    return true
+                fi
+            od
+
+            return false
+        si
+
+        // Finish a `case`'s probes once every arm has registered: the
+        // pulls are at their widest now, so the rest-element calls each
+        // group needs can be resolved.
+        _finalize_case_lazy_probes(`case: Trees.Statements.CASE) is
+            if let probes = `case.lazy_probes then
+                for p in probes do
+                    _resolve_lazy_rest_calls(p)
+                od
+            fi
+        si
+    si
+si

@@ -239,7 +239,15 @@ namespace Syntax.Process is
             value: Value,
             narrow_fail: Values.Breakable?
         ) is
-            let sequence = _variable_left_state.get(left)?.sequence
+            let state = _variable_left_state.get(left)
+
+            if state?.lazy_sequence? then
+                _gen_lazy_sequence_destructuring_initialize(left, elements, state!.lazy_sequence!, value, narrow_fail)
+
+                return
+            fi
+
+            let sequence = state?.sequence
 
             if !sequence? then
                 return
@@ -278,6 +286,279 @@ namespace Syntax.Process is
 
                 gen_destructuring_initialize(elements[i], element_value, narrow_fail)
             od
+        si
+
+        // A sequence pattern over a lazy sequence. The probe's pull is
+        // lowered once - by the first arm to reach it - and every arm
+        // tests `pulled` against the count its own pattern needs: the
+        // elements it brought, and no more than those, are what any arm
+        // of the statement can see. Leading elements bind from the
+        // pull's locals; a rest element is the unmatched ones followed
+        // by the iterator as the pull left it.
+        _gen_lazy_sequence_destructuring_initialize(
+            left: Variables.VariableLeft,
+            elements: Collections.List[Variables.VariableLeft],
+            lazy_values: LAZY_SEQUENCE_PATTERN_VALUES,
+            value: Value,
+            narrow_fail: Values.Breakable?
+        ) is
+            let probe = lazy_values.probe
+
+            if !probe.lowered? then
+                _lower_lazy_sequence_probe(probe, value)
+            fi
+
+            let locals = probe.lowered!
+            let int_type = _innate_symbol_lookup.get_int_type()
+
+            let expected = IR.Values.Literal.NUMBER(lazy_values.head_count, int_type)
+
+            if narrow_fail? then
+                add(Values.BREAK(narrow_fail, if lazy_values.has_rest then BRANCH.LT else BRANCH.NE fi, locals.pulled.load(), expected))
+            else
+                add(IR.Values.SEQUENCE_COUNT_CHECK(
+                    locals.pulled.load(),
+                    expected,
+                    lazy_values.has_rest,
+                    IR.Values.Literal.STRING(
+                        "{left.location}: a sequence pattern did not match",
+                        _innate_symbol_lookup.get_string_type()),
+                    _innate_symbol_lookup.get_void_type()))
+            fi
+
+            for i in 0..elements.count do
+                let element_value: Value =
+                    if lazy_values.has_rest /\ i == lazy_values.head_count then
+                        _gen_lazy_rest_value(lazy_values, locals)
+                    else
+                        locals.elements[i].load()
+                    fi
+
+                gen_destructuring_initialize(elements[i], element_value, narrow_fail)
+            od
+        si
+
+        // Lower a probe's pull: take an iterator from the source (or
+        // copy a value-type source that is its own iterator, so the
+        // pull cannot touch the matched value), then pull up to
+        // `pull_count` elements into locals, recording how many
+        // arrived. The pull is unrolled - `pull_count` is the widest
+        // head any arm matches, a handful of elements - which is what
+        // lets each element live in its own local.
+        _lower_lazy_sequence_probe(probe: LAZY_SEQUENCE_PROBE, source: Value) is
+            let location = probe.location
+
+            probe.source.value = source
+
+            let iterator_value: Value =
+                if probe.read_iterator? then
+                    probe.read_iterator.call(location, probe.source.value!, Collections.LIST[Value](0), null, _function_caller)
+                else
+                    probe.source.value!
+                fi
+
+            let iterator = TEMP(current_block, "lazy_iter", iterator_value)
+
+            let int_type = _innate_symbol_lookup.get_int_type()
+            let pulled = TEMP(current_block, "lazy_pulled", IR.Values.Literal.NUMBER(0, int_type))
+
+            let elements = Collections.LIST[IR.TEMP]()
+
+            for i in 0..probe.pull_count do
+                elements.add(TEMP(current_block, "lazy_element", IR.Values.DEFAULT(probe.element_type)))
+            od
+
+            let done = _open_region(LABEL())
+
+            for i in 0..probe.pull_count do
+                let has_next =
+                    probe.move_next!.call(location, iterator.load(), Collections.LIST[Value](0), null, _function_caller)
+
+                add(Values.BREAK(done, BRANCH.Z, has_next))
+
+                add(probe.read_current!.call(location, iterator.load(), Collections.LIST[Value](0), null, _function_caller))
+                add(Values.STORE_TEMP(elements[i].local))
+
+                add(IR.Values.Literal.NUMBER(i + 1, int_type))
+                add(Values.STORE_TEMP(pulled.local))
+            od
+
+            _close_structured(done)
+
+            probe.lowered = LAZY_SEQUENCE_PROBE_LOCALS(iterator, pulled, elements)
+        si
+
+        // The value a rest element binds: the elements the pull took
+        // past the leading ones, followed by what remained of the
+        // iterator as the pull left it, through `Ghul.Pipes.buffered`.
+        // The first read continues that iterator; every later read
+        // re-derives from the source, skipping the elements the pattern
+        // matched. How many unmatched elements there are is only known
+        // at runtime, so when the pull could have brought more than the
+        // arm matched, a chain of tests picks the construction for the
+        // count that arrived.
+        _gen_lazy_rest_value(
+            lazy_values: LAZY_SEQUENCE_PATTERN_VALUES,
+            locals: LAZY_SEQUENCE_PROBE_LOCALS
+        ) -> Value is
+            let probe = lazy_values.probe
+            let unmatched_max = probe.pull_count - lazy_values.head_count
+
+            if unmatched_max == 0 then
+                return _call_buffered(probe, locals, lazy_values.head_count, 0, probe.pull_count)
+            fi
+
+            let rest_temp = TEMP(current_block, "lazy_rest", IR.Values.DEFAULT(lazy_values.rest_type))
+
+            let done = _open_region(LABEL())
+
+            for j in lazy_values.head_count::probe.pull_count do
+                let skip = _open_region(LABEL())
+
+                add(Values.BREAK(skip, BRANCH.NE, locals.pulled.load(), IR.Values.Literal.NUMBER(j, _innate_symbol_lookup.get_int_type())))
+
+                add(_call_buffered(probe, locals, lazy_values.head_count, j - lazy_values.head_count, j))
+                add(Values.STORE_TEMP(rest_temp.local))
+
+                add(Values.BREAK(done))
+
+                _close_structured(skip)
+            od
+
+            _close_structured(done)
+
+            return rest_temp.load()
+        si
+
+        // One buffered pipe stage construction: the `count` unmatched
+        // elements from `from` on as the prefix, the matched value's
+        // source to re-derive from, `skip`, how many elements of it the
+        // pattern consumed, and the pull's iterator for a first read to
+        // continue. Counts past three chain single-element stages over
+        // the live core, which is rarer than any arm matching that far
+        // ahead.
+        _call_buffered(
+            probe: LAZY_SEQUENCE_PROBE,
+            locals: LAZY_SEQUENCE_PROBE_LOCALS,
+            from: int,
+            count: int,
+            skip: int
+        ) -> Value is
+            let stages = probe.rest_stages!
+            let int_type = _innate_symbol_lookup.get_int_type()
+
+            let live = locals.iterator.load()
+            let source = probe.source.value!
+            let skip_value = IR.Values.Literal.NUMBER(skip, int_type)
+
+            if count <= 3 then
+                let stage = stages[count]!
+
+                return _new_buffered_stage(probe, stage, _prefix_arguments(probe, locals, from, count), source, skip_value, live)
+            fi
+
+            // The live core plays the tail; each stage out holds one
+            // more unmatched element, outermost first, wrapping with no
+            // live iterator of its own: its first read drives the stage
+            // it wraps.
+            let core = stages[0]!
+
+            let value: Value mut =
+                _new_buffered_stage(
+                    probe,
+                    core,
+                    Collections.LIST[Value](),
+                    source,
+                    skip_value,
+                    live)
+
+            let wrap = stages[1]!
+            let zero = IR.Values.Literal.NUMBER(0, int_type)
+
+            for i in 0..count do
+                let arguments = Collections.LIST[Value]([locals.elements[from + count - 1 - i].load()])
+
+                value = _new_buffered_stage(probe, wrap, arguments, value, zero, null)
+            od
+
+            return value
+        si
+
+        // The prefix elements of a stage construction, before the
+        // source, skip and live iterator every stage takes.
+        _prefix_arguments(
+            probe: LAZY_SEQUENCE_PROBE,
+            locals: LAZY_SEQUENCE_PROBE_LOCALS,
+            from: int,
+            count: int
+        ) -> Collections.List[Value] is
+            let arguments = Collections.LIST[Value]()
+
+            for i in 0..count do
+                arguments.add(locals.elements[from + i].load())
+            od
+
+            return arguments
+        si
+
+        // One buffered pipe stage construction from its prefix
+        // arguments, the source, the skip and the live iterator: a
+        // plain NEW over the constructor's own formal types, so an
+        // argument the stage holds as an interface - a value-type
+        // source's iterator, a null live for a wrapping stage - is
+        // converted to what the constructor takes.
+        _new_buffered_stage(
+            probe: LAZY_SEQUENCE_PROBE,
+            stage: LAZY_REST_STAGE,
+            prefix: Collections.List[Value],
+            source: Value,
+            skip: Value,
+            live: Value?
+        ) -> Value is
+            let formals = stage.constructor.arguments
+            let arguments = Collections.LIST[Value]()
+
+            for i in 0..prefix.count do
+                arguments.add(prefix[i])
+            od
+
+            let source_argument = _convert_for(stage.constructor, formals.count - 3, source, probe)
+            arguments.add(source_argument)
+            arguments.add(skip)
+
+            let live_formal = formals[formals.count - 1].type
+            let live_argument: Value mut =
+                if live? then
+                    _convert_for(stage.constructor, formals.count - 1, live!, probe)
+                else
+                    IR.Values.NULL(live_formal ?? probe.iterator_type)
+                fi
+
+            arguments.add(live_argument)
+
+            return Values.NEW(stage.stage_type, stage.constructor, arguments)
+        si
+
+        // `value` as the constructor's formal at `at` takes it, cast
+        // where it does not already match - the live iterator of a
+        // value-type source, driven as itself, is one.
+        _convert_for(
+            constructor: Semantic.Symbols.Function,
+            at: int,
+            value: Value,
+            probe: LAZY_SEQUENCE_PROBE
+        ) -> Value is
+            let formal = constructor.arguments[at].type
+
+            if formal? /\ value.type? /\ value.type!.matches(formal!) then
+                return value
+            fi
+
+            if !formal? then
+                return value
+            fi
+
+            return _type_caster.cast_value(probe.location, value, formal!, true, false)
         si
 
         // TODO use Pre/Visit instead

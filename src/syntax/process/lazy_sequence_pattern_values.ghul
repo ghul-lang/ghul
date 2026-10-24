@@ -1,0 +1,169 @@
+namespace Syntax.Process is
+    use Source
+
+    use Type = Semantic.Types.Type
+
+    // What a sequence pattern over a lazy sequence (an `Iterable[T]`
+    // that is neither a list nor an array) matches against: one pull
+    // of the source's iterator, hoisted so every arm of the matching
+    // statement tests and binds against the same elements.
+    //
+    // A probe is built by compile-expressions and lowered by
+    // generate-il: the source hole is filled with the value being
+    // matched, then the pull stores up to `pull_count` elements into
+    // locals generate-il creates, with `pulled` recording how many
+    // arrived. An arm tests `pulled` against the count its pattern
+    // needs, binds its leading elements from the element locals, and
+    // builds a rest value from the unmatched ones followed by the
+    // iterator as the pull left it.
+    class LAZY_SEQUENCE_PROBE is
+        // The type being matched, which a later group at the same
+        // position is recognised by.
+        source_type: Type public
+
+        // The element type of the sequence being matched.
+        element_type: Type public
+
+        // The value being matched, over a hole generate-il fills.
+        source: IR.Values.WRAPPER public
+
+        // How many elements the arms could match: one past the
+        // greatest exact-length head among them, or that head itself
+        // when every arm's pattern ends in a rest element. Grows as
+        // arms register.
+        pull_count: int public
+
+        // Whether any registered group binds a rest element, which is
+        // what makes the `rest_calls` resolution necessary.
+        has_rest_group: bool public
+
+        // The calls that drive the source: taking an iterator from it
+        // (null when the source is driven directly, being a value type
+        // that is its own iterator, such as a range), advancing that
+        // iterator, and reading the element it is at. The type driven,
+        // which a wrapping rest stage's null live iterator takes.
+        read_iterator: Semantic.Symbols.Function? public
+        move_next: Semantic.Symbols.Function? public
+        read_current: Semantic.Symbols.Function? public
+        iterator_type: Type public
+
+        // The Ghul.Pipes buffered pipe stages, specialised over the
+        // element type, that a rest element is constructed from, by
+        // how many unmatched pulled elements its prefix holds, up to
+        // three; a longer prefix chains single-element stages over the
+        // first. Null until the compile side resolves it, which it
+        // does once no later group can widen the pull.
+        rest_stages: Collections.List[LAZY_REST_STAGE?]? public
+
+        location: Source.LOCATION public
+
+        // generate-il's locals for the pull, set when the probe is
+        // lowered and read by every later use. Null until then, and
+        // reset when the enclosing case is generated again.
+        lowered: LAZY_SEQUENCE_PROBE_LOCALS? public
+
+        init(
+            source_type: Type,
+            element_type: Type,
+            source: IR.Values.WRAPPER,
+            pull_count: int,
+            read_iterator: Semantic.Symbols.Function?,
+            move_next: Semantic.Symbols.Function?,
+            read_current: Semantic.Symbols.Function?,
+            iterator_type: Type,
+            location: Source.LOCATION
+        ) is
+            self.source_type = source_type
+            self.element_type = element_type
+            self.source = source
+            self.pull_count = pull_count
+            self.read_iterator = read_iterator
+            self.move_next = move_next
+            self.read_current = read_current
+            self.iterator_type = iterator_type
+            self.location = location
+        si
+
+        // What an arm matching `head_count` leading elements (a rest
+        // element when `has_rest`) needs the pull to have brought: an
+        // exact-length pattern must see one past its head, to tell
+        // "exactly this many" from "at least this many".
+        required_count(head_count: int, has_rest: bool) -> int =>
+            if has_rest then head_count else head_count + 1 fi
+
+        // Registers an arm matching `head_count` leading elements
+        // (a rest element when `has_rest`), widening the pull to
+        // cover what its test needs to see.
+        register(head_count: int, has_rest: bool) is
+            if has_rest then
+                has_rest_group = true
+            fi
+
+            let required = required_count(head_count, has_rest)
+
+            if required > pull_count then
+                pull_count = required
+            fi
+        si
+    si
+
+    // The locals a lowered probe reads: the iterator as the pull left
+    // it, how many elements arrived, and the elements themselves.
+    class LAZY_SEQUENCE_PROBE_LOCALS is
+        iterator: IR.TEMP public
+        pulled: IR.TEMP public
+        elements: Collections.List[IR.TEMP] public
+
+        init(iterator: IR.TEMP, pulled: IR.TEMP, elements: Collections.List[IR.TEMP]) is
+            self.iterator = iterator
+            self.pulled = pulled
+            self.elements = elements
+        si
+    si
+
+    // A buffered pipe stage a rest element is constructed from: the
+    // stage's type, specialised over the element type, and its
+    // constructor.
+    class LAZY_REST_STAGE is
+        stage_type: Type public
+        constructor: Semantic.Symbols.Function public
+
+        init(stage_type: Type, constructor: Semantic.Symbols.Function) is
+            self.stage_type = stage_type
+            self.constructor = constructor
+        si
+    si
+
+    // One sequence pattern group over a lazy sequence: the probe it
+    // tests against, and how many leading elements the group binds
+    // and whether it has a rest element. Built by compile-expressions
+    // where `SEQUENCE_PATTERN_VALUES` is built for a list or an array;
+    // generate-il lowers it in `gen_sequence_destructuring_initialize`.
+    class LAZY_SEQUENCE_PATTERN_VALUES is
+        probe: LAZY_SEQUENCE_PROBE public
+        element_type: Type public
+        head_count: int public
+        has_rest: bool public
+
+        // What a rest element binds: the elements the pull took past
+        // the leading ones, followed by what remained of the iterator,
+        // as an `Iterable` of the element type. The first read continues
+        // that iterator; every later read re-derives from the source,
+        // skipping the elements the pattern matched.
+        rest_type: Type public
+
+        init(
+            probe: LAZY_SEQUENCE_PROBE,
+            element_type: Type,
+            head_count: int,
+            has_rest: bool,
+            rest_type: Type
+        ) is
+            self.probe = probe
+            self.element_type = element_type
+            self.head_count = head_count
+            self.has_rest = has_rest
+            self.rest_type = rest_type
+        si
+    si
+si

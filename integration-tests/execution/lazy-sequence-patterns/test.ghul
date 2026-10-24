@@ -1,0 +1,105 @@
+use default
+
+// A generator source: each read of it starts from the beginning, so a
+// matching statement's single pull is what every arm sees.
+counting_from(start: int, limit: int) -> int{} is
+    let i mut = start;
+    while i <= limit do
+        yield i;
+        i = i + 1;
+    od
+si
+
+counting(limit: int) -> int{} is
+    let i mut = 0;
+    while i < limit do
+        yield i;
+        i = i + 1;
+    od
+si
+
+describe(xs: int{}) -> string =>
+    case xs
+    when [] then "empty"
+    when [x] then "one {x}"
+    when [a, b] then "two {a} {b}"
+    when [a, b, ..more] then "many {a} {b} +{more |> join(",")}"
+    esac
+
+head_only([first, .._]: int{}) -> int => first
+
+describe_word(word: string) -> string =>
+    case word
+    when [] then "empty"
+    when [c] then "one {c}"
+    when [c, ..rest] then "{c} then {rest |> count()}"
+    esac
+
+entry() is
+    write_line(describe(counting(0)));
+    write_line(describe(counting(1)));
+    write_line(describe(counting(2)));
+    write_line(describe(counting(4)));
+
+    // A rest element is a lazy sequence of its own: the first read
+    // continues the pull's iterator, and every later read re-derives
+    // from the source, replaying what the first read saw.
+    if let [x, ..rest] = counting(4) then
+        write_line("head {x} rest {rest |> join(",")}");
+        write_line("again {rest |> join(",")}");
+    fi
+
+    // An exact-length pattern sees one past its head, so it matches
+    // only when the sequence ends there.
+    if let [x, y] = counting(2) then
+        write_line("exactly two {x} {y}");
+    fi
+
+    if let [x, y] = counting(3) then
+        write_line("unreachable");
+    else
+        write_line("not exactly two");
+    fi
+
+    // A literal leaf tests its element.
+    if let [0, 1, ..more] = counting(4) then
+        write_line("starts 0,1 +{more |> join(",")}");
+    fi
+
+    // A range is its own iterator: the pull drives a copy, so the
+    // range is left where it was.
+    if let [a, b, ..more] = 10::15 then
+        write_line("range {a} {b} +{more |> count()}");
+    fi
+
+    // A formal argument matches over a lazy sequence.
+    write_line("head {head_only(counting(3))}");
+
+    // A for-variable pattern matches each item of a lazy sequence.
+    for [x, ..rest] in [counting(1), counting(3)] do
+        write_line("item {x} +{rest |> count()}");
+    od
+
+    // An exact-length arm four wide widens the pull to five, so a
+    // rest arm's unmatched count reaches four: the path that chains
+    // single-element stages, which must keep every unmatched element.
+    let chained = case counting_from(1, 5)
+    when [a, b, c, d] then "exact {a}{b}{c}{d}"
+    when [x, ..rest] then "head {x} rest {rest |> join(",")}"
+    else "other"
+    esac;
+    write_line(chained);
+
+    let chained2 = case counting_from(1, 6)
+    when [a, b, c, d] then "exact"
+    when [x, ..rest] then "head {x} rest {rest |> join(",")}"
+    else "other"
+    esac;
+    write_line(chained2);
+
+    // A string matches as a lazy sequence of its chars; a rest
+    // element is a sequence of chars, not a string.
+    write_line(describe_word(""));
+    write_line(describe_word("a"));
+    write_line(describe_word("ghul"));
+si

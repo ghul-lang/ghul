@@ -1484,7 +1484,7 @@ An arm narrows in the same way as `if let`. `when v: T` narrows the scrutinee to
 
 ### sequence patterns
 
-A pattern in square brackets matches a `List[T]` or an array by its length and binds its elements by position. It is accepted anywhere a destructure pattern is: `let`, `if let` and `while let`, a `case` arm's `when`, a `for` loop variable, a formal argument, and the left side of an assignment.
+A pattern in square brackets matches a `List[T]`, an array, or a lazy sequence (see below) by its length and binds its elements by position. It is accepted anywhere a destructure pattern is: `let`, `if let` and `while let`, a `case` arm's `when`, a `for` loop variable, a formal argument, and the left side of an assignment.
 
 ```ghul
 let [a, b] = pair;                  // exactly two elements
@@ -1507,7 +1507,15 @@ describe(xs: List[int]) -> string =>
 
 Without a rest element the pattern needs exactly that many elements; with one, at least that many. Where the pattern is refutable (`if let`, `while let`, a `case` arm) a mismatch fails the match. Everywhere else it throws `Ghul.AssertFailedException`.
 
-A `case` over a list is checked for exhaustiveness: `[]` and `[x, ..rest]` together cover every list, and a missing length is reported, as in `missing [_, _, ..]`.
+A sequence pattern also matches over a lazy sequence - anything that is an `Iterable[T]` but not a list or an array, such as a pipe or a generator's result. The match pulls elements from the sequence's iterator into locals, and every arm of the matching statement tests against the one pull, so a single-pass source is read once however many arms test it. An exact-length pattern sees one element past its head, to tell "exactly this many" from "at least this many".
+
+A rest element over a lazy sequence is a lazy sequence of its own: the elements the pull took past the ones the pattern matched, followed by what remained of the iterator. The first read continues the pull's iterator, so a source with side effects runs its matched head once per match; every later read takes a fresh iterator from the source and skips the matched elements, so it replays what the first read saw without holding any of it.
+
+A string is a lazy sequence of its chars to a sequence pattern, so `case word when [first, ..rest]` matches its first char and binds the rest as a sequence of chars rather than a string.
+
+A source that is its own iterator is driven through a copy, so a range matches without being consumed. A `while let` test does not support a lazy sequence pattern: every test would read the sequence from its beginning again. A guard does not follow a pattern that matches over a lazy sequence, a lazy sequence group nested inside a `case` pattern is not matched yet, and neither is a destructuring assignment over a lazy source.
+
+A `case` over a list is checked for exhaustiveness: `[]` and `[x, ..rest]` together cover every list, and a missing length is reported, as in `missing [_, _, ..]`. A `case` over a lazy sequence is checked the same way.
 
 `..` means a rest element only inside a sequence pattern; a rest element in a tuple pattern is an error. A sequence pattern cannot be a lambda parameter: destructure the argument at the start of the body instead, as in `xs => (let [x, ..r] = xs in x)`.
 

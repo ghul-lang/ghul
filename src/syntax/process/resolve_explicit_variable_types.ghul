@@ -290,13 +290,30 @@ namespace Syntax.Process is
             // A sequence pattern: each leading leaf is the sequence's element
             // type, and a rest leaf is a list of it.
             if left.is_sequence then
-                let element_type =
+                let rest_unspecialized mut = _innate_symbol_lookup.get_unspecialized_list_type()
+
+                let element_type: Type? mut =
                     if let array: Semantic.Types.ARRAY = from_type then
                         array.arguments[0]
                     else
                         Semantic.Symbols.TYPE_ARGUMENT_EXTRACTOR.extract(
-                            from_type, _innate_symbol_lookup.get_unspecialized_list_type())
+                            from_type, rest_unspecialized)
                     fi
+
+                // A source that is not a list or an array but is an
+                // `Iterable[T]` matches lazily, and its rest element is
+                // an iterable of the element type rather than a list.
+                if !element_type? then
+                    let iterable = _innate_symbol_lookup.find_unspecialized_iterable_type()
+
+                    if iterable? then
+                        rest_unspecialized = iterable!
+
+                        element_type =
+                            Semantic.Symbols.TYPE_ARGUMENT_EXTRACTOR.extract(
+                                from_type, rest_unspecialized)
+                    fi
+                fi
 
                 if !element_type? then
                     if !from_type.is_error then
@@ -310,7 +327,7 @@ namespace Syntax.Process is
                     return
                 fi
 
-                let list_classy = cast Semantic.Symbols.Classy?(_innate_symbol_lookup.get_unspecialized_list_type().unspecialized_symbol)
+                let list_classy = cast Semantic.Symbols.Classy?(rest_unspecialized.unspecialized_symbol)
 
                 let rest_type: Type? =
                     if list_classy? then

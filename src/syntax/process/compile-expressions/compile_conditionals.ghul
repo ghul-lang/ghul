@@ -43,6 +43,16 @@ namespace Syntax.Process is
         // Per-case flow bookkeeping, mirroring `_if_flow_stack`: each
         // arm records its exit environment here and visit_case joins them.
         _case_flow_stack: Collections.LIST[CASE_FLOW_FRAME]
+        // The lazy sequence probes of the case being compiled, parallel
+        // to the scrutinee stacks, and whether the walk is currently
+        // inside that case's pattern - probes are shared by pattern
+        // arms only, not by anything the arm bodies declare.
+        _lazy_probe_stack: Collections.LIST[Collections.LIST[LAZY_SEQUENCE_PROBE]]
+        _in_case_pattern: bool
+        // Whether the refutable binding being compiled is a while let
+        // test: a lazy sequence pattern cannot match there, because
+        // every test would read the sequence from its beginning again.
+        _in_while_let_binding: bool
         _match_propagator: Semantic.MATCH_PROPAGATOR
         _case_exhaustiveness_checker: CASE_EXHAUSTIVENESS_CHECKER
         _arm_null_join: ARM_NULL_JOIN
@@ -72,9 +82,43 @@ namespace Syntax.Process is
             _case_scrutinee_load_stack = Collections.LIST[IR.Values.Value?]()
             _case_scrutinee_expression_stack = Collections.LIST[Trees.Expressions.Expression?]()
             _case_flow_stack = Collections.LIST[CASE_FLOW_FRAME]()
+            _lazy_probe_stack = Collections.LIST[Collections.LIST[LAZY_SEQUENCE_PROBE]]()
+            _in_case_pattern = false
+            _in_while_let_binding = false
             _match_propagator = Semantic.MATCH_PROPAGATOR(logger)
             _case_exhaustiveness_checker = CASE_EXHAUSTIVENESS_CHECKER(logger, innate_symbol_lookup)
             _arm_null_join = ARM_NULL_JOIN()
+        si
+
+        // Accessors for the lazy sequence pattern builder on the pass:
+        // whether a case pattern is being walked (probes are shared only
+        // then), the innermost case's scrutinee type, its probe list, and
+        // whether the refutable binding being compiled is a while let.
+        in_case_pattern: bool public => _in_case_pattern
+
+        in_while_let_binding: bool public => _in_while_let_binding
+
+        current_case_scrutinee_type() -> Type? is
+            if _case_scrutinee_stack.count == 0 then
+                return null
+            fi
+
+            return _case_scrutinee_stack[_case_scrutinee_stack.count - 1]
+        si
+
+        current_lazy_probes() -> Collections.LIST[LAZY_SEQUENCE_PROBE] =>
+            _lazy_probe_stack[_lazy_probe_stack.count - 1]
+
+        // A `while let` binding: the same walk as `check_refutable_binding`,
+        // under the flag that rejects a lazy sequence pattern.
+        check_while_let_binding(rb: Trees.Statements.REFUTABLE_BINDING) is
+            _in_while_let_binding = true
+
+            try
+                check_refutable_binding(rb)
+            finally
+                _in_while_let_binding = false
+            yrt
         si
 
         pre_if_branch(`if: Trees.Statements.IF_BRANCH) -> bool is
@@ -831,9 +875,16 @@ namespace Syntax.Process is
             // in force once the scrutinee has been walked and spilled.
             _case_flow_stack.add(CASE_FLOW_FRAME(_flow.current_env.copy()))
 
+            // The case's lazy sequence probes, filled as its pattern
+            // arms register, for generate-il to lower once per case.
+            _lazy_probe_stack.add(Collections.LIST[LAZY_SEQUENCE_PROBE]())
+
             for m in `case.matches do
                 m.walk(_visitor)
             od
+
+            `case.case_state.lazy_probes = _lazy_probe_stack[_lazy_probe_stack.count - 1]
+            _lazy_probe_stack.remove_at(_lazy_probe_stack.count - 1)
 
             _case_scrutinee_stack.remove_at(_case_scrutinee_stack.count - 1)
             _case_scrutinee_load_stack.remove_at(_case_scrutinee_load_stack.count - 1)
@@ -993,19 +1044,43 @@ namespace Syntax.Process is
                 left_state.variable_location = arm.location
             fi
 
-            pattern.left.walk(_visitor)
+            // The pattern is non-null from here (the expression-list
+            // arm left above); captured before the try below, whose
+            // finally the pattern's narrowing does not survive.
+            let pattern_left = pattern.left
+
+            // A lazy sequence group in the pattern shares the case's
+            // pull; groups the arm bodies declare take probes of their
+            // own, so the flag covers the pattern walk only.
+            _in_case_pattern = true
+
+            try
+                pattern_left.walk(_visitor)
+            finally
+                _in_case_pattern = false
+            yrt
+
+            // A guard cannot be supported over a lazy sequence pattern
+            // yet: the guard runs after the pull, and a failing guard
+            // falls through to the next arm, which would need to see
+            // the elements the pull already took.
+            if arm.guard? /\ _visitor._has_lazy_sequence_group(pattern_left) then
+                _logger.error(
+                    arm.location,
+                    "a guard cannot follow a lazy sequence pattern")
+            fi
 
             // Same registration the `if let` clause path does: a
             // case-when pattern's bound names are body locals, so
             // inside a generator they need state-machine frame fields.
-            _visitor.declare_state_machine_local_fields(pattern.left)
+            _visitor.declare_state_machine_local_fields(pattern_left)
 
             // `case`-when patterns do not require implicit refutability
             // on the bare form — a destructure of a non-nullable tuple
             // is a valid arm that simply always matches, not an error
             // the way `if let v = some_int` is.
             _pattern_checker.check_pattern(
-                pattern.left,
+                pattern_left,
                 scrutinee_type,
                 target_type,
                 arm.location,
