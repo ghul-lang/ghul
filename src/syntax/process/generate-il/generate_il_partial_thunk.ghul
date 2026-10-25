@@ -1,0 +1,76 @@
+namespace Syntax.Process is
+    use IR
+    use IR.Values
+
+    // A partial application thunk has no literal behind it, so its body
+    // is generated from the description on its closure rather than
+    // walked. It unpacks the arguments it was closed over into the
+    // locals the call reads them from, makes the call and returns what
+    // it returns.
+    partial GENERATE_IL is
+        _gen_partial_thunk(closure: Semantic.Symbols.Closure) is
+            let thunk = closure.partial_thunk
+
+            if !thunk? then
+                return
+            fi
+
+            closure.map_type_arguments()
+
+            _backend.begin_body(closure)
+
+            enter_block()
+
+            if thunk.takes_fixed then
+                let closed_over = closure.find_direct(Semantic.Symbols.PARTIAL_THUNK.FIXED_PARAMETER)!.load(closure.location, null, _symbol_loader)
+
+                if thunk.fixed_locals.count == 1 then
+                    let local = thunk.fixed_locals[0]
+
+                    add(DECLARE_LOCAL(local))
+                    add(if thunk.fixed_is_boxed then _partial_thunk_unboxed(closed_over, local.type) else closed_over fi)
+                    add(STORE_TEMP(local))
+                else
+                    let tuple_type = _innate_symbol_lookup.get_tuple_type(thunk.fixed_types, null)
+
+                    let tuple = IR.TEMP(current_block, "partial_fixed", _partial_thunk_unboxed(closed_over, tuple_type))
+
+                    let strategy = DESTRUCTURE_RESOLVER.resolve_strategy(tuple_type, thunk.fixed_locals.count)
+
+                    for i in 0..thunk.fixed_locals.count do
+                        let local = thunk.fixed_locals[i]
+
+                        add(DECLARE_LOCAL(local))
+                        add(strategy.members[i]!.load(closure.location, tuple.load(), _symbol_loader))
+                        add(STORE_TEMP(local))
+                    od
+                fi
+            fi
+
+            add(thunk.call)
+
+            add(RET())
+
+            _backend.write(current_block)
+
+            leave_block()
+
+            _backend.finish_body(closure)
+            _backend.end_body()
+
+            closure.unmap_type_arguments()
+        si
+
+        // `value`, an `object`, as the `type` it was boxed from. A value
+        // type is unboxed straight from the object: every backend lowers
+        // an UNBOX whose type is the target, where a cast to a value type
+        // is lowered differently from one backend to the next.
+        _partial_thunk_unboxed(value: Value, type: Semantic.Types.Type) -> Value is
+            if type.is_value_type \/ type.is_type_variable then
+                return UNBOX(TYPE_WRAPPER(type, value))
+            fi
+
+            return CAST(type, value, false)
+        si
+    si
+si

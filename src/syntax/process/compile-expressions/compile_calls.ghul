@@ -3187,6 +3187,38 @@ namespace Syntax.Process is
                 return
             fi
 
+            // An argument that takes its type from its context - a `*`
+            // or a bare `_` - had nothing to take it from on the first
+            // walk. The formal is known now, so push it in and walk the
+            // argument again, as the named-function path does once its
+            // overload is chosen: the first walk's diagnostics for the
+            // whole call are rolled back, so every argument is walked
+            // again to commit its own.
+            if has_argument_awaiting_context_type(call.arguments.expressions) then
+                _logger.roll_back()
+                _logger.speculate()
+                _flow.restore()
+
+                for i in 0..arguments.count do
+                    let a = call.arguments.expressions[i]
+
+                    if COMPILE_CALLS.is_argument_awaiting_context_type(a) then
+                        let formal = function_generic_type.arguments[i]
+
+                        if !formal.is_wild then
+                            a.set_expected_type(formal, "")
+                        fi
+                    fi
+
+                    _visitor.rewalk(a)
+
+                    if let value = a.value, value_type = value.type then
+                        arguments[i] = value
+                        argument_types[i] = value_type
+                    fi
+                od
+            fi
+
             let ok mut = true
 
             for i in 0..arguments.count do

@@ -606,6 +606,19 @@ A nested function refers to itself by its own name, so it needs no `rec`. A lite
 
 A nested function is a local, so it is defined from its own definition onward. A reference to it above its definition is an error. Mutual recursion between two nested functions is an error. To get mutual recursion, write one of the pair as a `let mut` literal and assign it after the other is defined. A file's top-level statements are not a body, so a named function among them is a namespace-scope function, and its argument types are required.
 
+A call with `*` written for one or more of its arguments is a *partial application*: a function value with one parameter per `*`, in order, that makes the call with its parameters in those positions. The other arguments are evaluated once, where the partial application is written, not on each call:
+
+```ghul
+scale(x: int, by: int) -> int => x * by;
+
+xs |> map(scale(*, 2));                   // the same as map(x => scale(x, 2))
+let between_1_and_9 = between(1, *, 9);   // (int) -> bool
+let product = scale(*, *);                // (int, int) -> int
+items |> each(log.write(*));              // the receiver is evaluated once
+```
+
+The `*` is a whole argument of the call: `f(*, 2)` is a partial application, and `f(* + 1)` is an error. It belongs to the innermost argument list it is written in, so `f(g(*, 1), 2)` partially applies `g` and passes the result to `f`. Each `*` takes its type from the formal it stands in, exactly as a bare `_` argument does, so the call is resolved as any call is, with the written arguments choosing the overload. A `*` whose type nothing decides, such as a lone `*` to an overloaded function, is an error: write a function literal with a typed parameter instead. The callee can be a function, a method, a constructor, or a value of function type. A `*` cannot be combined with `~>`.
+
 *More detail on this section: [language details](docs/details.md#functions).*
 
 ## type definitions

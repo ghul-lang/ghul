@@ -1,0 +1,375 @@
+namespace Syntax.Process is
+    use Semantic.Types.Type
+
+    use IR.Values.Value
+
+    // Builds the function value a partial application stands for: the
+    // delegate of a generated thunk that takes one parameter per `*`
+    // and makes the call with them.
+    //
+    // The call is compiled as written, with each `*` a load of the
+    // thunk's parameter for it. The arguments that were written out are
+    // then moved out of the call: each is replaced in the call by a load
+    // of a local of the thunk, and the values themselves are evaluated
+    // once, where the partial application stands, into the one value
+    // the thunk's delegate is closed over. A thunk is a static closure
+    // symbol with no literal behind it, whose body is emitted from the
+    // description recorded on it.
+    //
+    // A partial application is compiled once for every walk of the body
+    // it stands in, so the thunk made for one is kept and reused rather
+    // than declared again.
+    class PARTIAL_APPLICATION_BUILDER is
+        _symbol_table: Semantic.SYMBOL_TABLE
+        _symbol_loader: Semantic.SYMBOL_LOADER
+        _innate_symbol_lookup: Semantic.Lookups.InnateSymbolLookup
+
+        _thunks: Collections.MAP[Trees.Node, Semantic.Symbols.Closure]
+
+        _index: int
+
+        init(
+            symbol_table: Semantic.SYMBOL_TABLE,
+            symbol_loader: Semantic.SYMBOL_LOADER,
+            innate_symbol_lookup: Semantic.Lookups.InnateSymbolLookup
+        ) is
+            _symbol_table = symbol_table
+            _symbol_loader = symbol_loader
+            _innate_symbol_lookup = innate_symbol_lookup
+
+            _thunks = Collections.MAP[Trees.Node, Semantic.Symbols.Closure]()
+        si
+
+        // The thunk for `partial`: the one already declared for it, or a
+        // new one declared into the enclosing function. Absent outside a
+        // function body.
+        thunk_for(application: Trees.Expressions.PARTIAL_APPLICATION) -> Semantic.Symbols.Closure? is
+            let existing: Semantic.Symbols.Closure mut
+
+            if _thunks.try_get_value(application, existing ref) then
+                return existing
+            fi
+
+            let enclosing = _symbol_table.current_function
+
+            if !enclosing? then
+                return null
+            fi
+
+            let thunk =
+                cast Semantic.Symbols.Closure?(
+                    enclosing.declare_closure(
+                        application.location,
+                        "$partial_{_index}",
+                        cast Semantic.Scope?(_symbol_table.current_closure_context)!,
+                        _symbol_table.current_scope,
+                        false,
+                        null
+                    )
+                )
+
+            _index = _index + 1
+
+            if !thunk? then
+                return null
+            fi
+
+            thunk.mark_synthesized()
+
+            _symbol_table.current_closure_context.add_closure(thunk)
+
+            _thunks[application] = thunk
+
+            return thunk
+        si
+
+        // The thunk's parameter named `name`, declared on first use.
+        parameter(
+            thunk: Semantic.Symbols.Closure,
+            location: Source.LOCATION,
+            name: string
+        ) -> Semantic.Symbols.Variable is
+            if let existing: Semantic.Symbols.Variable = thunk.find_direct(name) then
+                return existing
+            fi
+
+            thunk.start_declaring_arguments()
+
+            let declared = cast Semantic.Symbols.Variable?(thunk.declare_variable(location, name, false, null))!
+
+            thunk.end_declaring_arguments()
+
+            declared.mark_synthesized()
+            declared.define()
+
+            return declared
+        si
+
+        // The load of the thunk's parameter for the `*` at `index`, typed
+        // `type`. Built directly rather than through the loader, which
+        // would read it as a capture of the function being compiled.
+        placeholder_value(
+            thunk: Semantic.Symbols.Closure,
+            location: Source.LOCATION,
+            index: int,
+            type: Type
+        ) -> Value is
+            let declared = parameter(thunk, location, Semantic.Symbols.PARTIAL_THUNK.parameter_name(index))
+
+            (cast Semantic.Types.SettableTyped(declared)).set_type(type)
+
+            return IR.Values.Load.LOCAL_ARGUMENT(declared)
+        si
+
+        // The partial application's value: `call` with its written-out
+        // arguments moved into locals of `thunk`, and `thunk`'s delegate
+        // closed over those arguments' values. `placeholder_values` are
+        // the loads the `*` arguments compiled to, in order. Absent where
+        // the call is of a shape that cannot be taken apart, or where
+        // a `*` reached the call changed from the load it compiled to.
+        present(
+            thunk: Semantic.Symbols.Closure,
+            location: Source.LOCATION,
+            call: Value,
+            placeholder_values: Collections.List[Value]
+        ) -> Value? is
+            let arguments = cast Collections.LIST[Value]?(_arguments_of(call))
+
+            if !arguments? then
+                return null
+            fi
+
+            let fixed_locals = Collections.LIST[IR.LOCAL]()
+            let fixed_types = Collections.LIST[Type]()
+            let fixed_values = Collections.LIST[Value]()
+
+            let matched = Collections.LIST[bool]()
+
+            for _ in placeholder_values do
+                matched.add(false)
+            od
+
+            let receiver = _receiver_of(call)
+
+            if receiver? /\ !receiver.is_type_expression then
+                let moved = _move_fixed(receiver, fixed_locals, fixed_types, fixed_values)
+
+                if !moved? then
+                    return null
+                fi
+
+                _set_receiver(call, moved)
+            fi
+
+            for i in 0..arguments.count do
+                let argument = arguments[i]
+
+                let placeholder_index = _placeholder_index(argument, placeholder_values)
+
+                if placeholder_index >= 0 then
+                    if matched[placeholder_index] then
+                        return null
+                    fi
+
+                    matched[placeholder_index] = true
+                else
+                    let moved = _move_fixed(argument, fixed_locals, fixed_types, fixed_values)
+
+                    if !moved? then
+                        return null
+                    fi
+
+                    arguments[i] = moved
+                fi
+            od
+
+            for m in matched do
+                if !m then
+                    return null
+                fi
+            od
+
+            if fixed_locals.count > Semantic.ARGUMENT_PACK.MAXIMUM_ARITY then
+                return null
+            fi
+
+            let return_type = call.type ?? _innate_symbol_lookup.get_void_type()
+
+            let presented_types = Collections.LIST[Type]()
+            let parameter_types = Collections.LIST[Type]()
+            let parameter_names = Collections.LIST[string]()
+
+            // One fixed value of a reference type is closed over as it
+            // is; anything else arrives boxed as an `object`, since a
+            // closed delegate's first argument has to be a reference.
+            let fixed_is_boxed =
+                fixed_locals.count != 1 \/
+                fixed_types[0].is_value_type \/
+                fixed_types[0].is_type_variable
+
+            if fixed_locals.count > 0 then
+                let fixed_type = if fixed_is_boxed then _innate_symbol_lookup.get_object_type() else fixed_types[0] fi
+
+                parameter_types.add(fixed_type)
+                parameter_names.add(Semantic.Symbols.PARTIAL_THUNK.FIXED_PARAMETER)
+
+                (cast Semantic.Types.SettableTyped(parameter(thunk, location, Semantic.Symbols.PARTIAL_THUNK.FIXED_PARAMETER))).set_type(fixed_type)
+            fi
+
+            for i in 0..placeholder_values.count do
+                let type = placeholder_values[i].type!
+
+                presented_types.add(type)
+                parameter_types.add(type)
+                parameter_names.add(Semantic.Symbols.PARTIAL_THUNK.parameter_name(i))
+            od
+
+            presented_types.add(return_type)
+
+            let is_pure = !call.is_state_changing_call
+
+            let presented = _innate_symbol_lookup.get_function_type(presented_types, is_pure)
+
+            thunk.arguments = parameter_types
+            thunk.argument_names = parameter_names
+            thunk.set_return_type(return_type)
+
+            for t in parameter_types do
+                _record_type_arguments(thunk, t)
+            od
+
+            _record_type_arguments(thunk, return_type)
+
+            thunk.partial_thunk = Semantic.Symbols.PARTIAL_THUNK(call, fixed_locals, fixed_types, fixed_is_boxed)
+
+            if is_pure then
+                thunk.mark_declared_pure()
+            fi
+
+            if fixed_locals.count == 0 then
+                return thunk.load(location, _symbol_loader)
+            fi
+
+            let closed_over: Value =
+                if !fixed_is_boxed then
+                    fixed_values[0]
+                elif fixed_values.count == 1 then
+                    IR.Values.BOX(fixed_values[0])
+                else
+                    IR.Values.BOX(
+                        IR.Values.TUPLE(
+                            _innate_symbol_lookup.get_tuple_type(fixed_types, null),
+                            fixed_values
+                        )
+                    )
+                fi
+
+            return thunk.load_closed_over(location, closed_over, presented)
+        si
+
+        // Moves `value`, an argument written out, into a fresh local of the
+        // thunk: the value joins those the thunk is closed over, and the
+        // load of the local takes its place in the call. An argument
+        // passed by address keeps its shape: the local holds the value
+        // and its address is what the call gets.
+        _move_fixed(
+            value: Value,
+            fixed_locals: Collections.LIST[IR.LOCAL],
+            fixed_types: Collections.LIST[Type],
+            fixed_values: Collections.LIST[Value]
+        ) -> Value? is
+            if let address: IR.Values.ADDRESS = value then
+                let held = address.value
+                let held_type = held.type
+
+                if !held_type? \/ held_type.is_error then
+                    return null
+                fi
+
+                let local = IR.LOCAL("$partial_fixed_{fixed_locals.count}", held_type)
+
+                fixed_locals.add(local)
+                fixed_types.add(held_type)
+                fixed_values.add(held)
+
+                return IR.Values.ADDRESS(local.load(), address.type)
+            fi
+
+            let type = value.type
+
+            if !type? \/ type.is_error then
+                return null
+            fi
+
+            let local = IR.LOCAL("$partial_fixed_{fixed_locals.count}", type)
+
+            fixed_locals.add(local)
+            fixed_types.add(type)
+            fixed_values.add(value)
+
+            return local.load()
+        si
+
+        _placeholder_index(argument: Value, placeholder_values: Collections.List[Value]) -> int is
+            for i in 0..placeholder_values.count do
+                if placeholder_values[i] == argument then
+                    return i
+                fi
+            od
+
+            return -1
+        si
+
+        _arguments_of(call: Value) -> Collections.List[Value]? is
+            if let c: IR.Values.Call.INSTANCE = call then
+                return c.arguments
+            elif let c: IR.Values.Call.STRUCT = call then
+                return c.arguments
+            elif let c: IR.Values.Call.GLOBAL = call then
+                return c.arguments
+            elif let c: IR.Values.Call.STATIC = call then
+                return c.arguments
+            elif let c: IR.Values.Call.CLOSURE = call then
+                return c.arguments
+            elif let c: IR.Values.Call.INNATE = call then
+                return c.arguments
+            elif let c: IR.Values.NEW = call then
+                return c.arguments
+            fi
+
+            return null
+        si
+
+        _receiver_of(call: Value) -> Value? is
+            if let c: IR.Values.Call.INSTANCE = call then
+                return c.from
+            elif let c: IR.Values.Call.STRUCT = call then
+                return c.from
+            elif let c: IR.Values.Call.CLOSURE = call then
+                return c.from
+            fi
+
+            return null
+        si
+
+        _set_receiver(call: Value, receiver: Value) is
+            if let c: IR.Values.Call.INSTANCE = call then
+                c.from = receiver
+            elif let c: IR.Values.Call.STRUCT = call then
+                c.from = receiver
+            elif let c: IR.Values.Call.CLOSURE = call then
+                c.from = receiver
+            fi
+        si
+
+        _record_type_arguments(thunk: Semantic.Symbols.Closure, type: Type) is
+            let collected = Collections.LIST[Semantic.Symbols.Symbol]()
+
+            Semantic.INFERENCE_HELPERS.collect_method_level_type_variables(type, collected)
+
+            for u in collected do
+                thunk.add_type_argument_reference(u)
+            od
+        si
+    si
+si
