@@ -45,7 +45,7 @@ trap 'rm -rf "$scratch"' EXIT
     (cd "$core" && find src -name '*.ghul' | sort | sed "s#^#$core/#")
     echo "--library-source"
     echo "ghul-runtime@$(tr -d '[:space:]' < "$runtime/VERSION")=$runtime"
-    sed "s#^#$runtime/#" "$runtime/wasm-sources.rsp"
+    (cd "$runtime" && find ghul-runtime/src -name '*.ghul' | sort | sed "s#^#$runtime/#")
 } > "$scratch/libraries.rsp"
 
 scenarios=("$@")
