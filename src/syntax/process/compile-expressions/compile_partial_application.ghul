@@ -1,0 +1,112 @@
+namespace Syntax.Process is
+    use System.Exception
+
+    use IR.Values.DUMMY
+
+    // A call with `*` for some of its arguments. The call is compiled as
+    // written, each `*` taking its type from the formal it stands in and
+    // compiling to a load of the thunk's parameter for it; the value is
+    // then built from the compiled call by PARTIAL_APPLICATION_BUILDER.
+    partial COMPILE_EXPRESSIONS is
+        pre(application: Trees.Expressions.PARTIAL_APPLICATION) -> bool is
+            super.pre(application)
+
+            application.compile_expressions_state.value = null
+
+            try
+                _compile_partial_application(application)
+            catch ex: Exception
+                application.compile_expressions_state.value = DUMMY(Semantic.Types.ERROR(), application.location)
+                _logger.exception(application.location, ex, "exception compiling partial application")
+            yrt
+
+            return true
+        si
+
+        _compile_partial_application(application: Trees.Expressions.PARTIAL_APPLICATION) is
+            let thunk = _partials.thunk_for(application)
+
+            if !thunk? then
+                _logger.error(application.location, "cannot use * outside a function body")
+                application.compile_expressions_state.value = DUMMY(Semantic.Types.ERROR(), application.location)
+                return
+            fi
+
+            if application.call.propagates_absence then
+                _logger.error(application.location, "cannot use * in a ~> call")
+                application.compile_expressions_state.value = DUMMY(Semantic.Types.ERROR(), application.location)
+                return
+            fi
+
+            application.call.walk(self)
+
+            let call_value = application.call.value
+
+            if !call_value? \/ !call_value.type? \/ call_value.type.is_error then
+                application.compile_expressions_state.value = DUMMY(Semantic.Types.ERROR(), application.location)
+                return
+            fi
+
+            let placeholder_values = Collections.LIST[IR.Values.Value]()
+
+            for placeholder in application.placeholders do
+                let value = placeholder.value
+
+                if !value? \/ !value.type? \/ value.type.is_error then
+                    application.compile_expressions_state.value = DUMMY(Semantic.Types.ERROR(), application.location)
+                    return
+                fi
+
+                placeholder_values.add(value)
+            od
+
+            let result = _partials.present(thunk, application.location, call_value, placeholder_values)
+
+            if !result? then
+                _logger.error(application.location, "cannot partially apply this call")
+                application.compile_expressions_state.value = DUMMY(Semantic.Types.ERROR(), application.location)
+                return
+            fi
+
+            application.compile_expressions_state.value = result
+        si
+
+        // A `*` is typed by the formal it stands in, which the call
+        // pushes in once the callee is resolved. Until then it has no
+        // type, and the call reads it as an argument still awaiting one.
+        visit(placeholder: Trees.Expressions.PLACEHOLDER) is
+            placeholder.compile_expressions_state.value = null
+
+            let owner = placeholder.owner
+
+            if !owner? then
+                _logger.error(placeholder.location, "* can only stand for an argument of a call")
+                placeholder.compile_expressions_state.value = DUMMY(Semantic.Types.ERROR(), placeholder.location)
+                return
+            fi
+
+            let type = placeholder.expected_type
+
+            // Reported on every walk, as a bare `_` reports its own: the
+            // call rolls the first walk's diagnostics back once it has
+            // a formal to push, and what survives is this error from
+            // the walk where no formal ever arrived.
+            if !type? \/ type.is_error then
+                _logger.error(placeholder.location, "cannot infer the type of * here")
+                placeholder.compile_expressions_state.value = DUMMY(Semantic.Types.ERROR(), placeholder.location)
+                return
+            fi
+
+            let thunk = _partials.thunk_for(owner)
+
+            if !thunk? then
+                placeholder.compile_expressions_state.value = DUMMY(Semantic.Types.ERROR(), placeholder.location)
+                return
+            fi
+
+            _symbol_use_locations.add_inferred_type_hover(placeholder.location, type)
+
+            placeholder.compile_expressions_state.value = _partials.placeholder_value(thunk, placeholder.location, placeholder.index, type)
+        si
+    si
+si

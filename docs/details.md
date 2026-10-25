@@ -226,6 +226,12 @@ This fallback applies only when the nearest declaration cannot be called at all.
 let f = (x: int) -> int => f(x);   // error: variable is not defined here
 ```
 
+A partial application, a call with `*` for some of its arguments, evaluates everything that is not a `*` exactly once, where it is written: the receiver of a method call, the callee of a call through a function-typed value, and each written argument. The function value then holds those values, and each call of it supplies only the `*` positions. So `items |> each(counter.bump(*))` reads `counter` once, and `xs |> map(scale(*, cost()))` calls `cost` once rather than once per element. A written argument is converted to its formal's type where it is evaluated, so a value that does not fit is reported there, as in any call.
+
+Each `*` is typed by the formal it stands in, and the overload is chosen from the written arguments, with each `*` matching any parameter type. Where that leaves a `*` with no single type, the call is an error at the `*`: a lone `*` to an overloaded function, or a `*` in the position of a type parameter that nothing else pins. A `*` standing for an argument-pack formal (`v: T..`) is one parameter of whatever type that formal has at the call.
+
+A partial application of a call that stores nothing, one whose callee is declared `pure`, is a value of a pure function type. Whether the call stores is judged by the callee's declaration, not by what the compiler later proves of its body.
+
 ## classes
 
 An `@equality()` pragma before a class asks the compiler to synthesise the class's `=~` and a matching `get_hash_code`. They compare the members that hold the class's state: each auto-property and each `field`, in order, with that member type's own equality. A property with a body computes its value from the state, so it does not take part. A static member belongs to the type, so it does not take part either. Non-public members take part like any other members. The pragma is the author's request for the comparison, so a member's visibility says nothing about whether it distinguishes two values.

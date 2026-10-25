@@ -1,0 +1,64 @@
+namespace Syntax.Trees.Expressions is
+
+    use Source
+
+    use Ghul.Pipes
+
+    // A call with `*` for one or more of its arguments: a function value
+    // of one parameter per `*`, in order, that makes the call with its
+    // parameters in those positions and the other arguments as they were
+    // evaluated once, where the partial application is written.
+    //
+    // `call` is the call as written. It is resolved and typed as any
+    // call is, with each `*` typed from its formal; the value this
+    // expression stands for is built from the result.
+    class PARTIAL_APPLICATION: Expression is
+        call: CALL
+        placeholders: Collections.LIST[PLACEHOLDER]
+
+        right_location: LOCATION => call.right_location
+
+        init(location: LOCATION, call: CALL) is
+            super.init(location)
+
+            self.call = call
+
+            placeholders = Collections.LIST[PLACEHOLDER]()
+
+            for argument in call.arguments.expressions do
+                if let placeholder: PLACEHOLDER = argument then
+                    placeholder.owner = self
+                    placeholder.index = placeholders.count
+
+                    placeholders.add(placeholder)
+                fi
+            od
+        si
+
+        // Whether `arguments` has a `*` among its elements: what makes a
+        // call a partial application.
+        has_placeholder(arguments: LIST) -> bool static =>
+            arguments.expressions |> any(a => isa PLACEHOLDER(a))
+
+        set_expected_type(expected_type: Semantic.Types.Type?, error_message: string?) is
+            compile_expressions_state.set_expected_type(expected_type, error_message)
+        si
+
+        accept(visitor: Visitor) is
+            visitor.visit(self)
+        si
+
+        walk(visitor: Visitor) is
+            visitor.enter_node(self)
+            try
+                if !visitor.pre(self) then
+                    call.walk(visitor)
+                fi
+
+                accept(visitor)
+            finally
+                visitor.leave_node(self)
+            yrt
+        si
+    si
+si
