@@ -463,6 +463,17 @@ si
 let total = vectors |> reduce(V(0), V.`+);
 ```
 
+A built-in operator is named the same way. It has no method behind it, so the compiler synthesises one that applies the operator to its parameters, shared by every use of the operator at that type in the function body, and the delegate over it is built once. A bare spelling found in no scope is the operator of the type the expected function type applies it to: the first parameter type, or that parameter's element type where it is a tuple, as it is for a combinator that takes an argument pack as one tuple.
+
+```ghul
+let total = xs |> reduce(0, `+);                     // int.`+
+let sums = [(1, 2), (3, 4)] |> map(`+);             // 3, 7
+let scaled = zip(xs, ys, `*);
+let compare: System.Comparison[int] = `<>;
+```
+
+A built-in operator that mentions a type parameter of the enclosing function is a value at that type too, under the same rules as applying it in the body: `` `== `` is a `(T, T) -> bool` inside `same[T]`. A spelling that is derived from another operator - `<`, `<=`, `>` and `>=` from `<>`, `!=` from `==`, `!~` from `=~` - names no function.
+
 ## collections and pipes
 
 GHUL.md describes how to dispose a sequence that holds a resource, by taking its iterator with `use`. `cursor` builds a pipe over the held iterator. `cursor` reads the iterator it is given, and does not ask the source for a new one. So an early-exit terminal on the pipe leaves the disposal to `use`:

@@ -367,7 +367,12 @@ namespace Syntax.Process is
                 fi
             fi
 
-            return false
+            // A bare operator spelling found in no scope is the operator
+            // of whichever type the formal's first parameter turns out
+            // to be, so it takes the same route as a group: the formal is
+            // pushed whenever it is callable, and the call re-resolves
+            // once the reference has a shape.
+            return a.awaits_context_type /\ a.is_identifier /\ (a.value?.type?.is_error ?? true)
         si
 
         // True when the call carries at least one unresolved group
@@ -1558,6 +1563,14 @@ namespace Syntax.Process is
                     if let a.value? /\ value.type? /\ value.check_is_consumable(_logger, a.location) then
                         arguments[index] = value
                         argument_types[index] = value.type!
+
+                        // A reference that became a function of the pack's
+                        // elements only under the pushed formal is judged
+                        // as the function of their tuple, as one that had
+                        // its shape before the push was above.
+                        if let presented = _presented_pack_type(cache_key, push_candidate!, index, a, argument_types[index]) then
+                            argument_types[index] = presented
+                        fi
                     else
                         let t = Semantic.Types.ERROR()
 
@@ -2093,8 +2106,16 @@ namespace Syntax.Process is
             fi
 
             // A method named on an instance is included: the delegate
-            // over it carries its receiver.
-            if let delegate: MAKE_CLOSURE = argument.value then
+            // over it carries its receiver. A delegate built once and
+            // kept is judged by the delegate it keeps.
+            let value =
+                if let memoized: MEMOIZED_DELEGATE = argument.value then
+                    memoized.inner
+                else
+                    argument.value
+                fi
+
+            if let delegate: MAKE_CLOSURE = value then
                 if delegate.referenced_function? then
                     return arity
                 fi
@@ -2954,7 +2975,17 @@ namespace Syntax.Process is
                         // A bare group argument resolved to a delegate
                         // only now that the formal was known - re-resolve
                         // so the callee's own type variables bind from the
-                        // delegate's shape rather than staying open.
+                        // delegate's shape rather than staying open. A
+                        // delegate of a pack's elements is judged as the
+                        // function of their tuple, as on the first walk.
+                        for index in 0..slots.count do
+                            if let expression = slots.expression(index) /\ index < function.arguments.count then
+                                if let presented = _presented_pack_type(call, function, index, expression, argument_types[index]) then
+                                    argument_types[index] = presented
+                                fi
+                            fi
+                        od
+
                         let re_resolved = _overload_resolver.resolve(call.arguments.location, function_group, argument_types, true, want_instance, false, named_restrict, call.expected_type)
 
                         if re_resolved? then
