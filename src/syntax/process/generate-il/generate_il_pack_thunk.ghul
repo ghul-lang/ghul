@@ -86,7 +86,9 @@ namespace Syntax.Process is
 
             let return_type = closure.return_type!
 
-            if let target = thunk.target then
+            if let target = thunk.target, constructed_type = thunk.constructed_type then
+                add(_construct_in_pack_thunk(closure.location, target, arguments, constructed_type))
+            elif let target = thunk.target then
                 add(target.call(closure.location, null, arguments, null, _function_caller))
             else
                 add(
@@ -101,6 +103,30 @@ namespace Syntax.Process is
             fi
 
             _finish_pack_thunk(closure)
+        si
+
+        // The instance a constructing thunk returns: a scalar conversion
+        // converts its one argument as `cast` would, and any other
+        // constructor constructs as a call to it does.
+        _construct_in_pack_thunk(
+            location: Source.LOCATION,
+            constructor: Semantic.Symbols.Function,
+            arguments: Collections.List[Value],
+            constructed_type: Semantic.Types.Type
+        ) -> Value is
+            if constructor.is_scalar_conversion then
+                let caster = IoC.CONTAINER.instance.type_caster
+
+                return Values.SCALAR_CONVERSION(caster.cast_value(location, arguments[0], constructed_type, false, true))
+            fi
+
+            let argument_types = Collections.LIST[Semantic.Types.Type](arguments.count)
+
+            for a in arguments do
+                argument_types.add(a.type!)
+            od
+
+            return _function_caller.construct(constructor, arguments, argument_types, constructed_type)
         si
 
         _finish_pack_thunk(closure: Semantic.Symbols.Closure) is

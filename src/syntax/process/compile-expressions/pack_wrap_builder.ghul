@@ -56,6 +56,29 @@ namespace Syntax.Process is
             target: Semantic.Symbols.Function,
             callee_type: Type,
             delegate_type: Type?
+        ) -> Value? =>
+            _forward(location, target, callee_type, delegate_type, null)
+
+        // The delegate of a thunk that constructs `constructed_type`
+        // through its constructor `target` from its parameters, which
+        // are `callee_type`'s. A constructor has no method a delegate
+        // could point at either: `newobj` is not a call. Otherwise as
+        // `forward`.
+        construct(
+            location: Source.LOCATION,
+            target: Semantic.Symbols.Function,
+            constructed_type: Type,
+            callee_type: Type,
+            delegate_type: Type?
+        ) -> Value? =>
+            _forward(location, target, callee_type, delegate_type, constructed_type)
+
+        _forward(
+            location: Source.LOCATION,
+            target: Semantic.Symbols.Function,
+            callee_type: Type,
+            delegate_type: Type?,
+            constructed_type: Type?
         ) -> Value? is
             let enclosing = _symbol_table.current_function
 
@@ -63,7 +86,7 @@ namespace Syntax.Process is
                 return null
             fi
 
-            let thunk = forwarding_thunk(location, enclosing, target, callee_type, delegate_type)
+            let thunk = forwarding_thunk(location, enclosing, target, callee_type, delegate_type, constructed_type)
 
             if !thunk? then
                 return null
@@ -72,17 +95,30 @@ namespace Syntax.Process is
             return thunk.load(location, _symbol_loader)
         si
 
-        // The thunk `forward` loads: the one already declared into
-        // `enclosing` for `target` at this type, or a new one. The thunks
-        // are found on the enclosing function rather than kept here: a
-        // reference to the operator is compiled wherever a name is, and
-        // every builder has to find the one thunk.
+        // The thunk `forward` or `construct` loads: the one already
+        // declared into `enclosing` for `target` at this type, or a new
+        // one. The thunks are found on the enclosing function rather than
+        // kept here: a reference to the operator or type is compiled
+        // wherever a name is, and every builder has to find the one
+        // thunk.
         forwarding_thunk(
             location: Source.LOCATION,
             enclosing: Semantic.Symbols.Function,
             target: Semantic.Symbols.Function,
             callee_type: Type,
             delegate_type: Type?
+        ) -> Semantic.Symbols.Closure? =>
+            forwarding_thunk(location, enclosing, target, callee_type, delegate_type, null)
+
+        // As above, constructing `constructed_type` through `target`
+        // where that is present.
+        forwarding_thunk(
+            location: Source.LOCATION,
+            enclosing: Semantic.Symbols.Function,
+            target: Semantic.Symbols.Function,
+            callee_type: Type,
+            delegate_type: Type?,
+            constructed_type: Type?
         ) -> Semantic.Symbols.Closure? is
             let declared = Collections.LIST[Semantic.Symbols.Closure]()
 
@@ -106,7 +142,14 @@ namespace Syntax.Process is
                 return null
             fi
 
-            _describe(thunk, location, callee_type, callee_type, Semantic.Symbols.PACK_THUNK.forward(callee_type, target))
+            let description =
+                if constructed_type? then
+                    Semantic.Symbols.PACK_THUNK.construct(callee_type, target, constructed_type)
+                else
+                    Semantic.Symbols.PACK_THUNK.forward(callee_type, target)
+                fi
+
+            _describe(thunk, location, callee_type, callee_type, description)
 
             thunk.delegate_target_type = delegate_type
 

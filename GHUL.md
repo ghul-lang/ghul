@@ -2127,6 +2127,17 @@ xs.sort(compare_descending);                        // ok - System.Comparison[in
 let f = compare_descending;                         // f: (int, int) -> int
 ```
 
+A type used by name where a function type or a named delegate type is expected is its **constructor** as a function value. The expected type's parameter types choose the constructor, as a call's arguments would, and a generic type takes its type arguments from them, or from the expected return type. A constructor has no method a delegate can point at, so the compiler synthesises a function that constructs the type, once for each type it is used at in a function body. The scalar types' converting constructors are values in the same way.
+
+```ghul
+class PERSON(name: string public, age: int public) is si
+
+let people = pairs |> map(PERSON);                  // (string, int) -> PERSON
+let widened = xs |> map(double);                    // (int) -> double
+let boxed = words |> map(BOX);                      // BOX[string], from the element type
+let make: (string) -> PERSON = PERSON;              // the one-parameter constructor
+```
+
 The compiler resolves an overloaded name against the function or delegate type that the reference must match, in the same way that a call's argument types choose an overload. When there is no such type, an ambiguous name is an error; the compiler does not guess.
 
 A pragma whose name is not a compiler built-in names a .NET **attribute**. The compiler emits the attribute on the declaration that the pragma is written on. That declaration can be a class, trait, struct, union, variant or enum; a function or method; a field or property; or one parameter in the parameter list of a function, method or lambda literal. The short form `Foo` resolves to `FooAttribute` when there is no plain `Foo`. This applies in a `use` as well as in a pragma. So `use System.Obsolete` imports `System.ObsoleteAttribute`, and `use Marker = System.Obsolete` imports it as `Marker`. Attribute arguments can be positional, named (`name = value`), arrays, or `typeof`:

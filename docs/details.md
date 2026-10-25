@@ -472,6 +472,8 @@ let scaled = zip(xs, ys, `*);
 let compare: System.Comparison[int] = `<>;
 ```
 
+A type named as a value is its constructor, and takes the same route: the expected function type's parameter types pick the constructor through overload resolution, as a call's argument types would, and the synthesised function constructs the type from its parameters. A generic type binds its type arguments from those parameter types, or from the expected return type where it is settled, so `words |> map(BOX)` constructs `BOX[string]` over a `string{}`. Type arguments that neither pins are an error, and are written on the name: `BOX[int]`. A slot that takes an argument pack as one tuple takes a constructor of the tuple's elements where none takes the tuple itself, so `pairs |> map(PERSON)` constructs from each pair. A scalar's converting constructor is a value too: `xs |> map(double)`. An abstract class, a trait and a tuple have no constructor to take.
+
 A built-in operator that mentions a type parameter of the enclosing function is a value at that type too, under the same rules as applying it in the body: `` `== `` is a `(T, T) -> bool` inside `same[T]`. A spelling that is derived from another operator - `<`, `<=`, `>` and `>=` from `<>`, `!=` from `==`, `!~` from `=~` - names no function.
 
 ## collections and pipes
