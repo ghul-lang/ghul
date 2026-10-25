@@ -43,6 +43,78 @@ namespace Syntax.Process is
             _thunks = Collections.MAP[Trees.Node, Collections.MAP[int, Collections.LIST[Semantic.Symbols.Closure]]]()
         si
 
+        // The delegate of a thunk that calls `target` with its parameters,
+        // for a function that has no method a delegate could point at.
+        // `callee_type` is the function type the thunk presents, and so
+        // the type `target` is called at; `delegate_type` is the named
+        // delegate type the value is wanted as, where it is not a ghūl
+        // function type. One thunk serves every use of `target` at that
+        // type within the enclosing function. Absent outside a function
+        // body.
+        forward(
+            location: Source.LOCATION,
+            target: Semantic.Symbols.Function,
+            callee_type: Type,
+            delegate_type: Type?
+        ) -> Value? is
+            let enclosing = _symbol_table.current_function
+
+            if !enclosing? then
+                return null
+            fi
+
+            let thunk = _forwarder_for(location, enclosing, target, callee_type, delegate_type)
+
+            if !thunk? then
+                return null
+            fi
+
+            return thunk.load(location, _symbol_loader)
+        si
+
+        // The forwarding thunks are found on the enclosing function rather
+        // than kept here: a reference to the operator is compiled wherever
+        // a name is, and every builder has to find the one thunk.
+        _forwarder_for(
+            location: Source.LOCATION,
+            enclosing: Semantic.Symbols.Function,
+            target: Semantic.Symbols.Function,
+            callee_type: Type,
+            delegate_type: Type?
+        ) -> Semantic.Symbols.Closure? is
+            let declared = Collections.LIST[Semantic.Symbols.Closure]()
+
+            for symbol in enclosing.symbols do
+                if let closure: Semantic.Symbols.Closure = symbol, description = closure.pack_thunk /\ description.is_forward then
+                    declared.add(closure)
+
+                    if
+                        description.target!.root_specialized_from == target.root_specialized_from /\
+                        description.callee_type.is_equivalent_to(callee_type) /\
+                        (closure.delegate_target_type ?? callee_type).is_equivalent_to(delegate_type ?? callee_type)
+                    then
+                        return closure
+                    fi
+                fi
+            od
+
+            let thunk = _declare_thunk(location, enclosing, "$forward_thunk_{declared.count}")
+
+            if !thunk? then
+                return null
+            fi
+
+            _describe(thunk, location, callee_type, callee_type, Semantic.Symbols.PACK_THUNK.forward(callee_type, target))
+
+            thunk.delegate_target_type = delegate_type
+
+            if target.is_declared_pure then
+                thunk.mark_declared_pure()
+            fi
+
+            return thunk
+        si
+
         // The type `function_type` has once its parameters after the
         // first `fixed_count` are taken as one tuple. Absent where the
         // type is not one this applies to, or where a parameter is not
@@ -468,17 +540,7 @@ namespace Syntax.Process is
             fi
 
             while thunks.count < count do
-                let thunk =
-                    cast Semantic.Symbols.Closure?(
-                        enclosing.declare_closure(
-                            location,
-                            "$pack_thunk_{_index}",
-                            cast Semantic.Scope?(_symbol_table.current_closure_context)!,
-                            _symbol_table.current_scope,
-                            false,
-                            null
-                        )
-                    )
+                let thunk = _declare_thunk(location, enclosing, "$pack_thunk_{_index}")
 
                 _index = _index + 1
 
@@ -486,14 +548,38 @@ namespace Syntax.Process is
                     return null
                 fi
 
-                thunk.mark_synthesized()
-
-                _symbol_table.current_closure_context.add_closure(thunk)
-
                 thunks.add(thunk)
             od
 
             return thunks
+        si
+
+        _declare_thunk(
+            location: Source.LOCATION,
+            enclosing: Semantic.Symbols.Function,
+            name: string
+        ) -> Semantic.Symbols.Closure? is
+            let thunk =
+                cast Semantic.Symbols.Closure?(
+                    enclosing.declare_closure(
+                        location,
+                        name,
+                        cast Semantic.Scope?(_symbol_table.current_closure_context)!,
+                        _symbol_table.current_scope,
+                        false,
+                        null
+                    )
+                )
+
+            if !thunk? then
+                return null
+            fi
+
+            thunk.mark_synthesized()
+
+            _symbol_table.current_closure_context.add_closure(thunk)
+
+            return thunk
         si
     si
 si

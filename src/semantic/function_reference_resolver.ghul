@@ -16,7 +16,8 @@ namespace Semantic is
         _symbol_table: SYMBOL_TABLE,
         _symbol_loader: SYMBOL_LOADER,
         _innate_symbol_lookup: Lookups.InnateSymbolLookup,
-        _overload_resolver: OVERLOAD_RESOLVER
+        _overload_resolver: OVERLOAD_RESOLVER,
+        _pack_wrap_builder: Syntax.Process.PACK_WRAP_BUILDER
     ) is
         _delegate_shape: DELEGATE_SHAPE
 
@@ -100,19 +101,56 @@ namespace Semantic is
                 single = specialized
             fi
 
-            // An innate operator is an IL instruction declared as a
-            // static member, with no method behind it, so a reference
-            // to one emits a call to a method the runtime cannot find.
-            // Calling it is what it is for.
+            // An innate operator is an IL instruction sequence with no
+            // method behind it for a delegate to point at, so its value
+            // is a thunk that applies the operator to its parameters.
             if single.is_innate then
+                return _build_innate_value(location, single, expected_type)
+            fi
+
+            return _build_value(location, single, from, expected_type)
+        si
+
+        // The thunk standing in for an innate operator, presented at the
+        // slot's type where the slot has one and takes the operator, and
+        // at the operator's own type otherwise.
+        _build_innate_value(location: LOCATION, operator: Symbols.Function, expected_type: Type?) -> Value is
+            let shape = _check_shape(location, operator, expected_type)
+
+            if !shape? then
+                return DUMMY(Types.ERROR(), location)
+            fi
+
+            // A type parameter of the function the reference sits in is
+            // the thunk's own to carry, as a literal's would be; one
+            // belonging to the call still being resolved, or a slot still
+            // being inferred, leaves nothing fixed to stand in for.
+            if
+                !shape.is_settled \/
+                shape.contains_inferred \/
+                shape.has_function_generic_argument_foreign_to(_symbol_table.current_function)
+            then
                 _logger.error(
                     location,
-                    "cannot take the value of built-in operator '{single.name}'")
+                    "cannot take the value of built-in operator '{operator.name}' here",
+                    location,
+                    "help: the operator's type is not fixed; write a function literal instead")
 
                 return DUMMY(Types.ERROR(), location)
             fi
 
-            return _build_value(location, single, from, expected_type)
+            let callee_type = get_target_call_shape(shape) ?? shape
+            let delegate_type = if callee_type == shape then null else shape fi
+
+            let value = _pack_wrap_builder.forward(location, operator, callee_type, delegate_type)
+
+            if !value? then
+                _logger.error(location, "cannot take the value of built-in operator '{operator.name}' here")
+
+                return DUMMY(Types.ERROR(), location)
+            fi
+
+            return value
         si
 
         // A slot that cannot instantiate an open generic function:
@@ -266,18 +304,13 @@ namespace Semantic is
             return result.function
         si
 
-        // Checked against `expected_type` when it resolves to a
-        // callable shape via get_target_call_shape; a non-callable
-        // (or absent) `expected_type` yields a null shape here, and
-        // the function's own native call shape is used instead,
-        // leaving the ordinary assignability check at the use site
-        // to accept or reject it against the real target.
-        _build_value(
-            location: LOCATION,
-            function: Symbols.Function,
-            from: Value?,
-            expected_type: Type?
-        ) -> Value is
+        // The type the value of `function` is built at: `expected_type`
+        // where it is callable and settled, and `function`'s own type
+        // otherwise, leaving the ordinary assignability check at the use
+        // site to accept or reject the value against the real target.
+        // Null, with the error reported, where `expected_type` is settled
+        // and cannot take the function.
+        _check_shape(location: LOCATION, function: Symbols.Function, expected_type: Type?) -> Type? is
             let source_shape = function.get_full_type(_innate_symbol_lookup)
             let target_shape = get_target_call_shape(expected_type)
 
@@ -299,14 +332,20 @@ namespace Semantic is
                 target_shape? /\
                 target_shape.arguments |> any(a => a.is_wild \/ a.is_none)
 
-            if
-                target_shape? /\
-                !target_shape.contains_inferred /\
-                !open_slot /\
-                !target_shape.is_assignable_from(source_shape)
-            then
+            if !target_shape? \/ target_shape.contains_inferred \/ open_slot then
+                return source_shape
+            fi
+
+            // A function of an argument pack's elements going into a
+            // formal that takes the pack as one tuple is presented in
+            // that shape by the call, once it has the value at its own.
+            if ARGUMENT_PACK.adaptation_arity(target_shape, source_shape)? then
+                return source_shape
+            fi
+
+            if !target_shape.is_assignable_from(source_shape) then
                 _logger.error(location, "{function} is not compatible with {expected_type!}")
-                return DUMMY(Types.ERROR(), location)
+                return null
             fi
 
             // `target_shape` is the invoke *shape* used for the
@@ -316,12 +355,20 @@ namespace Semantic is
             // the delegate type itself. The built value has to carry
             // the delegate type so the closure is constructed
             // with `newobj` against the right `.ctor`.
-            let result_type =
-                if target_shape? /\ !target_shape.contains_inferred /\ !open_slot then
-                    expected_type!
-                else
-                    source_shape
-                fi
+            return expected_type!
+        si
+
+        _build_value(
+            location: LOCATION,
+            function: Symbols.Function,
+            from: Value?,
+            expected_type: Type?
+        ) -> Value is
+            let result_type = _check_shape(location, function, expected_type)
+
+            if !result_type? then
+                return DUMMY(Types.ERROR(), location)
+            fi
 
             let target: Value =
                 if !function.is_instance then

@@ -65,7 +65,7 @@ namespace Syntax.Process is
             _condition_analyzer = condition_analyzer
             _build_flags = build_flags
             _visitor = visitor
-            _function_reference_resolver = Semantic.FUNCTION_REFERENCE_RESOLVER(logger, symbol_table, symbol_loader, innate_symbol_lookup, overload_resolver)
+            _function_reference_resolver = Semantic.FUNCTION_REFERENCE_RESOLVER(logger, symbol_table, symbol_loader, innate_symbol_lookup, overload_resolver, PACK_WRAP_BUILDER(symbol_table, symbol_loader, innate_symbol_lookup))
             _shadowed_callable_finder = Semantic.SHADOWED_CALLABLE_FINDER(logger, symbol_table)
         si
 
@@ -589,10 +589,70 @@ namespace Syntax.Process is
             return false
         si
 
+        // A bare operator spelling in no scope is the operator of the
+        // type it is applied to: the first parameter type of the function
+        // type the context expects. With no context yet, the call that
+        // pushes one re-walks the reference.
+        _find_operator_from_context(identifier: Trees.Expressions.IDENTIFIER) -> Semantic.Symbols.Symbol? is
+            let name = identifier.identifier.name
+            let shape = _function_reference_resolver.get_target_call_shape(identifier.expected_type)
+
+            if !shape? \/ shape.arguments.count < 2 then
+                _logger.error(identifier.location, "cannot tell which type's operator '{name}' is meant here: give the expected function type")
+
+                return null
+            fi
+
+            let home mut = shape.arguments[0]
+
+            // A tuple declares no operators of its own, so a function of
+            // one tuple takes the operator of its elements: the pack of a
+            // binary operator's operands, as `map` over pairs presents it.
+            if
+                shape.arguments.count == 2 /\
+                (home.is_value_tuple \/ isa Semantic.Types.TUPLE(home)) /\
+                home.arguments.count > 0
+            then
+                home = home.arguments[0]
+            fi
+
+            if !home.is_settled \/ home.is_wild \/ home.contains_inferred then
+                _logger.error(identifier.location, "cannot tell which type's operator '{name}' is meant here: give the expected function type")
+
+                return null
+            fi
+
+            let result = home.find_member(name)
+
+            if !result? then
+                if let underlying = RELATIONAL_REWRITE.underlying_operator(name) then
+                    _logger.error(
+                        identifier.location,
+                        "{home} has no operator '{name}'",
+                        identifier.location,
+                        "help: '{name}' is derived from '{underlying}' and is not a function; use `{underlying} or a function literal")
+                else
+                    _logger.error(identifier.location, "{home} has no operator '{name}'")
+                fi
+            fi
+
+            return result
+        si
+
         visit_identifier(identifier: Trees.Expressions.IDENTIFIER) is
             let need_store = identifier.value? /\ isa Need.STORE(identifier.value)
 
-            let symbol mut = _visitor.find(identifier.identifier)
+            let symbol mut =
+                if identifier.awaits_context_type then
+                    _visitor.try_find(identifier.identifier) ?? _find_operator_from_context(identifier)
+                else
+                    _visitor.find(identifier.identifier)
+                fi
+
+            if identifier.awaits_context_type /\ !symbol? then
+                identifier.compile_expressions_state.value = DUMMY(Semantic.Types.ERROR(), identifier.location)
+                return
+            fi
 
             if
                 let shadowed = symbol /\

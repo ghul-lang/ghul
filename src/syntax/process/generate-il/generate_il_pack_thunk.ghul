@@ -8,7 +8,8 @@ namespace Syntax.Process is
     // shape the thunk takes into the shape the function it stands for
     // takes, calls that function and returns what it returns. Above the
     // pack, it calls that function with its parameters and returns the
-    // next thunk's delegate, built closed over the result.
+    // next thunk's delegate, built closed over the result. A forwarding
+    // thunk passes its parameters straight through to its target.
     partial GENERATE_IL is
         _gen_pack_thunk(closure: Semantic.Symbols.Closure) is
             let thunk = closure.pack_thunk
@@ -50,9 +51,15 @@ namespace Syntax.Process is
 
             let arguments = Collections.LIST[Value]()
 
-            for i in 0..thunk.fixed_count do
-                arguments.add(_pack_thunk_parameter(closure, "$pack_{i}"))
-            od
+            if thunk.is_forward then
+                for i in 0..closure.arguments.count do
+                    arguments.add(_pack_thunk_parameter(closure, "$pack_{i}"))
+                od
+            else
+                for i in 0..thunk.fixed_count do
+                    arguments.add(_pack_thunk_parameter(closure, "$pack_{i}"))
+                od
+            fi
 
             if thunk.is_unpack then
                 let tuple = IR.TEMP(current_block, "pack_thunk_tuple", _pack_thunk_parameter(closure, "$pack_{thunk.fixed_count}"))
@@ -62,7 +69,7 @@ namespace Syntax.Process is
                 for i in 0..thunk.element_types.count do
                     arguments.add(strategy.members[i]!.load(closure.location, tuple.load(), _symbol_loader))
                 od
-            else
+            elif !thunk.is_forward then
                 let elements = Collections.LIST[Value]()
 
                 for i in 0..thunk.element_types.count do
