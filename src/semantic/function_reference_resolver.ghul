@@ -20,11 +20,13 @@ namespace Semantic is
         _pack_wrap_builder: Syntax.Process.PACK_WRAP_BUILDER
     ) is
         _delegate_shape: DELEGATE_SHAPE
+        _owner_constraint_specializer: OWNER_CONSTRAINT_SPECIALIZER
 
         super()
 
         init(..) is
             _delegate_shape = DELEGATE_SHAPE()
+            _owner_constraint_specializer = OWNER_CONSTRAINT_SPECIALIZER()
         si
 
         // Returns null when `symbol` isn't a function reference in
@@ -39,6 +41,15 @@ namespace Semantic is
             is_call_target: bool
         ) -> Value? is
             if is_call_target \/ isa Symbols.Closure(symbol) then
+                return null
+            fi
+
+            // A type is its constructor where a function is expected.
+            if symbol.is_type then
+                if let type = symbol.type then
+                    return try_load_constructor(location, type, expected_type, false)
+                fi
+
                 return null
             fi
 
@@ -109,6 +120,244 @@ namespace Semantic is
             fi
 
             return _build_value(location, single, from, expected_type)
+        si
+
+        // A type named in value position where a function is expected is
+        // its constructor as a function value: a thunk that constructs the
+        // type from its parameters, since a constructor has no method a
+        // delegate could point at. The expected function type's parameter
+        // types pick the constructor as the arguments of a call would, and
+        // its return slot, where it is settled, contributes the type
+        // arguments the parameters leave open, as the slot a call is
+        // assigned to does.
+        //
+        // Null where `type` is in call position, or where no settled
+        // parameter shape is available to pick a constructor by: the
+        // reference then stays a type expression, and the call that pushes
+        // a settled formal re-walks it.
+        try_load_constructor(
+            location: LOCATION,
+            type: Type,
+            expected_type: Type?,
+            is_call_target: bool
+        ) -> Value? is
+            if is_call_target then
+                return null
+            fi
+
+            let shape = get_target_call_shape(expected_type)
+
+            if !shape? then
+                return null
+            fi
+
+            let shape_arguments = shape.arguments
+            let parameter_count = shape_arguments.count - 1
+
+            let parameter_types mut = Collections.LIST[Type](parameter_count)
+
+            for i in 0..parameter_count do
+                parameter_types.add(shape_arguments[i])
+            od
+
+            // A type parameter of the function the reference sits in is
+            // the thunk's own to carry, as a literal's would be; one
+            // belonging to the call still being resolved, or a slot still
+            // being inferred, leaves nothing fixed to pick a constructor by.
+            if parameter_types |> any(p => !_is_fixed(p)) then
+                return null
+            fi
+
+            // The slot's return type pins type arguments only where it is
+            // fixed itself; one still open - a type variable of the call
+            // being resolved - is left to bind from the constructed type.
+            let return_slot = shape_arguments[parameter_count]
+
+            let return_constraint =
+                if _is_fixed(return_slot) then
+                    return_slot
+                else
+                    null
+                fi
+
+            let named = cast Types.NAMED?(type)
+
+            if !named? \/ type.is_value_tuple \/ isa Types.TUPLE(type) \/ type.is_type_variable then
+                if !type.is_error then
+                    _logger.error(location, "cannot construct {type}")
+                fi
+
+                return DUMMY(Types.ERROR(), location)
+            fi
+
+            if let abstract_class: Symbols.CLASS = named.symbol /\ abstract_class.is_abstract then
+                _logger.error(location, "cannot instantiate abstract class {abstract_class.name}", abstract_class.location, "class declared abstract here")
+
+                return DUMMY(Types.ERROR(), location)
+            fi
+
+            let group = cast Symbols.FUNCTION_GROUP?(named.scope.find_direct("init"))
+
+            if !group? \/ group.count == 0 then
+                _logger.error(location, "no constructor found init({parameter_types |> join(", ")})")
+
+                return DUMMY(Types.ERROR(), location)
+            fi
+
+            // A slot taking one tuple is filled by a constructor of the
+            // tuple's elements where none takes the tuple itself: the call
+            // presents the value in the slot's shape, as it does a named
+            // function of the elements.
+            let spread = ARGUMENT_PACK.spread_shape(shape)
+
+            let result mut = cast OVERLOAD_RESOLVE_RESULT?(null)
+
+            if spread? then
+                _logger.speculate()
+
+                result = _overload_resolver.resolve(location, group, parameter_types, false, true, true, null, return_constraint)
+
+                if result? then
+                    _logger.commit()
+                else
+                    _logger.roll_back()
+
+                    parameter_types = Collections.LIST[Type](spread.arguments.count - 1)
+
+                    for i in 0..spread.arguments.count - 1 do
+                        parameter_types.add(spread.arguments[i])
+                    od
+
+                    result = _overload_resolver.resolve(location, group, parameter_types, false, true, true, null, return_constraint)
+                fi
+            else
+                result = _overload_resolver.resolve(location, group, parameter_types, false, true, true, null, return_constraint)
+            fi
+
+            if !result? then
+                return DUMMY(Types.ERROR(), location)
+            fi
+
+            let constructor = _owner_constraint_specializer.specialize_from_constraint(location, result.function, return_constraint)
+
+            let constructed_type mut = type
+            let type_symbol: Symbols.Symbol mut = named.symbol
+
+            if isa Symbols.GENERIC(constructor.owner) then
+                type_symbol = cast Symbols.Symbol(constructor.owner)
+                constructed_type = constructor.owner.type!
+            fi
+
+            let is_directly_owned =
+                if isa Symbols.GENERIC(type_symbol) /\ isa Symbols.Symbol(constructor.owner) then
+                    type_symbol =~ cast Symbols.Symbol(constructor.owner)
+                else
+                    type_symbol == constructor.owner
+                fi
+
+            if !is_directly_owned then
+                _logger.error(location, "cannot call superclass constructor {constructor}", constructor.location, "constructor declared here")
+
+                return DUMMY(Types.ERROR(), location)
+            fi
+
+            // A generic type whose arguments neither the parameters nor the
+            // return slot pin has no one instance to construct: it is still
+            // the declaration's own type, not a specialization of it.
+            let unbound =
+                if let classy: Symbols.Classy = type_symbol then
+                    classy.is_generic /\ !isa Types.GENERIC(constructed_type)
+                else
+                    false
+                fi
+
+            if unbound \/ !_is_fixed(constructed_type) then
+                let name = type_symbol.root_unspecialized_symbol.name
+
+                _logger.error(
+                    location,
+                    "cannot tell the type arguments of {name} here",
+                    location,
+                    "help: write them, {name}[...], or expect a function type that fixes them")
+
+                return DUMMY(Types.ERROR(), location)
+            fi
+
+            if let constructed: Types.GENERIC = constructed_type, generic_symbol: Symbols.GENERIC = constructed.symbol then
+                generic_symbol.symbol.check_argument_constraints(location, _logger, constructed.arguments)
+            fi
+
+            if constructor.is_scalar_conversion then
+                let caster = IoC.CONTAINER.instance.type_caster
+
+                if !caster.check_cast_is_valid(location, parameter_types[0], constructed_type) then
+                    return DUMMY(Types.ERROR(), location)
+                fi
+            fi
+
+            // The thunk is built at the shape's parameters and the
+            // constructed type, and the ordinary assignability check at
+            // the use site accepts or rejects that against the slot, as
+            // it does for a named function.
+            let callee_types = Collections.LIST[Type](parameter_types.count + 1)
+
+            callee_types.add_range(parameter_types)
+            callee_types.add(constructed_type)
+
+            let callee_type = _innate_symbol_lookup.get_function_type(callee_types)
+
+            let delegate_type =
+                if expected_type!.is_function \/ !shape.is_assignable_from(callee_type) then
+                    null
+                else
+                    expected_type
+                fi
+
+            let value = _pack_wrap_builder.construct(location, constructor, constructed_type, callee_type, delegate_type)
+
+            if !value? then
+                _logger.error(location, "cannot take the value of constructor {type} here")
+
+                return DUMMY(Types.ERROR(), location)
+            fi
+
+            return value
+        si
+
+        // Whether `type` names one type here: settled, with no inference
+        // placeholder, and no type variable but those of the enclosing
+        // function and classes, which a thunk declared here carries.
+        _is_fixed(type: Type) -> bool =>
+            type.is_settled /\
+            !type.is_none /\
+            !type.is_error /\
+            !type.contains_inferred /\
+            !type.has_function_generic_argument_foreign_to(_symbol_table.current_function) /\
+            !_has_classy_generic_argument_foreign_to_here(type)
+
+        // Whether `type` mentions a type parameter of a class other than
+        // one enclosing the reference: a generic type whose arguments
+        // nothing has bound names no one type to construct.
+        _has_classy_generic_argument_foreign_to_here(type: Type) -> bool is
+            let scope = _symbol_table.current_function
+
+            for a in type.get_type_arguments() do
+                if !a.is_classy_generic_argument then
+                    continue
+                fi
+
+                if !scope? then
+                    return true
+                fi
+
+                let found = scope.find_enclosing(a.symbol.name)
+
+                if !found? \/ found != a.symbol then
+                    return true
+                fi
+            od
+
+            return false
         si
 
         // The thunk standing in for an innate operator, presented at the
