@@ -49,10 +49,6 @@ namespace Syntax.Process is
         // arms only, not by anything the arm bodies declare.
         _lazy_probe_stack: Collections.LIST[Collections.LIST[LAZY_SEQUENCE_PROBE]]
         _in_case_pattern: bool
-        // Whether the refutable binding being compiled is a while let
-        // test: a lazy sequence pattern cannot match there, because
-        // every test would read the sequence from its beginning again.
-        _in_while_let_binding: bool
         _match_propagator: Semantic.MATCH_PROPAGATOR
         _case_exhaustiveness_checker: CASE_EXHAUSTIVENESS_CHECKER
         _arm_null_join: ARM_NULL_JOIN
@@ -84,7 +80,6 @@ namespace Syntax.Process is
             _case_flow_stack = Collections.LIST[CASE_FLOW_FRAME]()
             _lazy_probe_stack = Collections.LIST[Collections.LIST[LAZY_SEQUENCE_PROBE]]()
             _in_case_pattern = false
-            _in_while_let_binding = false
             _match_propagator = Semantic.MATCH_PROPAGATOR(logger)
             _case_exhaustiveness_checker = CASE_EXHAUSTIVENESS_CHECKER(logger, innate_symbol_lookup)
             _arm_null_join = ARM_NULL_JOIN()
@@ -92,11 +87,8 @@ namespace Syntax.Process is
 
         // Accessors for the lazy sequence pattern builder on the pass:
         // whether a case pattern is being walked (probes are shared only
-        // then), the innermost case's scrutinee type, its probe list, and
-        // whether the refutable binding being compiled is a while let.
+        // then), the innermost case's scrutinee type and its probe list.
         in_case_pattern: bool public => _in_case_pattern
-
-        in_while_let_binding: bool public => _in_while_let_binding
 
         current_case_scrutinee_type() -> Type? is
             if _case_scrutinee_stack.count == 0 then
@@ -108,18 +100,6 @@ namespace Syntax.Process is
 
         current_lazy_probes() -> Collections.LIST[LAZY_SEQUENCE_PROBE] =>
             _lazy_probe_stack[_lazy_probe_stack.count - 1]
-
-        // A `while let` binding: the same walk as `check_refutable_binding`,
-        // under the flag that rejects a lazy sequence pattern.
-        check_while_let_binding(rb: Trees.Statements.REFUTABLE_BINDING) is
-            _in_while_let_binding = true
-
-            try
-                check_refutable_binding(rb)
-            finally
-                _in_while_let_binding = false
-            yrt
-        si
 
         pre_if_branch(`if: Trees.Statements.IF_BRANCH) -> bool is
             // Controlled walk: walk the condition, derive its
@@ -1059,16 +1039,6 @@ namespace Syntax.Process is
             finally
                 _in_case_pattern = false
             yrt
-
-            // A guard cannot be supported over a lazy sequence pattern
-            // yet: the guard runs after the pull, and a failing guard
-            // falls through to the next arm, which would need to see
-            // the elements the pull already took.
-            if arm.guard? /\ _visitor._has_lazy_sequence_group(pattern_left) then
-                _logger.error(
-                    arm.location,
-                    "a guard cannot follow a lazy sequence pattern")
-            fi
 
             // Same registration the `if let` clause path does: a
             // case-when pattern's bound names are body locals, so

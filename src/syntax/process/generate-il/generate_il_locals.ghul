@@ -18,6 +18,8 @@ namespace Syntax.Process is
         visit(assign: Statements.ASSIGNMENT) is
             super.visit(assign)
 
+            _lower_lazy_sequence_assignments(assign.left)
+
             let v = assign.value
             if v? then
                 add(v)
@@ -288,6 +290,56 @@ namespace Syntax.Process is
             od
         si
 
+        // The sequence targets over lazy sequences in a destructuring
+        // assignment, at any depth: each has its probe lowered into a
+        // detached block that fills the pull hole, so the pull runs at the
+        // target's own place in the assignment, after anything the
+        // enclosing targets read; the count and element holes then read
+        // the pull's locals.
+        _lower_lazy_sequence_assignments(left: Expressions.AssignmentLeftExpression) is
+            let destructure = cast Expressions.DESTRUCTURING_LEFT_EXPRESSION?(left)
+
+            if !destructure? then
+                return
+            fi
+
+            if let lazy = destructure.lazy_assignment then
+                let probe = lazy.values.probe
+
+                let pull_block = Values.BLOCK(_innate_symbol_lookup.get_void_type())
+
+                enter_block(pull_block)
+                _lower_lazy_sequence_probe(probe, lazy.source)
+                leave_block()
+
+                pull_block.close()
+
+                let locals = probe.lowered!
+
+                lazy.pull.value = pull_block
+                lazy.pulled.value = locals.pulled.load()
+
+                // An assignment's probe is its own, so the pull is never wider
+                // than the pattern and the rest value is a plain construction.
+                assert probe.pull_count == lazy.values.head_count \/ !lazy.values.has_rest else "lazy sequence assignment pull is wider than its pattern"
+
+                for i in 0..lazy.elements.count do
+                    if let hole = lazy.elements[i] then
+                        hole.value =
+                            if lazy.values.has_rest /\ i == lazy.values.head_count then
+                                _gen_lazy_rest_value(lazy.values, locals)
+                            else
+                                locals.elements[i].load()
+                            fi
+                    fi
+                od
+            fi
+
+            for e in destructure.elements do
+                _lower_lazy_sequence_assignments(e)
+            od
+        si
+
         // A sequence pattern over a lazy sequence. The probe's pull is
         // lowered once - by the first arm to reach it - and every arm
         // tests `pulled` against the count its own pattern needs: the
@@ -348,7 +400,12 @@ namespace Syntax.Process is
         _lower_lazy_sequence_probe(probe: LAZY_SEQUENCE_PROBE, source: Value) is
             let location = probe.location
 
-            probe.source.value = source
+            probe.source.value =
+                if source.is_lightweight_pure then
+                    source
+                else
+                    TEMP(current_block, "lazy_source", source).load()
+                fi
 
             let iterator_value: Value =
                 if probe.read_iterator? then

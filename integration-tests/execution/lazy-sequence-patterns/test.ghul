@@ -35,6 +35,77 @@ describe_word(word: string) -> string =>
     when [c, ..rest] then "{c} then {rest |> count()}"
     esac
 
+class MY_SEQ: Collections.Iterable[int] is
+    init() is si
+    iterator: Collections.Iterator[int] => [7, 8, 9].iterator;
+si
+
+// A guard runs after the pull; a failing one falls to the next arm,
+// which tests the same pull.
+guarded(xs: int{}) -> string =>
+    case xs
+    when [x, ..rest] /\ x > 1 then "big {x}"
+    when [x, ..rest] then "small {x} rest {rest |> join(",")}"
+    else "none"
+    esac
+
+// A while let re-reads its scrutinee on every test, so reassigning it
+// to the rest walks the sequence.
+walk(xs: int{}) -> string is
+    let seen = Collections.LIST[int]();
+    let cur mut = xs;
+
+    while let [x, ..rest] = cur do
+        seen.add(x);
+        cur = rest;
+    od
+
+    return seen |> join(",");
+si
+
+// The pull's locals live between the test and the arm body, never
+// across a yield, so a generator body matches too.
+gen_head(xs: int{}) -> int{} is
+    case xs
+    when [] then
+    when [h, ..t] then
+        yield h;
+        yield in gen_head(t);
+    esac
+si
+
+// A group nested in a case pattern pulls on its own in each arm that
+// reaches it: here the leading literal fails the first arm before its
+// group is reached.
+tagged(pair: (int, int{})) -> string =>
+    case pair
+    when (1, [x, ..rest]) then "one {x} +{rest |> join(",")}"
+    when (2, [x, ..rest]) then "two {x} +{rest |> join(",")}"
+    when (_, []) then "empty"
+    else "other"
+    esac
+
+// A type-ascribed group is not at the scrutinee's own type.
+ascribed(xs: Collections.Iterable[int]) -> string =>
+    case xs
+    when [a, ..r]: MY_SEQ then "my seq {a} {r |> join(",")}"
+    when [] then "empty"
+    when [x, ..rest] then "other {x} +{rest |> count()}"
+    esac
+
+// A lazy group inside a lazy group.
+nested_lazy(xss: int{}{}) -> string =>
+    case xss
+    when [[a, ..r], ..more] then "inner {a} {r |> join(",")} outer +{more |> count()}"
+    when [[], ..more] then "inner empty"
+    else "none"
+    esac
+
+make() -> int{} is
+    write_line("make called");
+    return counting(3);
+si
+
 entry() is
     write_line(describe(counting(0)));
     write_line(describe(counting(1)));
@@ -102,4 +173,48 @@ entry() is
     write_line(describe_word(""));
     write_line(describe_word("a"));
     write_line(describe_word("ghul"));
+
+    write_line(guarded(counting(0)));
+    write_line(guarded(counting(2)));
+    write_line(guarded(counting(5) |> map(x => x + 2)));
+    write_line(walk(counting(4)));
+    write_line(gen_head(counting(4)) |> join(","));
+
+    write_line(tagged((1, counting(3))));
+    write_line(tagged((2, counting(3))));
+    write_line(tagged((3, counting(0))));
+    write_line(tagged((3, counting(2))));
+    write_line(ascribed(MY_SEQ()));
+    write_line(ascribed(counting(0)));
+    write_line(ascribed(counting(3)));
+    write_line(nested_lazy([counting(3), counting(1)] |> map(x => x)));
+    write_line(nested_lazy([counting(0)] |> map(x => x)));
+    write_line(nested_lazy(Collections.LIST[int{}]() |> map(x => x)));
+
+    // The source is read once: a rest element's later reads re-derive
+    // from the value matched, not from the expression that produced it.
+    let [m, ..ms] = make();
+    write_line("{m} {ms |> join(",")} {ms |> join(",")}");
+
+    // A destructuring assignment matches over a lazy sequence, at the
+    // top of the target or nested in a tuple target.
+    let a mut = 0;
+    let b mut = 0;
+    let rest: int{} mut = counting(0);
+    [a, b] = counting(2);
+    write_line("{a} {b}");
+    [a, ..rest] = make();
+    write_line("{a} rest {rest |> join(",")} again {rest |> join(",")}");
+    [_, b, ..] = counting(5);
+    write_line("{b}");
+
+    let n mut = 0;
+    ([a, ..rest], n) = (counting(4) |> map(x => x * 10), 9);
+    write_line("{a} {rest |> join(",")} {n}");
+
+    try
+        [a, b] = counting(3);
+    catch e: Ghul.Exception
+        write_line("mismatch");
+    yrt
 si
