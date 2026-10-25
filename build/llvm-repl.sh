@@ -42,7 +42,7 @@ trap 'kill "$server" 2>/dev/null; rm -rf "$work"' EXIT
     (cd "$core" && find src -name '*.ghul' | sort | sed "s#^#$core/#")
     echo "--library-source"
     echo "ghul-runtime@$(tr -d '[:space:]' < "$runtime/VERSION")=$runtime"
-    sed "s#^#$runtime/#" "$runtime/wasm-sources.rsp"
+    find "$runtime/ghul-runtime/src" -name "*.ghul" | sort
 } > "$work/libraries.rsp"
 
 mkfifo "$work/commands"
