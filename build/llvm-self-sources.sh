@@ -29,11 +29,7 @@ mkdir -p "$output"
     echo --library-source
     echo "ghul-runtime@$(tr -d '[:space:]' < "$runtime/VERSION")=$runtime"
 
-    while read -r file; do
-        if [ -n "$file" ]; then
-            echo "$runtime/$file"
-        fi
-    done < "$runtime/wasm-sources.rsp"
+    find "$runtime/ghul-runtime/src" -name '*.ghul' | sort
 } > "$output/libraries.rsp"
 
 for directory in src wasm/src llvm/src analysis-protocol/src; do
