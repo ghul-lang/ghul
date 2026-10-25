@@ -164,7 +164,7 @@ let reader = use IO.StreamReader(file)
 return reader.read_line()
 ```
 
-`use` disposes the value it evaluated. So reassigning a `mut` local initialized from a `use` does not change what is disposed. Inside a body, a statement can start with `use`: `use R()` alone holds a value for the rest of the block. At file or namespace level, a `use` is an import, so a top-level statement that starts with the operator is written in parentheses: `(use E)`. Disposal belongs to the block, not to the expression. So `for x in use f().iterator do ... od` disposes the iterator when the block that contains the loop ends, not when the loop ends. `return use E` returns a value that is already disposed.
+`use` disposes the value it evaluated. So reassigning a `mut` local initialized from a `use` does not change what is disposed. For a struct, that value is a copy, and a change made through the `mut` local does not reach it, so the compiler warns (`use-struct-copy`). An immutable local initialized from a `use` is itself what is disposed: a struct guard committed or cancelled through the local is disposed in that state. Inside a body, a statement can start with `use`: `use R()` alone holds a value for the rest of the block. At file or namespace level, a `use` is an import, so a top-level statement that starts with the operator is written in parentheses: `(use E)`. Disposal belongs to the block, not to the expression. So `for x in use f().iterator do ... od` disposes the iterator when the block that contains the loop ends, not when the loop ends. `return use E` returns a value that is already disposed.
 
 `let use x = E` is the old spelling of `let x = use E`. It cannot be combined with `mut`.
 
