@@ -469,7 +469,7 @@ si
 let total = vectors |> reduce(V(0), V.`+);
 ```
 
-A built-in operator is named the same way. It has no method behind it, so the compiler synthesises one that applies the operator to its parameters, shared by every use of the operator at that type in the function body, and the delegate over it is built once. A bare spelling found in no scope is the operator of the type the expected function type applies it to: the first parameter type, or that parameter's element type where it is a tuple, as it is for a combinator that takes an argument pack as one tuple.
+A built-in operator is named the same way. It has no method behind it, so the compiler synthesises one that applies the operator to its parameters, shared by every use of the operator at that type in the function body, and the delegate over it is built once. A bare spelling is resolved as the written operator expression would be over operands of the expected function type's parameter types - or of the tuple's element types where the type takes one tuple, as it does for a combinator that takes an argument pack as one tuple. The candidates and the overload resolution are those of the expression, so the operator is never taken from any one operand's type alone: it may be a static member of the right operand's type, or declared at namespace scope. In callee position - `` `-(10, *) ``, `` `+(*, 1) `` - the call resolves the spelling as it resolves any function group, from the candidates the written arguments' types supply, and a `*` is typed by the formal of the overload chosen. Instance operators take their left operand as a receiver and are reached by a function literal in either position.
 
 ```ghul
 let total = xs |> reduce(0, `+);                     // int.`+

@@ -2765,6 +2765,73 @@ namespace Syntax.Process is
         _scope_operator_candidates(location: Source.LOCATION, name: string) -> Semantic.Symbols.FUNCTION_GROUP? =>
             SCOPE_OPERATOR_CANDIDATES.find(_symbol_table, location, name)
 
+        // The operators a bare spelling in callee position could name,
+        // given the operand types its arguments have settled so far: the
+        // candidates the written operator over those operands would be
+        // resolved from, for the call to pick between as it does for any
+        // function group. Instance operators take their left operand as
+        // a receiver and are not called this way.
+        operator_callee_candidates(
+            location: Source.LOCATION,
+            name: string,
+            known_operand_types: Collections.LIST[Type]
+        ) -> Semantic.Symbols.FUNCTION_GROUP? =>
+            _static_operator_candidates(location, name, known_operand_types)
+
+        // The operator a bare spelling names where a function over
+        // `operand_types` is expected, resolved as the written operator
+        // over operands of those types is: the same candidates, through
+        // the same overload resolution. An operator can be declared on
+        // the right operand's type, or at namespace scope for operands
+        // whose types declare nothing, so no one operand's type is ever
+        // consulted on its own. Null when nothing resolves; the caller
+        // reports.
+        resolve_operator_value(
+            location: Source.LOCATION,
+            name: string,
+            operand_types: Collections.LIST[Type]
+        ) -> Semantic.Symbols.Function? is
+            let static_result: Semantic.OVERLOAD_RESOLVE_RESULT? mut = null
+            let member_result: Semantic.OVERLOAD_RESOLVE_RESULT? mut = null
+
+            let static_candidates = _static_operator_candidates(location, name, operand_types)
+
+            if static_candidates? then
+                static_result =
+                    _resolve_silently(location, static_candidates, operand_types, _symbol_table.current_instance_context?)
+            fi
+
+            // An instance operator takes the left operand as its receiver,
+            // which must always hold a value.
+            if operand_types.count == 2 /\ !operand_types[0].is_optional then
+                let member_candidates =
+                    _instance_operator_candidates(location, name, operand_types[0].find_member(name))
+
+                if member_candidates? /\ !HIDDEN_OPERATOR_MEMBERS.is_hidden(member_candidates) then
+                    member_result =
+                        _resolve_silently(location, member_candidates, Collections.LIST[Type]([operand_types[1]]), true)
+
+                    if member_result? /\ member_result.function.is_hidden_from_operator_resolution then
+                        member_result = null
+                    fi
+                fi
+            fi
+
+            if member_result? /\ static_result? then
+                if cast int(member_result.score) <= cast int(static_result.score) then
+                    return member_result.function
+                fi
+
+                return static_result.function
+            elif member_result? then
+                return member_result.function
+            elif static_result? then
+                return static_result.function
+            fi
+
+            return null
+        si
+
         // Resolve an operator overload under speculation, so a failed
         // resolution (no matching overload) leaves no diagnostics: the
         // `case` path treats "no operator" as "fall back to a raw

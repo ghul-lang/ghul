@@ -589,62 +589,160 @@ namespace Syntax.Process is
             return false
         si
 
-        // A bare operator spelling in no scope is the operator of the
-        // type it is applied to: the first parameter type of the function
-        // type the context expects. With no context yet, the call that
-        // pushes one re-walks the reference.
-        _find_operator_from_context(identifier: Trees.Expressions.IDENTIFIER) -> Semantic.Symbols.Symbol? is
+        // A bare operator spelling is the operator that the written
+        // expression over operands of the expected function type's
+        // parameter types would resolve to: the same candidates, through
+        // the same overload resolution. It is never looked up on any one
+        // operand's type - the operator may be declared on the right
+        // operand's type, or at namespace scope - and a group found in
+        // scope under the name is one candidate among those, not the
+        // answer. With no settled context yet, the call that pushes one
+        // re-walks the reference.
+        _resolve_bare_operator(identifier: Trees.Expressions.IDENTIFIER) -> Semantic.Symbols.Symbol? is
             let name = identifier.identifier.name
             let shape = _function_reference_resolver.get_target_call_shape(identifier.expected_type)
 
-            if !shape? \/ shape.arguments.count < 2 then
+            if let underlying = RELATIONAL_REWRITE.underlying_operator(name) then
                 _logger.error(
                     identifier.location,
-                    "cannot tell which type's operator '{name}' is meant here",
+                    "'{name}' is derived from '{underlying}' and is not a function",
                     identifier.location,
-                    "help: give the expected function type, or name the type: int.`{name}")
+                    "help: use `{underlying} or a function literal")
 
                 return null
             fi
 
-            let home mut = shape.arguments[0]
+            if !shape? \/ shape.arguments.count < 2 then
+                // With no operand types there is nothing to resolve
+                // against; a group in scope under the name is not chosen
+                // either, since nothing says it is the one meant.
+                if _visitor.try_find(identifier.identifier)? then
+                    _logger.error(
+                        identifier.location,
+                        "cannot tell which operator '{name}' is meant here",
+                        identifier.location,
+                        "help: give the expected function type")
+                else
+                    _logger.error(
+                        identifier.location,
+                        "cannot tell which operator '{name}' is meant here",
+                        identifier.location,
+                        "help: give the expected function type, or name the type: int.`{name}")
+                fi
+
+                return null
+            fi
+
+            // In callee position the call resolves the operator from its
+            // arguments, as it does any function group: the reference is
+            // the group of operators the operands typed so far could mean,
+            // and a `*` among them takes the formal of whichever is picked.
+            if identifier.is_call_target then
+                return _bare_operator_callee_candidates(identifier, name, shape)
+            fi
 
             // A tuple declares no operators of its own, so a function of
             // one tuple takes the operator of its elements: the pack of a
             // binary operator's operands, as `map` over pairs presents it.
-            if
-                shape.arguments.count == 2 /\
-                (home.is_value_tuple \/ isa Semantic.Types.TUPLE(home)) /\
-                home.arguments.count > 0
-            then
-                home = home.arguments[0]
-            fi
+            let operand_shape = Semantic.ARGUMENT_PACK.spread_shape(shape) ?? shape
+            let operand_count = operand_shape.arguments.count - 1
 
-            if !home.is_settled \/ home.is_wild \/ home.contains_inferred then
-                _logger.error(
-                    identifier.location,
-                    "cannot tell which type's operator '{name}' is meant here",
-                    identifier.location,
-                    "help: give the expected function type, or name the type: int.`{name}")
+            let operand_types = Collections.LIST[Type](operand_count)
+
+            for i in 0..operand_count do
+                let operand_type = operand_shape.arguments[i]
+
+                // A type variable of the enclosing function is an operand
+                // type like any other; one belonging to the call still
+                // being resolved is not settled yet.
+                if
+                    !operand_type.is_settled \/
+                    operand_type.contains_inferred \/
+                    operand_type.has_function_generic_argument_foreign_to(_symbol_table.current_function)
+                then
+                    _logger.error(
+                        identifier.location,
+                        "cannot tell which operator '{name}' is meant here",
+                        identifier.location,
+                        "help: give the expected function type, or name the type: int.`{name}")
+
+                    return null
+                fi
+
+                operand_types.add(operand_type)
+            od
+
+            if operand_count < 1 \/ operand_count > 2 then
+                _logger.error(identifier.location, "an operator takes one or two operands, not {operand_count}")
 
                 return null
             fi
 
-            let result = home.find_member(name)
+            let function = _visitor.compile_operators.resolve_operator_value(identifier.location, name, operand_types)
 
-            if !result? then
-                if let underlying = RELATIONAL_REWRITE.underlying_operator(name) then
-                    _logger.error(
-                        identifier.location,
-                        "{home} has no operator '{name}'",
-                        identifier.location,
-                        "help: '{name}' is derived from '{underlying}' and is not a function; use `{underlying} or a function literal")
+            if !function? then
+                if operand_count == 1 then
+                    _logger.error(identifier.location, "no unary operator {name} found for {operand_types[0]}")
                 else
-                    _logger.error(identifier.location, "{home} has no operator '{name}'")
+                    _logger.error(identifier.location, "operator {operand_types[0]} {name} {operand_types[1]} not found")
                 fi
+
+                return null
             fi
 
-            return result
+            if function.is_instance then
+                _logger.error(
+                    identifier.location,
+                    "cannot take the value of instance operator {function}",
+                    identifier.location,
+                    "help: an instance operator takes its left operand as its receiver; write a function literal")
+
+                return null
+            fi
+
+            return function
+        si
+
+        _bare_operator_callee_candidates(
+            identifier: Trees.Expressions.IDENTIFIER,
+            name: string,
+            shape: Type
+        ) -> Semantic.Symbols.Symbol? is
+            let operand_count = shape.arguments.count - 1
+
+            if operand_count < 1 \/ operand_count > 2 then
+                _logger.error(identifier.location, "an operator takes one or two operands, not {operand_count}")
+
+                return null
+            fi
+
+            let known_operand_types = Collections.LIST[Type]()
+
+            for i in 0..operand_count do
+                let operand_type = shape.arguments[i]
+
+                if !operand_type.is_error then
+                    known_operand_types.add(operand_type)
+                fi
+            od
+
+            let group = _visitor.compile_operators.operator_callee_candidates(identifier.location, name, known_operand_types)
+
+            if !group? then
+                if known_operand_types.count == 0 then
+                    _logger.error(
+                        identifier.location,
+                        "cannot tell which operator '{name}' is meant here",
+                        identifier.location,
+                        "help: give an operand a type, or name the type: int.`{name}")
+                else
+                    _logger.error(identifier.location, "no operator '{name}' found for {known_operand_types |> join(", ")}")
+                fi
+
+                return null
+            fi
+
+            return group
         si
 
         visit_identifier(identifier: Trees.Expressions.IDENTIFIER) is
@@ -652,7 +750,7 @@ namespace Syntax.Process is
 
             let symbol mut =
                 if identifier.awaits_context_type then
-                    _visitor.try_find(identifier.identifier) ?? _find_operator_from_context(identifier)
+                    _resolve_bare_operator(identifier)
                 else
                     _visitor.find(identifier.identifier)
                 fi

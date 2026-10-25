@@ -120,8 +120,20 @@ namespace Syntax.Process is
         // for is not known until they have been. With no expected type
         // on the call there is no return type to supply, so the callee
         // walks unaided and reports that it cannot infer one.
+        //
+        // A bare operator in callee position is different: it is not
+        // typed by the call but resolved by it, as a function group is,
+        // so it is handed the operand types the arguments have so far -
+        // a `*` or an unsettled argument contributes none - and resolves
+        // to the group of operators those operands could be meant for.
+        // The call then picks the overload exactly as it would for `a - b`.
         _walk_deferred_callee(call: Trees.Expressions.CALL) is
-            let function_type = _try_get_callee_function_type(call)
+            let function_type =
+                if call.function.is_identifier then
+                    _get_operator_callee_shape(call)
+                else
+                    _try_get_callee_function_type(call)
+                fi
 
             if function_type? then
                 call.function.set_expected_type(
@@ -162,6 +174,29 @@ namespace Syntax.Process is
             od
 
             types.add(return_type)
+
+            return _innate_symbol_lookup.get_function_type(types)
+        si
+
+        // The operand shape a call hands a bare operator in callee
+        // position: each argument's type where it has a settled one, and
+        // ERROR where it has none yet. The return slot is not the call's
+        // to decide - the operator the call resolves to returns what it
+        // returns - so it carries an inferred placeholder.
+        _get_operator_callee_shape(call: Trees.Expressions.CALL) -> Semantic.Types.Type is
+            let types = Collections.LIST[Semantic.Types.Type]()
+
+            for a in call.arguments.expressions do
+                let type = a.value?.type
+
+                if type? /\ !type.is_error /\ type.is_settled /\ !type.contains_inferred then
+                    types.add(type)
+                else
+                    types.add(Semantic.Types.ERROR())
+                fi
+            od
+
+            types.add(Semantic.Types.INFERRED_RETURN_TYPE())
 
             return _innate_symbol_lookup.get_function_type(types)
         si
