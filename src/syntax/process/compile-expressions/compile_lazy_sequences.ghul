@@ -17,13 +17,9 @@ namespace Syntax.Process is
         // `from_type`, or null when it is not an `Iterable[T]`. The
         // group joins the `case` being compiled when there is one and
         // the group is at the scrutinee itself, sharing the case's
-        // single pull; otherwise it takes a probe of its own. Null is
-        // also returned - after reporting - for the shapes that are
-        // not built yet: a `while let` test, a group nested inside a
-        // case pattern, and any group in a generator or asynchronous
-        // body, whose locals would not survive a suspend.
+        // single pull; otherwise it takes a probe of its own.
         _try_build_lazy_sequence_pattern(
-            left: Trees.Variables.VariableLeft,
+            location: Source.LOCATION,
             from_type: Type,
             head_count: int,
             has_rest: bool
@@ -34,50 +30,36 @@ namespace Syntax.Process is
                 return null
             fi
 
-            if _conditionals.in_while_let_binding then
-                _logger.error(
-                    left.location,
-                    "a sequence pattern over {from_type} cannot match in a while let: each test reads the sequence from its beginning")
-
-                return null
-            fi
-
-            if _enclosing_state_machine_frame()? then
-                _logger.error(
-                    left.location,
-                    "a sequence pattern over {from_type} is not yet supported in a generator or async body")
-
-                return null
-            fi
-
             let probe: LAZY_SEQUENCE_PROBE? mut = null
 
-            if _conditionals.in_case_pattern then
-                let scrutinee_type = _conditionals.current_case_scrutinee_type()
+            // In a `case`, a group at the scrutinee itself joins the case's
+            // single pull, shared by every arm. A group nested deeper in an
+            // arm's pattern pulls on its own at its position in the arm,
+            // after whatever tests precede it there; the probe still joins
+            // the case's list so a re-generation of the case resets it.
+            let at_scrutinee =
+                if _conditionals.in_case_pattern then
+                    let scrutinee_type = _conditionals.current_case_scrutinee_type()
 
-                // A group at the scrutinee itself joins the case's
-                // pull. A group nested deeper would need its own pull
-                // before the arm's test, which is not built yet.
-                if scrutinee_type? /\ !scrutinee_type.matches(from_type) then
-                    _logger.error(
-                        left.location,
-                        "a sequence pattern over {from_type} nested in a case pattern is not yet supported")
-
-                    return null
+                    scrutinee_type? /\ scrutinee_type.matches(from_type)
+                else
+                    false
                 fi
 
+            if at_scrutinee then
                 for p in _conditionals.current_lazy_probes() do
-                    if p.source_type.matches(from_type) then
+                    if p.shared /\ p.source_type.matches(from_type) then
                         probe = p
                         break
                     fi
                 od
             fi
 
-            let rest_type = _iterable_of(element_type!, left.location)
+            let rest_type = _iterable_of(element_type!, location)
 
             if !probe? then
-                probe = _new_lazy_probe(from_type, element_type!, left.location)
+                probe = _new_lazy_probe(from_type, element_type!, location)
+                probe.shared = at_scrutinee
 
                 if _conditionals.in_case_pattern then
                     _conditionals.current_lazy_probes().add(probe!)
@@ -88,9 +70,10 @@ namespace Syntax.Process is
 
             let result = LAZY_SEQUENCE_PATTERN_VALUES(probe!, element_type!, head_count, has_rest, rest_type)
 
-            // Outside a `case` no later group can widen the pull, so
-            // the rest-element calls it needs can be resolved now.
-            if !_conditionals.in_case_pattern then
+            // Only a shared probe can be widened by a later arm; any other
+            // pull is at its widest now, so its rest-element calls can be
+            // resolved.
+            if !probe.shared then
                 _resolve_lazy_rest_calls(probe!)
             fi
 
@@ -227,35 +210,15 @@ namespace Syntax.Process is
             _logger.error(location, "cannot match a sequence pattern against {from_type}: it is not a list or an array")
         si
 
-        // Whether any group in `left`'s pattern matches over a lazy
-        // sequence, by the state the compile side recorded for it.
-        _has_lazy_sequence_group(left: Trees.Variables.VariableLeft) -> bool is
-            if _variable_left_state.get(left)?.lazy_sequence? then
-                return true
-            fi
-
-            let elements = left.elements
-
-            if !elements? then
-                return false
-            fi
-
-            for e in elements do
-                if _has_lazy_sequence_group(e) then
-                    return true
-                fi
-            od
-
-            return false
-        si
-
         // Finish a `case`'s probes once every arm has registered: the
         // pulls are at their widest now, so the rest-element calls each
         // group needs can be resolved.
         _finalize_case_lazy_probes(`case: Trees.Statements.CASE) is
             if let probes = `case.lazy_probes then
                 for p in probes do
-                    _resolve_lazy_rest_calls(p)
+                    if p.shared then
+                        _resolve_lazy_rest_calls(p)
+                    fi
                 od
             fi
         si

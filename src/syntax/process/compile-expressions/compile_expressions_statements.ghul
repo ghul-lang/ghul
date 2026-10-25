@@ -317,15 +317,13 @@ namespace Syntax.Process is
 
             if !values? then
                 if _operators.lazy_sequence_element_type(from_type)? then
-                    _logger.error(
-                        left.location,
-                        "a sequence pattern over {from_type} is not yet supported in an assignment")
+                    _assign_lazy_sequence(left, from, from_type, head_count, has_rest, block)
                 else
                     _report_unmatchable_sequence_source(left.location, from_type)
-                fi
 
-                block.close()
-                left.compile_expressions_state.value = block
+                    block.close()
+                    left.compile_expressions_state.value = block
+                fi
 
                 return
             fi
@@ -369,6 +367,87 @@ namespace Syntax.Process is
             od
 
             block.close()
+            left.compile_expressions_state.value = block
+        si
+
+        // `[a, b, ..rest] = source` over a lazy sequence: the pull that
+        // reads the source only exists once generate-il lowers the probe,
+        // so the block is built over holes - where the pull goes, how many
+        // elements it brought, and the value each element stores - that
+        // generate-il fills before emitting it; see LAZY_SEQUENCE_ASSIGNMENT.
+        _assign_lazy_sequence(
+            left: Trees.Expressions.DESTRUCTURING_LEFT_EXPRESSION,
+            from: IR.Values.Value,
+            from_type: Type,
+            head_count: int,
+            has_rest: bool,
+            block: IR.Values.BLOCK
+        ) is
+            let elements = left.elements
+            let lazy_values = _try_build_lazy_sequence_pattern(left.location, from_type, head_count, has_rest)
+
+            if !lazy_values? then
+                block.close()
+                left.compile_expressions_state.value = block
+
+                return
+            fi
+
+            let void_type = _innate_symbol_lookup.get_void_type()
+            let int_type = _innate_symbol_lookup.get_int_type()
+
+            let pull = IR.Values.WRAPPER(DUMMY(void_type, left.location))
+            let pulled = IR.Values.WRAPPER(DUMMY(int_type, left.location))
+
+            block.add(pull)
+
+            block.add(
+                IR.Values.SEQUENCE_COUNT_CHECK(
+                    pulled,
+                    IR.Values.Literal.NUMBER(head_count, int_type),
+                    has_rest,
+                    IR.Values.Literal.STRING(
+                        "{left.location}: a sequence pattern did not match",
+                        _innate_symbol_lookup.get_string_type()),
+                    void_type))
+
+            let holes = Collections.LIST[IR.Values.WRAPPER?]()
+
+            for i in 0..elements.count do
+                let element = elements[i]
+
+                // A `_` target, and a discarded rest, assign nothing.
+                if let simple: Trees.Expressions.SIMPLE_LEFT_EXPRESSION = element then
+                    if isa Trees.Expressions.DEFAULT(simple.expression) then
+                        holes.add(null)
+
+                        continue
+                    fi
+                fi
+
+                let element_type =
+                    if has_rest /\ i == head_count then
+                        lazy_values.rest_type
+                    else
+                        lazy_values.element_type
+                    fi
+
+                let hole = IR.Values.WRAPPER(DUMMY(element_type, element.location))
+
+                holes.add(hole)
+
+                element.compile_expressions_state.value = hole
+
+                element.walk(self)
+
+                if element.value? then
+                    block.add(element.value)
+                fi
+            od
+
+            block.close()
+
+            left.lazy_assignment = LAZY_SEQUENCE_ASSIGNMENT(lazy_values!, from, pull, pulled, holes)
             left.compile_expressions_state.value = block
         si
 
