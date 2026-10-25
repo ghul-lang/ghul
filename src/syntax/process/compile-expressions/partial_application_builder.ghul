@@ -199,13 +199,21 @@ namespace Syntax.Process is
             let parameter_types = Collections.LIST[Type]()
             let parameter_names = Collections.LIST[string]()
 
-            if fixed_locals.count > 0 then
-                let object_type = _innate_symbol_lookup.get_object_type()
+            // One fixed value of a reference type is closed over as it
+            // is; anything else arrives boxed as an `object`, since a
+            // closed delegate's first argument has to be a reference.
+            let fixed_is_boxed =
+                fixed_locals.count != 1 \/
+                fixed_types[0].is_value_type \/
+                fixed_types[0].is_type_variable
 
-                parameter_types.add(object_type)
+            if fixed_locals.count > 0 then
+                let fixed_type = if fixed_is_boxed then _innate_symbol_lookup.get_object_type() else fixed_types[0] fi
+
+                parameter_types.add(fixed_type)
                 parameter_names.add(Semantic.Symbols.PARTIAL_THUNK.FIXED_PARAMETER)
 
-                (cast Semantic.Types.SettableTyped(parameter(thunk, location, Semantic.Symbols.PARTIAL_THUNK.FIXED_PARAMETER))).set_type(object_type)
+                (cast Semantic.Types.SettableTyped(parameter(thunk, location, Semantic.Symbols.PARTIAL_THUNK.FIXED_PARAMETER))).set_type(fixed_type)
             fi
 
             for i in 0..placeholder_values.count do
@@ -232,7 +240,7 @@ namespace Syntax.Process is
 
             _record_type_arguments(thunk, return_type)
 
-            thunk.partial_thunk = Semantic.Symbols.PARTIAL_THUNK(call, fixed_locals, fixed_types)
+            thunk.partial_thunk = Semantic.Symbols.PARTIAL_THUNK(call, fixed_locals, fixed_types, fixed_is_boxed)
 
             if is_pure then
                 thunk.mark_declared_pure()
@@ -243,14 +251,10 @@ namespace Syntax.Process is
             fi
 
             let closed_over: Value =
-                if fixed_values.count == 1 then
-                    let only = fixed_values[0]
-
-                    if fixed_types[0].is_value_type \/ fixed_types[0].is_type_variable then
-                        IR.Values.BOX(only)
-                    else
-                        only
-                    fi
+                if !fixed_is_boxed then
+                    fixed_values[0]
+                elif fixed_values.count == 1 then
+                    IR.Values.BOX(fixed_values[0])
                 else
                     IR.Values.BOX(
                         IR.Values.TUPLE(
