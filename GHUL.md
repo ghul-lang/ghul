@@ -1816,7 +1816,7 @@ for line in use IO.File.read_lines(path).iterator do
 od
 ```
 
-`next` reads one element from an iterator. It advances the iterator and returns the element it reaches, or the absent value at the end. An element that is itself absent is returned as a present value, so only the end of the iterator gives the absent value. So `next` works as the condition of a `while let` loop: `while let cat: CAT = animals |> next() do ... od` runs until the iterator ends, or until it gives an element that is not a `CAT`.
+`next` reads one element from an iterator. It advances the iterator and returns the element it reaches, or the absent value at the end. So `next` works as the condition of a `while let` loop: `while let cat: CAT = animals |> next() do ... od` runs until the iterator ends, or until it gives an element that is not a `CAT`.
 
 A pipe can also start from a value instead of a collection:
 
