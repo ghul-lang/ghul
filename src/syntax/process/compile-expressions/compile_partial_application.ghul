@@ -38,6 +38,10 @@ namespace Syntax.Process is
                 return
             fi
 
+            if application.call.function.awaits_context_type then
+                _push_expected_shape_into_call(application)
+            fi
+
             application.call.walk(self)
 
             let call_value = application.call.value
@@ -70,6 +74,41 @@ namespace Syntax.Process is
 
             application.compile_expressions_state.value = result
         si
+
+        // A callee that takes its type from its context, such as a bare
+        // operator, has no formals to type the `*` arguments with until it
+        // is resolved, and it cannot be resolved until they are typed. The
+        // function type expected of the partial application breaks the
+        // cycle: its parameters are the `*` arguments' types, in order, and
+        // its return type, when the context has settled one, is the call's.
+        _push_expected_shape_into_call(application: Trees.Expressions.PARTIAL_APPLICATION) is
+            let shape = application.expected_type
+
+            if !shape? \/ !shape.is_function \/ shape.arguments.count != application.placeholders.count + 1 then
+                return
+            fi
+
+            let return_index = shape.arguments.count - 1
+
+            for i in 0..return_index do
+                if !_is_known(shape.arguments[i]) then
+                    return
+                fi
+            od
+
+            for i in 0..return_index do
+                application.placeholders[i].set_expected_type(shape.arguments[i], null)
+            od
+
+            let return_type = shape.arguments[return_index]
+
+            if _is_known(return_type) then
+                application.call.set_expected_type(return_type, null)
+            fi
+        si
+
+        _is_known(type: Semantic.Types.Type) -> bool =>
+            type.is_settled /\ !type.is_wild /\ !type.contains_inferred
 
         // A `*` is typed by the formal it stands in, which the call
         // pushes in once the callee is resolved. Until then it has no
