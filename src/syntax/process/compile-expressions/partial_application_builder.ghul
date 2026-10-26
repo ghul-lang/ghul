@@ -130,9 +130,10 @@ namespace Syntax.Process is
         present(
             thunk: Semantic.Symbols.Closure,
             location: Source.LOCATION,
-            call: Value,
+            body: Value,
             placeholder_values: Collections.List[Value]
         ) -> Value? is
+            let call = _call_of(body)
             let arguments = cast Collections.LIST[Value]?(_arguments_of(call))
 
             if !arguments? then
@@ -152,13 +153,25 @@ namespace Syntax.Process is
             let receiver = _receiver_of(call)
 
             if receiver? /\ !receiver.is_type_expression then
-                let moved = _move_fixed(receiver, fixed_locals, fixed_types, fixed_values)
+                // An instance operator's left operand is its receiver, so
+                // `* < v` has the `*` there rather than among the arguments;
+                // a struct receiver is passed by address.
+                let receiver_value =
+                    if let address: IR.Values.ADDRESS = receiver then address.value else receiver fi
 
-                if !moved? then
-                    return null
+                let receiver_placeholder = _placeholder_index(receiver_value, placeholder_values)
+
+                if receiver_placeholder >= 0 then
+                    matched[receiver_placeholder] = true
+                else
+                    let moved = _move_fixed(receiver, fixed_locals, fixed_types, fixed_values)
+
+                    if !moved? then
+                        return null
+                    fi
+
+                    _set_receiver(call, moved)
                 fi
-
-                _set_receiver(call, moved)
             fi
 
             for i in 0..arguments.count do
@@ -193,7 +206,7 @@ namespace Syntax.Process is
                 return null
             fi
 
-            let return_type = call.type ?? _innate_symbol_lookup.get_void_type()
+            let return_type = body.type ?? _innate_symbol_lookup.get_void_type()
 
             let presented_types = Collections.LIST[Type]()
             let parameter_types = Collections.LIST[Type]()
@@ -226,7 +239,7 @@ namespace Syntax.Process is
 
             presented_types.add(return_type)
 
-            let is_pure = !call.is_state_changing_call
+            let is_pure = !body.is_state_changing_call
 
             let presented = _innate_symbol_lookup.get_function_type(presented_types, is_pure)
 
@@ -240,7 +253,7 @@ namespace Syntax.Process is
 
             _record_type_arguments(thunk, return_type)
 
-            thunk.partial_thunk = Semantic.Symbols.PARTIAL_THUNK(call, fixed_locals, fixed_types, fixed_is_boxed)
+            thunk.partial_thunk = Semantic.Symbols.PARTIAL_THUNK(body, fixed_locals, fixed_types, fixed_is_boxed)
 
             if is_pure then
                 thunk.mark_declared_pure()
@@ -338,6 +351,20 @@ namespace Syntax.Process is
             fi
 
             return null
+        si
+
+        // The call inside a compiled operator body: a relational operator
+        // is its `<>` call read against zero, and `!~` is `=~` negated,
+        // so the call to take apart sits one node in. Anything else is
+        // taken as it is.
+        _call_of(body: Value) -> Value is
+            if let compared: IR.Values.COMPARE_ORDER_TO_ZERO = body then
+                return _call_of(compared.value)
+            elif let negated: IR.Values.NOT = body then
+                return _call_of(negated.value)
+            fi
+
+            return body
         si
 
         _receiver_of(call: Value) -> Value? is

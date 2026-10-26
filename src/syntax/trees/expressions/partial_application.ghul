@@ -4,28 +4,35 @@ namespace Syntax.Trees.Expressions is
 
     use Ghul.Pipes
 
-    // A call with `*` for one or more of its arguments: a function value
-    // of one parameter per `*`, in order, that makes the call with its
+    // A call with `*` for one or more of its arguments, or an operator
+    // expression with `*` for one of its operands: a function value of
+    // one parameter per `*`, in order, that makes the call with its
     // parameters in those positions and the other arguments as they were
-    // evaluated once, where the partial application is written.
+    // evaluated once, where the partial application is written. An
+    // operator expression is a call of the operator, `a + *` being
+    // `+(a, *)`, so it is taken apart the same way.
     //
-    // `call` is the call as written. It is resolved and typed as any
-    // call is, with each `*` typed from its formal; the value this
-    // expression stands for is built from the result.
+    // `body` is the call or operator expression as written. It is
+    // resolved and typed as any call is, with each `*` typed from its
+    // formal; the value this expression stands for is built from the
+    // result.
     class PARTIAL_APPLICATION: Expression is
-        call: CALL
+        body: Expression
         placeholders: Collections.LIST[PLACEHOLDER]
 
-        right_location: LOCATION => call.right_location
+        // The body where it is a call; absent for an operator body.
+        call: CALL? => cast CALL?(body)
 
-        init(location: LOCATION, call: CALL) is
+        right_location: LOCATION => body.right_location
+
+        init(location: LOCATION, body: Expression) is
             super.init(location)
 
-            self.call = call
+            self.body = body
 
             placeholders = Collections.LIST[PLACEHOLDER]()
 
-            for argument in call.arguments.expressions do
+            for argument in operands do
                 if let placeholder: PLACEHOLDER = argument then
                     placeholder.owner = self
                     placeholder.index = placeholders.count
@@ -33,7 +40,26 @@ namespace Syntax.Trees.Expressions is
                     placeholders.add(placeholder)
                 fi
             od
+
+            if let binary: BINARY = body then
+                binary.is_partial_body = true
+            elif let unary: UNARY = body then
+                unary.is_partial_body = true
+            fi
         si
+
+        // The body's written arguments in order: a call's argument list,
+        // or an operator's operands.
+        operands: Collections.List[Expression] =>
+            if let call: CALL = body then
+                call.arguments.expressions
+            elif let binary: BINARY = body then
+                Collections.LIST[Expression]([binary.left, binary.right])
+            elif let unary: UNARY = body then
+                Collections.LIST[Expression]([unary.right])
+            else
+                Collections.LIST[Expression]()
+            fi
 
         // Whether `arguments` has a `*` among its elements: what makes a
         // call a partial application.
@@ -52,7 +78,7 @@ namespace Syntax.Trees.Expressions is
             visitor.enter_node(self)
             try
                 if !visitor.pre(self) then
-                    call.walk(visitor)
+                    body.walk(visitor)
                 fi
 
                 accept(visitor)

@@ -34,17 +34,30 @@ namespace Syntax.Process is
                 return
             fi
 
-            if application.call.propagates_absence then
+            if let call = application.call /\ call.propagates_absence then
                 _logger.error(application.location, "cannot use '*' in a '~>' call")
+                application.compile_expressions_state.value = DUMMY(Semantic.Types.ERROR(), application.location)
+                return
+            fi
+
+            // `??`, `/\` and `\/` are not calls of an operator: each
+            // evaluates its right operand only on some values of its left,
+            // which no function of the operands expresses.
+            if let binary: Trees.Expressions.BINARY = application.body /\ _is_short_circuit(binary.operation.name) then
+                _logger.error(
+                    application.location,
+                    "cannot partially apply '{binary.operation.name}'",
+                    application.location,
+                    "help: write a function literal")
                 application.compile_expressions_state.value = DUMMY(Semantic.Types.ERROR(), application.location)
                 return
             fi
 
             _bound_placeholders_from_expected(application)
 
-            application.call.walk(self)
+            application.body.walk(self)
 
-            let call_value = application.call.value
+            let call_value = application.body.value
 
             let placeholder_values = Collections.LIST[IR.Values.Value]()
             let placeholder_types = Collections.LIST[Semantic.Types.Type]()
@@ -136,8 +149,8 @@ namespace Syntax.Process is
 
             let return_type = shape.arguments[shape.arguments.count - 1]
 
-            if !application.call.expected_type? /\ _is_settled_here(return_type) then
-                application.call.set_expected_type(return_type, null)
+            if !application.body.expected_type? /\ _is_settled_here(return_type) then
+                application.body.set_expected_type(return_type, null)
             fi
         si
 
@@ -146,6 +159,9 @@ namespace Syntax.Process is
             !type.is_error /\
             !type.contains_inferred /\
             !type.has_function_generic_argument_foreign_to(_symbol_table.current_function)
+
+        _is_short_circuit(operation: string) -> bool =>
+            operation =~ "??" \/ operation =~ "/\\" \/ operation =~ "\\/"
 
         // The result type the application's value carries while a `*` is
         // still waiting: the call's type where it resolved, else a named
@@ -163,10 +179,10 @@ namespace Syntax.Process is
             if function? then
                 let origin =
                     Semantic.RESULT_ORIGINS.origin_for(
-                        application.call,
-                        application.call.location,
+                        application.body,
+                        application.body.location,
                         cast Semantic.Scope(function),
-                        "$result@{application.call.location.start_line}:{application.call.location.start_column}")
+                        "$result@{application.body.location.start_line}:{application.body.location.start_column}")
 
                 if origin? then
                     origin.description = "the result type of this call"
