@@ -37,6 +37,11 @@ namespace Syntax.Process is
         _function_reference_resolver: Semantic.FUNCTION_REFERENCE_RESOLVER
         _shadowed_callable_finder: Semantic.SHADOWED_CALLABLE_FINDER
 
+        // The value a bare operator spelling stands as while it waits on
+        // a named unknown, handed from _resolve_bare_operator to
+        // visit_identifier in place of a symbol.
+        _deferred_operator_value: IR.Values.Value?
+
         init(
             logger: Logger,
             symbol_table: Semantic.SYMBOL_TABLE,
@@ -600,7 +605,9 @@ namespace Syntax.Process is
         // re-walks the reference.
         _resolve_bare_operator(identifier: Trees.Expressions.IDENTIFIER) -> Semantic.Symbols.Symbol? is
             let name = identifier.identifier.name
-            let shape = _function_reference_resolver.get_target_call_shape(identifier.expected_type)
+            let shape mut = _function_reference_resolver.get_target_call_shape(identifier.expected_type)
+
+            _deferred_operator_value = null
 
             if let underlying = RELATIONAL_REWRITE.underlying_operator(name) then
                 _logger.error(
@@ -613,23 +620,56 @@ namespace Syntax.Process is
             fi
 
             if !shape? \/ shape.arguments.count < 2 then
-                // With no operand types there is nothing to resolve
-                // against, so the spelling is an ordinary name: a variable
-                // or field spelt with operator characters, or a function
-                // group that reports for itself what it is missing. As an
-                // argument of a call still to be resolved it is re-walked
-                // under the formal, and resolves over operand types then.
-                if let in_scope = _visitor.try_find(identifier.identifier) then
+                let in_scope = _visitor.try_find(identifier.identifier)
+
+                // A variable or field spelt with operator characters is
+                // that symbol: there is no operator to choose.
+                if in_scope? /\ !in_scope.is_function_group /\ !isa Semantic.Symbols.Function(in_scope) then
                     return in_scope
                 fi
 
-                _logger.error(
-                    identifier.location,
-                    "cannot tell which operator '{name}' is meant here",
-                    identifier.location,
-                    "help: give the expected function type, or name the type: int.`{name}")
+                // With no function type expected of it the spelling is a
+                // named unknown of the body: whatever the context resolves
+                // it against records the function type on its origin, and
+                // the next walk has operand types to choose by. A group in
+                // scope under the spelling is one candidate, never the
+                // answer while the context has not spoken; it is the
+                // default once the body has nothing more to say.
+                let origin = _bare_operator_origin(identifier)
 
-                return null
+                if !origin? \/ Semantic.OBLIGATIONS.has_default_for(origin) then
+                    if in_scope? then
+                        return in_scope
+                    fi
+
+                    _logger.error(
+                        identifier.location,
+                        "cannot tell which operator '{name}' is meant here",
+                        identifier.location,
+                        "help: give the expected function type, or name the type: int.`{name}")
+
+                    return null
+                fi
+
+                let inferred = origin.try_get_inferred_type()
+
+                if inferred? /\ inferred.is_settled then
+                    shape = _function_reference_resolver.get_target_call_shape(inferred)
+
+                    if !shape? \/ shape.arguments.count < 2 then
+                        _logger.error(identifier.location, "operator '{name}' is used where {inferred} is expected")
+
+                        return null
+                    fi
+                else
+                    let waiting = Semantic.Types.INFERRED_VARIABLE_TYPE(origin)
+
+                    Semantic.OBLIGATIONS.defer(Semantic.OBLIGATIONS.BARE_OPERATOR, waiting, identifier.location)
+
+                    _deferred_operator_value = DUMMY(waiting, identifier.location)
+
+                    return null
+                fi
             fi
 
             // In callee position the call resolves the operator from its
@@ -651,12 +691,22 @@ namespace Syntax.Process is
             for i in 0..operand_count do
                 let operand_type = operand_shape.arguments[i]
 
-                // A type variable of the enclosing function is an operand
-                // type like any other; one belonging to the call still
-                // being resolved is not settled yet.
-                if
+                // An operand type still being inferred settles on a later
+                // walk; the operator waits on it, standing as a value of
+                // the expected shape meanwhile. A type variable of the
+                // enclosing function is an operand type like any other;
+                // one belonging to the call still being resolved names no
+                // type to choose by.
+                if let waiting = _unsettled_placeholder_in(operand_type) then
+                    if !Semantic.OBLIGATIONS.has_default_for(waiting.origin) then
+                        Semantic.OBLIGATIONS.defer(Semantic.OBLIGATIONS.OPERATOR_OPERAND, waiting, identifier.location)
+
+                        _deferred_operator_value = DUMMY(shape, identifier.location)
+
+                        return null
+                    fi
+                elif
                     !operand_type.is_settled \/
-                    operand_type.contains_inferred \/
                     operand_type.has_function_generic_argument_foreign_to(_symbol_table.current_function)
                 then
                     _logger.error(
@@ -720,7 +770,21 @@ namespace Syntax.Process is
             for i in 0..operand_count do
                 let operand_type = shape.arguments[i]
 
-                if !operand_type.is_error then
+                // An operand still being inferred may yet supply the
+                // candidates - an operator can be declared on its type -
+                // so the call waits on it, and the `*` arguments flow out
+                // of the partial application for the context to settle
+                // meanwhile. Once nothing more will settle it, the
+                // candidates the settled operands supply are the choice.
+                if let waiting = _unsettled_placeholder_in(operand_type) then
+                    if !Semantic.OBLIGATIONS.has_default_for(waiting.origin) then
+                        Semantic.OBLIGATIONS.defer(Semantic.OBLIGATIONS.OPERATOR_OPERAND, waiting, identifier.location)
+
+                        _deferred_operator_value = DUMMY(Semantic.Types.ERROR(), identifier.location)
+
+                        return null
+                    fi
+                elif !operand_type.is_error then
                     known_operand_types.add(operand_type)
                 fi
             od
@@ -744,6 +808,49 @@ namespace Syntax.Process is
             return group
         si
 
+        // The named unknown standing for a bare operator spelling that no
+        // function type is yet expected of. Absent outside a body, where
+        // there are no walks to settle it.
+        _bare_operator_origin(identifier: Trees.Expressions.IDENTIFIER) -> Semantic.Symbols.INFERRED_RESULT_ORIGIN? is
+            let function = _symbol_table.current_function
+
+            if !function? then
+                return null
+            fi
+
+            let origin =
+                Semantic.RESULT_ORIGINS.origin_for(
+                    identifier,
+                    identifier.location,
+                    cast Semantic.Scope(function),
+                    "$`{identifier.identifier.name}@{identifier.location.start_line}:{identifier.location.start_column}")
+
+            if origin? then
+                origin.description = "which operator '{identifier.identifier.name}' is meant here"
+            fi
+
+            return origin
+        si
+
+        // The first inference placeholder inside `type`, or null when it
+        // carries none.
+        _unsettled_placeholder_in(type: Type) -> Semantic.Types.INFERRED_VARIABLE_TYPE? is
+            if !type.contains_inferred then
+                return null
+            fi
+
+            let found: Semantic.Types.INFERRED_VARIABLE_TYPE? mut = null
+
+            type.walk(
+                t => if !found? then
+                    if let placeholder: Semantic.Types.INFERRED_VARIABLE_TYPE = t then
+                        found = placeholder
+                    fi
+                fi)
+
+            return found
+        si
+
         visit_identifier(identifier: Trees.Expressions.IDENTIFIER) is
             let need_store = identifier.value? /\ isa Need.STORE(identifier.value)
 
@@ -755,7 +862,11 @@ namespace Syntax.Process is
                 fi
 
             if identifier.awaits_context_type /\ !symbol? then
-                identifier.compile_expressions_state.value = DUMMY(Semantic.Types.ERROR(), identifier.location)
+                identifier.compile_expressions_state.value =
+                    _deferred_operator_value ?? DUMMY(Semantic.Types.ERROR(), identifier.location)
+
+                _deferred_operator_value = null
+
                 return
             fi
 
