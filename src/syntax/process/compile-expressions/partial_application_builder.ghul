@@ -28,6 +28,13 @@ namespace Syntax.Process is
 
         _index: int
 
+        // The operands fixed ahead of a lowered operator body, and the
+        // application they were fixed for; see fix_lowered_operands.
+        _lowered_application: Trees.Expressions.PARTIAL_APPLICATION?
+        _lowered_locals: Collections.LIST[IR.LOCAL]
+        _lowered_types: Collections.LIST[Type]
+        _lowered_values: Collections.LIST[Value]
+
         init(
             symbol_table: Semantic.SYMBOL_TABLE,
             symbol_loader: Semantic.SYMBOL_LOADER,
@@ -38,6 +45,54 @@ namespace Syntax.Process is
             _innate_symbol_lookup = innate_symbol_lookup
 
             _thunks = Collections.MAP[Trees.Node, Semantic.Symbols.Closure]()
+
+            _lowered_locals = Collections.LIST[IR.LOCAL]()
+            _lowered_types = Collections.LIST[Type]()
+            _lowered_values = Collections.LIST[Value]()
+        si
+
+        // Starts compiling `application`'s body: whatever an earlier walk
+        // fixed for a lowered body is dropped with that walk.
+        begin(application: Trees.Expressions.PARTIAL_APPLICATION) is
+            _lowered_application = null
+        si
+
+        // The operands of an operator body that compiles to a lowering
+        // rather than to a call - `=~` over tuples, or over sequences
+        // compared element by element - fixed before the lowering is
+        // built: each operand that is not a `*` is moved into a local of
+        // the thunk, and the lowering is built over the loads, so present
+        // takes the value it becomes whole as the thunk's body. Absent
+        // where an operand has no type.
+        fix_lowered_operands(
+            application: Trees.Expressions.PARTIAL_APPLICATION,
+            left: Value,
+            left_is_placeholder: bool,
+            right: Value,
+            right_is_placeholder: bool
+        ) -> (left: Value, right: Value)? is
+            _lowered_application = null
+            _lowered_locals = Collections.LIST[IR.LOCAL]()
+            _lowered_types = Collections.LIST[Type]()
+            _lowered_values = Collections.LIST[Value]()
+
+            let fixed_left =
+                if left_is_placeholder then left else _move_fixed(left, _lowered_locals, _lowered_types, _lowered_values) fi
+
+            if !fixed_left? then
+                return null
+            fi
+
+            let fixed_right =
+                if right_is_placeholder then right else _move_fixed(right, _lowered_locals, _lowered_types, _lowered_values) fi
+
+            if !fixed_right? then
+                return null
+            fi
+
+            _lowered_application = application
+
+            return (fixed_left, fixed_right)
         si
 
         // The thunk for `partial`: the one already declared for it, or a
@@ -127,7 +182,10 @@ namespace Syntax.Process is
         // the loads the `*` arguments compiled to, in order. Absent where
         // the call is of a shape that cannot be taken apart, or where
         // a `*` reached the call changed from the load it compiled to.
+        // A body that is a lowering rather than a call is taken whole,
+        // over the operands fix_lowered_operands moved for it.
         present(
+            application: Trees.Expressions.PARTIAL_APPLICATION,
             thunk: Semantic.Symbols.Closure,
             location: Source.LOCATION,
             body: Value,
@@ -136,14 +194,51 @@ namespace Syntax.Process is
             let call = _call_of(body)
             let arguments = cast Collections.LIST[Value]?(_arguments_of(call))
 
-            if !arguments? then
-                return null
-            fi
-
             let fixed_locals = Collections.LIST[IR.LOCAL]()
             let fixed_types = Collections.LIST[Type]()
             let fixed_values = Collections.LIST[Value]()
 
+            if !arguments? then
+                if _lowered_application != application then
+                    return null
+                fi
+
+                _lowered_application = null
+
+                for local in _lowered_locals do
+                    fixed_locals.add(local)
+                od
+
+                for type in _lowered_types do
+                    fixed_types.add(type)
+                od
+
+                for value in _lowered_values do
+                    fixed_values.add(value)
+                od
+            elif !_take_apart(call, arguments, placeholder_values, fixed_locals, fixed_types, fixed_values) then
+                return null
+            fi
+
+            if fixed_locals.count > Semantic.ARGUMENT_PACK.MAXIMUM_ARITY then
+                return null
+            fi
+
+            return _present_thunk(thunk, location, body, placeholder_values, fixed_locals, fixed_types, fixed_values)
+        si
+
+        // Replaces each written-out argument of `call` - its receiver
+        // included - by a load of a fresh local of the thunk, collecting
+        // the moved values, and checks that every `*` reached the call
+        // exactly once.
+        _take_apart(
+            call: Value,
+            arguments: Collections.LIST[Value],
+            placeholder_values: Collections.List[Value],
+            fixed_locals: Collections.LIST[IR.LOCAL],
+            fixed_types: Collections.LIST[Type],
+            fixed_values: Collections.LIST[Value]
+        ) -> bool is
             let matched = Collections.LIST[bool]()
 
             for _ in placeholder_values do
@@ -167,7 +262,7 @@ namespace Syntax.Process is
                     let moved = _move_fixed(receiver, fixed_locals, fixed_types, fixed_values)
 
                     if !moved? then
-                        return null
+                        return false
                     fi
 
                     _set_receiver(call, moved)
@@ -181,7 +276,7 @@ namespace Syntax.Process is
 
                 if placeholder_index >= 0 then
                     if matched[placeholder_index] then
-                        return null
+                        return false
                     fi
 
                     matched[placeholder_index] = true
@@ -189,7 +284,7 @@ namespace Syntax.Process is
                     let moved = _move_fixed(argument, fixed_locals, fixed_types, fixed_values)
 
                     if !moved? then
-                        return null
+                        return false
                     fi
 
                     arguments[i] = moved
@@ -198,14 +293,24 @@ namespace Syntax.Process is
 
             for m in matched do
                 if !m then
-                    return null
+                    return false
                 fi
             od
 
-            if fixed_locals.count > Semantic.ARGUMENT_PACK.MAXIMUM_ARITY then
-                return null
-            fi
+            return true
+        si
 
+        // The thunk's declaration and the value standing for it, from the
+        // body and the fixed values it reads through `fixed_locals`.
+        _present_thunk(
+            thunk: Semantic.Symbols.Closure,
+            location: Source.LOCATION,
+            body: Value,
+            placeholder_values: Collections.List[Value],
+            fixed_locals: Collections.LIST[IR.LOCAL],
+            fixed_types: Collections.LIST[Type],
+            fixed_values: Collections.LIST[Value]
+        ) -> Value? is
             let return_type = body.type ?? _innate_symbol_lookup.get_void_type()
 
             let presented_types = Collections.LIST[Type]()

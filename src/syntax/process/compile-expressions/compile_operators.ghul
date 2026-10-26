@@ -1005,8 +1005,48 @@ namespace Syntax.Process is
                 return null
             fi
 
-            return _build_equality(lowering, left_value, right_value, binary.location)
+            let left mut = left_value
+            let right mut = right_value
+
+            // The body of a partial application is taken apart as a
+            // call, which a lowering cannot be: its written-out operand
+            // is moved into the thunk ahead of building it instead.
+            if binary.is_partial_body then
+                let owner = _partial_owner(binary)
+
+                if !owner? then
+                    return null
+                fi
+
+                let fixed =
+                    _visitor.partials.fix_lowered_operands(
+                        owner,
+                        left,
+                        isa Trees.Expressions.PLACEHOLDER(binary.left),
+                        right,
+                        isa Trees.Expressions.PLACEHOLDER(binary.right))
+
+                if !fixed? then
+                    return null
+                fi
+
+                left = fixed.left
+                right = fixed.right
+            fi
+
+            return _build_equality(lowering, left, right, binary.location)
         si
+
+        // The partial application an operator body with a `*` operand
+        // belongs to.
+        _partial_owner(binary: Trees.Expressions.BINARY) -> Trees.Expressions.PARTIAL_APPLICATION? =>
+            if let placeholder: Trees.Expressions.PLACEHOLDER = binary.left then
+                placeholder.owner
+            elif let placeholder: Trees.Expressions.PLACEHOLDER = binary.right then
+                placeholder.owner
+            else
+                null
+            fi
 
 
         // A reflected tuple type answers is_value_tuple; the
