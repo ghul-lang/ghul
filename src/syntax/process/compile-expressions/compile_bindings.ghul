@@ -82,6 +82,15 @@ namespace Syntax.Process is
                         variable.is_defined = false
                     fi
                 od
+
+                // `let x = use E` disposes the local itself, as `let use x = E`
+                // does. A mut local keeps the copy, so that a reassignment
+                // does not change what is disposed.
+                if !v.is_mutable_marked then
+                    if let `use: Trees.Expressions.USE = v.initializer, name = v.name, variable: Semantic.Symbols.Variable = _visitor.find(name) then
+                        `use.let_local = variable
+                    fi
+                fi
             od
 
             return false
@@ -116,6 +125,24 @@ namespace Syntax.Process is
                     fi
                 od
             fi
+
+            // A mut local initialised from `use` keeps the disposed value
+            // in a local of its own, so reassigning it does not change what
+            // is disposed. For a struct that local is a copy, and a change
+            // made through the declared local does not reach it.
+            for v in `let.variables do
+                if !v.is_mutable_marked then
+                    continue
+                fi
+
+                if let `use: Trees.Expressions.USE = v.initializer, value = `use.value, type = value.type /\ type.is_value_type then
+                    _logger.warn(
+                        `use.location,
+                        "use-struct-copy",
+                        "disposed value is a copy of the initial value of mut local {v.name}"
+                    )
+                fi
+            od
 
             if `let.want_dispose then
                 let idisposable = _innate_symbol_lookup.get_idisposable_type()

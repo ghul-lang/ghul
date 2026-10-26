@@ -408,6 +408,10 @@ namespace Syntax.Process is
         // that local for disposal at the end of the enclosing statement
         // list, or of the expression body where there is no list. The
         // expression is the value, so it reads as E wherever it appears.
+        // As the whole initializer of an immutable `let`, the declared
+        // local is registered instead, so `let x = use E` disposes what
+        // `x` holds, as `let use x = E` does: for a struct, a copy made
+        // when the value was stored would miss a mutation made through `x`.
         visit(`use: Trees.Expressions.USE) is
             `use.compile_expressions_state.value = null
 
@@ -431,7 +435,13 @@ namespace Syntax.Process is
                 return
             fi
 
-            let target = _use_target(`use, type)
+            let let_local = `use.let_local
+
+            if let_local? then
+                let_local.is_disposed = true
+            fi
+
+            let target = let_local ?? _use_target(`use, type)
 
             if !target? then
                 `use.compile_expressions_state.value = operand
@@ -450,6 +460,11 @@ namespace Syntax.Process is
                 fi
             else
                 _logger.error(`use.location, "cannot dispose a value here")
+                `use.compile_expressions_state.value = operand
+                return
+            fi
+
+            if let_local? then
                 `use.compile_expressions_state.value = operand
                 return
             fi
