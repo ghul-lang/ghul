@@ -318,7 +318,7 @@ namespace Syntax.Process is
         si
 
         visit(`default: Trees.Expressions.DEFAULT) is
-            _literals.visit_default(`default)
+            _literals.visit_default(`default, _default_awaited_type(`default))
 
             // Non-optional-by-default: `default` reaching a non-optional
             // reference slot resolves to null at runtime, the same hole
@@ -332,6 +332,49 @@ namespace Syntax.Process is
                 let target = `default.value!.type
                 _logger.warn(`default.location, "non-optional", "default where non-optional {target} expected")
             fi
+        si
+
+        // The type a bare `_` with nothing yet pushed into it stands as:
+        // a named unknown of the body, which the call it is an argument
+        // of bounds with the formal it resolves to, as it does a `*`. The
+        // fixing step reports one nothing settles. Absent outside a body,
+        // or for a `_` already typed by `_[T]` or by its context.
+        _default_awaited_type(`default: Trees.Expressions.DEFAULT) -> Semantic.Types.Type? is
+            if `default.type_expression? \/ `default.expected_type? then
+                return null
+            fi
+
+            let function = current_function
+
+            if !function? then
+                return null
+            fi
+
+            let origin =
+                Semantic.RESULT_ORIGINS.origin_for(
+                    `default,
+                    `default.location,
+                    cast Semantic.Scope(function),
+                    "$_@{`default.location.start_line}:{`default.location.start_column}")
+
+            if !origin? then
+                return null
+            fi
+
+            origin.description = "the type of this '_'"
+            origin.is_placeholder_argument = true
+
+            let inferred = origin.try_get_inferred_type()
+
+            if inferred? /\ inferred.is_settled then
+                return inferred
+            fi
+
+            let waiting = Semantic.Types.INFERRED_VARIABLE_TYPE(origin)
+
+            Semantic.OBLIGATIONS.defer(Semantic.OBLIGATIONS.PLACEHOLDER, waiting, `default.location)
+
+            return waiting
         si
 
     si
