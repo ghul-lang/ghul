@@ -11,11 +11,30 @@ namespace Syntax.Parsers.Expressions is
 
         parse(context: CONTEXT) -> Trees.Expressions.Expression? =>
             if context.current.token == Lexical.TOKEN.OPERATOR then
+                // `*` where an operand is expected and an operator, a
+                // comma or a closing bracket follows is a partial
+                // application's placeholder: `* + 1`, `2 * *`, `- *`.
+                // Followed by anything else it is the prefix operator `*`
+                // applied to what follows.
+                if context.current.value_string =~ "*" /\ _placeholder_follows(context) then
+                    let location = context.location
+                    context.next_token()
+
+                    return Trees.Expressions.PLACEHOLDER(location)
+                fi
+
                 let name = Trees.Identifiers.Identifier(context.location, context.current_string!)
                 context.next_token()
                 let right = parse(context)!
 
-                Trees.Expressions.UNARY(name.location::right.location, name, right)
+                let unary = Trees.Expressions.UNARY(name.location::right.location, name, right)
+
+                // `- *` is `-(*)`: a partial application of the operator.
+                if isa Trees.Expressions.PLACEHOLDER(right) then
+                    Trees.Expressions.PARTIAL_APPLICATION(unary.location, unary)
+                else
+                    unary
+                fi
             elif context.current.token == Lexical.TOKEN.AWAIT then
                 let start = context.location
                 context.next_token()
@@ -31,5 +50,22 @@ namespace Syntax.Parsers.Expressions is
             else
                 expression_secondary_parser.parse(context)
             fi
+
+        _placeholder_follows(context: CONTEXT) -> bool is
+            use context.tokenizer_speculate_then_backtrack()
+
+            context.next_token()
+
+            let token = context.current.token
+
+            return
+                token == Lexical.TOKEN.OPERATOR \/
+                token == Lexical.TOKEN.COMMA \/
+                token == Lexical.TOKEN.SEMICOLON \/
+                token == Lexical.TOKEN.PAREN_CLOSE \/
+                token == Lexical.TOKEN.SQUARE_CLOSE \/
+                context.current.first_on_line \/
+                context.is_end_of_file
+        si
     si
 si

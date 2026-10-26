@@ -799,12 +799,17 @@ namespace Syntax.Process is
 
                     value = function.call(binary.location, null, binary_argument_values, force_type, _function_caller)
 
+                    // The body of a partial application is taken apart as
+                    // a call, which the lowered form cannot be; the backend
+                    // lowers it where it is emitted.
                     if isa Call.INNATE(value) then
                         let innate_value = value
 
                         innate_value.actual_operation = binary.actual_operation
 
-                        value = innate_value.lower()
+                        if !binary.is_partial_body then
+                            value = innate_value.lower()
+                        fi
                     fi
                 fi
 
@@ -936,6 +941,29 @@ namespace Syntax.Process is
 
             if !unsettled? then
                 return false
+            fi
+
+            // A `*` operand is settled by the context of its partial
+            // application where that says anything; the operator waits
+            // for it, since the operator may be declared on its type. Once
+            // nothing more will settle it, the operator is chosen from the
+            // candidates the other operand supplies, as for any still-
+            // inferred operand, and that choice types the `*`.
+            if
+                let placeholder: Semantic.Types.INFERRED_VARIABLE_TYPE = unsettled,
+                origin: Semantic.Symbols.INFERRED_RESULT_ORIGIN = placeholder.origin /\
+                origin.is_placeholder_argument
+            then
+                if Semantic.OBLIGATIONS.has_default_for(origin) then
+                    return false
+                fi
+
+                Semantic.OBLIGATIONS.defer(Semantic.OBLIGATIONS.OPERATOR_OPERAND, unsettled, operator_location)
+
+                node.compile_expressions_state.value =
+                    DUMMY(Semantic.Types.INFERRED_JOIN_TYPE(unsettled), node.location)
+
+                return true
             fi
 
             Semantic.OBLIGATIONS.defer("operator", unsettled, operator_location)
