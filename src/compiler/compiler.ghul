@@ -733,31 +733,6 @@ namespace Compiler is
             compile_expressions_only(source_file)
         si
 
-        // The spans a body's expression-level output lies in: a declared
-        // function's own location. The synthesised top-level entry's
-        // location runs from its first statement to its last, and the
-        // file's other definitions can lie between them with output of
-        // their own, so the entry's is confined to its statements' spans;
-        // the wrapper that calls it stands at the same location with a
-        // body of internal locations, which confines it the same way.
-        _expression_spans(function: Syntax.Trees.Definitions.FUNCTION) -> Collections.List[Source.LOCATION] is
-            let spans = LIST[Source.LOCATION]()
-
-            if function.is_top_level_entry \/ function.wraps_top_level_entry then
-                if let block = cast Syntax.Trees.Bodies.BLOCK?(function.body) then
-                    for statement in block.statements do
-                        spans.add(statement.location)
-                    od
-
-                    return spans
-                fi
-            fi
-
-            spans.add(function.location)
-
-            return spans
-        si
-
         // Re-walk one definition's body against the current symbol table
         // and the current effect relations: what the previous walk of that
         // body left behind - its node state, its expression-level
@@ -765,8 +740,26 @@ namespace Compiler is
         // dropped, and compile-expressions is driven over that body
         // alone. The interface, and every other body in the file, is
         // untouched.
+        //
+        // The one body whose span is not its own extent is the entry
+        // synthesised around a file's top-level statements: it runs from
+        // the first statement to the last, so a function declared between
+        // two statements, and the declaration sites of the top-level
+        // `let`s, lie inside the span without being walked as part of the
+        // body. Clearing by that span and walking only the body would
+        // drop their uses, hovers and diagnostics with nothing to record
+        // them again, so that entry re-walks its whole file instead. The
+        // wrapper synthesised to call it stands at the same location with
+        // a body of internal locations, and takes the same route.
         recompile_body_expressions(source_file: SOURCE_FILE, function: Syntax.Trees.Definitions.FUNCTION) is
+            if function.is_top_level_entry \/ function.wraps_top_level_entry then
+                recompile_file_expressions(source_file)
+
+                return
+            fi
+
             let file_name = source_file.file_name
+            let span = function.location
 
             _effects_stale_files.add(file_name)
 
@@ -776,11 +769,9 @@ namespace Compiler is
                 Syntax.Process.CLEAR_STATE_VISITOR(true).apply(body)
             fi
 
-            for span in _expression_spans(function) do
-                logger.clear_expression_diagnostics_within(file_name, span)
-                container.symbol_use_locations.drop_within(file_name, span)
-                Syntax.Process.PURE_SLOTS.clear_within(file_name, span)
-            od
+            logger.clear_expression_diagnostics_within(file_name, span)
+            container.symbol_use_locations.drop_within(file_name, span)
+            Syntax.Process.PURE_SLOTS.clear_within(file_name, span)
 
             let only = Collections.SET[Syntax.Trees.Definitions.FUNCTION]()
             only.add(function)

@@ -1,0 +1,113 @@
+namespace Analysis.Tests is
+    use Collections.LIST;
+
+    use IO.File;
+
+    use Analysis.Protocol.ANALYSER_PROCESS;
+    use Analysis.Protocol.DIAGNOSTIC;
+    use Analysis.Protocol.HOVER_ENTRY;
+    use Analysis.Protocol.Response;
+
+    use Microsoft.VisualStudio.TestTools.UnitTesting.Assert;
+    use TestClass = Microsoft.VisualStudio.TestTools.UnitTesting.TestClassAttribute;
+    use Test = Microsoft.VisualStudio.TestTools.UnitTesting.TestMethodAttribute;
+    use Assertions;
+
+    // The synthesised entry that wraps a file's top-level statements spans
+    // from the first statement to the last, and a function declared between
+    // two statements sits inside that span without being part of the
+    // entry's body. A per-body re-walk of the entry (here driven by piping
+    // a function by name into `map`, whose formal is marked pure) clears
+    // everything recorded within the body's span and then walks only the
+    // body - so what the clear took from the sibling function, and from the
+    // declaration sites of the top-level `let`s, nothing put back. The
+    // entry's re-walk therefore has to re-walk the whole file.
+    @TestClass()
+    class TOP_LEVEL_ENTRY_REWALK_TESTS is
+        init() is si
+
+        load_source(name: string) -> string is
+            let path = fixture_path("top-level-entry-rewalk/{name}");
+            assert File.exists(path) else "fixture not copied to test output: {path}";
+            return File.read_all_text(path);
+        si
+
+        // EDIT then COMPILE, as an editor does; the COMPILE's diagnostics
+        // are the ones reported after the effects solve and its re-walks.
+        prime(analyser: ANALYSER_PROCESS, name: string) -> LIST[DIAGNOSTIC] is
+            analyser.send_edit(name, load_source(name));
+
+            let edit = analyser.read_response();
+            assert isa Response.DIAGNOSTICS(edit) else "expected DIAGNOSTICS after EDIT";
+
+            analyser.send_compile();
+
+            let compile = analyser.read_response();
+            assert isa Response.DIAGNOSTICS(compile) else "expected DIAGNOSTICS after COMPILE";
+
+            return LIST(user_diagnostics_of(cast Response.DIAGNOSTICS(compile)));
+        si
+
+        hover_entries(analyser: ANALYSER_PROCESS, name: string) -> LIST[HOVER_ENTRY] is
+            analyser.send_hover_map(name);
+
+            let response = analyser.read_query_response();
+            assert isa Response.HOVER_MAP(response) else "expected HOVER_MAP response";
+
+            return LIST[HOVER_ENTRY]((cast Response.HOVER_MAP(response)).entries);
+        si
+
+        has_entry_at(entries: LIST[HOVER_ENTRY], line: int, column: int) -> bool is
+            for entry in entries do
+                if entry.start_line == line /\ entry.start_column == column then
+                    return true;
+                fi
+            od
+
+            return false;
+        si
+
+        // The declaration sites of the top-level `let` (4:5), the sibling
+        // function (6:1) and its parameter (6:8) keep their hover entries
+        // after the entry's re-walk.
+        @Test()
+        definition_sites_between_statements_keep_their_hovers() is
+            let use analyser = ANALYSER_PROCESS();
+            let diagnostics = prime(analyser, "top-level-entry-rewalk.ghul");
+
+            are_equal(0, diagnostics.count, diagnostics_summary("COMPILE had unexpected diagnostics", diagnostics));
+
+            let entries = hover_entries(analyser, "top-level-entry-rewalk.ghul");
+
+            is_true(has_entry_at(entries, 4, 5), "no hover entry at the top-level let's declaration (4:5)");
+            is_true(has_entry_at(entries, 6, 1), "no hover entry at the sibling function's declaration (6:1)");
+            is_true(has_entry_at(entries, 6, 8), "no hover entry at the sibling function's parameter (6:8)");
+        si
+
+        // An error inside the sibling function survives the entry's
+        // re-walk: the clear took the `symbol not found` with it, and a
+        // body walk that never reached the function left only the
+        // internal unsettled-state report at the use site.
+        @Test()
+        error_in_function_between_statements_is_reported() is
+            let use analyser = ANALYSER_PROCESS();
+            let diagnostics = prime(analyser, "top-level-entry-rewalk-error.ghul");
+
+            let saw_symbol_not_found mut = false;
+            let saw_internal mut = false;
+
+            for diagnostic in diagnostics do
+                if diagnostic.message.contains("undefined_thing") then
+                    saw_symbol_not_found = true;
+                fi
+
+                if diagnostic.message.contains("internal:") then
+                    saw_internal = true;
+                fi
+            od
+
+            is_true(saw_symbol_not_found, diagnostics_summary("the sibling function's symbol-not-found error was not reported", diagnostics));
+            is_false(saw_internal, diagnostics_summary("an internal diagnostic was reported in place of the user's error", diagnostics));
+        si
+    si
+si
