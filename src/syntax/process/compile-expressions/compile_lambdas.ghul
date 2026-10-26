@@ -192,12 +192,12 @@ namespace Syntax.Process is
                 let walks mut = 0
                 let final_walk mut = 0
 
-                for i in 1::retries do
-                    walks = i
+                while walks < retries do
+                    walks = walks + 1
                     final_walk = _type_arg_placeholder_registry.begin_walk()
                     RETRY_SITE_STATS.begin_walk()
                     Semantic.OBLIGATIONS.begin_walk()
-                    Semantic.INFERENCE_TRACE.begin_walk(i)
+                    Semantic.INFERENCE_TRACE.begin_walk(walks)
 
                     // Narrowing is method-local — start each body
                     // walk (and each inference-retry re-walk) from
@@ -227,31 +227,34 @@ namespace Syntax.Process is
                     // that can only repeat.
                     let waiting = Semantic.OBLIGATIONS.standing.count > 0
 
-                    if _logger.is_clean /\ !waiting then
-                        break
-                    fi
-
                     // A walk that leaves exactly the obligations the walk
                     // before it did, and that learned no bound or
                     // constraint while doing so, can only repeat - whatever
-                    // else it marked as consumed. The default for what is
-                    // still standing is taken below.
-                    if waiting /\ Semantic.OBLIGATIONS.is_stuck then
+                    // else it marked as consumed. A failure that no
+                    // obligation records - a call no candidate fits - marks
+                    // every walk as consumed, so once a walk after the
+                    // first has learned nothing, the next can only repeat
+                    // it either.
+                    let converged =
+                        (_logger.is_clean /\ !waiting) \/
+                        (waiting /\ Semantic.OBLIGATIONS.is_stuck) \/
+                        (!_logger.has_consumed_any /\ !waiting) \/
+                        (!waiting /\ walks > 1 /\ Semantic.OBLIGATIONS.learned_nothing)
+
+                    // The walks have stopped with obligations standing, and
+                    // some rule that recorded one has a default the language
+                    // defines. Taking it here rather than during a walk is
+                    // what keeps a walk from pre-empting the uses that would
+                    // have settled the origin properly. A default is
+                    // information the walks did not have, so walking goes
+                    // on from it until the body converges again: what the
+                    // default settles can itself settle more, and a default
+                    // taken for one origin can leave another's to take.
+                    if converged /\ !Semantic.OBLIGATIONS.take_defaults() then
                         break
                     fi
 
-                    if !_logger.has_consumed_any /\ !waiting then
-                        break
-                    fi
-
-                    // A failure that no obligation records - a call no candidate
-                    // fits - marks every walk as consumed. Once a walk after the
-                    // first has learned nothing, the next can only repeat it.
-                    if !waiting /\ i > 1 /\ Semantic.OBLIGATIONS.learned_nothing then
-                        break
-                    fi
-
-                    if i < retries then
+                    if walks < retries then
                         _logger.roll_back()
                         _logger.speculate()
 
@@ -266,38 +269,6 @@ namespace Syntax.Process is
                         fi
                     fi
                 od
-
-                // The loop has stopped with obligations standing, and
-                // some rule that recorded one has a default the language
-                // defines. Taking it here rather than during a walk is
-                // what keeps a walk from pre-empting the uses that would
-                // have settled the origin properly; the default then
-                // needs one more walk to reach the site that waited and
-                // everything typed from it.
-                if Semantic.OBLIGATIONS.take_defaults() then
-                    _logger.roll_back()
-                    _logger.speculate()
-
-                    _symbol_use_locations.roll_back()
-                    _symbol_use_locations.speculate()
-
-                    if RETRY_STATS.iteration_clear then
-                        CLEAR_STATE_VISITOR(true, true).apply(function.body!)
-                    fi
-
-                    walks = walks + 1
-                    final_walk = _type_arg_placeholder_registry.begin_walk()
-
-                    RETRY_SITE_STATS.begin_walk()
-                    Semantic.OBLIGATIONS.begin_walk()
-                    Semantic.INFERENCE_TRACE.begin_walk(walks)
-
-                    _flow.reset()
-
-                    function.body!.walk(_visitor)
-
-                    Semantic.INFERENCE_TRACE.end_walk(_logger.is_clean, _logger.has_consumed_any)
-                fi
 
                 RETRY_STATS.note(walks, function_symbol, function.location)
                 RETRY_SITE_STATS.end_body(retry_body, walks, function_symbol, function.location)

@@ -373,13 +373,38 @@ namespace Syntax.Process is
                 fi
             fi
 
-            // A bare operator spelling found in no scope is the operator
-            // of whichever type the formal's first parameter turns out
-            // to be, so it takes the same route as a group: the formal is
-            // pushed whenever it is callable, and the call re-resolves
-            // once the reference has a shape.
-            return a.awaits_context_type /\ a.is_identifier /\ (a.value?.type?.is_error ?? true)
+            // A bare operator spelling is resolved over the operand types
+            // of the function type expected of it, so until it has one it
+            // stands as a named unknown, or as an error where there is no
+            // body to hold one. Either way it takes the same route as a
+            // group: the formal is pushed whenever it is callable, and
+            // the call re-resolves once the reference has a shape.
+            if a.awaits_context_type /\ a.is_identifier then
+                let type = a.value?.type
+
+                return !type? \/ type.is_error \/ isa Semantic.Types.INFERRED_VARIABLE_TYPE(type)
+            fi
+
+            return false
         si
+
+        // Whether an argument is a `*` of a partial application whose type
+        // nothing has settled yet. A call that cannot resolve over one
+        // waits for it rather than reporting an overload failure the
+        // `*` would be named in as `***`: the function type expected of
+        // the application may yet settle it, and the fixing step reports
+        // the `*` if nothing does.
+        has_waiting_placeholder_argument(argument_types: Collections.List[Type]) -> bool static =>
+            argument_types |> any(
+                t => if let placeholder: Semantic.Types.INFERRED_VARIABLE_TYPE = t then
+                    if let origin: Semantic.Symbols.INFERRED_RESULT_ORIGIN = placeholder.origin then
+                        origin.is_placeholder_argument
+                    else
+                        false
+                    fi
+                else
+                    false
+                fi)
 
         // True when the call carries at least one unresolved group
         // reference among its arguments.
@@ -2974,6 +2999,16 @@ namespace Syntax.Process is
                     fi
 
                     if overload_result == null then
+                        // Over a `*` still waiting on its type nothing
+                        // resolved, or more than one candidate did. The
+                        // failure's report is rolled back: it would name
+                        // the `*` as `***`, and the `*` has its own
+                        // obligation standing for the fixing step.
+                        if COMPILE_CALLS.has_waiting_placeholder_argument(argument_types) then
+                            _logger.roll_back()
+                            _logger.speculate()
+                        fi
+
                         call.compile_expressions_state.value = DUMMY(Semantic.Types.ERROR(), call.location)
                         return
                     fi

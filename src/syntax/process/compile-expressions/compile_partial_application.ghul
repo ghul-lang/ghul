@@ -3,6 +3,8 @@ namespace Syntax.Process is
 
     use IR.Values.DUMMY
 
+    use Ghul.Pipes
+
     // A call with `*` for some of its arguments. The call is compiled as
     // written, each `*` taking its type from the formal it stands in and
     // compiling to a load of the thunk's parameter for it; the value is
@@ -38,27 +40,54 @@ namespace Syntax.Process is
                 return
             fi
 
+            _bound_placeholders_from_expected(application)
+
             application.call.walk(self)
 
             let call_value = application.call.value
+
+            let placeholder_values = Collections.LIST[IR.Values.Value]()
+            let placeholder_types = Collections.LIST[Semantic.Types.Type]()
+            let waiting mut = false
+
+            for placeholder in application.placeholders do
+                let value = placeholder.value
+                let type = value?.type
+
+                if !value? \/ !type? \/ type.is_error then
+                    application.compile_expressions_state.value = DUMMY(Semantic.Types.ERROR(), application.location)
+                    return
+                fi
+
+                if !type.is_settled \/ type.contains_inferred then
+                    waiting = true
+                fi
+
+                placeholder_values.add(value)
+                placeholder_types.add(type)
+            od
+
+            // A `*` still waiting on its type leaves the call unresolved
+            // or resolved provisionally. The application's value is still
+            // a function over the `*` types as they stand, so the context
+            // it flows into - the call it is an argument to, the slot it
+            // is assigned to - records what it learns on the same named
+            // unknowns, and the next walk resolves the call over them.
+            // The call's own report, if it made one, is rolled back with
+            // the walk; the fixing step reports a `*` nothing settles.
+            if waiting then
+                placeholder_types.add(_provisional_result_type(application, call_value))
+
+                application.compile_expressions_state.value =
+                    DUMMY(_innate_symbol_lookup.get_function_type(placeholder_types), application.location)
+
+                return
+            fi
 
             if !call_value? \/ !call_value.type? \/ call_value.type.is_error then
                 application.compile_expressions_state.value = DUMMY(Semantic.Types.ERROR(), application.location)
                 return
             fi
-
-            let placeholder_values = Collections.LIST[IR.Values.Value]()
-
-            for placeholder in application.placeholders do
-                let value = placeholder.value
-
-                if !value? \/ !value.type? \/ value.type.is_error then
-                    application.compile_expressions_state.value = DUMMY(Semantic.Types.ERROR(), application.location)
-                    return
-                fi
-
-                placeholder_values.add(value)
-            od
 
             let result = _partials.present(thunk, application.location, call_value, placeholder_values)
 
@@ -71,9 +100,97 @@ namespace Syntax.Process is
             application.compile_expressions_state.value = result
         si
 
-        // A `*` is typed by the formal it stands in, which the call
-        // pushes in once the callee is resolved. Until then it has no
-        // type, and the call reads it as an argument still awaiting one.
+        // The function type expected of the partial application bounds
+        // its `*` arguments ahead of the call, one parameter each in
+        // order, as the parameter types of an expected function type
+        // bound a literal's parameters: the call then resolves over them
+        // as it would over written arguments, which is what lets it
+        // choose an overload nothing written would pin. A parameter the
+        // context has not settled is left for the resolved formal, and a
+        // settled return type is the call's expected type.
+        _bound_placeholders_from_expected(application: Trees.Expressions.PARTIAL_APPLICATION) is
+            let expected = application.expected_type
+
+            if !expected? then
+                return
+            fi
+
+            let shape =
+                if expected.is_function then
+                    expected
+                else
+                    Semantic.DELEGATE_SHAPE().try_get_function_type(expected, _innate_symbol_lookup)
+                fi
+
+            if !shape? \/ shape.arguments.count - 1 != application.placeholders.count then
+                return
+            fi
+
+            for (index, placeholder) in application.placeholders |> index() do
+                let parameter = shape.arguments[index]
+
+                if _is_settled_here(parameter) then
+                    placeholder.set_expected_type(parameter, null)
+                fi
+            od
+
+            let return_type = shape.arguments[shape.arguments.count - 1]
+
+            if !application.call.expected_type? /\ _is_settled_here(return_type) then
+                application.call.set_expected_type(return_type, null)
+            fi
+        si
+
+        _is_settled_here(type: Semantic.Types.Type) -> bool =>
+            type.is_settled /\
+            !type.is_error /\
+            !type.contains_inferred /\
+            !type.has_function_generic_argument_foreign_to(_symbol_table.current_function)
+
+        // The result type the application's value carries while a `*` is
+        // still waiting: the call's type where it resolved, else a named
+        // unknown of the call's own, so that what the context learns about
+        // the result lands somewhere the next walk can read.
+        _provisional_result_type(application: Trees.Expressions.PARTIAL_APPLICATION, call_value: IR.Values.Value?) -> Semantic.Types.Type is
+            let call_type = call_value?.type
+
+            if call_type? /\ !call_type.is_error then
+                return call_type
+            fi
+
+            let function = current_function
+
+            if function? then
+                let origin =
+                    Semantic.RESULT_ORIGINS.origin_for(
+                        application.call,
+                        application.call.location,
+                        cast Semantic.Scope(function),
+                        "$result@{application.call.location.start_line}:{application.call.location.start_column}")
+
+                if origin? then
+                    origin.description = "the result type of this call"
+
+                    let inferred = origin.try_get_inferred_type()
+
+                    if inferred? /\ inferred.is_settled then
+                        return inferred
+                    fi
+
+                    return Semantic.Types.INFERRED_VARIABLE_TYPE(origin)
+                fi
+            fi
+
+            return Semantic.Types.ERROR()
+        si
+
+        // A `*` is a named unknown of the body: its type is what the call
+        // it stands in and the function type expected of the application
+        // settle between them, recorded as bounds on its origin by the
+        // resolutions they take part in. Until it settles the `*` carries
+        // the placeholder, and the call resolves over it as it would over
+        // any argument still being inferred. Nothing is reported during
+        // a walk; the fixing step reports a `*` nothing settles.
         visit(placeholder: Trees.Expressions.PLACEHOLDER) is
             placeholder.compile_expressions_state.value = null
 
@@ -85,18 +202,6 @@ namespace Syntax.Process is
                 return
             fi
 
-            let type = placeholder.expected_type
-
-            // Reported on every walk, as a bare `_` reports its own: the
-            // call rolls the first walk's diagnostics back once it has
-            // a formal to push, and what survives is this error from
-            // the walk where no formal ever arrived.
-            if !type? \/ type.is_error then
-                _logger.error(placeholder.location, "cannot infer the type of '*' here")
-                placeholder.compile_expressions_state.value = DUMMY(Semantic.Types.ERROR(), placeholder.location)
-                return
-            fi
-
             let thunk = _partials.thunk_for(owner)
 
             if !thunk? then
@@ -104,9 +209,70 @@ namespace Syntax.Process is
                 return
             fi
 
-            _symbol_use_locations.add_inferred_type_hover(placeholder.location, type)
+            let type = _placeholder_type(placeholder)
+
+            if type.is_error then
+                placeholder.compile_expressions_state.value = DUMMY(type, placeholder.location)
+                return
+            fi
+
+            if type.is_settled /\ !type.contains_inferred then
+                _symbol_use_locations.add_inferred_type_hover(placeholder.location, type)
+            fi
 
             placeholder.compile_expressions_state.value = _partials.placeholder_value(thunk, placeholder.location, placeholder.index, type)
+        si
+
+        _placeholder_type(placeholder: Trees.Expressions.PLACEHOLDER) -> Semantic.Types.Type is
+            let expected = placeholder.expected_type
+            let function = current_function
+
+            if !function? then
+                // No body, no walks to settle an unknown: the pushed type
+                // is all there will be.
+                if expected? /\ !expected.is_error then
+                    return expected
+                fi
+
+                _logger.error(placeholder.location, "cannot infer the type of '*' here")
+
+                return Semantic.Types.ERROR()
+            fi
+
+            let origin =
+                Semantic.RESULT_ORIGINS.origin_for(
+                    placeholder,
+                    placeholder.location,
+                    cast Semantic.Scope(function),
+                    "$*@{placeholder.location.start_line}:{placeholder.location.start_column}")
+
+            if !origin? then
+                _logger.error(placeholder.location, "cannot infer the type of '*' here")
+
+                return Semantic.Types.ERROR()
+            fi
+
+            origin.description = "the type of this '*'"
+            origin.is_placeholder_argument = true
+
+            // The parameter type the application's expected function type
+            // gives this `*`, or the formal a resolved call pushed: the
+            // thunk's parameter holds values of that type.
+            if expected? /\ !expected.is_error /\ expected.is_settled /\ !expected.contains_inferred then
+                let _ = Semantic.INFERENCE_TRACE.add_lower_bound("placeholder.expected", origin, expected)
+            fi
+
+            let inferred = origin.try_get_inferred_type()
+
+            if inferred? /\ inferred.is_settled then
+                return inferred
+            fi
+
+            let waiting = Semantic.Types.INFERRED_VARIABLE_TYPE(origin)
+
+            Semantic.OBLIGATIONS.defer(Semantic.OBLIGATIONS.PLACEHOLDER, waiting, placeholder.location)
+
+            return waiting
         si
     si
 si
