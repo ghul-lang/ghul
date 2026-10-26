@@ -28,12 +28,14 @@ namespace Syntax.Process.UnitTests is
     // whether a call's argument walk needs a retry to give an argument
     // its callee-supplied type. Two argument shapes take their type
     // from the context: a bare `_`, and a `cast(v)` written without a
-    // target type. Either only counts as waiting when it carries no
-    // explicit type of its own and its first-walk value is missing or
-    // ERROR-typed; `_[T]` and `cast T(v)` are never retried, and an
-    // already-resolved argument (a synthesised `_` filling an omitted
-    // named argument, or a second walk that already succeeded) is left
-    // alone.
+    // target type. A `cast(v)` counts as waiting when its first-walk
+    // value is missing or ERROR-typed; a bare `_` counts as waiting
+    // until a formal has been pushed into it, whatever its own named
+    // unknown has typed it meanwhile, since the formal also supplies a
+    // declared default value. `_[T]` and `cast T(v)` are never retried,
+    // and an argument a formal has reached (a synthesised `_` filling
+    // an omitted named argument, or a second walk that already
+    // succeeded) is left alone.
     @TestClass()
     class CONTEXT_TYPED_CALL_ARGUMENT_TESTS is
         init() is si
@@ -61,6 +63,12 @@ namespace Syntax.Process.UnitTests is
             expression.compile_expressions_state.value = DUMMY(int_class().type!, loc())
         si
 
+        // The state a formal pushed into the argument leaves it in.
+        resolve_with_formal(expression: Expression) is
+            expression.set_expected_type(int_class().type!, null)
+            resolve_with_concrete_type(expression)
+        si
+
         @Test()
         Calling__is_argument_awaiting_context_type__with_a_non_default_expression__returns_false() is
             is_false(COMPILE_CALLS.is_argument_awaiting_context_type(make_identifier("x")))
@@ -79,10 +87,21 @@ namespace Syntax.Process.UnitTests is
             is_true(COMPILE_CALLS.is_argument_awaiting_context_type(`default))
         si
 
+        // A bare `_` typed by its own named unknown, with no formal pushed
+        // yet, is still waiting: the formal gives it a declared default
+        // value as well as its type.
+        @Test()
+        Calling__is_argument_awaiting_context_type__with_a_bare_default_typed_without_a_formal__returns_true() is
+            let `default = make_bare_default()
+            resolve_with_concrete_type(`default)
+
+            is_true(COMPILE_CALLS.is_argument_awaiting_context_type(`default))
+        si
+
         @Test()
         Calling__is_argument_awaiting_context_type__with_a_resolved_bare_default__returns_false() is
             let `default = make_bare_default()
-            resolve_with_concrete_type(`default)
+            resolve_with_formal(`default)
 
             is_false(COMPILE_CALLS.is_argument_awaiting_context_type(`default))
         si
@@ -166,7 +185,7 @@ namespace Syntax.Process.UnitTests is
         @Test()
         Calling__has_argument_awaiting_context_type__with_a_resolved_default_only__returns_false() is
             let `default = make_bare_default()
-            resolve_with_concrete_type(`default)
+            resolve_with_formal(`default)
 
             let args = LIST[Expression]()
             args.add(make_identifier("a"))
