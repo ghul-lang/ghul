@@ -34,6 +34,8 @@ namespace Syntax.Process is
                 return
             fi
 
+            _partials.begin(application)
+
             if let call = application.call /\ call.propagates_absence then
                 _logger.error(application.location, "cannot use '*' in a '~>' call")
                 application.compile_expressions_state.value = DUMMY(Semantic.Types.ERROR(), application.location)
@@ -102,7 +104,7 @@ namespace Syntax.Process is
                 return
             fi
 
-            let result = _partials.present(thunk, application.location, call_value, placeholder_values)
+            let result = _partials.present(application, thunk, application.location, call_value, placeholder_values)
 
             if !result? then
                 _logger.error(application.location, "cannot partially apply this call")
@@ -143,7 +145,7 @@ namespace Syntax.Process is
                 let parameter = shape.arguments[index]
 
                 if _is_settled_here(parameter) then
-                    placeholder.set_expected_type(parameter, null)
+                    _bound_placeholder_from_context(placeholder, parameter)
                 fi
             od
 
@@ -151,6 +153,19 @@ namespace Syntax.Process is
 
             if !application.body.expected_type? /\ _is_settled_here(return_type) then
                 application.body.set_expected_type(return_type, null)
+            fi
+        si
+
+        // The context's parameter type is what the thunk's parameter is
+        // handed, so it bounds the `*` from below. With no body to settle
+        // an unknown in, the type is pushed as the `*`'s own.
+        _bound_placeholder_from_context(placeholder: Trees.Expressions.PLACEHOLDER, type: Semantic.Types.Type) is
+            let origin = _placeholder_origin(placeholder)
+
+            if origin? then
+                let _ = Semantic.INFERENCE_TRACE.add_lower_bound("placeholder.context", origin, type)
+            else
+                placeholder.set_expected_type(type, null)
             fi
         si
 
@@ -255,12 +270,7 @@ namespace Syntax.Process is
                 return Semantic.Types.ERROR()
             fi
 
-            let origin =
-                Semantic.RESULT_ORIGINS.origin_for(
-                    placeholder,
-                    placeholder.location,
-                    cast Semantic.Scope(function),
-                    "$*@{placeholder.location.start_line}:{placeholder.location.start_column}")
+            let origin = _placeholder_origin(placeholder)
 
             if !origin? then
                 _logger.error(placeholder.location, "cannot infer the type of '*' here")
@@ -268,14 +278,16 @@ namespace Syntax.Process is
                 return Semantic.Types.ERROR()
             fi
 
-            origin.description = "the type of this '*'"
-            origin.is_placeholder_argument = true
-
-            // The parameter type the application's expected function type
-            // gives this `*`, or the formal a resolved call pushed: the
-            // thunk's parameter holds values of that type.
+            // The formal a resolved call pushed onto this `*` is what the
+            // thunk's parameter is passed on as, so it bounds the `*` from
+            // above; the context's parameter type bounds it from below,
+            // recorded by _bound_placeholder_from_context. Taking the
+            // formal as a lower bound too would widen a `*` the context
+            // has already settled - to `T?` where a candidate accepting
+            // an optional was chosen over a still-unsettled operand - and
+            // leave it with no type at all.
             if expected? /\ !expected.is_error /\ expected.is_settled /\ !expected.contains_inferred then
-                let _ = Semantic.INFERENCE_TRACE.add_lower_bound("placeholder.expected", origin, expected)
+                let _ = Semantic.INFERENCE_TRACE.add_upper_bound("placeholder.formal", origin, expected)
             fi
 
             let inferred = origin.try_get_inferred_type()
@@ -289,6 +301,30 @@ namespace Syntax.Process is
             Semantic.OBLIGATIONS.defer(Semantic.OBLIGATIONS.PLACEHOLDER, waiting, placeholder.location)
 
             return waiting
+        si
+
+        // The named unknown standing for a `*`'s type, declared on first
+        // use in the enclosing function; absent outside a function body.
+        _placeholder_origin(placeholder: Trees.Expressions.PLACEHOLDER) -> Semantic.Symbols.Variable? is
+            let function = current_function
+
+            if !function? then
+                return null
+            fi
+
+            let origin =
+                Semantic.RESULT_ORIGINS.origin_for(
+                    placeholder,
+                    placeholder.location,
+                    cast Semantic.Scope(function),
+                    "$*@{placeholder.location.start_line}:{placeholder.location.start_column}")
+
+            if origin? then
+                origin.description = "the type of this '*'"
+                origin.is_placeholder_argument = true
+            fi
+
+            return origin
         si
     si
 si
