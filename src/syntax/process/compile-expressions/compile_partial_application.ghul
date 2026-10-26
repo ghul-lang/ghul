@@ -3,6 +3,8 @@ namespace Syntax.Process is
 
     use IR.Values.DUMMY
 
+    use Ghul.Pipes
+
     // A call with `*` for some of its arguments. The call is compiled as
     // written, each `*` taking its type from the formal it stands in and
     // compiling to a load of the thunk's parameter for it; the value is
@@ -38,6 +40,8 @@ namespace Syntax.Process is
                 return
             fi
 
+            _type_placeholders_from_expected(application)
+
             application.call.walk(self)
 
             let call_value = application.call.value
@@ -71,9 +75,58 @@ namespace Syntax.Process is
             application.compile_expressions_state.value = result
         si
 
+        // The function type expected of the partial application types
+        // its `*` arguments ahead of the call, one parameter each in
+        // order, as the parameter types of an expected function type type
+        // a literal's parameters: the call then resolves over them as it
+        // would over written arguments, which is what lets it choose an
+        // overload nothing written would pin. A parameter the context has
+        // not settled is left for the resolved formal to type, and a
+        // settled return type is the call's expected type.
+        _type_placeholders_from_expected(application: Trees.Expressions.PARTIAL_APPLICATION) is
+            let expected = application.expected_type
+
+            if !expected? then
+                return
+            fi
+
+            let shape =
+                if expected.is_function then
+                    expected
+                else
+                    Semantic.DELEGATE_SHAPE().try_get_function_type(expected, _innate_symbol_lookup)
+                fi
+
+            if !shape? \/ shape.arguments.count - 1 != application.placeholders.count then
+                return
+            fi
+
+            for (index, placeholder) in application.placeholders |> index() do
+                let parameter = shape.arguments[index]
+
+                if _is_settled_here(parameter) then
+                    placeholder.set_expected_type(parameter, null)
+                fi
+            od
+
+            let return_type = shape.arguments[shape.arguments.count - 1]
+
+            if !application.call.expected_type? /\ _is_settled_here(return_type) then
+                application.call.set_expected_type(return_type, null)
+            fi
+        si
+
+        _is_settled_here(type: Semantic.Types.Type) -> bool =>
+            type.is_settled /\
+            !type.is_error /\
+            !type.contains_inferred /\
+            !type.has_function_generic_argument_foreign_to(_symbol_table.current_function)
+
         // A `*` is typed by the formal it stands in, which the call
-        // pushes in once the callee is resolved. Until then it has no
-        // type, and the call reads it as an argument still awaiting one.
+        // pushes in once the callee is resolved, or by the parameter of
+        // the function type expected of the partial application where
+        // that is settled first. Until either it has no type, and the
+        // call reads it as an argument still awaiting one.
         visit(placeholder: Trees.Expressions.PLACEHOLDER) is
             placeholder.compile_expressions_state.value = null
 

@@ -373,12 +373,23 @@ namespace Syntax.Process is
                 fi
             fi
 
-            // A bare operator spelling found in no scope is the operator
-            // of whichever type the formal's first parameter turns out
-            // to be, so it takes the same route as a group: the formal is
-            // pushed whenever it is callable, and the call re-resolves
-            // once the reference has a shape.
-            return a.awaits_context_type /\ a.is_identifier /\ (a.value?.type?.is_error ?? true)
+            // A partial application compiled with no function type
+            // expected of it typed its `*` arguments from the formals of
+            // whatever overload the written arguments alone picked; the
+            // formal pushed here can type them differently, and pick
+            // differently, so it is resolved again under it.
+            if isa Trees.Expressions.PARTIAL_APPLICATION(a) /\ !a.expected_type? then
+                return true
+            fi
+
+            // A bare operator spelling is resolved over the operand types
+            // of the function type expected of it, so until a formal has
+            // been pushed it has not been resolved at all - whatever a
+            // group of that name in scope loaded as on the first walk. It
+            // takes the same route as a group: the formal is pushed
+            // whenever it is callable, and the call re-resolves once the
+            // reference has a shape.
+            return a.awaits_context_type /\ a.is_identifier /\ (!a.expected_type? \/ (a.value?.type?.is_error ?? true))
         si
 
         // True when the call carries at least one unresolved group
@@ -537,6 +548,26 @@ namespace Syntax.Process is
             argument_types: Collections.LIST[Type]
         ) is
             let value = a.value
+
+            // A partial application, or a bare operator spelling, compiled
+            // before any formal reached it is typed by whatever its
+            // written arguments alone, or a group of that name in scope,
+            // picked. That type is not evidence for resolution - it would
+            // bind the callee's type variables to the wrong overload's
+            // shape - so the argument stands as one still awaiting its
+            // type, and is compiled again under the formal once that is
+            // pushed.
+            if
+                (isa Trees.Expressions.PARTIAL_APPLICATION(a) \/ (a.awaits_context_type /\ a.is_identifier)) /\
+                !a.expected_type?
+            then
+                let t = Semantic.Types.ERROR()
+
+                arguments.add(DUMMY(t, a.location))
+                argument_types.add(t)
+
+                return
+            fi
 
             if value? /\ value.type? /\ value.check_is_consumable(_logger, a.location) then
                 arguments.add(value)
