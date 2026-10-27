@@ -69,6 +69,112 @@ namespace Semantic.Types.UnitTests is
         type_param() -> GenericArgument =>
             cast GenericArgument(CLASSY_GENERIC_ARGUMENT(loc(), Semantic.BLOCK_SCOPE(), "T", 0).type)
 
+        // Two-element tuples over one shared tuple class and element type,
+        // so that any two of them are each assignable from the other
+        // whatever their element names.
+        pair_tuples() -> ((LIST[string?]?) -> Type) =>
+            let
+                pair = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "TUPLE_2", LIST[string](["T1", "T2"]), Semantic.BLOCK_SCOPE()),
+                element = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "int", empty_names(), Semantic.BLOCK_SCOPE()).type!
+            in
+                (names: LIST[string?]?) => Semantic.Types.TUPLE(loc(), pair, LIST[Type]([element, element]), names)
+
+        // The element names the binding of `t` ended up with.
+        bound_names(r: GENERIC_ARGUMENT_BIND_RESULTS, t: GenericArgument) -> Collections.List[string?] =>
+            r.bindings[t.symbol].actual_type.tuple_element_names!
+
+        has_names(names: Collections.List[string?], first: string, second: string) is
+            are_equal(first, names[0])
+            are_equal(second, names[1])
+        si
+
+        @Test()
+        Calling__bind__with_a_named_tuple_then_an_unnamed_one__should_keep_the_names() is
+            let tuple = pair_tuples()
+            let r = GENERIC_ARGUMENT_BIND_RESULTS()
+            let t = type_param()
+
+            is_true(r.bind(t, tuple(LIST[string?](["low", "high"]))))
+            is_true(r.bind(t, tuple(null)))
+
+            has_names(bound_names(r, t), "low", "high")
+        si
+
+        @Test()
+        Calling__bind__with_an_unnamed_tuple_then_a_named_one__should_take_the_names() is
+            let tuple = pair_tuples()
+            let r = GENERIC_ARGUMENT_BIND_RESULTS()
+            let t = type_param()
+
+            is_true(r.bind(t, tuple(null)))
+            is_true(r.bind(t, tuple(LIST[string?](["low", "high"]))))
+
+            has_names(bound_names(r, t), "low", "high")
+        si
+
+        @Test()
+        Calling__bind__with_tuples_naming_different_elements__should_keep_both_names() is
+            let tuple = pair_tuples()
+            let r = GENERIC_ARGUMENT_BIND_RESULTS()
+            let t = type_param()
+
+            is_true(r.bind(t, tuple(LIST[string?](["low", null]))))
+            is_true(r.bind(t, tuple(LIST[string?]([null, "high"]))))
+
+            has_names(bound_names(r, t), "low", "high")
+        si
+
+        @Test()
+        Calling__bind__with_tuples_giving_one_element_the_same_name__should_keep_it() is
+            let tuple = pair_tuples()
+            let r = GENERIC_ARGUMENT_BIND_RESULTS()
+            let t = type_param()
+
+            is_true(r.bind(t, tuple(LIST[string?](["low", null]))))
+            is_true(r.bind(t, tuple(LIST[string?](["low", "high"]))))
+
+            has_names(bound_names(r, t), "low", "high")
+        si
+
+        @Test()
+        Calling__bind__with_a_written_name_and_a_different_name_taken_from_an_identifier__should_keep_the_written_one() is
+            let tuple = pair_tuples()
+            let r = GENERIC_ARGUMENT_BIND_RESULTS()
+            let t = type_param()
+
+            let projected = tuple(LIST[string?](["other", "high"])).with_projected_names(LIST[bool]([true, true]))
+
+            is_true(r.bind(t, tuple(LIST[string?](["low", "high"]))))
+            is_true(r.bind(t, projected))
+
+            has_names(bound_names(r, t), "low", "high")
+        si
+
+        @Test()
+        Calling__bind__with_two_different_names_taken_from_identifiers__should_leave_the_element_unnamed() is
+            let tuple = pair_tuples()
+            let r = GENERIC_ARGUMENT_BIND_RESULTS()
+            let t = type_param()
+
+            let first = tuple(LIST[string?](["x", "y"])).with_projected_names(LIST[bool]([true, true]))
+            let second = tuple(LIST[string?](["b", "y"])).with_projected_names(LIST[bool]([true, true]))
+
+            is_true(r.bind(t, first))
+            is_true(r.bind(t, second))
+
+            has_names(bound_names(r, t), "0", "y")
+        si
+
+        @Test()
+        Calling__bind__with_tuples_giving_one_element_different_names__should_fail() is
+            let tuple = pair_tuples()
+            let r = GENERIC_ARGUMENT_BIND_RESULTS()
+            let t = type_param()
+
+            is_true(r.bind(t, tuple(LIST[string?](["low", "high"]))))
+            is_false(r.bind(t, tuple(LIST[string?](["first", "high"]))))
+        si
+
         @Test()
         Calling__bind__twice_with_the_same_type__should_resolve_to_that_type() is
             let h = build_hierarchy()
