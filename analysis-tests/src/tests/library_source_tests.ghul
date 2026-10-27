@@ -168,5 +168,54 @@ namespace Analysis.Tests is
 
             are_equal("The number of code units.", response.doc)
         si
+
+        maybe_source() -> string =>
+            "use Lib.first\n"
+            "\n"
+            "f() -> int => 1\n"
+            "\n"
+            "let m = first()\n"
+            "assert m?\n"
+            "let n: int = m\n"
+            "let e: int = first() ?? 0\n"
+
+        // A MAYBE[T] the library writes by name is the optional carrier for
+        // as long as the session lasts, not only until the first rebuild.
+        // Every edit to a file with top-level statements rebuilds.
+        @Test()
+        a_library_maybe_stays_optional_across_rebuilds() is
+            let root = Path.get_directory_name(fixture_path("library-source/maybe/maybe.ghul"))!
+
+            let use analyser =
+                ANALYSER_PROCESS([
+                    "--target",
+                    "wasm",
+                    "--library-source",
+                    "maybe@1.0.0={root}",
+                    Path.combine(root, "maybe.ghul")
+                ])
+
+            analyser.send_edit("library-source-maybe.ghul", maybe_source())
+
+            for i in 0..3 do
+                let response = analyser.read_response()
+
+                assert isa Response.DIAGNOSTICS(response) else "expected DIAGNOSTICS response"
+
+                for diagnostic in response.diagnostics do
+                    is_false(diagnostic.severity == 1, "unexpected error after {i} rebuilds: {diagnostic.message}")
+                od
+
+                analyser.send_edit("library-source-maybe.ghul", "{maybe_source()}\nother{i}() -> int => 1\n")
+            od
+
+            let response = analyser.read_response()
+
+            assert isa Response.DIAGNOSTICS(response) else "expected DIAGNOSTICS response"
+
+            for diagnostic in response.diagnostics do
+                is_false(diagnostic.severity == 1, "unexpected error after rebuilds: {diagnostic.message}")
+            od
+        si
     si
 si
