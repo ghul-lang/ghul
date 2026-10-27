@@ -117,6 +117,49 @@ namespace Semantic.Types is
             return false
         si
 
+        // `newer` named with every element name either tuple gives: a
+        // name from one side is kept when the other leaves the element
+        // unnamed, and the same name from both is kept once. Null when
+        // the two give one element different names.
+        _with_both_names(existing: Type, newer: Type) -> Type? is
+            let names = LIST[string?]()
+            let any_name mut = false
+
+            for index in 0..newer.arguments.count do
+                let from_existing = _element_name(existing, index)
+                let from_newer = _element_name(newer, index)
+
+                if from_existing? /\ from_newer? /\ from_existing !~ from_newer then
+                    return null
+                fi
+
+                let name = from_newer ?? from_existing
+
+                if name? then
+                    any_name = true
+                fi
+
+                names.add(name)
+            od
+
+            if !any_name then
+                return newer
+            fi
+
+            return newer.apply_tuple_element_names(names)
+        si
+
+        // The name a tuple gives its element at `index`, or null where it
+        // gives none. A positional name such as `0` is not a name.
+        _element_name(tuple: Type, index: int) -> string? =>
+            if
+                let names = tuple.tuple_element_names /\
+                index < names.count /\
+                !Symbols.Symbol.is_positional_member_name(names[index])
+            then
+                names[index]
+            fi
+
         bind(type_argument: GenericArgument, actual_type: Type mut) -> bool is
             if !_is_bindable(type_argument) then
                 return true
@@ -126,6 +169,29 @@ namespace Semantic.Types is
 
             if bindings.try_get_value(type_argument.symbol, existing ref) then
                 if !existing.actual_type.is_none then
+                    // Tuple assignability ignores element names, so two
+                    // tuples of the same shape are each assignable from
+                    // the other whatever they are called. Neither simply
+                    // replaces the other: the binding keeps every name
+                    // either side gives, and two different names for the
+                    // same element mean the types differ.
+                    if
+                        existing.actual_type.is_value_tuple /\
+                        actual_type.is_value_tuple /\
+                        actual_type.is_assignable_from(existing.actual_type) /\
+                        existing.actual_type.is_assignable_from(actual_type)
+                    then
+                        if let named = _with_both_names(existing.actual_type, actual_type) then
+                            existing.actual_type = named
+
+                            return true
+                        fi
+
+                        existing.actual_type = NONE.instance
+
+                        return false
+                    fi
+
                     if actual_type.is_assignable_from(existing.actual_type) then
                         if !actual_type.is_null /\ !actual_type.is_sentinel then
                             existing.actual_type = actual_type

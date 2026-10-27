@@ -1,6 +1,8 @@
 namespace Semantic.Types.UnitTests is
     use Collections.LIST
 
+    use Ghul.Pipes
+
     use Microsoft.VisualStudio.TestTools.UnitTesting.Assert
 
     use Source.LOCATION
@@ -68,6 +70,81 @@ namespace Semantic.Types.UnitTests is
 
         type_param() -> GenericArgument =>
             cast GenericArgument(CLASSY_GENERIC_ARGUMENT(loc(), Semantic.BLOCK_SCOPE(), "T", 0).type)
+
+        // Two-element tuples over one shared tuple class and element type,
+        // so that any two of them are each assignable from the other
+        // whatever their element names.
+        pair_tuples() -> ((LIST[string?]?) -> Type) =>
+            let
+                pair = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "TUPLE_2", LIST[string](["T1", "T2"]), Semantic.BLOCK_SCOPE()),
+                element = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "int", empty_names(), Semantic.BLOCK_SCOPE()).type!
+            in
+                (names: LIST[string?]?) => Semantic.Types.TUPLE(loc(), pair, LIST[Type]([element, element]), names)
+
+        names_of(type: Type) -> string =>
+            if let names = type.tuple_element_names then
+                names |> map(name => name ?? "_") |> join(" ")
+            else
+                "none"
+            fi
+
+        @Test()
+        Calling__bind__with_a_named_tuple_then_an_unnamed_one__should_keep_the_names() is
+            let tuple = pair_tuples()
+            let r = GENERIC_ARGUMENT_BIND_RESULTS()
+            let t = type_param()
+
+            is_true(r.bind(t, tuple(LIST[string?](["low", "high"]))))
+            is_true(r.bind(t, tuple(null)))
+
+            are_equal("low high", names_of(r.bindings[t.symbol].actual_type))
+        si
+
+        @Test()
+        Calling__bind__with_an_unnamed_tuple_then_a_named_one__should_take_the_names() is
+            let tuple = pair_tuples()
+            let r = GENERIC_ARGUMENT_BIND_RESULTS()
+            let t = type_param()
+
+            is_true(r.bind(t, tuple(null)))
+            is_true(r.bind(t, tuple(LIST[string?](["low", "high"]))))
+
+            are_equal("low high", names_of(r.bindings[t.symbol].actual_type))
+        si
+
+        @Test()
+        Calling__bind__with_tuples_naming_different_elements__should_keep_both_names() is
+            let tuple = pair_tuples()
+            let r = GENERIC_ARGUMENT_BIND_RESULTS()
+            let t = type_param()
+
+            is_true(r.bind(t, tuple(LIST[string?](["low", null]))))
+            is_true(r.bind(t, tuple(LIST[string?]([null, "high"]))))
+
+            are_equal("low high", names_of(r.bindings[t.symbol].actual_type))
+        si
+
+        @Test()
+        Calling__bind__with_tuples_giving_one_element_the_same_name__should_keep_it() is
+            let tuple = pair_tuples()
+            let r = GENERIC_ARGUMENT_BIND_RESULTS()
+            let t = type_param()
+
+            is_true(r.bind(t, tuple(LIST[string?](["low", null]))))
+            is_true(r.bind(t, tuple(LIST[string?](["low", "high"]))))
+
+            are_equal("low high", names_of(r.bindings[t.symbol].actual_type))
+        si
+
+        @Test()
+        Calling__bind__with_tuples_giving_one_element_different_names__should_fail() is
+            let tuple = pair_tuples()
+            let r = GENERIC_ARGUMENT_BIND_RESULTS()
+            let t = type_param()
+
+            is_true(r.bind(t, tuple(LIST[string?](["low", "high"]))))
+            is_false(r.bind(t, tuple(LIST[string?](["first", "high"]))))
+        si
 
         @Test()
         Calling__bind__twice_with_the_same_type__should_resolve_to_that_type() is
