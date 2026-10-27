@@ -119,44 +119,86 @@ namespace Semantic.Types is
 
         // `newer` named with every element name either tuple gives: a
         // name from one side is kept when the other leaves the element
-        // unnamed, and the same name from both is kept once. Null when
-        // the two give one element different names.
+        // unnamed, and the same name from both is kept once. A name
+        // written out outranks one taken from an identifier, and two
+        // different names taken from identifiers leave the element
+        // unnamed. Two different names written out mean the tuples
+        // differ, and the result is null, unless one side's element type
+        // is still being inferred, when that side gives way.
         _with_both_names(existing: Type, newer: Type) -> Type? is
             let names = LIST[string?]()
+            let projected = LIST[bool]()
             let any_name mut = false
+            let any_projected mut = false
 
             for index in 0..newer.arguments.count do
                 let from_existing = _element_name(existing, index)
                 let from_newer = _element_name(newer, index)
+                let existing_projected = existing.is_projected_element_name(index)
+                let newer_projected = newer.is_projected_element_name(index)
+
+                let name mut = from_newer ?? from_existing
+                let is_projected mut =
+                    if from_newer? then newer_projected else existing_projected fi
 
                 if from_existing? /\ from_newer? /\ from_existing !~ from_newer then
-                    return null
-                fi
+                    if existing_projected /\ newer_projected then
+                        name = null
+                        is_projected = false
+                    elif newer_projected then
+                        name = from_existing
+                        is_projected = false
+                    elif !existing_projected then
+                        let existing_settled = !existing.arguments[index].contains_inferred
+                        let newer_settled = !newer.arguments[index].contains_inferred
 
-                let name = from_newer ?? from_existing
+                        if existing_settled /\ !newer_settled then
+                            name = from_existing
+                        elif existing_settled /\ newer_settled then
+                            return null
+                        fi
+                    fi
+                fi
 
                 if name? then
                     any_name = true
                 fi
 
-                names.add(name)
+                if is_projected then
+                    any_projected = true
+                fi
+
+                names.add(name ?? "{index}")
+                projected.add(is_projected)
             od
 
             if !any_name then
                 return newer
             fi
 
-            return newer.apply_tuple_element_names(names)
+            let named = newer.apply_tuple_element_names(names)
+
+            if any_projected then
+                return named.with_projected_names(projected)
+            fi
+
+            return named
         si
 
         // The name a tuple gives its element at `index`, or null where it
         // gives none. A positional name such as `0` is not a name.
         _element_name(tuple: Type, index: int) -> string? =>
             if
-                let names = tuple.tuple_element_names /\
-                index < names.count /\
-                !Symbols.Symbol.is_positional_member_name(names[index])
+                let name = _raw_element_name(tuple, index) /\
+                !Symbols.Symbol.is_positional_member_name(name)
             then
+                name
+            fi
+
+        // The tuple's own entry for the element at `index`, positional
+        // or not, or null where it records none.
+        _raw_element_name(tuple: Type, index: int) -> string? =>
+            if let names = tuple.tuple_element_names /\ index < names.count then
                 names[index]
             fi
 
