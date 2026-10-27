@@ -104,7 +104,14 @@ namespace Syntax.Process is
                 return
             fi
 
-            let result = _partials.present(application, thunk, application.location, call_value, placeholder_values)
+            let result =
+                _partials.present(
+                    application,
+                    thunk,
+                    application.location,
+                    call_value,
+                    placeholder_values,
+                    _expected_action_return(application))
 
             if !result? then
                 _logger.error(application.location, "cannot partially apply this call")
@@ -121,23 +128,15 @@ namespace Syntax.Process is
         // bound a literal's parameters: the call then resolves over them
         // as it would over written arguments, which is what lets it
         // choose an overload nothing written would pin. A parameter the
-        // context has not settled is left for the resolved formal, and a
-        // settled return type is the call's expected type.
+        // context has not settled is left for the resolved formal.
         _bound_placeholders_from_expected(application: Trees.Expressions.PARTIAL_APPLICATION) is
-            let expected = application.expected_type
+            let shape = _expected_shape(application)
 
-            if !expected? then
+            if !shape? then
                 return
             fi
 
-            let shape =
-                if expected.is_function then
-                    expected
-                else
-                    Semantic.DELEGATE_SHAPE().try_get_function_type(expected, _innate_symbol_lookup)
-                fi
-
-            if !shape? \/ shape.arguments.count - 1 != application.placeholders.count then
+            if Semantic.ARGUMENT_PACK.parameter_count(shape!) != application.placeholders.count then
                 return
             fi
 
@@ -149,11 +148,52 @@ namespace Syntax.Process is
                 fi
             od
 
-            let return_type = shape.arguments[shape.arguments.count - 1]
+            // an expected ACTION's return is void, which asks nothing of
+            // the body - its result is discarded by the thunk, never
+            // demanded of the call - so only a value-returning shape
+            // hands the body a return type
+            if !shape.is_action then
+                let return_type = shape.arguments[shape.arguments.count - 1]
 
-            if !application.body.expected_type? /\ _is_settled_here(return_type) then
-                application.body.set_expected_type(return_type, null)
+                if !application.body.expected_type? /\ _is_settled_here(return_type) then
+                    application.body.set_expected_type(return_type, null)
+                fi
             fi
+        si
+
+        // The call shape expected of `application`, whether written as a
+        // ghūl function type or carried by a named .NET delegate.
+        _expected_shape(application: Trees.Expressions.PARTIAL_APPLICATION) -> Semantic.Types.Type? is
+            let expected = application.expected_type
+
+            if !expected? then
+                return null
+            fi
+
+            if expected.is_function then
+                return expected
+            fi
+
+            return Semantic.DELEGATE_SHAPE().try_get_function_type(expected, _innate_symbol_lookup)
+        si
+
+        // The void an expected ACTION slot asks of the application,
+        // where its parameters match the `*`s one for one: the thunk
+        // returns void and discards the call's own result, as a literal's
+        // body has its value discarded under the same slot. Absent for
+        // every other shape.
+        _expected_action_return(application: Trees.Expressions.PARTIAL_APPLICATION) -> Semantic.Types.Type? is
+            let shape = _expected_shape(application)
+
+            if !shape? \/ !shape.is_action then
+                return null
+            fi
+
+            if Semantic.ARGUMENT_PACK.parameter_count(shape!) != application.placeholders.count then
+                return null
+            fi
+
+            return _innate_symbol_lookup.get_void_type()
         si
 
         // The context's parameter type is what the thunk's parameter is
