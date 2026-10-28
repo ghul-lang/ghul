@@ -1,0 +1,183 @@
+namespace Syntax.Process is
+    use IR
+    use IR.Values
+
+    // What a `memo` function's body needs at each of its returns: the
+    // cache it stores into and the key the call's arguments made.
+    class MEMO_BODY is
+        function: Semantic.Symbols.Function
+        cache: Semantic.Symbols.Field
+        key: TEMP
+        assign: Semantic.Symbols.Function
+
+        init(
+            function: Semantic.Symbols.Function,
+            cache: Semantic.Symbols.Field,
+            key: TEMP,
+            assign: Semantic.Symbols.Function
+        ) is
+            self.function = function
+            self.cache = cache
+            self.key = key
+            self.assign = assign
+        si
+    si
+
+    // A function declared `memo` answers from its cache. Its body begins
+    // by making the key from its arguments, creating the cache on the
+    // first call, and returning the cached result when the key is there;
+    // every return from it stores its result under the key on the way
+    // out. Calls and function values reach it as any other function, so
+    // they all go through the cache, its calls to itself included.
+    partial GENERATE_IL is
+        // The `memo` bodies being generated, innermost last: a function
+        // declared inside another's body is generated in the middle of it.
+        _memo_bodies: Collections.LIST[MEMO_BODY]
+
+        // The prologue of `symbol`'s body, when it is a `memo` function.
+        _begin_memo_body(symbol: Semantic.Symbols.Function) is
+            let cache = symbol.memo_cache
+
+            if !cache? then
+                return
+            fi
+
+            let cache_type = cache.type!
+
+            // contains_key then the indexer rather than try_get_value: the
+            // wasm target cannot take the address of a local for its out
+            // parameter.
+            let contains = _memo_member(cache_type, "contains_key", 1)
+            let read = _memo_member(cache_type, Semantic.Symbols.INDEXER_NAMES.read, 1)
+            let assign = _memo_member(cache_type, Semantic.Symbols.INDEXER_NAMES.assign, 2)
+            let constructor = _memo_member(cache_type, "init", 0)
+
+            assert contains? /\ read? /\ assign? /\ constructor? else "memo cache type {cache_type} lacks the members a memo body uses"
+
+            let location = symbol.location
+
+            let key = TEMP(current_block, "memo_key", _memo_key(symbol))
+
+            let expansion = EXPANSION(_innate_symbol_lookup.get_void_type())
+
+            let created = expansion.region()
+
+            expansion.exit_if(created, BRANCH.NZ, _load_memo_cache(location, cache))
+            expansion.add(_store_memo_cache(location, cache, NEW(cache_type, constructor, Collections.LIST[Value](0))))
+            expansion.close(created)
+
+            let missed = expansion.region()
+
+            expansion.exit_if(
+                missed,
+                BRANCH.Z,
+                contains.call(location, _load_memo_cache(location, cache), [cast Value(key.load())], null, _function_caller))
+
+            expansion.add(read.call(location, _load_memo_cache(location, cache), [cast Value(key.load())], null, _function_caller))
+            expansion.add(RET())
+            expansion.close(missed)
+
+            add(expansion.result)
+
+            _memo_bodies.add(MEMO_BODY(symbol, cache, key, assign))
+        si
+
+        _end_memo_body(symbol: Semantic.Symbols.Function) is
+            let bodies = _memo_bodies
+
+            if bodies.count > 0 /\ bodies[bodies.count - 1].function == symbol then
+                bodies.remove_at(bodies.count - 1)
+            fi
+        si
+
+        _is_memo_body(symbol: Semantic.Symbols.Function) -> bool =>
+            if let memo = _current_memo_body then memo.function == symbol else false fi
+
+        // The `memo` body whose returns are being generated, if the
+        // function being generated is one.
+        _current_memo_body: MEMO_BODY? is
+            let bodies = _memo_bodies
+
+            if bodies.count > 0 /\ bodies[bodies.count - 1].function == current_function then
+                return bodies[bodies.count - 1]
+            fi
+
+            return null
+        si
+
+        // Adds the return of `value` from the function being generated:
+        // through its cache when it is a `memo` function, and directly
+        // otherwise.
+        _add_function_return(value: Value) is
+            if let memo = _current_memo_body then
+                let location = memo.function.location
+                let result = TEMP(current_block, "memo_result", value)
+
+                add(
+                    memo.assign.call(
+                        location,
+                        _load_memo_cache(location, memo.cache),
+                        [cast Value(memo.key.load()), result.load()],
+                        null,
+                        _function_caller))
+
+                add(result.load())
+            else
+                add(value)
+            fi
+
+            add(RET())
+        si
+
+        // The key the call's arguments make: the one argument itself, a
+        // tuple of several, or a constant for a function that takes none.
+        _memo_key(symbol: Semantic.Symbols.Function) -> Value is
+            let names = symbol.argument_names
+
+            if names.count == 0 then
+                return Literal.NUMBER(0, _innate_symbol_lookup.get_int_type())
+            fi
+
+            let arguments = Collections.LIST[Value]()
+
+            for name in names do
+                arguments.add(symbol.find_direct(name)!.load(symbol.location, null, _symbol_loader))
+            od
+
+            if symbol.is_memo_key_wrapped then
+                let bool_type = _innate_symbol_lookup.get_bool_type()
+
+                return TUPLE(
+                    _innate_symbol_lookup.get_tuple_type([symbol.arguments[0], bool_type], null),
+                    [arguments[0], Literal.NUMBER(1, bool_type)])
+            fi
+
+            if arguments.count == 1 then
+                return arguments[0]
+            fi
+
+            return TUPLE(_innate_symbol_lookup.get_tuple_type(symbol.arguments, null), arguments)
+        si
+
+        _load_memo_cache(location: Source.LOCATION, cache: Semantic.Symbols.Field) -> Value =>
+            cache.load(location, _memo_cache_receiver(location, cache), _symbol_loader)
+
+        _store_memo_cache(location: Source.LOCATION, cache: Semantic.Symbols.Field, value: Value) -> Value =>
+            cache.store(location, _memo_cache_receiver(location, cache), value, _symbol_loader, false)
+
+        _memo_cache_receiver(location: Source.LOCATION, cache: Semantic.Symbols.Field) -> Value? =>
+            if cache.is_instance then _symbol_loader.load_self(location) else null fi
+
+        _memo_member(type: Semantic.Types.Type, name: string, arity: int) -> Semantic.Symbols.Function? is
+            if let group: Semantic.Symbols.FUNCTION_GROUP = type.find_member(name) then
+                for f in group.functions do
+                    if f.argument_names.count == arity then
+                        return f
+                    fi
+                od
+            fi
+
+            return null
+        si
+    si
+si
