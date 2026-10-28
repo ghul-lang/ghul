@@ -1,0 +1,102 @@
+namespace Semantic.UnitTests is
+    use Collections.LIST
+
+    use Source.LOCATION
+
+    use Semantic.Types.Type
+
+    use Semantic.Symbols.CLASS
+    use Semantic.Symbols.Function
+    use Semantic.Symbols.STATIC_METHOD
+    use Semantic.Symbols.INSTANCE_METHOD
+    use Semantic.Symbols.FUNCTION_GROUP
+    use TestClass = Microsoft.VisualStudio.TestTools.UnitTesting.TestClassAttribute
+    use Test = Microsoft.VisualStudio.TestTools.UnitTesting.TestMethodAttribute
+    use Assertions
+
+    // Tests for PACK_PUSH_CANDIDATES - which overload's formals to push
+    // onto a call's arguments when several overloads share the call's
+    // arity and the pack adaptation applies to some of them.
+    @TestClass()
+    class PACK_PUSH_CANDIDATES_TESTS is
+        init() is si
+
+        loc() -> LOCATION => LOCATION("test.ghul", 1, 1, 1, 1)
+
+        owner() -> CLASS => CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Owner", LIST[string](), Semantic.BLOCK_SCOPE())
+
+        static_method(owner: CLASS, name: string) -> STATIC_METHOD is
+            let l = TEST_INNATE_SYMBOL_LOOKUP()
+            let f = STATIC_METHOD(loc(), loc(), owner, name, Semantic.BLOCK_SCOPE())
+            f.arguments = LIST[Type]([l.get_int_type()])
+            f.return_type = l.get_int_type()
+            return f
+        si
+
+        instance_method(owner: CLASS, name: string) -> INSTANCE_METHOD is
+            let l = TEST_INNATE_SYMBOL_LOOKUP()
+            let f = INSTANCE_METHOD(loc(), loc(), owner, name, Semantic.BLOCK_SCOPE())
+            f.arguments = LIST[Type]([l.get_int_type()])
+            f.return_type = l.get_int_type()
+            return f
+        si
+
+        @Test()
+        Calling__find_single__when_no_overload_adapts__returns_null() is
+            let o = owner()
+            let group = FUNCTION_GROUP(loc(), o, "two")
+            group.add(static_method(o, "two"))
+            group.add(static_method(o, "two"))
+
+            let result = Semantic.PACK_PUSH_CANDIDATES().find_single(group, true, (f: Function) => false)
+
+            is_null(result)
+        si
+
+        // The `two(x: int)` beside `two[T.., U](f: T.. -> U)` shape: only
+        // the pack overload adapts, so it is the one pushed.
+        @Test()
+        Calling__find_single__when_exactly_one_overload_adapts__returns_it() is
+            let o = owner()
+            let plain = static_method(o, "two")
+            let packed = static_method(o, "two")
+            let group = FUNCTION_GROUP(loc(), o, "two")
+            group.add(plain)
+            group.add(packed)
+
+            let result = Semantic.PACK_PUSH_CANDIDATES().find_single(group, true, (f: Function) => f == packed)
+
+            are_same(packed, result)
+        si
+
+        // Two overloads the adaptation applies to give no reason to push
+        // either: no retry is made, and the call reports its original
+        // resolution failure.
+        @Test()
+        Calling__find_single__when_two_overloads_adapt__returns_null() is
+            let o = owner()
+            let group = FUNCTION_GROUP(loc(), o, "two")
+            group.add(static_method(o, "two"))
+            group.add(static_method(o, "two"))
+
+            let result = Semantic.PACK_PUSH_CANDIDATES().find_single(group, true, (f: Function) => true)
+
+            is_null(result)
+        si
+
+        // An instance overload is no candidate for a call that cannot
+        // supply a receiver, so it neither wins nor makes a tie.
+        @Test()
+        Calling__find_single__without_an_instance__skips_instance_overloads() is
+            let o = owner()
+            let packed = static_method(o, "two")
+            let group = FUNCTION_GROUP(loc(), o, "two")
+            group.add(instance_method(o, "two"))
+            group.add(packed)
+
+            let result = Semantic.PACK_PUSH_CANDIDATES().find_single(group, false, (f: Function) => true)
+
+            are_same(packed, result)
+        si
+    si
+si
