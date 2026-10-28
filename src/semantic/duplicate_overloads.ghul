@@ -1,0 +1,63 @@
+namespace Semantic is
+    use Symbols.Function
+
+    // Recognises a tie between global functions that are the same
+    // signature declared more than once: functions with alike parameters
+    // in different namespaces, merged into one group by `use`. Members of
+    // a type are left alone; a type declaring one twice is already an
+    // error.
+    class DUPLICATE_OVERLOADS is
+        // The tied candidate whose declaration comes first in `group`,
+        // which lists a name's functions in scope order, when every
+        // candidate takes the same parameters; null when any differs.
+        first_in_scope_order(group: Symbols.FUNCTION_GROUP, tied: Collections.List[Function]) -> Function? static is
+            if tied.count < 2 then
+                return null
+            fi
+
+            let signature = _declaration_of(tied[0]).override_class
+
+            for f in tied do
+                let declaration = _declaration_of(f)
+
+                if !isa Symbols.NAMESPACE(declaration.owner) \/ !(declaration.override_class =~ signature) then
+                    return null
+                fi
+            od
+
+            for g in group.functions do
+                let declaration = _declaration_of(g)
+
+                for f in tied do
+                    if _declaration_of(f) == declaration then
+                        return f
+                    fi
+                od
+            od
+
+            return null
+        si
+
+        // Whether `kept` is declared in the namespace `group` was looked up
+        // from, and none of `others` is: a function the calling namespace
+        // declares shadows what it imports, so a library that later gains
+        // a function of the same name and arguments changes nothing.
+        is_declared_where_called(group: Symbols.FUNCTION_GROUP, kept: Function, others: Collections.List[Function]) -> bool static is
+            let calling = group.owner
+
+            if !calling? \/ _declaration_of(kept).owner != calling then
+                return false
+            fi
+
+            for f in others do
+                if _declaration_of(f).owner == calling then
+                    return false
+                fi
+            od
+
+            return true
+        si
+
+        _declaration_of(f: Function) -> Function static => cast Function(f.root_specialized_from)
+    si
+si
