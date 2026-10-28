@@ -7,20 +7,17 @@ namespace Syntax.Process is
     class MEMO_BODY is
         function: Semantic.Symbols.Function
         cache: Semantic.Symbols.Field
-        cache_type: Semantic.Types.Type
         key: TEMP
         assign: Semantic.Symbols.Function
 
         init(
             function: Semantic.Symbols.Function,
             cache: Semantic.Symbols.Field,
-            cache_type: Semantic.Types.Type,
             key: TEMP,
             assign: Semantic.Symbols.Function
         ) is
             self.function = function
             self.cache = cache
-            self.cache_type = cache_type
             self.key = key
             self.assign = assign
         si
@@ -35,19 +32,7 @@ namespace Syntax.Process is
     partial GENERATE_IL is
         // The `memo` bodies being generated, innermost last: a function
         // declared inside another's body is generated in the middle of it.
-        _memo_bodies: Collections.LIST[MEMO_BODY] is
-            if let bodies = _memo_body_stack then
-                return bodies
-            fi
-
-            let bodies = Collections.LIST[MEMO_BODY]()
-
-            _memo_body_stack = bodies
-
-            return bodies
-        si
-
-        _memo_body_stack: Collections.LIST[MEMO_BODY]?
+        _memo_bodies: Collections.LIST[MEMO_BODY]
 
         // The prologue of `symbol`'s body, when it is a `memo` function.
         _begin_memo_body(symbol: Semantic.Symbols.Function) is
@@ -59,6 +44,9 @@ namespace Syntax.Process is
 
             let cache_type = cache.type!
 
+            // contains_key then the indexer rather than try_get_value: the
+            // wasm target cannot take the address of a local for its out
+            // parameter.
             let contains = _memo_member(cache_type, "contains_key", 1)
             let read = _memo_member(cache_type, Semantic.Symbols.INDEXER_NAMES.read, 1)
             let assign = _memo_member(cache_type, Semantic.Symbols.INDEXER_NAMES.assign, 2)
@@ -83,8 +71,7 @@ namespace Syntax.Process is
             expansion.exit_if(
                 missed,
                 BRANCH.Z,
-                contains.call(location, _load_memo_cache(location, cache), [cast Value(key.load())], null, _function_caller)
-            )
+                contains.call(location, _load_memo_cache(location, cache), [cast Value(key.load())], null, _function_caller))
 
             expansion.add(read.call(location, _load_memo_cache(location, cache), [cast Value(key.load())], null, _function_caller))
             expansion.add(RET())
@@ -92,7 +79,7 @@ namespace Syntax.Process is
 
             add(expansion.result)
 
-            _memo_bodies.add(MEMO_BODY(symbol, cache, cache_type, key, assign))
+            _memo_bodies.add(MEMO_BODY(symbol, cache, key, assign))
         si
 
         _end_memo_body(symbol: Semantic.Symbols.Function) is
@@ -156,6 +143,14 @@ namespace Syntax.Process is
             for name in names do
                 arguments.add(symbol.find_direct(name)!.load(symbol.location, null, _symbol_loader))
             od
+
+            if symbol.is_memo_key_wrapped then
+                let bool_type = _innate_symbol_lookup.get_bool_type()
+
+                return TUPLE(
+                    _innate_symbol_lookup.get_tuple_type([symbol.arguments[0], bool_type], null),
+                    [arguments[0], Literal.NUMBER(1, bool_type)])
+            fi
 
             if arguments.count == 1 then
                 return arguments[0]
