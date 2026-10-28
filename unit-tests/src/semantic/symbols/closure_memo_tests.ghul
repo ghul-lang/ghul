@@ -1,0 +1,71 @@
+namespace Semantic.UnitTests is
+    use Microsoft.VisualStudio.TestTools.UnitTesting.Assert
+
+    use Source.LOCATION
+
+    use Semantic.Symbols.CLASS
+    use Semantic.Symbols.INSTANCE_CLOSURE
+    use TestClass = Microsoft.VisualStudio.TestTools.UnitTesting.TestClassAttribute
+    use Test = Microsoft.VisualStudio.TestTools.UnitTesting.TestMethodAttribute
+    use Assertions
+
+    // Pins that a `memo` literal keeps the frame its cache lives on: the
+    // cache is a frame field, and nothing that would drop the frame - a
+    // delegate conversion, the static delegate cache - applies to it.
+    @TestClass()
+    class CLOSURE_MEMO_TESTS is
+        // A frame declares its fields at the internal location, which is
+        // only there once the location statics are set up.
+        init() is
+            if !LOCATION.internal? then
+                LOCATION.init_static()
+            fi
+        si
+
+        loc() -> LOCATION => LOCATION("test.ghul", 1, 1, 1, 1)
+
+        closure(is_memo: bool) -> INSTANCE_CLOSURE is
+            let scope = Semantic.BLOCK_SCOPE()
+            let owner = CLASS(loc(), loc(), scope, "OWNER", Collections.LIST[string](), scope)
+            let result = INSTANCE_CLOSURE(loc(), owner, "$anon", owner, false)
+
+            result.is_memo = is_memo
+
+            return result
+        si
+
+        @Test()
+        A_closure_capturing_nothing_could_be_a_delegate() is
+            is_true(closure(false).could_be_delegate)
+        si
+
+        @Test()
+        A_memo_closure_capturing_nothing_could_not_be_a_delegate() is
+            is_false(closure(true).could_be_delegate)
+        si
+
+        @Test()
+        A_memo_closure_is_never_cached_as_a_shared_delegate() is
+            is_false(closure(true).is_memoizable_delegate)
+        si
+
+        @Test()
+        A_memo_cache_should_be_a_field_of_the_closures_frame() is
+            let subject = closure(true)
+
+            let cache = subject.find_or_add_memo_cache()
+
+            is_true(subject.frame?)
+            are_same(cast Semantic.Symbols.Symbol(subject.frame!), cast Semantic.Symbols.Symbol(cache.owner!))
+            are_same(cache, subject.memo_cache!)
+            is_true(cache.is_memo_cache)
+        si
+
+        @Test()
+        Asking_for_the_memo_cache_again_should_give_the_same_field() is
+            let subject = closure(true)
+
+            are_same(subject.find_or_add_memo_cache(), subject.find_or_add_memo_cache())
+        si
+    si
+si
