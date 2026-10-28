@@ -152,7 +152,7 @@ namespace Semantic is
             fi
 
             let shape_arguments = shape.arguments
-            let parameter_count = shape_arguments.count - 1
+            let parameter_count = ARGUMENT_PACK.parameter_count(shape)
 
             let parameter_types mut = Collections.LIST[Type](parameter_count)
 
@@ -171,11 +171,9 @@ namespace Semantic is
             // The slot's return type pins type arguments only where it is
             // fixed itself; one still open - a type variable of the call
             // being resolved - is left to bind from the constructed type.
-            let return_slot = shape_arguments[parameter_count]
-
             let return_constraint =
-                if _is_fixed(return_slot) then
-                    return_slot
+                if !shape.is_action /\ _is_fixed(shape_arguments[parameter_count]) then
+                    shape_arguments[parameter_count]
                 else
                     null
                 fi
@@ -222,9 +220,11 @@ namespace Semantic is
                 else
                     _logger.roll_back()
 
-                    parameter_types = Collections.LIST[Type](spread.arguments.count - 1)
+                    let spread_count = ARGUMENT_PACK.parameter_count(spread)
 
-                    for i in 0..spread.arguments.count - 1 do
+                    parameter_types = Collections.LIST[Type](spread_count)
+
+                    for i in 0..spread_count do
                         parameter_types.add(spread.arguments[i])
                     od
 
@@ -442,7 +442,7 @@ namespace Semantic is
             target_shape: Type
         ) -> Symbols.Function is
             let shape_arguments = target_shape.arguments
-            let parameter_count = shape_arguments.count - 1
+            let parameter_count = ARGUMENT_PACK.parameter_count(target_shape)
 
             if function.arguments.count != parameter_count then
                 return function
@@ -488,7 +488,7 @@ namespace Semantic is
             // the parameters already pinned everything: an open return
             // slot carries no information then, and a contradictory
             // one is the assignability check's to report.
-            if !parameters_bound then
+            if !parameters_bound /\ !target_shape.is_action then
                 let return_slot = shape_arguments[parameter_count]
 
                 if let return_type = function.return_type /\ !return_slot.is_error /\ !return_slot.contains_inferred then
@@ -527,7 +527,7 @@ namespace Semantic is
             target_shape: Type
         ) -> Symbols.Function? is
             let shape_arguments = target_shape.arguments
-            let parameter_count = shape_arguments.count - 1
+            let parameter_count = ARGUMENT_PACK.parameter_count(target_shape)
 
             let parameter_types = Collections.LIST[Type](parameter_count)
 
@@ -535,7 +535,12 @@ namespace Semantic is
                 parameter_types.add(shape_arguments[i])
             od
 
-            let return_constraint = shape_arguments[parameter_count]
+            let return_constraint =
+                if target_shape.is_action then
+                    null
+                else
+                    shape_arguments[parameter_count]
+                fi
 
             let want_instance =
                 if from? then
