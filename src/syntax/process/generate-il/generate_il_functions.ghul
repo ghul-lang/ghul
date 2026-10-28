@@ -417,15 +417,24 @@ namespace Syntax.Process is
 
             _gen_closure_destructure_prologue(function, closure)
 
+            _begin_memo_body(closure)
+
             function.body.walk(self)
 
             // An implicit tail return delivers the body list's captured
             // value boxed against the closure's return type, in place of
-            // the default value a non-void fall-off loads.
+            // the default value a non-void fall-off loads. A memo
+            // literal's tail is returned through its cache.
             let closure_tail = _function_body_tail(function.body)
 
+            let tail_returned = closure_tail? /\ closure.return_type? /\ _is_memo_body(closure)
+
             if let ct = closure_tail, crt = closure.return_type then
-                add(_boxer.box_if_needed(ct, crt))
+                if tail_returned then
+                    _add_function_return(_boxer.box_if_needed(ct, crt))
+                else
+                    add(_boxer.box_if_needed(ct, crt))
+                fi
             elif
                 closure.return_type? /\
                 closure.return_type.compare(_innate_symbol_lookup.get_void_type()) != Semantic.Types.MATCH.SAME
@@ -437,7 +446,11 @@ namespace Syntax.Process is
                 fi
             fi
 
-            add(Values.RET())
+            if !tail_returned then
+                add(Values.RET())
+            fi
+
+            _end_memo_body(closure)
 
             _backend.write(current_block)
 

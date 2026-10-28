@@ -1195,6 +1195,12 @@ namespace Syntax.Process is
                 Semantic.MATCH_PROPAGATOR(_logger).propagate_match(target, closure.type)
             fi
 
+            if let memo = function.memo_location /\ closure.is_memo then
+                if let type = MEMO_CACHE_TYPE(_logger, _innate_symbol_lookup, _task_conversion).of(memo, closure) then
+                    closure.set_memo_cache_type(type)
+                fi
+            fi
+
             closure.unmap_type_arguments()
 
             let value mut = closure.load(function.location, _symbol_loader)
@@ -1328,13 +1334,21 @@ namespace Syntax.Process is
         // conversion) overwrite the recorded flag — the last walk is
         // the one whose compilation stands.
         _walk_literal_body(function: Trees.Expressions.FUNCTION, closure: Semantic.Symbols.Closure) is
+            // A `memo` literal's cache lives on its frame, so the frame is
+            // there before anything in the body is captured into it.
+            if closure.is_memo then
+                closure.find_or_add_memo_cache()
+            fi
+
             _flow.push_literal_frame()
 
             closure.enter_literal_body()
             function.body.walk(_visitor)
             closure.leave_literal_body()
 
-            closure.literal_body_impure = _flow.pop_literal_frame()
+            // A literal written `pure` is trusted, as a function declared
+            // `pure` is.
+            closure.literal_body_impure = _flow.pop_literal_frame() /\ !closure.is_declared_pure
         si
 
         // A nested named function referring to itself, by its own name.

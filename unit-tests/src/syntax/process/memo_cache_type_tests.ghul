@@ -1,0 +1,169 @@
+namespace Syntax.Process.UnitTests is
+    use Microsoft.VisualStudio.TestTools.UnitTesting.Assert
+
+    use NSubstitute
+    use NSubstitute.SubstituteExtensions.returns
+
+    use Source.LOCATION
+
+    use Collections.LIST
+
+    use Semantic.Lookups.InnateSymbolLookup
+    use Semantic.Symbols.CLASS
+    use Semantic.Symbols.NAMESPACE
+    use Semantic.Symbols.STATIC_CLOSURE
+    use Semantic.Types.Type
+
+    use Syntax.Process.MEMO_CACHE_TYPE
+
+    use TestClass = Microsoft.VisualStudio.TestTools.UnitTesting.TestClassAttribute
+    use Test = Microsoft.VisualStudio.TestTools.UnitTesting.TestMethodAttribute
+    use Assertions
+
+    // Pins the cache type a `memo` function gets from its signature: the
+    // key is a constant int for no arguments, the argument itself for one,
+    // and a tuple for several or for one that may be absent. A signature
+    // memo cannot cache is reported and gets no cache type.
+    @TestClass()
+    class MEMO_CACHE_TYPE_TESTS is
+        _scope: Semantic.BLOCK_SCOPE
+        _int: Type
+        _bool: Type
+        _string: Type
+        _tuple: Type
+        _map: Type
+        _task_class: CLASS
+        _logger: Logging.Logger
+        _lookup: InnateSymbolLookup
+
+        init() is
+            _scope = Semantic.BLOCK_SCOPE()
+            _int = make_class("int").type!
+            _bool = make_class("bool").type!
+            _string = make_class("string").type!
+            _tuple = make_class("TUPLE").type!
+            _map = make_class("MAP").type!
+            _task_class = CLASS(loc(), loc(), _scope, "Task", names(["T"]), _scope)
+
+            _logger = NSubstitute.Substitute.`for`[Logging.Logger](System.Array.empty`[object]())
+            _lookup = NSubstitute.Substitute.`for`[InnateSymbolLookup](System.Array.empty`[object]())
+
+            _lookup.get_int_type() |> returns(_int, null)
+            _lookup.get_bool_type() |> returns(_bool, null)
+            _lookup.get_unspecialized_task_type() |> returns(task_of(make_class("T").type!), null)
+            _lookup.get_tuple_type(
+                NSubstitute.Arg_Compat.any`[Collections.List[Type]](),
+                NSubstitute.Arg_Compat.any`[Collections.List[string?]?]()
+            ) |> returns(_tuple, null)
+
+            // no map unless a test offers one: an unconfigured call would
+            // answer with a substitute type rather than null
+            _lookup.get_map_type(
+                NSubstitute.Arg_Compat.any`[Type](),
+                NSubstitute.Arg_Compat.any`[Type]()
+            ) |> returns(null, null)
+        si
+
+        loc() -> LOCATION => LOCATION("test.ghul", 1, 1, 1, 1)
+
+        names(values: Collections.Iterable[string]) -> LIST[string] => LIST[string](values)
+
+        make_class(name: string) -> CLASS => CLASS(loc(), loc(), _scope, name, LIST[string](), _scope)
+
+        task_of(element: Type) -> Type => Semantic.Types.GENERIC(loc(), _task_class, LIST[Type]([element]))
+
+        subject() -> MEMO_CACHE_TYPE =>
+            MEMO_CACHE_TYPE(_logger, _lookup, Semantic.TASK_CONVERSION(_lookup))
+
+        function(arguments: Collections.List[Type], return_type: Type) -> STATIC_CLOSURE is
+            let owner = NAMESPACE(loc(), "Test", null, ".Test", false)
+            let result = STATIC_CLOSURE(loc(), owner, "$anon", owner, false)
+
+            let argument_names = LIST[string]()
+
+            for i in 0..arguments.count do
+                argument_names.add("a{i}")
+            od
+
+            // the return type first: set with the arguments already
+            // declared, it builds the function's type through the container
+            result.set_return_type(return_type)
+            result.set_arguments(argument_names, LIST[Type](arguments))
+
+            return result
+        si
+
+        // the map is only offered for the expected key, so getting it back
+        // shows which key was asked for
+        offer_map(key: Type, value: Type) is
+            _lookup.get_map_type(key, value) |> returns(_map, null)
+        si
+
+        @Test()
+        A_function_with_no_arguments_should_be_keyed_by_an_int() is
+            offer_map(_int, _string)
+
+            are_same(_map, subject().of(loc(), function([], _string)))
+        si
+
+        @Test()
+        A_function_with_one_argument_should_be_keyed_by_that_argument() is
+            offer_map(_string, _int)
+
+            are_same(_map, subject().of(loc(), function([_string], _int)))
+
+            NSubstitute.SubstituteExtensions.did_not_receive[InnateSymbolLookup](_lookup).get_bool_type()
+        si
+
+        @Test()
+        A_function_with_several_arguments_should_be_keyed_by_a_tuple_of_them() is
+            offer_map(_tuple, _int)
+
+            are_same(_map, subject().of(loc(), function([_string, _int], _int)))
+
+            NSubstitute.SubstituteExtensions.did_not_receive[InnateSymbolLookup](_lookup).get_bool_type()
+        si
+
+        @Test()
+        A_function_whose_one_argument_may_be_absent_should_be_keyed_by_a_tuple_holding_it() is
+            offer_map(_tuple, _int)
+
+            are_same(_map, subject().of(loc(), function([_string.as_optional()], _int)))
+
+            NSubstitute.SubstituteExtensions.received[InnateSymbolLookup](_lookup).get_bool_type()
+        si
+
+        @Test()
+        A_function_returning_void_should_be_reported_and_get_no_cache() is
+            let void_type = Semantic.Symbols.VOID_STRUCT(loc(), loc(), _scope, "void", LIST[string](), _scope).type!
+
+            is_null(subject().of(loc(), function([_int], void_type)))
+
+            NSubstitute.SubstituteExtensions.received[Logging.Logger](_logger).error(loc(), "memo is not valid on a function returning void")
+        si
+
+        @Test()
+        A_function_returning_a_task_should_be_reported_and_get_no_cache() is
+            is_null(subject().of(loc(), function([_int], task_of(_int))))
+
+            NSubstitute.SubstituteExtensions.received[Logging.Logger](_logger).error(loc(), "memo is not valid on a function returning a task")
+        si
+
+        @Test()
+        A_function_with_a_ref_argument_should_be_reported_and_get_no_cache() is
+            let ref_class = CLASS(loc(), loc(), _scope, "REFERENCE", names(["T"]), _scope)
+            let ref_int = Semantic.Types.REFERENCE(loc(), ref_class, LIST[Type]([_int]))
+
+            is_null(subject().of(loc(), function([ref_int], _int)))
+
+            NSubstitute.SubstituteExtensions.received[Logging.Logger](_logger).error(loc(), "memo is not valid on a function with ref or out parameters")
+        si
+
+        @Test()
+        A_target_without_a_map_should_be_reported_and_get_no_cache() is
+            is_null(subject().of(loc(), function([_int], _int)))
+
+            NSubstitute.SubstituteExtensions.received[Logging.Logger](_logger).error(loc(), "memo is not supported by this target's runtime")
+        si
+    si
+si

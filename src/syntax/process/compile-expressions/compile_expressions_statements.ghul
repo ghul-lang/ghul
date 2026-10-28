@@ -151,60 +151,14 @@ namespace Syntax.Process is
             super.visit(function)
         si
 
-        // A `memo` function's cache maps its arguments - the one argument,
-        // or a tuple of several - to its result.
+        // A `memo` function's cache maps its arguments to its result.
         _settle_memo_cache(
             function: Trees.Definitions.FUNCTION,
             symbol: Semantic.Symbols.Function,
             cache: Semantic.Symbols.Field
         ) is
-            let location = function.modifiers.location
-            let return_type = symbol.return_type
-
-            if !return_type? then
-                return
-            fi
-
-            // A function written with no return type is reported where the
-            // cache is declared; one written `-> void` is reported here.
-            if return_type.is_void then
-                _logger.error(location, "memo is not valid on a function returning void")
-                return
-            fi
-
-            // A task's result is not known when the call returns, so
-            // caching the task would cache the work rather than its result.
-            let tasks = _bindings.task_conversion
-
-            if tasks.is_task_type(return_type) \/ tasks.completes_without_machine(return_type) then
-                _logger.error(location, "memo is not valid on a function returning a task")
-                return
-            fi
-
-            let argument_types = symbol.arguments
-
-            for type in argument_types do
-                if isa Semantic.Types.REFERENCE(type) then
-                    _logger.error(location, "memo is not valid on a function with ref or out parameters")
-                    return
-                fi
-            od
-
-            let key_type =
-                if argument_types.count == 0 then
-                    _innate_symbol_lookup.get_int_type()
-                elif symbol.is_memo_key_wrapped then
-                    _innate_symbol_lookup.get_tuple_type([argument_types[0], _innate_symbol_lookup.get_bool_type()], null)
-                elif argument_types.count == 1 then
-                    argument_types[0]
-                else
-                    _innate_symbol_lookup.get_tuple_type(argument_types, null)
-                fi
-
-            if let map_type = _innate_symbol_lookup.get_map_type(key_type, return_type) then
-                cache.set_type(map_type)
-            else
-                _logger.error(location, "memo is not supported by this target's runtime")
+            if let type = MEMO_CACHE_TYPE(_logger, _innate_symbol_lookup, _bindings.task_conversion).of(function.modifiers.location, symbol) then
+                cache.set_type(type)
             fi
         si
 

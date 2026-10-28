@@ -279,6 +279,72 @@ namespace Syntax.Parsers.Expressions is
 
         // Consume the postfix trailers (`.member`, `(args)`, `[index]`, …)
         // that follow a primary.
+        // Whether the current token is a `memo` or `pure` marker leading a
+        // function literal's body: the markers that follow it, `rec`
+        // among them, all on the same line, then `=>` or `is`.
+        _starts_literal_markers(context: CONTEXT) -> bool is
+            if !_is_named_marker(context) then
+                return false
+            fi
+
+            use context.tokenizer_speculate_then_backtrack_bounded()
+
+            while
+                !context.current.first_on_line /\
+                (context.current.token == Lexical.TOKEN.REC \/ _is_named_marker(context))
+            do
+                context.next_token()
+            od
+
+            return
+                !context.current.first_on_line /\
+                (context.current.token == Lexical.TOKEN.ARROW_FAT \/ context.current.token == Lexical.TOKEN.IS)
+        si
+
+        _is_named_marker(context: CONTEXT) -> bool =>
+            context.current.token == Lexical.TOKEN.IDENTIFIER /\
+            !context.current.first_on_line /\
+            (context.current.value_string =~ "memo" \/ context.current.value_string =~ "pure")
+
+        // The markers between a function literal's parameters, or its
+        // return type, and its body, written in any order: `rec`, `memo`
+        // and `pure`.
+        _parse_literal_markers(context: CONTEXT) -> (is_recursive: bool, memo: LOCATION?, is_pure: bool) is
+            let is_recursive mut = false
+            let memo: LOCATION? mut = null
+            let is_pure mut = false
+
+            while true do
+                let location = context.location
+
+                if context.current.token == Lexical.TOKEN.REC /\ !context.current.first_on_line then
+                    if is_recursive then
+                        context.error(location, "duplicate rec marker")
+                    fi
+
+                    is_recursive = true
+                elif _is_named_marker(context) /\ context.current.value_string =~ "memo" then
+                    if memo? then
+                        context.error(location, "duplicate memo marker", memo, "first written here")
+                    else
+                        memo = location
+                    fi
+                elif _is_named_marker(context) then
+                    if is_pure then
+                        context.error(location, "duplicate pure marker")
+                    fi
+
+                    is_pure = true
+                else
+                    return (is_recursive, memo, is_pure)
+                fi
+
+                context.next_token()
+            od
+
+            return (is_recursive, memo, is_pure)
+        si
+
         _parse_trailers(
             context: CONTEXT,
             start: LOCATION,
@@ -377,7 +443,16 @@ namespace Syntax.Parsers.Expressions is
                     return result
                 fi
 
-                case context.current.token
+                // A `memo` or `pure` marker opens a function literal exactly
+                // as `rec` does.
+                let trailer =
+                    if _starts_literal_markers(context) then
+                        Lexical.TOKEN.REC
+                    else
+                        context.current.token
+                    fi
+
+                case trailer
                 when Lexical.TOKEN.PAREN_OPEN then
                     context.next_token()
                     let arguments: Trees.Expressions.LIST mut
@@ -646,7 +721,9 @@ namespace Syntax.Parsers.Expressions is
                         type_expression = Trees.TypeExpressions.INFER(start::result.location)
                     fi
 
-                    if context.expect_token([Lexical.TOKEN.ARROW_FAT, Lexical.TOKEN.IS, Lexical.TOKEN.REC]) then
+                    let markers = _parse_literal_markers(context)
+
+                    if context.expect_token([Lexical.TOKEN.ARROW_FAT, Lexical.TOKEN.IS]) then
                         // A sequence pattern is not accepted as a lambda parameter.
                         // The parameter list was parsed as expressions, so say so
                         // here and drop the parameters, rather than let them fail
@@ -674,14 +751,6 @@ namespace Syntax.Parsers.Expressions is
                             elements.add(result)
                             arguments = Trees.Expressions.LIST(start::result.location, elements)
                         fi
-
-                        let is_recursive =
-                            if context.current.token == Lexical.TOKEN.REC then
-                                context.next_token()
-                                true
-                            else
-                                false
-                            fi
 
                         // A lambda body is a fresh statement context. The
                         // enclosing argument list leaves allow_tuple_element
@@ -711,8 +780,11 @@ namespace Syntax.Parsers.Expressions is
                                 arguments,
                                 type_expression,
                                 body,
-                                is_recursive
+                                markers.is_recursive
                             )
+
+                        literal.memo_location = markers.memo
+                        literal.is_pure = markers.is_pure
 
                         if let name = nested_name then
                             literal.set_nested_name(name)

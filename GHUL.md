@@ -163,7 +163,7 @@ These rules decide where a line break ends a statement. The most common come fir
 - Two string literals on adjacent lines join into one literal. If one statement ends with a string literal and the next statement starts with one, write a `;` between them. This is the one boundary that needs a written `;` (see [types and literals](#types-and-literals)).
 - A bare `return` at the end of a line is a void return when the next line starts with a closing keyword (`fi`, `si`, `od`, …). Otherwise the `return` takes the next line's expression as its value. A statement after a `return` in the same block is unreachable, so the two readings do not conflict.
 - In a parenthesised group, a top-level `,` makes the group a tuple, and an inferred boundary makes the group a block, exactly as a written `;` does. A compound statement at the end of a line is complete. The boundary falls after it, whatever starts the next line, and an operator at the start of the next line begins a new statement. To continue the expression, put the operator on the same line: `(if c then 2 else 5 fi - 1)` is 1 when `c` is true. If `- 1` is on its own line instead, it is a second statement and is the group's value.
-- A postfix marker must be on the same line as the thing it marks. A modifier at the start of a line (`pure`, `static`, …) belongs to the next definition, not to the header above it. A `rec` at the start of a line is the recursive self-reference call, not a rec-lambda marker.
+- A postfix marker must be on the same line as the thing it marks. A modifier at the start of a line (`pure`, `static`, …) belongs to the next definition, not to the header above it. A `rec` at the start of a line is the recursive self-reference call, not a rec-lambda marker, and a function literal's `memo` and `pure` markers are on the line they follow.
 - An `else` at the start of the line after a bare `assert` belongs to the assert, as its message clause, when the `else` is indented at least as far as the `assert`. Otherwise the `else` belongs to the enclosing `if` or `case` arm. Only indentation decides this. When the assert is on the same line as the `if` (`if c then assert x` / `else y fi`), an `else` at the same indentation as the `if` belongs to the assert. A `;` after the assert gives the `else` to the `if`.
 
 *More detail on this section: [language details](docs/details.md#statement-terminators).*
@@ -630,7 +630,19 @@ cost(i: int, j: int) -> int memo is
 si
 ```
 
-The key is the argument, or the tuple of the arguments when there are several, compared with `=~` and hashed with `get_hash_code`. A type that declares no equality is compared by reference. A function with no arguments computes its result once. There is one cache per function, kept for the life of the program, with no bound on its size. On an instance method the cache belongs to the instance, so each instance computes its own results and its cache is collected with it. A method of a generic class has one cache per instantiation. The cache is not safe to use from more than one thread at a time. `memo` changes no signature: callers and overload resolution see an ordinary function. An absent argument is a key like any other. It is an error on a function that returns nothing or returns a task, a constructor, a property, a nested function, a generator, an async function, a function with `ref` or `out` parameters, a function with type parameters of its own, a struct or trait instance method, and a function with no body.
+The key is the argument, or the tuple of the arguments when there are several, compared with `=~` and hashed with `get_hash_code`. A type that declares no equality is compared by reference. A function with no arguments computes its result once. There is one cache per function, kept for the life of the program, with no bound on its size. On an instance method the cache belongs to the instance, so each instance computes its own results and its cache is collected with it. A method of a generic class has one cache per instantiation. The cache is not safe to use from more than one thread at a time. `memo` changes no signature: callers and overload resolution see an ordinary function. An absent argument is a key like any other. It is an error on a function that returns nothing or returns a task, a constructor, a property, a generator, an async function, a function with `ref` or `out` parameters, a function with type parameters of its own, a struct or trait instance method, and a function with no body.
+
+A function literal is memoised the same way. `memo` is written with the literal's other markers, `rec` and `pure`, in any order, after its parameters or its return type and before `=>` or `is`. Calls through `rec` go through the cache, and a nested named function's calls to itself by its name do too:
+
+```ghul
+let fib = (n: int) -> long rec memo =>
+    if n < 2 then long(n) else rec(n - 1) + rec(n - 2) fi
+
+paths(r: int, c: int) -> long memo =>
+    if r == 0 \/ c == 0 then 1L else paths(r - 1, c) + paths(r, c - 1) fi
+```
+
+Each value a literal makes has a cache of its own: evaluating the literal again makes a function with an empty cache, and the cache is collected with the function. `memo` is an error on a literal that returns nothing or a task, a generator literal and an async literal. The cache is not a store the compiler sees, so a `memo` function whose body stores nothing is still store-free.
 
 *More detail on this section: [language details](docs/details.md#functions).*
 

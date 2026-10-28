@@ -155,6 +155,8 @@ let f = double;                      // (int) -> int pure
 let g = (n: int) -> int => n * 2;    // (int) -> int pure — proved store-free
 ```
 
+A literal written `pure` has a pure function type whatever its body does: `(n: int) -> int pure => …`. The compiler trusts it, as it trusts a function declared `pure`. The marker goes with the literal's `rec` and `memo` markers, in any order.
+
 The compiler trusts a variable of a pure function type to hold a store-free value wherever it is read. So the warning is on the store into such a variable, and the trust is only as good as the values stored. A pure function type is a declaration in the same sense as `pure` on a function. The compiler verifies neither, and both mislead the compiler when they are false. Reassigning such a variable is fine, as long as the new value is also store-free. Purity declarations and pure function types are kept in a compiled assembly, and the compiler honours them when it imports the assembly.
 
 A postfix `pure` on a class, struct or trait header (`class PARSER pure is ... si`) makes the same declaration for a whole type. Every instance member must then be pure, either proved store-free or declared `pure`. A member that stores is an error, and the error names it. Declaring the member `pure` is the way out: the compiler trusts the declaration and does not verify it, as everywhere else. These writes are exempt, because they are necessary:

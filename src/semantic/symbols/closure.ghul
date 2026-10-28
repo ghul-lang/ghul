@@ -129,6 +129,10 @@ namespace Semantic.Symbols is
         self_reference_variable: Variable? public
         is_recursive: bool
 
+        // Written `memo`. Such a literal always keeps its frame, which holds
+        // its cache, so each value the literal makes has a cache of its own.
+        is_memo: bool public
+
         init(location: LOCATION, owner: Scope, name: string, enclosing_scope: Scope, is_recursive: bool) is
             super.init(location, location, owner, name, enclosing_scope)
 
@@ -326,6 +330,10 @@ namespace Semantic.Symbols is
         is_memoizable_delegate: bool is
             if is_cached_on_frame then
                 return true
+            fi
+
+            if is_memo then
+                return false
             fi
 
             if captured_type_arguments? then
@@ -690,6 +698,34 @@ namespace Semantic.Symbols is
         si
 
         find_or_add_capture_self() -> Field => find_or_add_capture(null)
+
+        // The frame field a `memo` literal caches its results in, absent
+        // until the first call creates the cache.
+        find_or_add_memo_cache() -> Field is
+            let frame = _ensure_frame()
+
+            if let existing: Field = frame.find_member("$memo") then
+                memo_cache = existing
+                return existing
+            fi
+
+            let `field = frame.declare_memo_cache(IoC.CONTAINER.instance.symbol_definition_locations)
+
+            memo_cache = `field
+
+            return `field
+        si
+
+        // Types the memo cache field, once the literal's signature settles.
+        set_memo_cache_type(type: Types.Type) is
+            if let cache = memo_cache then
+                _capture_type_arguments_of(type)
+                cache.set_type(type)
+            fi
+        si
+
+        // The frame instance, as this literal's body sees it.
+        load_frame_self() -> Value => _capture_frame_self_load()
 
         outer_recurse_field_name(outer: Closure) -> string =>
             "$outer_recurse_{outer.name}"
@@ -1757,7 +1793,8 @@ namespace Semantic.Symbols is
 
         could_be_delegate: bool =>
             let captured_values = self.captured_values in
-            !captured_values? \/ (is_self_captured /\ captured_values.count == 1) /\ !is_recursive /\ _can_carry_captured_type_arguments
+            !is_memo /\
+            (!captured_values? \/ (is_self_captured /\ captured_values.count == 1) /\ !is_recursive /\ _can_carry_captured_type_arguments)
 
         // A delegate's method is emitted on the enclosing class, which
         // supplies that class's own type parameters and nothing else, so
