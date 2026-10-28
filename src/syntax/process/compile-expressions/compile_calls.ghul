@@ -34,6 +34,7 @@ namespace Syntax.Process is
         _flow: NARROWING_FLOW
         _delegate_shape: Semantic.DELEGATE_SHAPE
         _delegate_push_candidates: Semantic.DELEGATE_PUSH_CANDIDATES
+        _pack_push_candidates: Semantic.PACK_PUSH_CANDIDATES
         _async_literal_candidates: Semantic.ASYNC_LITERAL_CANDIDATES
         _symbol_loader: Semantic.SYMBOL_LOADER
         _function_reference_adapter: FUNCTION_REFERENCE_ADAPTER
@@ -75,6 +76,7 @@ namespace Syntax.Process is
             _flow = flow
             _delegate_shape = Semantic.DELEGATE_SHAPE()
             _delegate_push_candidates = Semantic.DELEGATE_PUSH_CANDIDATES(_delegate_shape, innate_symbol_lookup)
+            _pack_push_candidates = Semantic.PACK_PUSH_CANDIDATES()
             _async_literal_candidates = Semantic.ASYNC_LITERAL_CANDIDATES(innate_symbol_lookup, Semantic.TASK_LIKE_RESOLVER(logger))
             _symbol_loader = symbol_loader
             _function_reference_adapter = function_reference_adapter
@@ -1496,7 +1498,7 @@ namespace Syntax.Process is
             let effective_candidate =
                 candidate ??
                 _delegate_push_candidates.find_single_pushable_candidate(function_group, argument_types, want_instance) ??
-                _find_single_pack_candidate(function_group, argument_types, argument_expressions, want_instance)
+                _pack_push_candidates.find_single(function_group, want_instance, f => _has_pack_mismatch_argument(f, argument_types, argument_expressions))
 
             // Trigger the retry when at least one actual
             // is a FUNCTION literal even if its first-walk
@@ -2514,40 +2516,6 @@ namespace Syntax.Process is
             return TUPLE(_innate_symbol_lookup.get_tuple_type(types, null), values)
         si
 
-
-        // The one arity-matching overload a pack adaptation applies to,
-        // for when more than one overload takes this many arguments and
-        // so none is the lone candidate. Null where none or several are.
-        _find_single_pack_candidate(
-            group: Semantic.Symbols.FUNCTION_GROUP,
-            argument_types: Collections.LIST[Type],
-            argument_expressions: Collections.List[Trees.Expressions.Expression?],
-            want_instance: bool
-        ) -> Semantic.Symbols.Function? is
-            let result: Semantic.Symbols.Function? mut = null
-            let count mut = 0
-
-            for f in group.functions do
-                if !want_instance /\ f.is_instance then
-                    continue
-                fi
-
-                if !f.are_arguments_declared then
-                    continue
-                fi
-
-                if _has_pack_mismatch_argument(f, argument_types, argument_expressions) then
-                    result = f
-                    count = count + 1
-                fi
-            od
-
-            if count == 1 then
-                return result
-            fi
-
-            return null
-        si
 
         // True when at least one argument is one the pack adaptation
         // applies to - the signal that a failed resolve is recoverable
