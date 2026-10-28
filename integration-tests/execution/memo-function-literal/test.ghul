@@ -1,0 +1,95 @@
+use IO.Std.write_line
+use Ghul.Pipes
+
+class COUNTER is
+    calls: int public
+
+    init() is
+        calls = 0
+    si
+
+    tick() is
+        calls = calls + 1
+    si
+si
+
+class SCALER(factor: int) is
+    // a memo literal in an instance method reads the receiver through its
+    // frame, and its cache lives with the value the literal makes
+    scaled_sums(counter: COUNTER) -> (int) -> int =>
+        (n: int) -> int rec memo =>
+            (
+                counter.tick();
+                if n == 0 then 0 else n * factor + rec(n - 1) fi
+            )
+si
+
+pairs[T](first: T, counter: COUNTER) -> (T) -> string =>
+    (second: T) -> string memo => (counter.tick(); "{first}/{second}")
+
+entry() is
+    let counter = COUNTER()
+
+    // rec, memo and pure in any order, all memoised through rec
+    let a = (n: int) -> long rec memo => (counter.tick(); if n < 2 then long(n) else rec(n - 1) + rec(n - 2) fi)
+    write_line("a {a(60)} calls {counter.calls}")
+    write_line("a again {a(60)} calls {counter.calls}")
+
+    let b = (n: int) -> long memo rec pure => if n < 2 then long(n) else rec(n - 1) + rec(n - 2) fi
+    let c = (n: int) -> long pure memo rec => if n < 2 then long(n) else rec(n - 1) + rec(n - 2) fi
+    let d = n memo rec => if n < 2 then long(n) else rec(n - 1) + rec(n - 2) fi
+    write_line("b c d {b(80)} {c(80)} {d(80)}")
+
+    // each evaluation of a literal makes a value with its own cache
+    counter.calls = 0
+    let makers = [1, 2] |> map(_ => (x: int) -> int memo => (counter.tick(); x * x)) |> collect()
+    write_line("squares {makers[0](3)} {makers[0](3)} {makers[1](3)} calls {counter.calls}")
+
+    // several arguments key on all of them; an absent argument is a key
+    counter.calls = 0
+    let add = (x: int, y: int) -> int memo => (counter.tick(); x + y)
+    write_line("add {add(1, 2)} {add(1, 2)} {add(2, 1)} calls {counter.calls}")
+
+    counter.calls = 0
+    let describe = (s: string?) -> string memo => (counter.tick(); s ?? "none")
+    write_line("describe {describe(null)} {describe(null)} {describe("x")} calls {counter.calls}")
+
+    // no arguments: computed once
+    counter.calls = 0
+    let once = () -> int memo => (counter.tick(); 42)
+    write_line("once {once()} {once()} calls {counter.calls}")
+
+    // a block body, returning early and at its tail
+    counter.calls = 0
+    let collatz = (n: long) -> int rec memo is
+        counter.tick()
+        if n == 1L then
+            return 0
+        fi
+        1 + rec(if n % 2L == 0L then n / 2L else 3L * n + 1L fi)
+    si
+    write_line("collatz {collatz(27L)} {collatz(9L)} calls {counter.calls}")
+
+    // an instance method's literal captures the receiver
+    counter.calls = 0
+    let sums = SCALER(3).scaled_sums(counter)
+    write_line("scaled {sums(10)} {sums(12)} calls {counter.calls}")
+
+    // a generic function's literal
+    counter.calls = 0
+    let p = pairs("a", counter)
+    write_line("pairs {p("b")} {p("b")} {p("c")} calls {counter.calls}")
+
+    // a nested named function, memoised through its own name
+    counter.calls = 0
+    paths(r: int, c: int) -> long memo =>
+        (counter.tick(); if r == 0 \/ c == 0 then 1L else paths(r - 1, c) + paths(r, c - 1) fi)
+    write_line("paths {paths(16, 16)} calls {counter.calls}")
+
+    // a pipe stage is called through the cache, not compiled inline; pure
+    // is trusted, as on a declaration, so the store does not make the
+    // literal impure
+    counter.calls = 0
+    let total = [1, 2, 1, 2, 1] |> map((x: int) -> int memo pure => (counter.tick(); x * 10)) |> reduce(0, (s, x) => s + x)
+    write_line("total {total} calls {counter.calls}")
+si

@@ -1,0 +1,75 @@
+namespace Syntax.Process is
+    use Logging
+    use Source
+
+    use Semantic.Types.Type
+
+    // The type of the cache a `memo` function keeps: a map from its
+    // arguments - the one argument, or a tuple of several - to its result.
+    class MEMO_CACHE_TYPE is
+        _logger: Logger
+        _innate_symbol_lookup: Semantic.Lookups.InnateSymbolLookup
+        _task_conversion: Semantic.TASK_CONVERSION
+
+        init(
+            logger: Logger,
+            innate_symbol_lookup: Semantic.Lookups.InnateSymbolLookup,
+            task_conversion: Semantic.TASK_CONVERSION
+        ) is
+            _logger = logger
+            _innate_symbol_lookup = innate_symbol_lookup
+            _task_conversion = task_conversion
+        si
+
+        // The cache type for `symbol`, or null where it cannot have one:
+        // its signature has not settled, or it is reported at `location`
+        // as a function `memo` is not valid on.
+        of(location: LOCATION, symbol: Semantic.Symbols.Function) -> Type? is
+            let return_type = symbol.return_type
+
+            if !return_type? then
+                return null
+            fi
+
+            if return_type.is_void then
+                _logger.error(location, "memo is not valid on a function returning void")
+                return null
+            fi
+
+            // A task's result is not known when the call returns, so
+            // caching the task would cache the work rather than its result.
+            if _task_conversion.is_task_type(return_type) \/ _task_conversion.completes_without_machine(return_type) then
+                _logger.error(location, "memo is not valid on a function returning a task")
+                return null
+            fi
+
+            let argument_types = symbol.arguments
+
+            for type in argument_types do
+                if isa Semantic.Types.REFERENCE(type) then
+                    _logger.error(location, "memo is not valid on a function with ref or out parameters")
+                    return null
+                fi
+            od
+
+            let key_type =
+                if argument_types.count == 0 then
+                    _innate_symbol_lookup.get_int_type()
+                elif symbol.is_memo_key_wrapped then
+                    _innate_symbol_lookup.get_tuple_type([argument_types[0], _innate_symbol_lookup.get_bool_type()], null)
+                elif argument_types.count == 1 then
+                    argument_types[0]
+                else
+                    _innate_symbol_lookup.get_tuple_type(argument_types, null)
+                fi
+
+            if let map_type = _innate_symbol_lookup.get_map_type(key_type, return_type) then
+                return map_type
+            fi
+
+            _logger.error(location, "memo is not supported by this target's runtime")
+
+            return null
+        si
+    si
+si
