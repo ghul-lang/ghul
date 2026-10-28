@@ -1,0 +1,111 @@
+namespace Semantic.UnitTests is
+    use Collections.LIST
+
+    use Source.LOCATION
+
+    use Semantic.Types.Type
+
+    use Semantic.Symbols.CLASS
+    use Semantic.Symbols.Function
+    use Semantic.Symbols.GLOBAL_FUNCTION
+    use Semantic.Symbols.INNATE_FUNCTION
+    use Semantic.Symbols.STATIC_METHOD
+    use Semantic.Symbols.NAMESPACE
+    use Semantic.Symbols.FUNCTION_GROUP
+    use TestClass = Microsoft.VisualStudio.TestTools.UnitTesting.TestClassAttribute
+    use Test = Microsoft.VisualStudio.TestTools.UnitTesting.TestMethodAttribute
+    use Assertions
+
+    // Tests for DUPLICATE_OVERLOADS, which settles a tie between global
+    // functions declared alike in different namespaces, and for
+    // Function.is_same_function_as, which the merges use to count one
+    // function reached twice only once.
+    @TestClass()
+    class DUPLICATE_OVERLOADS_TESTS is
+        _a: Type
+        _b: Type
+
+        init() is
+            let owner = Semantic.BLOCK_SCOPE()
+            _a = CLASS(loc(), loc(), owner, "A", LIST[string](), Semantic.BLOCK_SCOPE()).type!
+            _b = CLASS(loc(), loc(), owner, "B", LIST[string](), Semantic.BLOCK_SCOPE()).type!
+        si
+
+        loc() -> LOCATION => LOCATION("test.ghul", 1, 1, 1, 1)
+
+        space(name: string) -> NAMESPACE => NAMESPACE(loc(), name, null, ".{name}", false)
+
+        global(owner: NAMESPACE, argument: Type) -> GLOBAL_FUNCTION is
+            let result = GLOBAL_FUNCTION(loc(), loc(), owner, "f", Semantic.BLOCK_SCOPE())
+            result.arguments = LIST[Type]([argument])
+            return result
+        si
+
+        group(owner: NAMESPACE, functions: Collections.Iterable[Function]) -> FUNCTION_GROUP is
+            let result = FUNCTION_GROUP(loc(), owner, "f")
+            for f in functions do result.add(f); od
+            return result
+        si
+
+        // Alike functions from two namespaces: the one the group lists
+        // first is called, whatever order the tie lists them in.
+        @Test()
+        Calling__first_in_scope_order__with_alike_globals__returns_the_first_the_group_lists() is
+            let first = global(space("C"), _a)
+            let second = global(space("D"), _a)
+            let g = group(space("P"), [first, second])
+
+            let result = Semantic.DUPLICATE_OVERLOADS.first_in_scope_order(g, LIST[Function]([second, first]))
+
+            are_same(first, result)
+        si
+
+        // A tie between different signatures is a real ambiguity.
+        @Test()
+        Calling__first_in_scope_order__with_different_signatures__returns_null() is
+            let first = global(space("C"), _a)
+            let second = global(space("D"), _b)
+            let g = group(space("P"), [first, second])
+
+            is_null(Semantic.DUPLICATE_OVERLOADS.first_in_scope_order(g, LIST[Function]([first, second])))
+        si
+
+        // Members of a type are not globals merged by `use`: a type
+        // declaring one twice is reported where it is declared.
+        @Test()
+        Calling__first_in_scope_order__with_type_members__returns_null() is
+            let owner = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Owner", LIST[string](), Semantic.BLOCK_SCOPE())
+
+            let first = STATIC_METHOD(loc(), loc(), owner, "f", Semantic.BLOCK_SCOPE())
+            first.arguments = LIST[Type]([_a])
+            let second = STATIC_METHOD(loc(), loc(), owner, "f", Semantic.BLOCK_SCOPE())
+            second.arguments = LIST[Type]([_a])
+
+            let g = FUNCTION_GROUP(loc(), owner, "f")
+            g.add(first)
+            g.add(second)
+
+            is_null(Semantic.DUPLICATE_OVERLOADS.first_in_scope_order(g, LIST[Function]([first, second])))
+        si
+
+        @Test()
+        Calling__is_same_function_as__with_two_alike_declarations__returns_false() is
+            let ns = space("C")
+
+            is_false(global(ns, _a).is_same_function_as(global(ns, _a)))
+        si
+
+        // An intrinsic declared in source and the innate registered for it
+        // are one function.
+        @Test()
+        Calling__is_same_function_as__with_a_declaration_and_its_stand_in__returns_true() is
+            let ns = space("C")
+            let declaration = global(ns, _a)
+            let stand_in = INNATE_FUNCTION(loc(), ns, "f", ns, "host.f")
+            stand_in.stands_in_for = declaration
+
+            is_true(declaration.is_same_function_as(stand_in))
+            is_true(stand_in.is_same_function_as(declaration))
+        si
+    si
+si

@@ -1,14 +1,16 @@
 namespace Semantic.DotNet is
+    use Ghul.Pipes.any
+
     use Symbols.Function
     use Symbols.FUNCTION_GROUP
-    use Symbols.METHOD_OVERRIDE_CLASS
 
     // Combines the symbols one global name resolves to in several places
     // into the single symbol a lookup answers with.
     class GLOBAL_OVERLOAD_MERGE is
         // The first symbol when it is the only one, or when any of them is
-        // not a function; otherwise one group holding every function, the
-        // first declaration of each signature winning.
+        // not a function; otherwise one group holding every function once,
+        // in the order found. Functions alike in signature are all kept, and
+        // overload resolution decides between them.
         merge(found: Collections.List[Symbols.Symbol]) -> Symbols.Symbol static is
             let first = found[0]
 
@@ -27,14 +29,13 @@ namespace Semantic.DotNet is
             assert owner? else "global symbol has no owner: {first}"
 
             let result = FUNCTION_GROUP(first.location, owner, first.name)
-            let seen = Collections.SET[METHOD_OVERRIDE_CLASS]()
 
             for s in found do
                 if let f: Function = s then
-                    _add(result, seen, f)
+                    _add(result, f)
                 elif let group: FUNCTION_GROUP = s then
                     for f in group.functions do
-                        _add(result, seen, f)
+                        _add(result, f)
                     od
                 fi
             od
@@ -42,13 +43,10 @@ namespace Semantic.DotNet is
             return result
         si
 
-        _add(result: FUNCTION_GROUP, seen: Collections.SET[METHOD_OVERRIDE_CLASS], f: Function) static is
-            if seen.contains(f.override_class) then
-                return
+        _add(result: FUNCTION_GROUP, f: Function) static is
+            if !(result.functions |> any(g => g.is_same_function_as(f))) then
+                result.add(f)
             fi
-
-            seen.add(f.override_class)
-            result.add(f)
         si
     si
 si
