@@ -542,6 +542,10 @@ namespace Syntax.Process is
                     fi
                 fi
 
+                if function.modifiers.is_memo then
+                    _declare_memo_cache(function, function_symbol)
+                fi
+
                 if let operation = _pragma_scope_stack.intrinsic_operation ?? function.intrinsic_operation then
                     function_symbol.intrinsic_operation = operation
                 fi
@@ -648,6 +652,86 @@ namespace Syntax.Process is
             fi
 
             return true
+        si
+
+        // A `memo` function caches its results in a field no source names:
+        // static beside a global or static function, and on the instance
+        // for an instance method, so the cache is collected with it. The
+        // field's type waits for the signature, which compile-expressions
+        // settles. A declaration the cache cannot work for is reported
+        // here and left an ordinary function.
+        _declare_memo_cache(function: Definitions.FUNCTION, symbol: Semantic.Symbols.Function) is
+            let location = function.modifiers.location
+            let body = function.body
+
+            if !body? \/ body.is_null then
+                _logger.error(location, "memo is not valid on a function without a body")
+                return
+            fi
+
+            if YIELD_SCANNER().body_has_yield(body) then
+                _logger.error(location, "memo is not valid on a generator")
+                return
+            fi
+
+            let await_scanner = AWAIT_SCANNER()
+            await_scanner.scan(body)
+
+            if await_scanner.found then
+                _logger.error(location, "memo is not valid on an async function")
+                return
+            fi
+
+            if function.generic_arguments.count > 0 then
+                _logger.error(location, "memo is not supported on a function with type parameters")
+                return
+            fi
+
+            if function.for_property? then
+                _logger.error(location, "memo is not valid on a property")
+                return
+            fi
+
+            let owner = symbol.owner
+
+            if !owner? \/ !(isa Semantic.Symbols.NAMESPACE(owner) \/ isa Semantic.Symbols.Classy(owner)) then
+                _logger.error(location, "memo is not supported on a nested function")
+                return
+            fi
+
+            let is_static = function.modifiers.is_static \/ isa Semantic.Symbols.NAMESPACE(owner)
+
+            if let classy: Semantic.Symbols.Classy = owner then
+                if !is_static /\ classy.is_trait then
+                    _logger.error(location, "memo is not valid on a trait method")
+                    return
+                fi
+
+                if !is_static /\ isa Semantic.Symbols.STRUCT(classy) then
+                    _logger.error(location, "memo is not valid on a struct method")
+                    return
+                fi
+            fi
+
+            let base_name = "$memo_{symbol.name}"
+            let field_name mut = base_name
+            let suffix mut = 1
+
+            while owner.find_direct(field_name)? do
+                field_name = "{base_name}_{suffix}"
+                suffix = suffix + 1
+            od
+
+            let cache =
+                if let classy: Semantic.Symbols.Classy = owner then
+                    classy.declare_variable(LOCATION.internal, field_name, is_static, null)
+                else
+                    (cast Semantic.Symbols.NAMESPACE(owner)).declare_variable(LOCATION.internal, field_name, is_static, null)
+                fi
+
+            if let `field: Semantic.Symbols.Field = cache then
+                symbol.memo_cache = `field
+            fi
         si
 
         visit(function: Definitions.FUNCTION) is

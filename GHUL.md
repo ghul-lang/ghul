@@ -619,6 +619,19 @@ items |> each(log.write(*));              // the receiver is evaluated once
 
 The `*` is a whole argument of the call: `f(*, 2)` is a partial application. It belongs to the innermost argument list it is written in, so `f(g(*, 1), 2)` partially applies `g` and passes the result to `f`. An operator expression is a call of its operator, `a + b` being `+(a, b)`, so `*` as an operand partially applies the operator: `* + 1` is `x => x + 1`, `10 - *` is `x => 10 - x`, `* - *` takes two parameters, `- *` negates, and `xs |> filter(* < 3)` keeps the elements below three. The other operand is evaluated once, where the expression is written, and the operator is whichever the written operands would resolve to, a built-in, a static or an instance member alike. Only the operator node the `*` is an operand of becomes the function, so `(* + 1) * 2` multiplies a function by two and is an error. `??`, `/\` and `\/` evaluate their right operand only for some values of the left and cannot be partially applied. Where an operand is expected, `*` is a placeholder when an operator, a comma, a closing bracket or the end of the statement follows; otherwise it is the prefix operator `*` applied to what follows. Operator characters run together into one operator, so `-*` is the operator `-*`: the negation is written `- *`. Each `*` takes its type from the formal it stands in, exactly as a bare `_` argument does, so the call is resolved as any call is, with the written arguments choosing the overload. Where a function type is expected of the partial application - a declared slot, or a formal of the call it is an argument to - its parameter types type the `*` arguments first, one each in order, so the expected type can choose the overload where the written arguments alone would not: `let halve: (double) -> double = scale(*, 0.5)` picks the `double` overload of `scale`. A `*` whose type nothing decides, such as a lone `*` to an overloaded function with no expected type, is an error: write a function literal with a typed parameter instead. The callee can be a function, a method, a constructor, or a value of function type. A `*` cannot be combined with `~>`.
 
+A function declared `memo` caches its results by its arguments. Every call goes through the cache, including the function's calls to itself and calls through a function value taken from it, so the plain recursive definition is the memoised one:
+
+```ghul
+fib(n: int) -> long memo =>
+    if n < 2 then long(n) else fib(n - 1) + fib(n - 2) fi
+
+cost(i: int, j: int) -> int memo is
+    ...
+si
+```
+
+The key is the argument, or the tuple of the arguments when there are several, compared with `=~` and hashed with `get_hash_code`. A type that declares no equality is compared by reference. A function with no arguments computes its result once. There is one cache per function, kept for the life of the program, with no bound on its size. On an instance method the cache belongs to the instance, so each instance computes its own results and its cache is collected with it. A method of a generic class has one cache per instantiation. The cache is not safe to use from more than one thread at a time. `memo` changes no signature: callers and overload resolution see an ordinary function. It is an error on a function that returns nothing, a generator, an async function, a function with `ref` or `out` parameters, a function with type parameters of its own, a struct instance method, a trait method, and a function with no body.
+
 *More detail on this section: [language details](docs/details.md#functions).*
 
 ## type definitions
