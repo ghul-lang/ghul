@@ -120,7 +120,7 @@ GHUL.md describes `use default`. Importing a name that the set already includes 
 
 To make every call use your own function, leave that name out of the imports, by replacing `use default` with the specific `use` statements that the file needs. Or give your function a different name.
 
-`--default-use` replaces the set with a project's own set. It takes a comma-separated list, and can be given more than once. Naming any name at all leaves the default set out completely. So a project that wants only the collections asks for only the collections. A project built by MSBuild names them in one property: `<GhulDefaultUses>Collections;IO.Std.write_line</GhulDefaultUses>`.
+`--default-use` replaces the set with a project's own set. It takes a comma-separated list, and can be given more than once. Naming any name at all leaves the default set out completely. So a project that wants only the collections asks for only the collections. A project built by MSBuild names them in one property: `<GhulDefaultUses>Collections;IO.Std.write_line</GhulDefaultUses>`. A name in a project's own set that is not defined is an error.
 
 `--implicit-default-use` gives every file that declares no namespace an implicit `use default`, after the file's pragmas and before everything else. A one-file script run directly uses this to get `write_line`, the pipes and the collections without importing them. A file that declares a namespace gets no implicit import, because its namespace blocks choose their own imports. An explicit `use default` in the file as well is harmless. A function that the file defines joins a function of the same name from the set, as with an explicit `use default`.
 
