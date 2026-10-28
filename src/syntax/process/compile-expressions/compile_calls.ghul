@@ -1493,7 +1493,10 @@ namespace Syntax.Process is
             let candidate =
                 _try_find_single_arity_candidate(function_group, argument_types.count, want_instance) ??
                 _async_literal_candidates.find(function_group, argument_expressions, want_instance)
-            let effective_candidate = candidate ?? _delegate_push_candidates.find_single_pushable_candidate(function_group, argument_types, want_instance)
+            let effective_candidate =
+                candidate ??
+                _delegate_push_candidates.find_single_pushable_candidate(function_group, argument_types, want_instance) ??
+                _find_single_pack_candidate(function_group, argument_types, argument_expressions, want_instance)
 
             // Trigger the retry when at least one actual
             // is a FUNCTION literal even if its first-walk
@@ -2511,6 +2514,40 @@ namespace Syntax.Process is
             return TUPLE(_innate_symbol_lookup.get_tuple_type(types, null), values)
         si
 
+
+        // The one arity-matching overload a pack adaptation applies to,
+        // for when more than one overload takes this many arguments and
+        // so none is the lone candidate. Null where none or several are.
+        _find_single_pack_candidate(
+            group: Semantic.Symbols.FUNCTION_GROUP,
+            argument_types: Collections.LIST[Type],
+            argument_expressions: Collections.List[Trees.Expressions.Expression?],
+            want_instance: bool
+        ) -> Semantic.Symbols.Function? is
+            let result: Semantic.Symbols.Function? mut = null
+            let count mut = 0
+
+            for f in group.functions do
+                if !want_instance /\ f.is_instance then
+                    continue
+                fi
+
+                if !f.are_arguments_declared then
+                    continue
+                fi
+
+                if _has_pack_mismatch_argument(f, argument_types, argument_expressions) then
+                    result = f
+                    count = count + 1
+                fi
+            od
+
+            if count == 1 then
+                return result
+            fi
+
+            return null
+        si
 
         // True when at least one argument is one the pack adaptation
         // applies to - the signal that a failed resolve is recoverable
