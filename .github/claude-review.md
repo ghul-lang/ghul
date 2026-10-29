@@ -23,6 +23,7 @@ Flag:
 - Violations of the contracts below (type-system change protocol, cross-assembly test traps).
 - Deprecated idioms.
 - **Any new use of rendered text as an entity's identity** - see the contract below. This one is a rejection, not a suggestion.
+- **Any new or extended syntax-tree rewriting** - see the contract below. Also a rejection, not a suggestion, even when the change itself is correct.
 - **Any new or reworded diagnostic message that violates the wording rubric below** - most commonly, a backtick around a literal keyword or an interpolated identifier.
 - Missing tests where CONTRIBUTING.md requires one (any behavioural change wants an integration test; type-system changes additionally want unit tests).
 - `GHUL.md` and `docs/` falling out of step with reality - a PR introduces a feature they don't document, changes documented behaviour without updating it, or otherwise leaves the reference contradicting the code.
@@ -64,6 +65,14 @@ This is a hard rule rather than a preference because rendering is lossy in both 
 What this does *not* cover: a source-level identifier used as a name is the datum, not a proxy for one. Scope and member lookup, completion prefix matching, `use` imports, suppression slugs, diagnostic codes, file paths - all legitimate, don't flag them. The rule is about a rendered *description* of an entity standing in for the entity.
 
 Existing text-keyed mechanisms (the `MAP[string, Type]` type-argument maps in the specializers and the placeholder registry, the state-machine frame's function-name-keyed class map, the name-keyed symbol and definition maps) are not to be ripped out on sight, and a PR that merely touches one in passing is fine. But a PR that **significantly changes or extends** one - a new consumer, a new key format, a new entity kind flowing through it, a rework of how the keys are built - must say in its description why it is not being migrated to a non-text identity as part of the work. Any concrete reason is acceptable; silence is not. If the statement is missing, request changes and ask for it.
+
+### No syntax-tree rewriting
+
+**Reject any diff that introduces a new syntax-tree rewriting mechanism, or extends an existing one.** ghul's syntax trees are not abstract syntax trees: nothing in the compiler is designed to handle them being rewritten. Pretty much every attempt to rewrite them has ended up biting us - the rewrite expresses what is semantically a value conversion as surgery on user syntax mid-resolution, and the surrounding machinery (closure-capture analysis, generate-IL's "a literal that does not land in the tree is never emitted") was never built for nodes appearing, moving or being replaced after their first walk.
+
+What counts as rewriting: splicing a synthesized node into the tree, replacing one node with another, re-parenting subtrees during resolution or inside a speculative retry. Building the tree in the parser is construction, not rewriting. The sanctioned alternative is a value-level mechanism: `PACK_WRAP_BUILDER` is the model - a synthesized closure symbol with no literal behind it, its body emitted from a recorded description, the wrapped value passed as the thunk's first parameter, tree untouched.
+
+Where a problem is found in an existing tree-rewriting mechanism (`FUNCTION_REFERENCE_ADAPTER`'s eta-expansion splice is the one live today; #3775 tracks its replacement), the fix is the replacement, not a widening. An extension of such a mechanism is rejected even when the extension itself is correct - point at #3775 instead.
 
 ### Reading the environment
 
