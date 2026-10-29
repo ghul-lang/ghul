@@ -1,6 +1,6 @@
 # ghūl language tutorial and reference
 
-ghūl is a statically typed, general-purpose programming language. It targets .NET 10, WebAssembly and native executables. It is a hobby project, and it is expressive enough for general-purpose work: the ghūl compiler is written in ghūl. On .NET, the compiler produces ordinary assemblies and NuGet packages, and ghūl code can use any .NET library. The WebAssembly and native targets use ghūl's own libraries. The [compilation targets](#compilation-targets) section says what each target supports.
+ghūl is a statically typed, general-purpose programming language. It targets .NET 10, WebAssembly and native executables. It is a hobby project, and it is expressive enough for general-purpose work: the ghūl compiler is written in ghūl. On .NET, the compiler produces ordinary assemblies and NuGet packages, and ghūl code can use any .NET library. The WebAssembly and native targets use ghūl's own library. The [compilation targets](#compilation-targets) section says what each target supports.
 
 ghūl is a conventional language with an unusual syntax. The syntax comes from ALGOL 68 and Pascal. Keywords delimit blocks; there are no braces, and indentation has no meaning. Keywords come in pairs, and the closing keyword is the opening keyword spelled backwards: a class or function body is `is` ... `si`, a conditional is `if` ... `fi`, and a `try` block ends with `yrt`.
 
