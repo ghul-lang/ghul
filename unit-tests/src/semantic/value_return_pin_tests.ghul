@@ -8,6 +8,8 @@ namespace Semantic.UnitTests is
     use Semantic.Symbols.LOCAL_VARIABLE
     use Semantic.Symbols.NAMESPACE
     use Semantic.Types.INFERRED_VARIABLE_TYPE
+    use Semantic.Types.MAYBE
+    use Semantic.Types.NULLABLE
     use Semantic.Types.Type
     use Semantic.VALUE_RETURN_PIN
 
@@ -21,7 +23,9 @@ namespace Semantic.UnitTests is
     // return covariance, which a value-type instantiation does not have -
     // so the conversion is made inside the literal and the return settles
     // at the slot's type. A body producing a reference type is left alone
-    // and keeps the more precise type it produced.
+    // and keeps the more precise type it produced. A slot returning the
+    // value-type optional of what the body produced is pinned the same
+    // way: a delegate returning `int` is not one returning `int?`.
     @TestClass()
     class VALUE_RETURN_PIN_TESTS is
         init() is
@@ -42,6 +46,45 @@ namespace Semantic.UnitTests is
 
         a_struct(name: string) -> Type =>
             STRUCT(loc(), loc(), Semantic.BLOCK_SCOPE(), name, System.Array.empty[string](), Semantic.BLOCK_SCOPE()).type!
+
+        nullable_over(inner: Type) -> Type =>
+            NULLABLE(loc(), STRUCT(loc(), loc(), Semantic.BLOCK_SCOPE(), "Nullable", ["T"], Semantic.BLOCK_SCOPE()), Collections.LIST[Type]([inner]))
+
+        maybe_over(inner: Type) -> Type =>
+            MAYBE(loc(), STRUCT(loc(), loc(), Semantic.BLOCK_SCOPE(), "MAYBE", ["T"], Semantic.BLOCK_SCOPE()), Collections.LIST[Type]([inner]))
+
+        @Test()
+        Calling__applies_to_slot__for_a_value_type_optional_slot__returns_true() is
+            is_true(VALUE_RETURN_PIN.applies_to_slot(nullable_over(a_struct("PRODUCED"))))
+        si
+
+        @Test()
+        Calling__applies_to_slot__for_a_maybe_slot__returns_false() is
+            // MAYBE_RETURN_PIN settles a literal going into a `MAYBE` slot.
+            is_false(VALUE_RETURN_PIN.applies_to_slot(maybe_over(a_struct("PRODUCED"))))
+        si
+
+        @Test()
+        Calling__of__for_a_value_body_into_its_value_type_optional__returns_the_slot() is
+            let produced = a_struct("PRODUCED")
+            let slot = nullable_over(produced)
+
+            are_same(slot, VALUE_RETURN_PIN.of(slot, produced))
+        si
+
+        @Test()
+        Calling__of__for_a_value_body_into_another_types_optional__returns_null() is
+            is_null(VALUE_RETURN_PIN.of(nullable_over(a_struct("OTHER")), a_struct("PRODUCED")))
+        si
+
+        @Test()
+        Calling__of__for_an_optional_body_into_a_value_type_optional__returns_null() is
+            // Already optional: the body's type needs no pin to be returned.
+            let produced = a_struct("PRODUCED")
+            let slot = nullable_over(produced)
+
+            is_null(VALUE_RETURN_PIN.of(slot, nullable_over(produced)))
+        si
 
         @Test()
         Calling__applies_to_slot__for_a_class_slot__returns_true() is
