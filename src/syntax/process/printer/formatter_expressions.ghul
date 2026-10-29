@@ -28,10 +28,29 @@ namespace Syntax.Process.Printer is
                 return
             fi
 
+            // A short last operand of a two-operand chain stays with its
+            // operator: `(...).count == 7` never leaves the 7 on its own.
+            if !_is_chain_link(binary.left, binary) /\ _is_simple_element(binary.right) then
+                binary.left.accept(self)
+                write(' ')
+                write_operation(binary)
+                write(' ')
+                binary.right.accept(self)
+                return
+            fi
+
             _builder.begin_group()
             _emit_binary_chain(binary)
             _builder.end_group()
         si
+
+        // Whether `left` is flattened into `binary`'s chain.
+        _is_chain_link(left: Expressions.Expression, binary: Expressions.BINARY) -> bool =>
+            if let left_binary: Expressions.BINARY = left then
+                !is_tight_range(left_binary) /\ _precedence(left_binary) == _precedence(binary)
+            else
+                false
+            fi
 
         // Emit a chain's operands and operators in tree order, a soft break
         // after each operator. Only the left spine of operators of the
@@ -41,12 +60,8 @@ namespace Syntax.Process.Printer is
         // as its own unit, so a nested chain indents once rather than once
         // per enclosing operator.
         _emit_binary_chain(binary: Expressions.BINARY) is
-            if
-                let left_binary: Expressions.BINARY = cast Expressions.BINARY?(binary.left) /\
-                !is_tight_range(left_binary) /\
-                _precedence(left_binary) == _precedence(binary)
-            then
-                _emit_binary_chain(left_binary)
+            if _is_chain_link(binary.left, binary) then
+                _emit_binary_chain(cast Expressions.BINARY(binary.left))
             else
                 binary.left.accept(self)
             fi
@@ -1195,12 +1210,15 @@ namespace Syntax.Process.Printer is
         si
 
         // A tuple breaks as an argument list does, and so does a single
-        // element in parentheses, which is a parenthesised expression.
+        // element in parentheses, which is a parenthesised expression. A
+        // tuple of literals and names is filled, as such an array is.
         visit(tuple: Expressions.TUPLE) is
             note(tuple.location)
             write("(")
 
-            if tuple.elements.count == 1 /\ !tuple.elements.has_trailing_comma then
+            if tuple.elements.count > 1 /\ tuple.elements |> Ghul.Pipes.all(e => _is_simple_element(e)) then
+                _emit_filled(tuple.elements)
+            elif tuple.elements.count == 1 /\ !tuple.elements.has_trailing_comma then
                 _builder.begin_group()
                 _builder.begin_nest(4)
                 _builder.soft_line()
@@ -1256,6 +1274,8 @@ namespace Syntax.Process.Printer is
         _is_simple_element(e: Expressions.Expression) -> bool =>
             if let unary: Expressions.UNARY = e then
                 isa Expressions.Literals.Literal(unary.right)
+            elif let element: Expressions.TUPLE_ELEMENT = e then
+                if let element.initializer? then _is_simple_element(initializer) else true fi
             else
                 isa Expressions.Literals.Literal(e) \/
                     isa Expressions.IDENTIFIER(e) \/
