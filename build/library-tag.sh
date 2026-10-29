@@ -5,8 +5,8 @@
 #
 # Usage: build/library-tag.sh <library>
 #
-# <library> is ghul-core or ghul-runtime, and is fetched from
-# github.com/ghul-lang/<library>.
+# <library> is a library repository under github.com/ghul-lang, such as
+# ghul-runtime.
 
 set -euo pipefail
 

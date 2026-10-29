@@ -4,10 +4,10 @@
 # own source, that native compiler builds the same source again, and the
 # two passes must write the same LLVM module and the same executable.
 #
-# usage: build/llvm-bootstrap.sh [<compiler dll> [<ghul-core> [<ghul-runtime>]]]
+# usage: build/llvm-bootstrap.sh [<compiler dll> [<ghul-runtime>]]
 #
-# The defaults are publish/ghul.dll and the library checkouts under
-# libraries/, where CI puts them. ghul-llvm has to be on the PATH, or named
+# The defaults are publish/ghul.dll and the runtime library checkout under
+# libraries/, where CI puts it. ghul-llvm has to be on the PATH, or named
 # by GHUL_LLVM. The passes are written to a temporary directory, or to
 # LLVM_BOOTSTRAP_DIR where it is set, which is then kept.
 
@@ -16,8 +16,7 @@ set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 
 compiler=${1:-$root/publish/ghul.dll}
-core=${2:-$root/libraries/ghul-core}
-runtime=${3:-$root/libraries/ghul-runtime}
+runtime=${2:-$root/libraries/ghul-runtime}
 
 if [ -n "${LLVM_BOOTSTRAP_DIR:-}" ]; then
     work=$LLVM_BOOTSTRAP_DIR
@@ -27,7 +26,7 @@ else
     trap 'rm -rf "$work"' EXIT
 fi
 
-"$root/build/llvm-self-sources.sh" "$work" "$core" "$runtime"
+"$root/build/llvm-self-sources.sh" "$work" "$runtime"
 
 cd "$root"
 

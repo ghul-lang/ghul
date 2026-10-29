@@ -13,8 +13,8 @@
 #
 # Usage: build/llvm-repl.sh <ghul.dll> <ghul-llvm dir> <host dir>
 #
-# ghul-core and ghul-runtime are read from libraries/ghul-core and
-# libraries/ghul-runtime, or from GHUL_CORE and GHUL_RUNTIME. With
+# The runtime library, core and runtime sources both, is read from
+# libraries/ghul-runtime, or from GHUL_RUNTIME. With
 # GHUL_REPL_TIMING set, the time each step of a cell takes is written to
 # standard error.
 
@@ -30,7 +30,6 @@ tool="$(cd "$2" && pwd)/bin/ghul-llvm"
 host="$(cd "$3" && pwd)/bin/ghul-host"
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
-core="${GHUL_CORE:-$root/libraries/ghul-core}"
 runtime="${GHUL_RUNTIME:-$root/libraries/ghul-runtime}"
 
 work="$(mktemp -d)"
@@ -38,11 +37,8 @@ trap 'kill "$server" 2>/dev/null; rm -rf "$work"' EXIT
 
 {
     echo "--library-source"
-    echo "ghul-core@$(tr -d '[:space:]' < "$core/VERSION")=$core"
-    (cd "$core" && find src -name '*.ghul' | sort | sed "s#^#$core/#")
-    echo "--library-source"
     echo "ghul-runtime@$(tr -d '[:space:]' < "$runtime/VERSION")=$runtime"
-    (cd "$runtime" && find ghul-runtime/src -name '*.ghul' | sort | sed "s#^#$runtime/#")
+    (cd "$runtime" && find ghul-core/src ghul-runtime/src -name '*.ghul' | sort | sed "s#^#$runtime/#")
 } > "$work/libraries.rsp"
 
 mkfifo "$work/commands"

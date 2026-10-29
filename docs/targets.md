@@ -6,7 +6,7 @@ Read this file when you are building for WebAssembly or native executables. It c
 
 GHUL.md describes the `dotnet` and `wasm` targets. The third target, `llvm`, builds a native executable. An `llvm` build:
 
-1. type-checks the program against ghul-core and ghul-runtime, as a `wasm` build does
+1. type-checks the program against ghul-runtime, as a `wasm` build does
 2. writes an LLVM module
 3. links the module into a statically linked executable with the `ghul-llvm` tool. The tool must be on the path, or named by `GHUL_LLVM`.
 
@@ -48,12 +48,12 @@ On the llvm target, a crash is reported in the same way. The program's output is
 
 A frame has the name that the linker gives the function. On the llvm target, a build with `--debug` adds the frame's file and line. At the default optimisation level, a function inlined into another function has no frame of its own. A stack that the llvm optimiser has turned into a loop does not run out, so it is never reported.
 
-A `wasm` build loads no .NET assemblies. Two libraries, compiled into the module from source, supply what the .NET assemblies supply on .NET:
+A `wasm` build loads no .NET assemblies. One library, ghul-runtime, compiled into the module from source, supplies what the .NET assemblies supply on .NET. It holds two source trees:
 
-- ghul-core gives the built-in types their members, and declares the collections.
-- ghul-runtime supplies the pipes and the rest of `Ghul`.
+- `ghul-core` gives the built-in types their members, and declares the collections.
+- `ghul-runtime` supplies the pipes and the rest of `Ghul`.
 
-The `ghul` command-line tool builds a project for the `wasm` or `llvm` target, and fetches these libraries for either target. A project lists its targets in its `ghul-project.json` manifest. A .NET project is built with the .NET SDK instead:
+The `ghul` command-line tool builds a project for the `wasm` or `llvm` target, and fetches the library for either target. A project lists its targets in its `ghul-project.json` manifest. A .NET project is built with the .NET SDK instead:
 
 ```sh
 ghul new hello --target llvm,wasm

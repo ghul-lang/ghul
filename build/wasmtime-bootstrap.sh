@@ -5,10 +5,10 @@
 # builds the same source again, and the passes must write the same module and
 # the same loader.
 #
-# usage: build/wasmtime-bootstrap.sh [<compiler dll> [<ghul-core> [<ghul-runtime>]]]
+# usage: build/wasmtime-bootstrap.sh [<compiler dll> [<ghul-runtime>]]
 #
-# The defaults are publish/ghul.dll and the library checkouts under
-# libraries/, where CI puts them. The embedder has to be on the PATH as
+# The defaults are publish/ghul.dll and the runtime library checkout under
+# libraries/, where CI puts it. The embedder has to be on the PATH as
 # wasmtime-host, or named by GHUL_WASMTIME_HOST. The passes are written to a
 # temporary directory, or to WASMTIME_BOOTSTRAP_DIR where it is set, which is
 # then kept. The build command can be shown without running anything by
@@ -19,8 +19,7 @@ set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 
 compiler=${1:-$root/publish/ghul.dll}
-core=${2:-$root/libraries/ghul-core}
-runtime=${3:-$root/libraries/ghul-runtime}
+runtime=${2:-$root/libraries/ghul-runtime}
 
 embedder=${GHUL_WASMTIME_HOST:-$(command -v wasmtime-host || true)}
 if [ -z "$embedder" ]; then
@@ -36,7 +35,7 @@ else
     trap 'rm -rf "$work"' EXIT
 fi
 
-"$root/build/llvm-self-sources.sh" "$work" "$core" "$runtime"
+"$root/build/llvm-self-sources.sh" "$work" "$runtime"
 
 cd "$root"
 
@@ -52,11 +51,11 @@ build() {
     local start=$(date +%s)
 
     if [ -n "${WASMTIME_BOOTSTRAP_DRY_RUN:-}" ]; then
-        echo "$name: $* --target wasm --wasm-loader $core/host/loader.mjs --underscore-access legacy -o $directory/ghul @$work/libraries.rsp @$work/sources.rsp"
+        echo "$name: $* --target wasm --wasm-loader $runtime/ghul-core/host/loader.mjs --underscore-access legacy -o $directory/ghul @$work/libraries.rsp @$work/sources.rsp"
         return
     fi
 
-    if ! "$@" --target wasm --wasm-loader "$core/host/loader.mjs" --underscore-access legacy -o "$directory/ghul" @"$work/libraries.rsp" @"$work/sources.rsp" > "$work/$name.log" 2>&1; then
+    if ! "$@" --target wasm --wasm-loader "$runtime/ghul-core/host/loader.mjs" --underscore-access legacy -o "$directory/ghul" @"$work/libraries.rsp" @"$work/sources.rsp" > "$work/$name.log" 2>&1; then
         grep -v ': warn: ' "$work/$name.log" || true
         echo "$name failed"
         exit 1
