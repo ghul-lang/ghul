@@ -234,7 +234,8 @@ namespace Syntax.Process.Printer.UnitTests is
             assert_formats(source, expected)
         si
 
-        // A chain breaks only at its lowest-precedence operators.
+        // A chain breaks only at its lowest-precedence operators, and every
+        // operand of a broken chain is at the first one's indent.
         @Test()
         an_operator_chain_breaks_at_its_lowest_precedence_operators() is
             let source = lines([
@@ -244,7 +245,7 @@ namespace Syntax.Process.Printer.UnitTests is
             let expected = lines([
                 "let determinant =",
                 "    first * second -",
-                "        third * fourth_value"
+                "    third * fourth_value"
             ])
 
             assert_formats(source, expected)
@@ -441,6 +442,303 @@ namespace Syntax.Process.Printer.UnitTests is
             ])
 
             assert_formats(source, expected)
+        si
+
+        // Adjacent string literals written on one line stay on one line.
+        @Test()
+        adjacent_string_literals_on_one_line_stay_on_one_line() is
+            let source = lines([
+                "let board = \"rnbqkbnr\" \"pppppppp\""
+            ])
+
+            assert_formats(source, source)
+        si
+
+        // A numeric literal keeps the digit separators it was written with.
+        @Test()
+        a_numeric_literal_keeps_its_digit_separators() is
+            let source = lines([
+                "let limit = 40_000",
+                "let mask = 0xFF_FF",
+                "let ratio = 1_000.5"
+            ])
+
+            assert_formats(source, source)
+        si
+
+        // A for header that does not fit takes the same block shape as an if or
+        // while header.
+        @Test()
+        a_long_for_header_takes_block_form() is
+            let source = lines([
+                "for item in values |> filter(x => x > 0) |> map(x => x * 2) do write_line(item) od"
+            ])
+
+            let expected = lines([
+                "for",
+                "    item in values",
+                "        |> filter(x => x > 0)",
+                "        |> map(x => x * 2)",
+                "do",
+                "    write_line(item)",
+                "od"
+            ])
+
+            assert_formats(source, expected)
+        si
+
+        // A function literal as the last argument hugs the call, its body on
+        // the next line and the closer below it.
+        @Test()
+        a_last_function_literal_argument_hugs_the_call() is
+            let source = lines([
+                "let found = items |> any(x => has_value(x, wanted_value))"
+            ])
+
+            let expected = lines([
+                "let found =",
+                "    items",
+                "        |> any(x =>",
+                "            has_value(x, wanted_value)",
+                "        )"
+            ])
+
+            assert_formats(source, expected)
+        si
+
+        // A hugged function literal whose body is a tuple keeps the tuple's
+        // opener on its line.
+        @Test()
+        a_hugged_function_literal_keeps_a_bracketed_body_on_its_line() is
+            let source = lines([
+                "let pairs = items |> map(x => (key = x.name, value = x.size))"
+            ])
+
+            let expected = lines([
+                "let pairs =",
+                "    items",
+                "        |> map(x => (",
+                "            key = x.name, value = x.size",
+                "        ))"
+            ])
+
+            assert_formats(source, expected)
+        si
+
+        // A pipe chain whose head is a bracketed literal stays on the line, the
+        // literal at the chain's own indent.
+        @Test()
+        a_pipe_chain_with_a_bracketed_head_stays_on_the_line() is
+            let source = lines([
+                "let total = [",
+                "    1, 2, 3,",
+                "    4, 5, 6",
+                "] |> sum()"
+            ])
+
+            let expected = lines([
+                "let total = [",
+                "    1, 2, 3,",
+                "    4, 5, 6",
+                "]",
+                "    |> sum()"
+            ])
+
+            assert_formats(source, expected)
+        si
+
+        // A tuple's last element hugs it as a call's last argument does.
+        @Test()
+        a_tuples_last_bracketed_element_hugs_it() is
+            let source = lines([
+                "let entry = (\"first\", [alpha_value, beta_value, gamma_value])"
+            ])
+
+            let expected = lines([
+                "let entry = (\"first\", [",
+                "    alpha_value, beta_value, gamma_value",
+                "])"
+            ])
+
+            assert_formats(source, expected)
+        si
+
+        // A single-variable let whose value breaks puts in on a line of its
+        // own.
+        @Test()
+        a_single_variable_let_whose_value_breaks_puts_in_on_its_own_line() is
+            let source = lines([
+                "f() =>",
+                "    let share = double(occurrences) / double(total_length) in",
+                "    -share * log2(share)"
+            ])
+
+            let expected = lines([
+                "f() =>",
+                "    let share =",
+                "        double(occurrences) /",
+                "        double(total_length)",
+                "    in",
+                "    -share * log2(share)"
+            ])
+
+            assert_formats(source, expected)
+        si
+
+        // A tuple of literals and names that does not fit is filled, as such an
+        // array is.
+        @Test()
+        a_tuple_of_simple_elements_is_filled() is
+            let source = lines([
+                "let point = (x = left, y = top, z = depth, w = weight)"
+            ])
+
+            let expected = lines([
+                "let point = (",
+                "    x = left, y = top, z = depth,",
+                "    w = weight",
+                ")"
+            ])
+
+            assert_formats(source, expected)
+        si
+
+        // A short last operand of a two-operand chain stays with its operator.
+        @Test()
+        a_short_last_operand_stays_with_its_operator() is
+            let source = lines([
+                "let unique = (values_from_the_source |> collect_set()).count == 7"
+            ])
+
+            let expected = lines([
+                "let unique =",
+                "    (",
+                "        values_from_the_source",
+                "            |> collect_set()",
+                "    ).count == 7"
+            ])
+
+            assert_formats(source, expected)
+        si
+
+        // A call on a receiver that is not a name, such as a string literal,
+        // does not count as opening a bracket: it moves to the next line.
+        @Test()
+        a_call_on_a_literal_receiver_moves_to_the_next_line() is
+            let source = lines([
+                "pad(text: string) -> string => \"[{{text}}]\".pad_right(20)"
+            ])
+
+            let expected = lines([
+                "pad(text: string) -> string =>",
+                "    \"[{{text}}]\".pad_right(20)"
+            ])
+
+            assert_formats(source, expected)
+        si
+
+        // What follows `return` or `yield` is laid out as the right-hand side
+        // of an `=` is: a multi-line `if` moves to the next line.
+        @Test()
+        a_return_value_is_laid_out_as_a_right_hand_side() is
+            let source = lines([
+                "f(x: int) -> bool is",
+                "    return",
+                "        if x == 1 then",
+                "            true",
+                "        else",
+                "            false",
+                "        fi",
+                "si",
+                "g() -> int{{}} is",
+                "    yield (first = 1, second = 2)",
+                "    return",
+                "si"
+            ])
+
+            assert_formats(source, source)
+        si
+
+        // A function literal on the right of `=` that does not fit moves to
+        // the next line, as any expression not opening with a bracket does.
+        @Test()
+        a_function_literal_that_does_not_fit_moves_to_the_next_line() is
+            let source = lines([
+                "let combine = (first, second) => first + second"
+            ])
+
+            let expected = lines([
+                "let combine =",
+                "    (first, second) => first + second"
+            ])
+
+            assert_formats(source, expected)
+        si
+
+        // A function's body moves to the next line before its header breaks:
+        // only a bracketed literal stays on the header's line.
+        @Test()
+        a_function_body_moves_to_the_next_line_before_the_header_breaks() is
+            let source = lines([
+                "pick(a: int, b: int) -> int => choose_between(a, b)"
+            ])
+
+            let expected = lines([
+                "pick(a: int, b: int) -> int =>",
+                "    choose_between(a, b)"
+            ])
+
+            assert_formats(source, expected)
+        si
+
+        // A function literal whose body is a block stays on the line, as the
+        // block would.
+        @Test()
+        a_function_literal_with_a_block_body_stays_on_the_line() is
+            let source = lines([
+                "counter(start: int) -> () -> int is",
+                "    let count mut = start",
+                "",
+                "    return () => (",
+                "        count = count + 1",
+                "        count",
+                "    )",
+                "si"
+            ])
+
+            assert_formats(source, source)
+        si
+
+        // A blank line after a line comment is kept: the comment's own line
+        // break counts toward it.
+        @Test()
+        a_blank_line_after_a_line_comment_is_kept() is
+            let source = lines([
+                "use default",
+                "",
+                "// a comment above the loop",
+                "",
+                "for value in 1::3 do",
+                "    write_line(value)",
+                "od"
+            ])
+
+            assert_formats(source, source)
+        si
+
+        // A block comment's continuation lines keep their alignment under the
+        // text after the opening marker.
+        @Test()
+        a_block_comment_keeps_its_continuation_alignment() is
+            let source = lines([
+                "f() is",
+                "    /* first line",
+                "       second line */",
+                "    x = 1",
+                "si"
+            ])
+
+            assert_formats(source, source)
         si
 
         // A comment trailing a line does not count toward its width, so it
