@@ -441,6 +441,23 @@ namespace Syntax.Process.Printer is
             fi
         si
 
+        visit(element: Expressions.TUPLE_ELEMENT) is
+            note(element.location)
+            element.name.accept(self)
+
+            let type_expression = element.type_expression
+
+            if !isa TypeExpressions.INFER(type_expression) then
+                write(": ")
+                type_expression.accept(self)
+            fi
+
+            if let element.initializer? then
+                write(" ")
+                emit_right_hand_side("=", initializer)
+            fi
+        si
+
         visit(assign: Statements.ASSIGNMENT) is
             note(assign.location)
             assign.left.accept(self)
@@ -601,8 +618,9 @@ namespace Syntax.Process.Printer is
 
         // --- wrapping: call argument lists and function parameter lists ---
 
+        // A pipe stage's span starts at its operator, not at the chain's
+        // head, so it is noted from the head onwards rather than from there.
         visit(call: Expressions.CALL) is
-            note(call.location)
             if _is_pipe_stage(call) then
                 _builder.begin_group()
                 _builder.begin_nest(4)
@@ -610,6 +628,7 @@ namespace Syntax.Process.Printer is
                 _builder.end_nest()
                 _builder.end_group()
             else
+                note(call.location)
                 emit_callee(call.function)
                 emit_inferred_type_arguments(call.function)
                 write("(")
@@ -628,7 +647,6 @@ namespace Syntax.Process.Printer is
             let left = call.arguments.expressions[0]
 
             if let stage: Expressions.CALL = left /\ _is_pipe_stage(stage) then
-                note(stage.location)
                 _emit_pipe_chain(stage)
             else
                 left.accept(self)
@@ -878,6 +896,12 @@ namespace Syntax.Process.Printer is
         // to `arguments`: the parser moved each value into the list and
         // kept the name beside it.
         emit_argument_list(arguments: Expressions.LIST, start: int, names: Collections.List[Identifiers.Identifier]?) is
+            emit_argument_list(arguments, start, names, true)
+        si
+
+        // `hug` is for a call's arguments only: the elements of a tuple or
+        // an array literal break one per line as written.
+        emit_argument_list(arguments: Expressions.LIST, start: int, names: Collections.List[Identifiers.Identifier]?, hug: bool) is
             if arguments.count <= start then
                 return
             fi
@@ -888,7 +912,7 @@ namespace Syntax.Process.Printer is
             // literal, a block, a function literal whose body is one - hugs
             // the call when it breaks: `f([` ... `])`, `map(x => (` ... `))`.
             // The arguments before it stay on the call's line.
-            if !arguments.has_trailing_comma /\ _hugs(arguments.expressions[last]) then
+            if hug /\ !arguments.has_trailing_comma /\ _hugs(arguments.expressions[last]) then
                 _builder.begin_group()
                 _builder.begin_nest(4)
 
@@ -972,7 +996,7 @@ namespace Syntax.Process.Printer is
             if tuple.elements.count == 1 /\ !tuple.elements.has_trailing_comma then
                 tuple.elements.expressions[0].accept(self)
             else
-                emit_argument_list(tuple.elements)
+                emit_argument_list(tuple.elements, 0, null, false)
             fi
 
             write(")")
@@ -993,7 +1017,7 @@ namespace Syntax.Process.Printer is
             if elements.count == 0 then
                 write("]")
             elif sequence.location.start_line == sequence.location.end_line then
-                emit_argument_list(elements)
+                emit_argument_list(elements, 0, null, false)
                 write("]")
             else
                 _emit_sequence_rows(elements)
