@@ -2,7 +2,8 @@ namespace Semantic is
     use Types.Type
 
     // Where a function literal's inferred return settles when its body
-    // produced a value type and its slot returns a reference type.
+    // produced a value type and its slot returns a reference type, or the
+    // value-type optional of what the body produced.
     //
     // A delegate assignment cannot carry the conversion: reaching the
     // slot's type that way needs return covariance, and a value-type
@@ -14,8 +15,9 @@ namespace Semantic is
     class VALUE_RETURN_PIN is
         // The type to settle at, or null to leave the body's own type
         // alone. Null whenever the question does not arise: no slot, a
-        // slot that is not a reference type, a body that is not a value
-        // type, or a body that does not implement what the slot returns.
+        // slot that is neither a reference type nor a value-type
+        // optional, a body that is not a value type, or a body that does
+        // not implement what the slot returns.
         of(slot: Type?, produced: Type?) -> Type? static is
             if !slot? \/ !produced? then
                 return null
@@ -29,6 +31,18 @@ namespace Semantic is
                 return null
             fi
 
+            if slot.is_value_type then
+                if
+                    let inner = slot.optional_inner_type /\
+                    !produced.is_optional /\
+                    inner.is_equivalent_to(produced)
+                then
+                    return slot
+                fi
+
+                return null
+            fi
+
             return produced.find_ancestor(slot)
         si
 
@@ -38,9 +52,9 @@ namespace Semantic is
         // and a slot is a reference type or is not whatever they turn out
         // to be.
         applies_to_slot(slot: Type?) -> bool static =>
-            slot?               /\
-            !slot.is_void       /\
-            !slot.is_value_type /\
+            slot?                                                        /\
+            !slot.is_void                                                /\
+            (!slot.is_value_type \/ (slot.is_optional /\ !slot.is_maybe)) /\
             !slot.is_type_variable
     si
 si

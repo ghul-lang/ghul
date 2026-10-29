@@ -500,7 +500,7 @@ namespace Semantic.Symbols is
     si
 
     // FIXME: pull up common code into a local + argument superclass:
-    class LOCAL_VARIABLE: Variable, Types.SettableTyped is
+    class LOCAL_VARIABLE: Variable, Types.SettableTyped, LiteralHolder is
         is_local: bool => true
 
         // Set on the local a nested named function statement declares, so
@@ -508,6 +508,10 @@ namespace Semantic.Symbols is
         // in the body, or a sibling function reaching for this one - is
         // reported as what it is rather than as an undefined variable.
         is_nested_function: bool public
+
+        stores_inferred_literal: bool public
+        literal_slot: Types.Type? public
+        literal_owner: Function? public
 
         describe(context: DESCRIBE_CONTEXT) -> SignaturePart =>
             _describe_typed(context, PARTS.literal(name), type)
@@ -722,7 +726,29 @@ namespace Semantic.Symbols is
 
     si
 
-    class GLOBAL_VARIABLE: Field, Types.SettableTyped is
+    // An immutable variable with no written type whose initializer is a
+    // function literal with no written return type. The literal's own body
+    // only bounds its return, so its type is open to the variable's uses,
+    // as it would be to the context it was written in.
+    trait LiteralHolder is
+        // Whether the variable holds such a literal.
+        stores_inferred_literal: bool, = v
+
+        // The function type the first use wanted that the literal's own
+        // type did not fit. The literal is typed under it on the next walk
+        // of the body, as if written at that use.
+        literal_slot: Types.Type?, = v
+
+        // The function whose body declares the variable: only a use there
+        // is walked again with the literal.
+        literal_owner: Function?, = v
+    si
+
+    class GLOBAL_VARIABLE: Field, Types.SettableTyped, LiteralHolder is
+        stores_inferred_literal: bool public
+        literal_slot: Types.Type? public
+        literal_owner: Function? public
+
         // Set by the .NET importer when the symbol is read back from a
         // referenced assembly: the carrier class the field is a static
         // member of, which a field reference hangs off. A namespace can

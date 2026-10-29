@@ -851,6 +851,33 @@ namespace Syntax.Process is
             return found
         si
 
+        // A read of a local holding an unannotated function literal, where
+        // what the read is wanted as is a function type the literal's own
+        // does not fit. Written here, the literal would have been typed
+        // under that type, so the local's initializer is typed under it on
+        // the next walk. The first use to ask decides it: one literal has
+        // one type.
+        _ask_of_stored_literal(identifier: Trees.Expressions.IDENTIFIER, symbol: Semantic.Symbols.Symbol) is
+            if
+                let holder: Semantic.Symbols.LiteralHolder = symbol /\
+                holder.stores_inferred_literal /\
+                !holder.literal_slot? /\
+                (isa Semantic.Symbols.LOCAL_VARIABLE(symbol) \/ _symbol_table.current_function == holder.literal_owner),
+                wanted = identifier.expected_type /\
+                wanted.is_function /\
+                !wanted.is_error,
+                loaded = identifier.value,
+                type = loaded.type /\
+                type.is_function /\
+                !wanted.is_assignable_from(type)
+            then
+                holder.literal_slot = wanted
+
+                Semantic.OBLIGATIONS.note_learned()
+                _logger.mark_consumed_any()
+            fi
+        si
+
         visit_identifier(identifier: Trees.Expressions.IDENTIFIER) is
             let need_store = identifier.value? /\ isa Need.STORE(identifier.value)
 
@@ -1023,6 +1050,8 @@ namespace Syntax.Process is
                         identifier.compile_expressions_state.value =
                             _function_reference_resolver.try_load(identifier.location, symbol, null, identifier.expected_type, identifier.is_call_target) ??
                             symbol.load(identifier.location, null, _symbol_loader)
+
+                        _ask_of_stored_literal(identifier, symbol)
 
                         // Optional-narrowing: when flow analysis has
                         // established this variable is non-null here,
