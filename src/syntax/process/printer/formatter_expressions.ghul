@@ -1017,7 +1017,12 @@ namespace Syntax.Process.Printer is
             if elements.count == 0 then
                 write("]")
             elif sequence.location.start_line == sequence.location.end_line then
-                emit_argument_list(elements, 0, null, false)
+                if elements |> Ghul.Pipes.all(e => _is_simple_element(e)) then
+                    _emit_filled(elements)
+                else
+                    emit_argument_list(elements, 0, null, false)
+                fi
+
                 write("]")
             else
                 _emit_sequence_rows(elements)
@@ -1031,6 +1036,49 @@ namespace Syntax.Process.Printer is
                 write(": ")
                 type_expression.accept(self)
             fi
+        si
+
+        // Literals and names: short and alike, so a list of them that does
+        // not fit is filled rather than run down the page one per line.
+        _is_simple_element(e: Expressions.Expression) -> bool =>
+            if let unary: Expressions.UNARY = e then
+                isa Expressions.Literals.Literal(unary.right)
+            else
+                isa Expressions.Literals.Literal(e) \/
+                    isa Expressions.IDENTIFIER(e) \/
+                    isa Expressions.MEMBER(e)
+            fi
+
+        // Broken, the brackets take lines of their own and the elements
+        // between them are filled: as many on each line as fit.
+        _emit_filled(elements: Expressions.LIST) is
+            _builder.begin_group()
+            _builder.begin_nest(4)
+            _builder.soft_line()
+
+            let first mut = true
+
+            for e in elements do
+                if first then
+                    e.accept(self)
+                else
+                    write(",")
+                    _builder.begin_group()
+                    _builder.line()
+                    e.accept(self)
+                    _builder.end_group()
+                fi
+
+                first = false
+            od
+
+            if elements.has_trailing_comma then
+                write(",")
+            fi
+
+            _builder.end_nest()
+            _builder.soft_line()
+            _builder.end_group()
         si
 
         // Each row the author wrote starts a line of its own. A row too

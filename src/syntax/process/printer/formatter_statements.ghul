@@ -359,16 +359,22 @@ namespace Syntax.Process.Printer is
 
                 if let branch.binding? then
                     _emit_binding_header(if first then "if let" else "elif let" fi, binding, branch.condition, "then")
-                    write_line()
                 elif let branch.condition? then
                     _emit_condition_header(if first then "if" else "elif" fi, () => condition.accept(self), "then")
-                    write_line()
                 else
-                    write_line("else")
+                    write("else")
                 fi
 
-                indent()
-                branch.body.accept(self)
+                let compact = _body_on_keyword_line(branch)
+
+                if compact then
+                    _emit_compact_body(branch.body)
+                    write_line()
+                else
+                    write_line()
+                    indent()
+                    branch.body.accept(self)
+                fi
 
                 // A comment after the branch's last statement belongs inside
                 // the branch: consume it while still indented, or it is
@@ -381,7 +387,9 @@ namespace Syntax.Process.Printer is
                         if_statement.location.end
                     fi)
 
-                outdent()
+                if !compact then
+                    outdent()
+                fi
 
                 first = false
                 i = i + 1
@@ -700,15 +708,19 @@ namespace Syntax.Process.Printer is
                     write("else")
                 fi
 
-                _builder.begin_nest(4)
-                _break(flat)
-                emit_branch_value(branch.body)
+                if !flat /\ _body_on_keyword_line(branch) then
+                    _emit_compact_body(branch.body)
+                else
+                    _builder.begin_nest(4)
+                    _break(flat)
+                    emit_branch_value(branch.body)
 
-                // A statement arm - a `return`, say - writes its own line
-                // break. The soft break that separates it from the next
-                // keyword would then be a second one, and the blank line
-                // it leaves comes back as another on every reformat.
-                _builder.end_nest()
+                    // A statement arm - a `return`, say - writes its own line
+                    // break. The soft break that separates it from the next
+                    // keyword would then be a second one, and the blank line
+                    // it leaves comes back as another on every reformat.
+                    _builder.end_nest()
+                fi
 
                 first = false
             od
@@ -720,6 +732,25 @@ namespace Syntax.Process.Printer is
             fi
 
             write("fi")
+            _builder.end_group()
+        si
+
+        // A branch whose one statement the author wrote on its `if`, `elif`
+        // or `else` line keeps it there where it fits, as a case arm does.
+        _body_on_keyword_line(branch: Statements.IF_BRANCH) -> bool =>
+            if let body = branch.body.last /\ _has_at_most_one_statement(branch.body) then
+                body.location.start_line == branch.location.start_line /\
+                    !_has_trivia_before(body.location.start)
+            else
+                false
+            fi
+
+        _emit_compact_body(body: Statements.LIST) is
+            _builder.begin_group()
+            _builder.begin_nest(4)
+            _builder.line()
+            _emit_inline(() => emit_branch_value(body))
+            _builder.end_nest()
             _builder.end_group()
         si
 
