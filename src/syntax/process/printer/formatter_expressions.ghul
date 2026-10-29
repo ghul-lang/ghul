@@ -28,56 +28,117 @@ namespace Syntax.Process.Printer is
                 return
             fi
 
-            // A chain whose first operand is long and whose others are all
-            // short stays on one line, and only the first breaks, inside its
-            // own brackets:
-            // `cast(...) * 100.0D / cast(trials)` never leaves `100.0D` on
-            // a line of its own.
-            if _has_short_tail(binary) /\ !_is_short_operand(_chain_head(binary)) then
-                _emit_unbroken_chain(binary)
+            let head = _chain_head(binary)
+
+            // A tail of literals and names after a first operand that can
+            // break - `... ?? 0`, `f(...) == 1` - is never broken: it stays
+            // with the first operand's last line, which breaks instead.
+            if _can_break_inside(head) /\ _has_trivial_tail(binary) then
+                head.accept(self)
+                _builder.begin_group()
+                _emit_chain_tail(binary)
+                _builder.end_flat()
+                return
+            fi
+
+            // A tail of short calls after a long bracketed first operand -
+            // `cast(...) * 100.0D / cast(trials)` - follows the closer when
+            // the first operand has to break, and breaks after its operators
+            // as usual when the first operand fits.
+            if _breaks_in_brackets(head) /\ !_is_short_operand(head) /\ _has_short_tail(binary) then
+                let head_group = _builder.new_group_id()
+
+                _builder.begin_group()
+                head.accept(self)
+                _builder.end_tracked_group(head_group)
+
+                _builder.begin_capture()
+                _emit_chain_tail(binary)
+                let tail = _builder.end_capture()
+
+                _builder.emit(DOC.IF_BROKEN(head_group, DOC.FLAT(tail), DOC.GROUP(tail)))
                 return
             fi
 
             _builder.begin_group()
-            _emit_binary_chain(binary)
+            head.accept(self)
+            _emit_chain_tail(binary)
             _builder.end_group()
         si
+
+        _has_trivial_tail(binary: Expressions.BINARY) -> bool =>
+            (if let unary: Expressions.UNARY = binary.right then _is_simple_element(unary.right) else _is_simple_element(binary.right) fi) /\
+                (if _is_chain_link(binary.left, binary) then _has_trivial_tail(cast Expressions.BINARY(binary.left)) else true fi)
 
         _has_short_tail(binary: Expressions.BINARY) -> bool =>
             _is_short_operand(binary.right) /\
                 (if _is_chain_link(binary.left, binary) then _has_short_tail(cast Expressions.BINARY(binary.left)) else true fi)
+
+        // Whether an operand has somewhere to break other than between its
+        // own operators' neighbours: a call with arguments, a cast, brackets,
+        // a pipe chain or an operator chain. An index's brackets and a call
+        // with nothing in its parentheses do not break.
+        _can_break_inside(e: Expressions.Expression) -> bool =>
+            if let member: Expressions.MEMBER = e then
+                _can_break_inside(member.left)
+            elif let call: Expressions.CALL = e then
+                _is_pipe_stage(call) \/ call.arguments.count > 0 \/ _can_break_inside(call.function)
+            elif let binary: Expressions.BINARY = e then
+                // A chain breaks inside an operand of its own only where it
+                // would hold its tail after that operand.
+                !is_tight_range(binary) /\ _can_break_inside(_chain_head(binary)) /\ _has_trivial_tail(binary)
+            else
+                isa Expressions.CAST(e) \/
+                    isa Expressions.TUPLE(e) \/
+                    isa Expressions.SEQUENCE(e) \/
+                    isa Expressions.COMPREHENSION(e)
+            fi
+
+        // Whether an operand can break inside brackets of its own: a call,
+        // a cast, a tuple or parenthesised expression, an array literal or
+        // comprehension, or a member of one of those.
+        _breaks_in_brackets(e: Expressions.Expression) -> bool =>
+            if let member: Expressions.MEMBER = e then
+                _breaks_in_brackets(member.left)
+            elif let call: Expressions.CALL = e then
+                !_is_pipe_stage(call)
+            else
+                isa Expressions.CAST(e) \/
+                    isa Expressions.TUPLE(e) \/
+                    isa Expressions.SEQUENCE(e) \/
+                    isa Expressions.COMPREHENSION(e)
+            fi
+
+        // An operand too short to be worth a line of its own: a literal, a
+        // plain name, or a call or cast of a plain name over operands like
+        // that.
+        _is_short_operand(e: Expressions.Expression) -> bool =>
+            if let call: Expressions.CALL = e then
+                !_is_pipe_stage(call) /\
+                    _is_plain_name(call.function) /\
+                    call.arguments |> Ghul.Pipes.all(a => _is_simple_element(a))
+            elif let `cast: Expressions.CAST = e then
+                _is_simple_element(`cast.right)
+            elif let unary: Expressions.UNARY = e then
+                _is_simple_element(unary.right)
+            else
+                _is_simple_element(e)
+            fi
+
+        // A name, plain or qualified, with no type arguments or index: what
+        // `a[b]` is cannot be told from the tree.
+        _is_plain_name(e: Expressions.Expression) -> bool =>
+            if let member: Expressions.MEMBER = e then
+                _is_plain_name(member.left)
+            else
+                isa Expressions.IDENTIFIER(e) \/ isa Expressions.SELF(e)
+            fi
 
         _chain_head(binary: Expressions.BINARY) -> Expressions.Expression =>
             if _is_chain_link(binary.left, binary) then
                 _chain_head(cast Expressions.BINARY(binary.left))
             else
                 binary.left
-            fi
-
-        _emit_unbroken_chain(binary: Expressions.BINARY) is
-            if _is_chain_link(binary.left, binary) then
-                _emit_unbroken_chain(cast Expressions.BINARY(binary.left))
-            else
-                binary.left.accept(self)
-            fi
-
-            write(' ')
-            write_operation(binary)
-            write(' ')
-            binary.right.accept(self)
-        si
-
-        // An operand too short to be worth a line of its own: a literal, a
-        // name, or a call or cast of a name over operands like that.
-        _is_short_operand(e: Expressions.Expression) -> bool =>
-            if let call: Expressions.CALL = e then
-                !_is_pipe_stage(call) /\
-                    _is_name(call.function) /\
-                    call.arguments |> Ghul.Pipes.all(a => _is_simple_element(a))
-            elif let `cast: Expressions.CAST = e then
-                _is_simple_element(`cast.right)
-            else
-                _is_simple_element(e)
             fi
 
         // Whether `left` is flattened into `binary`'s chain.
@@ -88,18 +149,16 @@ namespace Syntax.Process.Printer is
                 false
             fi
 
-        // Emit a chain's operands and operators in tree order, a soft break
-        // after each operator. Only the left spine of operators of the
-        // chain's own precedence is flattened into the enclosing group, so
-        // `a * b - c * d` breaks after the `-` and keeps each product whole;
-        // any other binary operand recurses through visit(BINARY) and breaks
-        // as its own unit, so a nested chain indents once rather than once
-        // per enclosing operator.
-        _emit_binary_chain(binary: Expressions.BINARY) is
+        // Emit a chain's operators and every operand after the first, in
+        // tree order, a soft break after each operator. Only the left spine
+        // of operators of the chain's own precedence is flattened into the
+        // chain, so `a * b - c * d` breaks after the `-` and keeps each
+        // product whole; any other binary operand recurses through
+        // visit(BINARY) and breaks as its own unit, so a nested chain
+        // indents once rather than once per enclosing operator.
+        _emit_chain_tail(binary: Expressions.BINARY) is
             if _is_chain_link(binary.left, binary) then
-                _emit_binary_chain(cast Expressions.BINARY(binary.left))
-            else
-                binary.left.accept(self)
+                _emit_chain_tail(cast Expressions.BINARY(binary.left))
             fi
 
             write(' ')
@@ -580,6 +639,19 @@ namespace Syntax.Process.Printer is
             _builder.soft_line()
             _builder.end_group()
             write(')')
+        si
+
+        // An index's brackets never break: what is between them is laid out
+        // flat, and the expression around it breaks instead. A line long
+        // because of an index is better taken apart with a local.
+        visit(index: Expressions.INDEX) is
+            note(index.location)
+            index.left.accept(self)
+            write('[')
+            _builder.begin_group()
+            index.index.accept(self)
+            _builder.end_flat()
+            write(']')
         si
 
         visit(assign: Statements.ASSIGNMENT) is
@@ -1405,7 +1477,7 @@ namespace Syntax.Process.Printer is
             elif let element: Expressions.TUPLE_ELEMENT = e then
                 if let element.initializer? then _is_simple_element(initializer) else true fi
             else
-                isa Expressions.Literals.Literal(e) \/ _is_name(e)
+                isa Expressions.Literals.Literal(e) \/ _is_plain_name(e)
             fi
 
         // Broken, the brackets take lines of their own and the elements
