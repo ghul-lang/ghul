@@ -68,11 +68,11 @@ Existing text-keyed mechanisms (the `MAP[string, Type]` type-argument maps in th
 
 ### No syntax-tree rewriting
 
-**Reject any diff that introduces a new syntax-tree rewriting mechanism, or extends an existing one.** ghul's syntax trees are not abstract syntax trees: nothing in the compiler is designed to handle them being rewritten. Pretty much every attempt to rewrite them has ended up biting us - the rewrite expresses what is semantically a value conversion as surgery on user syntax mid-resolution, and the surrounding machinery (closure-capture analysis, generate-IL's "a literal that does not land in the tree is never emitted") was never built for nodes appearing, moving or being replaced after their first walk.
+**Reject any diff that introduces a new syntax-tree rewriting mechanism, or extends an existing one.** ghul's syntax trees are not abstract syntax trees: nothing in the compiler is designed to handle them being rewritten and re-writes almost always have unintended consequences, including confusing diagnostics or unexpected effects at a distance like capturing of local variables in a closure, symbols appearing in analysis query results, or properties of the syntax tree nodes not being computed or not being cleared as expected in passes that are unaware of them / run before they exist etc.
 
 What counts as rewriting: splicing a synthesized node into the tree, replacing one node with another, re-parenting subtrees during resolution or inside a speculative retry. Building the tree in the parser is construction, not rewriting. The sanctioned alternative is a value-level mechanism: `PACK_WRAP_BUILDER` is the model - a synthesized closure symbol with no literal behind it, its body emitted from a recorded description, the wrapped value passed as the thunk's first parameter, tree untouched.
 
-Where a problem is found in an existing tree-rewriting mechanism (`FUNCTION_REFERENCE_ADAPTER`'s eta-expansion splice is the one live today; #3775 tracks its replacement), the fix is the replacement, not a widening. An extension of such a mechanism is rejected even when the extension itself is correct - point at #3775 instead.
+Small targeted fixes to existing mechanisms are acceptable, but any feature creep must be rejected - the prefered solution is to rewrite avoiding the rewriting entirely.
 
 ### Reading the environment
 
