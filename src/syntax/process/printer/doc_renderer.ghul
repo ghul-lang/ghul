@@ -24,9 +24,16 @@ namespace Syntax.Process.Printer is
     class DOC_RENDERER is
         _width: int
 
+        // Whether each tracked group was laid out flat.
+        _flat_groups: Collections.MAP[int, bool]
+
         init(width: int) is
             _width = width
+            _flat_groups = Collections.MAP[int, bool]()
         si
+
+        _was_broken(id: int) -> bool =>
+            _flat_groups.contains_key(id) /\ !_flat_groups[id]
 
         render(doc: DOC) -> string is
             let out = System.Text.StringBuilder()
@@ -74,6 +81,19 @@ namespace Syntax.Process.Printer is
 
                 if let flat: DOC.FLAT = d then
                     cmds.add(RENDER_CMD(c.indent, true, flat.doc))
+                fi
+
+                if let tracked: DOC.TRACKED_GROUP = d then
+                    let flat mut = c.flat
+                    if !flat then
+                        flat = _fits(_width - pos, c.indent, tracked.doc, cmds)
+                    fi
+                    _flat_groups[tracked.id] = flat
+                    cmds.add(RENDER_CMD(c.indent, flat, tracked.doc))
+                fi
+
+                if let choice: DOC.IF_BROKEN = d then
+                    cmds.add(RENDER_CMD(c.indent, c.flat, if _was_broken(choice.id) then choice.broken else choice.flat fi))
                 fi
 
                 if isa DOC.LINE(d) then
@@ -155,6 +175,14 @@ namespace Syntax.Process.Printer is
                     local.add(RENDER_CMD(c.indent, true, flat.doc))
                 fi
 
+                if let tracked: DOC.TRACKED_GROUP = d then
+                    local.add(RENDER_CMD(c.indent, true, tracked.doc))
+                fi
+
+                if let choice: DOC.IF_BROKEN = d then
+                    local.add(RENDER_CMD(c.indent, true, if _was_broken(choice.id) then choice.broken else choice.flat fi))
+                fi
+
                 if isa DOC.LINE(d) then
                     remaining = remaining - 1
                 fi
@@ -213,6 +241,14 @@ namespace Syntax.Process.Printer is
 
                 if let flat: DOC.FLAT = d then
                     pending.add(RENDER_CMD(c.indent, true, flat.doc))
+                fi
+
+                if let tracked: DOC.TRACKED_GROUP = d then
+                    pending.add(RENDER_CMD(c.indent, c.flat, tracked.doc))
+                fi
+
+                if let choice: DOC.IF_BROKEN = d then
+                    pending.add(RENDER_CMD(c.indent, c.flat, if _was_broken(choice.id) then choice.broken else choice.flat fi))
                 fi
 
                 if isa DOC.LINE(d) then

@@ -32,6 +32,11 @@ namespace Syntax.Process.Printer is
         GROUP(doc: DOC)
         // Rendered flat whatever the budget: its LINEs are always spaces.
         FLAT(doc: DOC)
+        // A GROUP whose decision IF_BROKEN can ask about by its id.
+        TRACKED_GROUP(id: int, doc: DOC)
+        // `broken` if the tracked group `id` was laid out broken, `flat`
+        // otherwise - including while that group is still being measured.
+        IF_BROKEN(id: int, broken: DOC, flat: DOC)
     si
 
     // One open group/nest frame in DOC_BUILDER's stack.
@@ -54,9 +59,16 @@ namespace Syntax.Process.Printer is
     class DOC_BUILDER is
         _stack: LIST[DOC_FRAME]
 
+        _next_group_id: int
+
         init() is
             _stack = LIST[DOC_FRAME]()
             _stack.add(DOC_FRAME(false, 0))
+        si
+
+        new_group_id() -> int is
+            _next_group_id = _next_group_id + 1
+            return _next_group_id
         si
 
         _top: DOC_FRAME => _stack[_stack.count - 1]
@@ -135,6 +147,25 @@ namespace Syntax.Process.Printer is
             if trailing? then
                 emit(trailing)
             fi
+        si
+
+        // Close a group opened with begin_group as a tracked one.
+        end_tracked_group(id: int) is
+            let frame = _top
+            _stack.remove_at(_stack.count - 1)
+            emit(DOC.TRACKED_GROUP(id, DOC.CONCAT(frame.items)))
+        si
+
+        // Collect what is emitted until end_capture as a document of its
+        // own, rather than into the current frame.
+        begin_capture() is
+            _stack.add(DOC_FRAME(false, 0))
+        si
+
+        end_capture() -> DOC is
+            let frame = _top
+            _stack.remove_at(_stack.count - 1)
+            return DOC.CONCAT(frame.items)
         si
 
         // Close a group opened with begin_group as one that never breaks.

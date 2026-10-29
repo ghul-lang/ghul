@@ -357,18 +357,12 @@ namespace Syntax.Process.Printer is
                     write_line()
                 fi
 
-                if let branch.binding? then
-                    _emit_binding_header(if first then "if let" else "elif let" fi, binding, branch.condition, "then")
-                elif let branch.condition? then
-                    _emit_condition_header(if first then "if" else "elif" fi, () => condition.accept(self), "then")
-                else
-                    write("else")
-                fi
+                let header = _emit_branch_header(branch, first)
 
                 let compact = _body_on_keyword_line(branch)
 
                 if compact then
-                    _emit_compact_body(branch.body)
+                    _emit_compact_body(branch.body, header)
                     write_line()
                 else
                     write_line()
@@ -416,7 +410,10 @@ namespace Syntax.Process.Printer is
         // unit. Broken, the keyword stands alone, the condition - or each
         // clause - takes a line one level in, and the closing `then` or
         // `do` returns to the keyword's indent.
-        _emit_condition_header(keyword: string, emit_condition: () -> void, closer: string) is
+        // Returns the header's group id, for a body that shares its line.
+        _emit_condition_header(keyword: string, emit_condition: () -> void, closer: string) -> int is
+            let id = _builder.new_group_id()
+
             write(keyword)
 
             _builder.begin_group()
@@ -426,10 +423,12 @@ namespace Syntax.Process.Printer is
             _builder.end_nest()
             _builder.line()
             write(closer)
-            _builder.end_group()
+            _builder.end_tracked_group(id)
+
+            return id
         si
 
-        _emit_binding_header(keyword: string, binding: Statements.REFUTABLE_BINDING, condition: Expressions.Expression?, closer: string) is
+        _emit_binding_header(keyword: string, binding: Statements.REFUTABLE_BINDING, condition: Expressions.Expression?, closer: string) -> int =>
             _emit_condition_header(
                 keyword,
                 () is
@@ -442,7 +441,6 @@ namespace Syntax.Process.Printer is
                 si,
                 closer
             )
-        si
 
         visit(rb: Statements.REFUTABLE_BINDING) is
             _emit_clauses(rb, false)
@@ -561,7 +559,7 @@ namespace Syntax.Process.Printer is
             if let `do.binding? then
                 _emit_binding_header("while let", binding, null, "do")
             elif let `do.condition? then
-                _emit_condition_header("while", () => condition.accept(self), "do")
+                _emit_condition_header("while", () => emit_condition(condition), "do")
             else
                 write("do")
             fi
@@ -711,16 +709,10 @@ namespace Syntax.Process.Printer is
                     flush_leading(branch.location.start)
                 fi
 
-                if let branch.binding? then
-                    _emit_binding_header(if first then "if let" else "elif let" fi, binding, branch.condition, "then")
-                elif let branch.condition? then
-                    _emit_condition_header(if first then "if" else "elif" fi, () => condition.accept(self), "then")
-                else
-                    write("else")
-                fi
+                let header = _emit_branch_header(branch, first)
 
                 if !flat /\ _body_on_keyword_line(branch) then
-                    _emit_compact_body(branch.body)
+                    _emit_compact_body(branch.body, header)
                 else
                     _builder.begin_nest(4)
                     _break(flat)
@@ -756,13 +748,43 @@ namespace Syntax.Process.Printer is
                 false
             fi
 
-        _emit_compact_body(body: Statements.LIST) is
-            _builder.begin_group()
-            _builder.begin_nest(4)
-            _builder.line()
-            _emit_inline(() => emit_branch_value(body))
-            _builder.end_nest()
-            _builder.end_group()
+        // The keyword and condition that open a branch; the header's group
+        // id, or 0 for an `else`.
+        _emit_branch_header(branch: Statements.IF_BRANCH, first: bool) -> int is
+            if let branch.binding? then
+                return _emit_binding_header(if first then "if let" else "elif let" fi, binding, branch.condition, "then")
+            elif let branch.condition? then
+                return _emit_condition_header(if first then "if" else "elif" fi, () => emit_condition(condition), "then")
+            fi
+
+            write("else")
+            return 0
+        si
+
+        // A body on its keyword's line where it fits - but never after a
+        // header that broke, where the closing keyword stands alone.
+        _emit_compact_body(body: Statements.LIST, header: int) is
+            _emit_compact(() => _emit_inline(() => emit_branch_value(body)), header)
+        si
+
+        _emit_compact(emit_body: () -> void, header: int) is
+            _builder.begin_capture()
+            emit_body()
+            let content = _builder.end_capture()
+
+            let on_same_line = DOC.GROUP(DOC.NEST(4, DOC.CONCAT([DOC.LINE(), content] |> Ghul.Pipes.collect_mutable())))
+
+            if header == 0 then
+                _builder.emit(on_same_line)
+            else
+                _builder.emit(
+                    DOC.IF_BROKEN(
+                        header,
+                        DOC.NEST(4, DOC.CONCAT([DOC.HARD_LINE(), content] |> Ghul.Pipes.collect_mutable())),
+                        on_same_line
+                    )
+                )
+            fi
         si
 
         // Emit an if-expression branch body. The branch's value is its last
@@ -826,7 +848,10 @@ namespace Syntax.Process.Printer is
         // the closing keyword with no trailing `;` — the consuming
         // context owns statement termination — and the body's value is
         // its last bare expression, as in an if-expression branch.
+        // A loop is one breaking unit with its header, so a body on the `do`
+        // line never follows a header that broke.
         emit_for_expression(for_statement: Statements.FOR) is
+            _builder.begin_group()
             write("for ")
 
             if let for_statement.variable? then
@@ -841,6 +866,7 @@ namespace Syntax.Process.Printer is
 
             write(" do")
             _emit_loop_body(for_statement.location, for_statement.body)
+            _builder.end_group()
         si
 
         // A loop's body and its closing `od`: on the `do` line where the
@@ -848,7 +874,6 @@ namespace Syntax.Process.Printer is
         _emit_loop_body(location: LOCATION, body: Statements.LIST?) is
             let flat = _written_on_one_line(location)
 
-            _builder.begin_group()
             _builder.begin_nest(4)
             _break(flat)
 
@@ -869,19 +894,21 @@ namespace Syntax.Process.Printer is
             fi
 
             write("od")
-            _builder.end_group()
         si
 
         emit_do_expression(do_statement: Statements.DO) is
+            _builder.begin_group()
+
             if let do_statement.binding? then
                 _emit_binding_header("while let", binding, null, "do")
             elif let do_statement.condition? then
-                _emit_condition_header("while", () => condition.accept(self), "do")
+                _emit_condition_header("while", () => emit_condition(condition), "do")
             else
                 write("do")
             fi
 
             _emit_loop_body(do_statement.location, do_statement.body)
+            _builder.end_group()
         si
 
         // --- faithfulness fix: `case` statement / expression. The base
@@ -947,44 +974,47 @@ namespace Syntax.Process.Printer is
                 _arm_start_line(match) == _arm_body_line(match) /\
                 !_has_trivia_before(match.location.end)
 
-            _builder.begin_group()
+            let header mut = 0
 
             if let match.pattern? then
-                write("when ")
-                pattern.accept(self)
+                header = _emit_condition_header(
+                    "when",
+                    () is
+                        pattern.accept(self)
 
-                if let match.guard? then
-                    write(" /\\ ")
-                    guard.accept(self)
-                fi
-
-                write(" then")
-            elif match.expressions? then
-                write("when ")
-                let first mut = true
-                for e in match.expressions! do
-                    if !first then
-                        write(", ")
-                    fi
-                    e.accept(self)
-                    first = false
-                od
-                write(" then")
+                        if let match.guard? then
+                            write(" /\\ ")
+                            guard.accept(self)
+                        fi
+                    si,
+                    "then"
+                )
+            elif let match.expressions? then
+                header = _emit_condition_header(
+                    "when",
+                    () is
+                        let first mut = true
+                        for e in expressions do
+                            if !first then
+                                write(",")
+                                _builder.line()
+                            fi
+                            e.accept(self)
+                            first = false
+                        od
+                    si,
+                    "then"
+                )
             else
                 write("else")
             fi
 
             if flat then
-                _builder.begin_nest(4)
-                _builder.line()
-                _emit_inline(() => emit_branch_value(match.statements))
-                _builder.end_nest()
-                _builder.end_group()
+                _emit_compact_body(match.statements, header)
                 write_line()
                 return
             fi
 
-            _builder.end_group()
             write_line()
 
             indent()

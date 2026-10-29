@@ -36,6 +36,20 @@ namespace Syntax.Process.Printer is
             _builder.end_group()
         si
 
+        // A condition alone on its line, between a keyword and `then` or
+        // `do`, already sits one level in: a chain there keeps its operands
+        // at that level rather than indenting the rest again.
+        emit_condition(condition: Expressions.Expression) is
+            if let binary: Expressions.BINARY = condition /\ !is_tight_range(binary) then
+                note(binary.location)
+                _builder.begin_group()
+                _emit_binary_chain(binary)
+                _builder.end_group()
+            else
+                condition.accept(self)
+            fi
+        si
+
         // Emit a chain's operands and operators in tree order, a soft break
         // after each operator. Only the left spine of operators of the
         // chain's own precedence is flattened into the enclosing group, so
@@ -981,9 +995,113 @@ namespace Syntax.Process.Printer is
                 block.is_parenthesised
             elif let sequence: Expressions.SEQUENCE = e then
                 sequence.elements.count > 0
+            elif isa Expressions.COMPREHENSION(e) then
+                true
             else
                 false
             fi
+
+        // Several variables in one `let` break one per line, each after the
+        // first one level in.
+        visit(variables: Variables.LIST) is
+            note(variables.location)
+
+            if variables |> Ghul.Pipes.count() <= 1 then
+                for v in variables do
+                    v.accept(self)
+                od
+
+                return
+            fi
+
+            _builder.begin_group()
+            _builder.begin_nest(4)
+
+            let first mut = true
+            for v in variables do
+                if !first then
+                    write(",")
+                    _builder.line()
+                fi
+                v.accept(self)
+                first = false
+            od
+
+            _builder.end_nest()
+            _builder.end_group()
+        si
+
+        // A tuple type breaks as an argument list does.
+        visit(tuple: TypeExpressions.TUPLE) is
+            note(tuple.location)
+            write("(")
+
+            _builder.begin_group()
+            _builder.begin_nest(4)
+            _builder.soft_line()
+
+            let first mut = true
+            for e in tuple.elements do
+                if !first then
+                    write(",")
+                    _builder.line()
+                fi
+                e.accept(self)
+                first = false
+            od
+
+            _builder.end_nest()
+            _builder.soft_line()
+            _builder.end_group()
+
+            write(")")
+        si
+
+        // A comprehension that does not fit puts its brackets on lines of
+        // their own, with the element and each `for` and `if` clause on a
+        // line one level in between them.
+        visit(comprehension: Expressions.COMPREHENSION) is
+            note(comprehension.location)
+
+            write(if comprehension.is_lazy then "{{" else "[" fi)
+
+            _builder.begin_group()
+            _builder.begin_nest(4)
+            _builder.soft_line()
+
+            comprehension.element.accept(self)
+
+            let clause: Expressions.COMPREHENSION_CLAUSE? mut = comprehension.first
+
+            while let c = clause do
+                _builder.line()
+
+                if let f: Expressions.COMPREHENSION_FOR = c then
+                    write("for ")
+                    f.variable.accept(self)
+                    write(" in ")
+                    f.source.accept(self)
+                elif let i: Expressions.COMPREHENSION_IF = c then
+                    write("if ")
+                    i.condition.accept(self)
+                fi
+
+                clause = c.inner
+            od
+
+            _builder.end_nest()
+            _builder.soft_line()
+            _builder.end_group()
+
+            write(if comprehension.is_lazy then "}}" else "]" fi)
+
+            let type_expression = comprehension.type_expression
+
+            if !isa Trees.TypeExpressions.INFER(type_expression) then
+                write(": ")
+                type_expression.accept(self)
+            fi
+        si
 
         // A tuple breaks as an argument list does. A single element in
         // parentheses is a parenthesised expression, not a tuple, and is
