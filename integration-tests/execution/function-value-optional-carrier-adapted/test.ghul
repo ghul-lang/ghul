@@ -1,0 +1,77 @@
+// A function value held in a local, and a literal with its types
+// written out, are as fixed in shape as a named reference's `ldftn`
+// delegate: a `(T) -> U?` formal over an unconstrained U is
+// `Func<T, MAYBE<U>>`, and neither a local holding a `(int) -> int?`
+// nor a literal annotated the same way is that delegate. Each is
+// eta-expanded like a reference is - the value becomes `(a) => h(a)` -
+// so the literal path supplies the delegate the formal binds against
+// and the call boundary coerces one carrier into the other. Both
+// directions, a parameter's carrier as well as a return's, and a local
+// whose own type is inferred rather than written. A mutable local is
+// left unadapted: the wrapper would capture it by value and so freeze
+// it against later assignment.
+namespace Test is
+    use Std = IO.Std;
+
+    unit[T](value: T) -> T? => value;
+
+    absent[T](value: T) -> T? => null;
+
+    bind[T, U](value: T?, f: (T) -> U?) -> U? =>
+        if value? then f(value) else null fi;
+
+    halve(n: int) -> int? => if n % 2 == 0 then n / 2 else null fi;
+
+    spell(n: int) -> string? => if n < 10 then "small" else null fi;
+
+    // The carrier the other way: a `T?` over an unconstrained T is
+    // `MAYBE[T]`, and this slot wants a value taking a reference
+    // `string?`.
+    consume(f: (string?) -> string, v: string?) -> string => f(v);
+
+    describe[T](v: T?) -> string => if v? then "{v}" else "absent" fi;
+
+    class Main is
+        show(label: string, value: string?) static =>
+            Std.write_line("{label}: {value ?? "nothing"}");
+
+        show_int(label: string, value: int?) static =>
+            Std.write_line("{label}: {if value? then "{value}" else "nothing" fi}");
+
+        entry() static is
+            // A local holding a named function, its return carrying the
+            // mismatch.
+            let named = halve;
+
+            show_int("named present", bind(unit(8), named));
+            show_int("named absent", bind(unit(7), named));
+
+            // A local holding a literal whose parameter is written with
+            // the reference carrier the formal does not use.
+            let annotated = (s: string?) => s ?? "none";
+
+            Std.write_line("annotated present: {consume(annotated, "hi")}");
+            Std.write_line("annotated absent: {consume(annotated, null)}");
+
+            // The same literal written directly at the call, both a
+            // parameter's carrier and a return's mismatching.
+            show_int("literal return present", bind(unit(8), (n: int) -> int? => if n % 2 == 0 then n / 2 else null fi));
+            show_int("literal return absent", bind(unit(7), (n: int) -> int? => if n % 2 == 0 then n / 2 else null fi));
+            show("literal parameter", consume((s: string?) => s ?? "none", "hi"));
+
+            // A local holding a function whose parameter takes the
+            // reference carrier, mismatching the formal's.
+            let describer = describe[string];
+
+            Std.write_line("describer present: {consume(describer, "hi")}");
+            Std.write_line("describer absent: {consume(describer, null)}");
+
+            // A local whose type is inferred from what it holds rather
+            // than written, passed with the call's type arguments
+            // inferred too.
+            let inferred = (n: int) -> int? => n - 1;
+
+            show_int("inferred", bind(unit(8), inferred));
+        si
+    si
+si

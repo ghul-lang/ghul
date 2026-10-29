@@ -1601,10 +1601,15 @@ namespace Syntax.Process is
 
                         continue
                     elif let shape = _carrier_mismatch_shape(original, argument_types[index], f) then
+                        // A parenthesised literal is called through its
+                        // inner node; anything else is the expression as
+                        // it stands.
+                        let callee = parenthesised_literal(original) ?? original
+
                         if
                             let literal =
                                 _function_reference_adapter.try_adapt(
-                                    original,
+                                    callee,
                                     shape.arguments.count - 1
                                 ) /\
                             _splice(cache_key, original, index, literal)
@@ -1750,25 +1755,28 @@ namespace Syntax.Process is
             return _delegate_shape.try_get_function_type(formal, _innate_symbol_lookup)
         si
 
-        // The formal's call shape, when this argument is a named
-        // function reference the eta-expansion applies to: it loaded as
-        // a delegate over a named function with no receiver to
-        // re-evaluate, and its own shape differs from the formal's only
-        // in which carrier an optional position uses. Null otherwise.
+        // The formal's call shape, when this argument is one the
+        // eta-expansion applies to and its own shape differs from the
+        // formal's only in which carrier an optional position uses: a
+        // named function reference (a delegate over a named function
+        // with no receiver to re-evaluate), a local or parameter read
+        // holding a function value, or a function literal. Null
+        // otherwise.
         _carrier_mismatch_shape(
             argument: Trees.Expressions.Expression,
             argument_type: Type?,
             formal: Type?
         ) -> Type? is
-            if isa Trees.Expressions.FUNCTION(argument) then
-                return null
-            fi
-
-            if let delegate: MAKE_CLOSURE = argument.value then
+            if parenthesised_literal(argument)? then
+                // A literal is adapted wherever its settled shape
+                // mismatches; the wrapper re-types it under the formal.
+            elif let delegate: MAKE_CLOSURE = argument.value then
                 if !delegate.referenced_function? \/ !isa NULL(delegate.receiver) then
                     return null
                 fi
-            else
+            elif argument.value? /\ !_is_local_function_read(argument.value) then
+                return null
+            elif !argument.value? then
                 return null
             fi
 
@@ -1779,6 +1787,22 @@ namespace Syntax.Process is
             fi
 
             return shape
+        si
+
+        // A read of an immutable local variable or parameter:
+        // re-evaluated cheaply in an adapter's body, so a function
+        // value held in one can be eta-expanded like a named reference.
+        // A mutable one is left out: the wrapper would capture it by
+        // value, which freezes the local against later assignment for
+        // no reason a reader can see.
+        _is_local_function_read(value: IR.Values.Value) -> bool static is
+            if let read: IR.Values.Load.SYMBOL = value then
+                if let variable: Semantic.Symbols.Variable = read.symbol then
+                    return variable.is_local /\ !variable.is_mutable_marked
+                fi
+            fi
+
+            return false
         si
 
         // A literal that cannot be compiled taking the pack's tuple - one
