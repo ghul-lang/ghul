@@ -14,8 +14,8 @@ namespace Syntax.Process.Printer is
         // A binary chain is one breaking unit: the left-nested spine of its
         // lowest-precedence operator shares a single group with a soft break
         // after each operator, so a chain that does not fit breaks one
-        // operand per line with each operator left at the end of the line
-        // above it. Breaks go after an operator only - a line-start operator
+        // operand per line, every operand at the indent of the first, with
+        // each operator left at the end of the line above it. Breaks go after an operator only - a line-start operator
         // opens something new, so a break before one would change what the
         // next line re-parses as.
         visit(binary: Expressions.BINARY) is
@@ -29,26 +29,8 @@ namespace Syntax.Process.Printer is
             fi
 
             _builder.begin_group()
-            _builder.begin_nest(4)
-
             _emit_binary_chain(binary)
-
-            _builder.end_nest()
             _builder.end_group()
-        si
-
-        // A condition alone on its line, between a keyword and `then` or
-        // `do`, already sits one level in: a chain there keeps its operands
-        // at that level rather than indenting the rest again.
-        emit_condition(condition: Expressions.Expression) is
-            if let binary: Expressions.BINARY = condition /\ !is_tight_range(binary) then
-                note(binary.location)
-                _builder.begin_group()
-                _emit_binary_chain(binary)
-                _builder.end_group()
-            else
-                condition.accept(self)
-            fi
         si
 
         // Emit a chain's operands and operators in tree order, a soft break
@@ -176,8 +158,8 @@ namespace Syntax.Process.Printer is
         si
 
         // A literal's characters, brace-escaped, split back into the
-        // adjacent literals the author chained it from: each chained
-        // fragment after the first starts its own line.
+        // adjacent literals the author chained it from, each on the line the
+        // author put it on.
         _emit_literal_characters(value: string, end: int) is
             let i mut = 0
 
@@ -187,7 +169,13 @@ namespace Syntax.Process.Printer is
                     b.offset == i
                 do
                     write(cast char(34))
-                    _builder.hard_line()
+
+                    if b.on_new_line then
+                        _builder.hard_line()
+                    else
+                        write(" ")
+                    fi
+
                     write(cast char(34))
                     _consume()
                 od
@@ -210,6 +198,43 @@ namespace Syntax.Process.Printer is
 
                 i = i + 1
             od
+        si
+
+        // A numeric literal as written, its `_` digit separators put back.
+        visit(integer: Expressions.Literals.INTEGER) is
+            note(integer.location)
+            _emit_numeric(integer.value_string, integer.location.end)
+        si
+
+        visit(float: Expressions.Literals.FLOAT) is
+            note(float.location)
+            _emit_numeric(float.value_string, float.location.end)
+        si
+
+        _emit_numeric(value: string, end: int) is
+            let text = System.Text.StringBuilder()
+            let i mut = 0
+
+            while i <= value.length do
+                while
+                    _has_trivia /\
+                    isa TRIVIA.DIGIT_SEPARATOR(_peek) /\
+                    _peek.location.start < end /\
+                    cast TRIVIA.DIGIT_SEPARATOR(_peek).offset == i
+                do
+                    text.append('_')
+                    _consume()
+                od
+
+                if i == value.length then
+                    break
+                fi
+
+                text.append(value[i])
+                i = i + 1
+            od
+
+            write(text.to_string())
         si
 
         _next_string_break(end: int) -> TRIVIA? =>
@@ -491,7 +516,13 @@ namespace Syntax.Process.Printer is
         emit_right_hand_side(operator: string, expression: Expressions.Expression) is
             write(operator)
 
-            if _opens_with_bracket(expression) then
+            // The body of a function literal that hugs its call moves to the
+            // next line before it breaks inside its own brackets, and the
+            // call's closer then takes a line of its own.
+            let hugged = _hugged_body_group
+            _hugged_body_group = 0
+
+            if _opens_with_bracket(expression) /\ (hugged == 0 \/ _is_bracket_literal(expression)) then
                 write(" ")
                 expression.accept(self)
                 return
@@ -502,12 +533,36 @@ namespace Syntax.Process.Printer is
             _builder.line()
             expression.accept(self)
             _builder.end_nest()
-            _builder.end_group()
+
+            if hugged != 0 then
+                _builder.end_tracked_group(hugged)
+            else
+                _builder.end_group()
+            fi
         si
+
+        // Set while a hugged function literal's body is being written: the
+        // id of the group that body's line break belongs to.
+        _hugged_body_group: int
+
+        // A literal written between brackets of its own: a block, an array
+        // literal, a comprehension, a tuple.
+        _is_bracket_literal(e: Expressions.Expression) -> bool =>
+            if let tuple: Expressions.TUPLE = e then
+                tuple.elements.count > 1
+            else
+                _opens_broken_bracket(e)
+            fi
 
         _opens_with_bracket(expression: Expressions.Expression) -> bool =>
             if let call: Expressions.CALL = expression then
-                !call.is_thread_first
+                // A pipe chain whose head is a bracketed literal opens with
+                // that bracket, and stays on the line as the literal would.
+                if _is_pipe_stage(call) then
+                    _is_bracket_literal(_pipe_head(call))
+                else
+                    true
+                fi
             else
                 isa Expressions.VAL_BLOCK(expression) \/
                     isa Expressions.TUPLE(expression) \/
@@ -638,9 +693,7 @@ namespace Syntax.Process.Printer is
         visit(call: Expressions.CALL) is
             if _is_pipe_stage(call) then
                 _builder.begin_group()
-                _builder.begin_nest(4)
                 _emit_pipe_chain(call)
-                _builder.end_nest()
                 _builder.end_group()
             else
                 note(call.location)
@@ -658,22 +711,39 @@ namespace Syntax.Process.Printer is
         // A chain of `|>` and `~>` stages is one breaking unit: broken, each
         // stage starts its own line with its operator, one level in from the
         // chain's head.
-        _emit_pipe_chain(call: Expressions.CALL) is
-            let left = call.arguments.expressions[0]
-
-            if let stage: Expressions.CALL = left /\ _is_pipe_stage(stage) then
-                _emit_pipe_chain(stage)
+        _pipe_head(call: Expressions.CALL) -> Expressions.Expression =>
+            if let stage: Expressions.CALL = call.arguments.expressions[0] /\ _is_pipe_stage(stage) then
+                _pipe_head(stage)
             else
-                left.accept(self)
+                call.arguments.expressions[0]
             fi
 
-            _builder.line()
-            write(if call.propagates_absence then "~> " else "|> " fi)
-            emit_callee(call.function)
-            emit_inferred_type_arguments(call.function)
-            write("(")
-            emit_argument_list(call.arguments, 1)
-            write(")")
+        _emit_pipe_chain(call: Expressions.CALL) is
+            let stages = LIST[Expressions.CALL]()
+            let head: Expressions.Expression mut = call
+
+            while let stage: Expressions.CALL = head /\ _is_pipe_stage(stage) do
+                stages.insert(0, stage)
+                head = stage.arguments.expressions[0]
+            od
+
+            // The head is outside the stages' indent, so a head that breaks
+            // inside its own brackets lays them out at the chain's indent.
+            head.accept(self)
+
+            _builder.begin_nest(4)
+
+            for stage in stages do
+                _builder.line()
+                write(if stage.propagates_absence then "~> " else "|> " fi)
+                emit_callee(stage.function)
+                emit_inferred_type_arguments(stage.function)
+                write("(")
+                emit_argument_list(stage.arguments, 1)
+                write(")")
+            od
+
+            _builder.end_nest()
         si
 
         // A callee that writes its own type arguments prints without
@@ -914,8 +984,8 @@ namespace Syntax.Process.Printer is
             emit_argument_list(arguments, start, names, true)
         si
 
-        // `hug` is for a call's arguments only: the elements of a tuple or
-        // an array literal break one per line as written.
+        // `hug` is for a call's arguments and a tuple's elements: the
+        // elements of an array literal break one per line as written.
         emit_argument_list(arguments: Expressions.LIST, start: int, names: Collections.List[Identifiers.Identifier]?, hug: bool) is
             if arguments.count <= start then
                 return
@@ -924,9 +994,10 @@ namespace Syntax.Process.Printer is
             let last = arguments.count - 1
 
             // A last argument that opens a bracket of its own - an array
-            // literal, a block, a function literal whose body is one - hugs
-            // the call when it breaks: `f([` ... `])`, `map(x => (` ... `))`.
-            // The arguments before it stay on the call's line.
+            // literal, a block - or is a function literal hugs the call when
+            // it breaks: `f([` ... `])`, `map(x => (` ... `))`, `any(x =>`
+            // with the body on the next line. The arguments before it stay on
+            // the call's line.
             if hug /\ !arguments.has_trailing_comma /\ _hugs(arguments.expressions[last]) then
                 _builder.begin_group()
                 _builder.begin_nest(4)
@@ -940,7 +1011,19 @@ namespace Syntax.Process.Printer is
                 _builder.end_nest()
                 _builder.end_group()
 
+                let lambda_body = _hugged_lambda_body(arguments.expressions[last])
+
+                if lambda_body then
+                    _hugged_body_group = _builder.new_group_id()
+                fi
+
+                let body_group = _hugged_body_group
+
                 _emit_argument(arguments, last, names)
+
+                if lambda_body then
+                    _builder.emit(DOC.IF_BROKEN(body_group, DOC.HARD_LINE(), DOC.NIL()))
+                fi
 
                 return
             fi
@@ -982,14 +1065,20 @@ namespace Syntax.Process.Printer is
         si
 
         _hugs(argument: Expressions.Expression) -> bool =>
+            isa Expressions.FUNCTION(argument) \/ _opens_broken_bracket(argument)
+
+        // A hugged function literal whose body is an expression other than a
+        // bracket the call already hugs: its body moves to the next line,
+        // and the call's closer below it, when it does not fit.
+        _hugged_lambda_body(argument: Expressions.Expression) -> bool =>
             if let function: Expressions.FUNCTION = argument then
                 if let expression: Bodies.EXPRESSION = function.body then
-                    _opens_broken_bracket(expression.expression)
+                    !_is_bracket_literal(expression.expression)
                 else
-                    isa Bodies.BLOCK(function.body)
+                    false
                 fi
             else
-                _opens_broken_bracket(argument)
+                false
             fi
 
         _opens_broken_bracket(e: Expressions.Expression) -> bool =>
@@ -1120,7 +1209,7 @@ namespace Syntax.Process.Printer is
                 _builder.soft_line()
                 _builder.end_group()
             else
-                emit_argument_list(tuple.elements, 0, null, false)
+                emit_argument_list(tuple.elements, 0, null, true)
             fi
 
             write(")")

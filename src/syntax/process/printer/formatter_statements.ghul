@@ -537,21 +537,8 @@ namespace Syntax.Process.Printer is
                 return
             fi
 
-            write("for ")
-
-            let variable = for_statement.variable
-            if variable? then
-                variable.accept(self)
-            fi
-
-            write(" in ")
-
-            let expression = for_statement.expression
-            if expression? then
-                expression.accept(self)
-            fi
-
-            write_line(" do")
+            _emit_for_header(for_statement)
+            write_line()
 
             indent()
 
@@ -591,7 +578,7 @@ namespace Syntax.Process.Printer is
             if let `do.binding? then
                 _emit_binding_header("while let", binding, null, "do")
             elif let `do.condition? then
-                _emit_condition_header("while", () => emit_condition(condition), "do")
+                _emit_condition_header("while", () => condition.accept(self), "do")
             else
                 write("do")
             fi
@@ -786,7 +773,7 @@ namespace Syntax.Process.Printer is
             if let branch.binding? then
                 return _emit_binding_header(if first then "if let" else "elif let" fi, binding, branch.condition, "then")
             elif let branch.condition? then
-                return _emit_condition_header(if first then "if" else "elif" fi, () => emit_condition(condition), "then")
+                return _emit_condition_header(if first then "if" else "elif" fi, () => condition.accept(self), "then")
             fi
 
             write("else")
@@ -884,22 +871,28 @@ namespace Syntax.Process.Printer is
         // line never follows a header that broke.
         emit_for_expression(for_statement: Statements.FOR) is
             _builder.begin_group()
-            write("for ")
-
-            if let for_statement.variable? then
-                variable.accept(self)
-            fi
-
-            write(" in ")
-
-            if let for_statement.expression? then
-                expression.accept(self)
-            fi
-
-            write(" do")
+            _emit_for_header(for_statement)
             _emit_loop_body(for_statement.location, for_statement.body)
             _builder.end_group()
         si
+
+        // `for v in e do`, which breaks as an `if` or `while` header does.
+        _emit_for_header(for_statement: Statements.FOR) -> int =>
+            _emit_condition_header(
+                "for",
+                () is
+                    if let for_statement.variable? then
+                        variable.accept(self)
+                    fi
+
+                    write(" in ")
+
+                    if let for_statement.expression? then
+                        expression.accept(self)
+                    fi
+                si,
+                "do"
+            )
 
         // A loop's body and its closing `od`: on the `do` line where the
         // author wrote the loop on one line and it fits.
@@ -934,7 +927,7 @@ namespace Syntax.Process.Printer is
             if let do_statement.binding? then
                 _emit_binding_header("while let", binding, null, "do")
             elif let do_statement.condition? then
-                _emit_condition_header("while", () => emit_condition(condition), "do")
+                _emit_condition_header("while", () => condition.accept(self), "do")
             else
                 write("do")
             fi
