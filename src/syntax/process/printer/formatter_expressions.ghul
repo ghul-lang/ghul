@@ -28,14 +28,13 @@ namespace Syntax.Process.Printer is
                 return
             fi
 
-            // A short last operand of a two-operand chain stays with its
-            // operator: `(...).count == 7` never leaves the 7 on its own.
-            if !_is_chain_link(binary.left, binary) /\ _is_simple_element(binary.right) then
-                binary.left.accept(self)
-                write(' ')
-                write_operation(binary)
-                write(' ')
-                binary.right.accept(self)
+            // A chain whose first operand is long and whose others are all
+            // short stays on one line, and only the first breaks, inside its
+            // own brackets:
+            // `cast(...) * 100.0D / cast(trials)` never leaves `100.0D` on
+            // a line of its own.
+            if _has_short_tail(binary) /\ !_is_short_operand(_chain_head(binary)) then
+                _emit_unbroken_chain(binary)
                 return
             fi
 
@@ -43,6 +42,43 @@ namespace Syntax.Process.Printer is
             _emit_binary_chain(binary)
             _builder.end_group()
         si
+
+        _has_short_tail(binary: Expressions.BINARY) -> bool =>
+            _is_short_operand(binary.right) /\
+                (if _is_chain_link(binary.left, binary) then _has_short_tail(cast Expressions.BINARY(binary.left)) else true fi)
+
+        _chain_head(binary: Expressions.BINARY) -> Expressions.Expression =>
+            if _is_chain_link(binary.left, binary) then
+                _chain_head(cast Expressions.BINARY(binary.left))
+            else
+                binary.left
+            fi
+
+        _emit_unbroken_chain(binary: Expressions.BINARY) is
+            if _is_chain_link(binary.left, binary) then
+                _emit_unbroken_chain(cast Expressions.BINARY(binary.left))
+            else
+                binary.left.accept(self)
+            fi
+
+            write(' ')
+            write_operation(binary)
+            write(' ')
+            binary.right.accept(self)
+        si
+
+        // An operand too short to be worth a line of its own: a literal, a
+        // name, or a call or cast of a name over operands like that.
+        _is_short_operand(e: Expressions.Expression) -> bool =>
+            if let call: Expressions.CALL = e then
+                !_is_pipe_stage(call) /\
+                    _is_name(call.function) /\
+                    call.arguments |> Ghul.Pipes.all(a => _is_simple_element(a))
+            elif let `cast: Expressions.CAST = e then
+                _is_simple_element(`cast.right)
+            else
+                _is_simple_element(e)
+            fi
 
         // Whether `left` is flattened into `binary`'s chain.
         _is_chain_link(left: Expressions.Expression, binary: Expressions.BINARY) -> bool =>
@@ -513,6 +549,39 @@ namespace Syntax.Process.Printer is
             fi
         si
 
+        // A cast's operand breaks between the parentheses as a call's one
+        // argument does.
+        visit(`cast: Expressions.CAST) is
+            note(`cast.location)
+            write("cast")
+
+            if `cast.is_ambiguous then
+                write('(')
+                `cast.type_expression!.accept(self)
+                write(')')
+                write('(')
+                emit_argument_list(`cast.call_arguments!)
+                write(')')
+
+                return
+            fi
+
+            if let type_expression = `cast.type_expression /\ !strip_cast_target(`cast, type_expression) then
+                write(' ')
+                type_expression.accept(self)
+            fi
+
+            write('(')
+            _builder.begin_group()
+            _builder.begin_nest(4)
+            _builder.soft_line()
+            `cast.right.accept(self)
+            _builder.end_nest()
+            _builder.soft_line()
+            _builder.end_group()
+            write(')')
+        si
+
         visit(assign: Statements.ASSIGNMENT) is
             note(assign.location)
             assign.left.accept(self)
@@ -627,6 +696,7 @@ namespace Syntax.Process.Printer is
                     isa Expressions.SEQUENCE(expression) \/
                     isa Expressions.COMPREHENSION(expression) \/
                     isa Expressions.CONSTRUCT(expression) \/
+                    isa Expressions.CAST(expression) \/
                     _is_bracketed_function(expression)
             fi
 
@@ -1335,9 +1405,7 @@ namespace Syntax.Process.Printer is
             elif let element: Expressions.TUPLE_ELEMENT = e then
                 if let element.initializer? then _is_simple_element(initializer) else true fi
             else
-                isa Expressions.Literals.Literal(e) \/
-                    isa Expressions.IDENTIFIER(e) \/
-                    isa Expressions.MEMBER(e)
+                isa Expressions.Literals.Literal(e) \/ _is_name(e)
             fi
 
         // Broken, the brackets take lines of their own and the elements
