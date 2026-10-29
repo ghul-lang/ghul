@@ -4,23 +4,22 @@
 # either, or a .NET-only declaration left uncarved, fails here rather than
 # at the next native build of the compiler.
 #
-# usage: build/llvm-self-type-check.sh [<compiler dll> [<ghul-core> [<ghul-runtime>]]]
+# usage: build/llvm-self-type-check.sh [<compiler dll> [<ghul-runtime>]]
 #
-# The defaults are publish/ghul.dll and the library checkouts under
-# libraries/, where CI puts them.
+# The defaults are publish/ghul.dll and the runtime library checkout under
+# libraries/, where CI puts it.
 
 set -euo pipefail
 
 root=$(cd "$(dirname "$0")/.." && pwd)
 
 compiler=${1:-$root/publish/ghul.dll}
-core=${2:-$root/libraries/ghul-core}
-runtime=${3:-$root/libraries/ghul-runtime}
+runtime=${2:-$root/libraries/ghul-runtime}
 
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 
-"$root/build/llvm-self-sources.sh" "$work" "$core" "$runtime"
+"$root/build/llvm-self-sources.sh" "$work" "$runtime"
 
 echo "type-checking $(wc -l < "$work/sources.rsp") files for llvm with $compiler"
 

@@ -132,11 +132,12 @@ A test belongs in one of two places:
 Don't copy a program that an execution test already holds into `wasm/` or
 `llvm/`: give the execution test a `targets` file instead.
 
-A run under `wasm` needs the core library, which a wasm build compiles in
+A run under `wasm` needs the runtime library, which a wasm build compiles in
 from source rather than loading from an assembly. The `local` configuration in
-`ghul-test.json` names ghul-core's and ghul-runtime's sources, from checkouts
-under `libraries/` or beside the repository, and ghul-test gives them to every
-wasm run. CI checks both out under `libraries/` at their default branches.
+`ghul-test.json` names ghul-runtime's sources, both its core and its runtime
+trees, from a checkout under `libraries/` or beside the repository, and
+ghul-test gives them to every wasm run. CI checks it out under `libraries/`,
+at the release a user would get, or at its head on the scheduled run.
 Without the libraries a wasm run fails to compile, which is the right answer: the
 test asserts the program on that target, and silently skipping it would hide
 the gap the `targets` file exists to show.

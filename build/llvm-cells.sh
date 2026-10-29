@@ -12,9 +12,9 @@
 # Usage: build/llvm-cells.sh <ghul.dll> <ghul-llvm dir> <host dir> [scenario...]
 #
 # <ghul.dll> is the compiler to test, <ghul-llvm dir> and <host dir> are the
-# unpacked releases (each holding bin/), and ghul-core and ghul-runtime are
-# read from libraries/ghul-core and libraries/ghul-runtime, or from
-# GHUL_CORE and GHUL_RUNTIME.
+# unpacked releases (each holding bin/), and the runtime library, core and
+# runtime sources both, is read from libraries/ghul-runtime, or from
+# GHUL_RUNTIME.
 #
 # With GHUL_CELLS_CAPTURE set, a scenario that runs writes what it printed as
 # its run.expected, to be read before it is committed.
@@ -32,7 +32,6 @@ host="$(cd "$3" && pwd)/bin/ghul-host"
 shift 3
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
-core="${GHUL_CORE:-$root/libraries/ghul-core}"
 runtime="${GHUL_RUNTIME:-$root/libraries/ghul-runtime}"
 
 scratch="$(mktemp -d)"
@@ -41,11 +40,8 @@ trap 'rm -rf "$scratch"' EXIT
 # The libraries are source: their root and version, then each source file.
 {
     echo "--library-source"
-    echo "ghul-core@$(tr -d '[:space:]' < "$core/VERSION")=$core"
-    (cd "$core" && find src -name '*.ghul' | sort | sed "s#^#$core/#")
-    echo "--library-source"
     echo "ghul-runtime@$(tr -d '[:space:]' < "$runtime/VERSION")=$runtime"
-    (cd "$runtime" && find ghul-runtime/src -name '*.ghul' | sort | sed "s#^#$runtime/#")
+    (cd "$runtime" && find ghul-core/src ghul-runtime/src -name '*.ghul' | sort | sed "s#^#$runtime/#")
 } > "$scratch/libraries.rsp"
 
 scenarios=("$@")

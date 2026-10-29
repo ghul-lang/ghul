@@ -46,7 +46,7 @@ The cells are compiled against the cells before them only for these closed-hiera
 - The last cell's definitions are exported for later cells. Its entry is the entry that the host runs.
 - A cell that only defines things has no entry to run, and the compiler does not report a missing entry.
 - A cell's final expression is not returned as an exit status. When the final expression has a value, the entry writes the value to standard output as `Ghul.inspect` shows it. The value follows one byte U+0002 at the start of a line, and is followed by a newline. A host or front end finds the value by that mark.
-- A source library that the cells share, ghul-core and the runtime, is not a cell. Each cell includes the parts of the library that it uses, and shares them with the other cells by name. So a library class, and a generic type instantiated with the same type arguments, are one type in every cell.
+- A source library that the cells share, such as ghul-runtime, is not a cell. Each cell includes the parts of the library that it uses, and shares them with the other cells by name. So a library class, and a generic type instantiated with the same type arguments, are one type in every cell.
 
 `--cell-link` implies `--session`, so the rules above apply. Its types and classes follow the rules of a build whose classes a later cell can extend. A later cell can subclass a class that an earlier cell declared and override its methods, and code compiled earlier dispatches to the override. Everything that the cells print, hold and change lasts as long as the process does.
 
