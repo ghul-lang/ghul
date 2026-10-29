@@ -1,0 +1,457 @@
+namespace Syntax.Process.Printer.UnitTests is
+    use Collections.Iterable
+
+    use Microsoft.VisualStudio.TestTools.UnitTesting.Assert
+
+    use Syntax.Process.Printer.FORMATTER
+    use TestClass = Microsoft.VisualStudio.TestTools.UnitTesting.TestClassAttribute
+    use Test = Microsoft.VisualStudio.TestTools.UnitTesting.TestMethodAttribute
+    use Assertions
+
+    // One fixture per layout rule, formatted at a narrow width so each
+    // fits in a few lines: the source as written, what the formatter
+    // makes of it, and a second pass to check that is a fixpoint.
+    @TestClass()
+    class FORMATTER_LAYOUT_RULE_TESTS is
+        init() is si
+
+        lines(parts: Iterable[string]) -> string is
+            let result = System.Text.StringBuilder()
+
+            for part in parts do
+                result.append(part)
+                result.append('\n')
+            od
+
+            return result.to_string()
+        si
+
+        format(source: string, width: int) -> string is
+            let logger = Logging.DIAGNOSTICS_STORE()
+
+            let source_file =
+                Compiler.COMPILER().parse(
+                    "layout.ghul",
+                    IO.StringReader(source),
+                    false,
+                    false,
+                    false,
+                    logger
+                )
+
+            is_false(logger.any_errors, "fixture did not parse")
+
+            return FORMATTER(source_file.trivia, width).format(source_file.definition)
+        si
+
+        assert_formats(source: string, expected: string, width: int) is
+            let first = format(source, width)
+
+            are_equal(expected, first, "first pass did not match expected output")
+
+            are_equal(first, format(first, width), "formatter is not a fixpoint")
+        si
+
+        assert_formats(source: string, expected: string) is
+            assert_formats(source, expected, 40)
+        si
+
+
+        // A right-hand side that does not fit and does not open with a bracket
+        // moves to the next line, one level in.
+        @Test()
+        a_right_hand_side_that_does_not_fit_moves_to_the_next_line() is
+            let source = lines([
+                "let total = values |> filter(x => x > 0) |> sum()"
+            ])
+
+            let expected = lines([
+                "let total =",
+                "    values",
+                "        |> filter(x => x > 0)",
+                "        |> sum()"
+            ])
+
+            assert_formats(source, expected)
+        si
+
+        // One that opens with a bracket stays on the line and breaks inside it.
+        @Test()
+        a_right_hand_side_opening_with_a_bracket_stays_on_the_line() is
+            let source = lines([
+                "let point = make_point(first_value, second_value)"
+            ])
+
+            let expected = lines([
+                "let point = make_point(",
+                "    first_value,",
+                "    second_value",
+                ")"
+            ])
+
+            assert_formats(source, expected)
+        si
+
+        // An if or a loop the author wrote on one line stays there when it
+        // fits; one written over several lines stays that way.
+        @Test()
+        an_if_or_loop_keeps_the_line_breaks_its_author_wrote() is
+            let source = lines([
+                "if count > 0 then write_line(\"some\") fi",
+                "if count > 0 then",
+                "    write_line(\"some\")",
+                "fi",
+                "for x in xs do write_line(x) od"
+            ])
+
+            assert_formats(source, source)
+        si
+
+        // An if expression that does not fit puts each branch body on a line of
+        // its own.
+        @Test()
+        an_if_expression_that_does_not_fit_breaks_every_branch() is
+            let source = lines([
+                "let label = if count > 100 then \"many things\" else \"few things\" fi"
+            ])
+
+            let expected = lines([
+                "let label =",
+                "    if count > 100 then",
+                "        \"many things\"",
+                "    else",
+                "        \"few things\"",
+                "    fi"
+            ])
+
+            assert_formats(source, expected)
+        si
+
+        // A branch the author wrote on its keyword's line stays there where it
+        // fits, as a case arm does.
+        @Test()
+        an_if_branch_written_on_its_keyword_line_stays_there_where_it_fits() is
+            let source = lines([
+                "let label =",
+                "    if count == 0 then \"none\"",
+                "    elif count == 1 then \"one\"",
+                "    else describe_the_count_at_length(count)",
+                "    fi"
+            ])
+
+            let expected = lines([
+                "let label =",
+                "    if count == 0 then \"none\"",
+                "    elif count == 1 then \"one\"",
+                "    else",
+                "        describe_the_count_at_length(",
+                "            count",
+                "        )",
+                "    fi"
+            ])
+
+            assert_formats(source, expected)
+        si
+
+        @Test()
+        a_case_arm_written_on_its_when_line_stays_there_where_it_fits() is
+            let source = lines([
+                "f(x: int) -> string =>",
+                "    case x",
+                "    when 1 then \"one\"",
+                "    when 2 then",
+                "        \"two\"",
+                "    else describe_the_value_at_length(x)",
+                "    esac"
+            ])
+
+            assert_formats(source, source)
+        si
+
+        // A pipe chain breaks as one unit, every stage on a line of its own.
+        @Test()
+        a_pipe_chain_breaks_one_stage_per_line() is
+            let source = lines([
+                "let squares = values |> map(x => x * x) |> filter(x => x > 10) |> collect()"
+            ])
+
+            let expected = lines([
+                "let squares =",
+                "    values",
+                "        |> map(x => x * x)",
+                "        |> filter(x => x > 10)",
+                "        |> collect()"
+            ])
+
+            assert_formats(source, expected)
+        si
+
+        @Test()
+        a_tuple_that_does_not_fit_breaks_one_element_per_line() is
+            let source = lines([
+                "let point = (x = first.x + second.x, y = first.y + second.y)"
+            ])
+
+            let expected = lines([
+                "let point = (",
+                "    x = first.x + second.x,",
+                "    y = first.y + second.y",
+                ")"
+            ])
+
+            assert_formats(source, expected)
+        si
+
+        // An array literal keeps its author's rows; one written on one line is
+        // filled when its elements are simple, and broken one per line
+        // otherwise.
+        @Test()
+        an_array_literal_keeps_its_rows_and_fills_simple_elements() is
+            let source = lines([
+                "let board = [",
+                "    1, 2, 3,",
+                "    4, 5, 6",
+                "]",
+                "let digits = [10, 20, 30, 40, 50, 60, 70, 80, 90]",
+                "let calls = [first_call(1), second_call(2), third_call(3)]"
+            ])
+
+            let expected = lines([
+                "let board = [",
+                "    1, 2, 3,",
+                "    4, 5, 6",
+                "]",
+                "let digits = [",
+                "    10, 20, 30, 40, 50, 60, 70, 80, 90",
+                "]",
+                "let calls = [",
+                "    first_call(1),",
+                "    second_call(2),",
+                "    third_call(3)",
+                "]"
+            ])
+
+            assert_formats(source, expected)
+        si
+
+        // A chain breaks only at its lowest-precedence operators.
+        @Test()
+        an_operator_chain_breaks_at_its_lowest_precedence_operators() is
+            let source = lines([
+                "let determinant = first * second - third * fourth_value"
+            ])
+
+            let expected = lines([
+                "let determinant =",
+                "    first * second -",
+                "        third * fourth_value"
+            ])
+
+            assert_formats(source, expected)
+        si
+
+        @Test()
+        an_interpolated_string_is_never_broken() is
+            let source = lines([
+                "write_line(\"{{first_value |> map(x => x * 2) |> join(\", \")}}\")"
+            ])
+
+            let expected = lines([
+                "write_line(",
+                "    \"{{first_value |> map(x => x * 2) |> join(\", \")}}\"",
+                ")"
+            ])
+
+            assert_formats(source, expected)
+        si
+
+        // Several variables take block form; a single one stays on the let line.
+        @Test()
+        a_let_in_with_several_variables_takes_block_form() is
+            let source = lines([
+                "f(p: int) -> int =>",
+                "    let across = p * 2, depth = p * 3 in across + depth",
+                "g(p: int) -> int => let twice = p * 2 in twice + 1"
+            ])
+
+            let expected = lines([
+                "f(p: int) -> int =>",
+                "    let",
+                "        across = p * 2,",
+                "        depth = p * 3",
+                "    in",
+                "        across + depth",
+                "g(p: int) -> int =>",
+                "    let twice = p * 2 in twice + 1"
+            ])
+
+            assert_formats(source, expected)
+        si
+
+        @Test()
+        an_if_let_with_several_clauses_that_does_not_fit_takes_block_form() is
+            let source = lines([
+                "if let s: string = a, length = s.length then",
+                "    write_line(\"{{length}}\")",
+                "fi"
+            ])
+
+            let expected = lines([
+                "if let",
+                "    s: string = a,",
+                "    length = s.length",
+                "then",
+                "    write_line(\"{{length}}\")",
+                "fi"
+            ])
+
+            assert_formats(source, expected)
+        si
+
+        // A body on the then line never follows a header that broke.
+        @Test()
+        a_long_condition_takes_block_form_and_moves_the_body_below_then() is
+            let source = lines([
+                "if first_condition(x) /\\ second_condition(x) then next fi"
+            ])
+
+            let expected = lines([
+                "if",
+                "    first_condition(x) /\\",
+                "    second_condition(x)",
+                "then",
+                "    next",
+                "fi"
+            ])
+
+            assert_formats(source, expected)
+        si
+
+        @Test()
+        a_last_array_argument_hugs_the_call() is
+            let source = lines([
+                "show([first_element, second_element, third_element])"
+            ])
+
+            let expected = lines([
+                "show([",
+                "    first_element, second_element,",
+                "    third_element",
+                "])"
+            ])
+
+            assert_formats(source, expected)
+        si
+
+        @Test()
+        adjacent_string_literals_keep_their_line_breaks() is
+            let source = lines([
+                "let text =",
+                "    \"first fragment of a long string \"",
+                "    \"second fragment\""
+            ])
+
+            assert_formats(source, source)
+        si
+
+        @Test()
+        a_comprehension_that_does_not_fit_puts_each_clause_on_its_own_line() is
+            let source = lines([
+                "let pairs = [(a, b) for a in 1::count for b in a::count if a != b]"
+            ])
+
+            let expected = lines([
+                "let pairs = [",
+                "    (a, b)",
+                "    for a in 1::count",
+                "    for b in a::count",
+                "    if a != b",
+                "]"
+            ])
+
+            assert_formats(source, expected)
+        si
+
+        // A loop ending a case arm leaves the line open; the next when must not
+        // run onto it.
+        @Test()
+        a_loop_ending_a_case_arm_does_not_run_into_the_next_arm() is
+            let source = lines([
+                "f(x: int) is",
+                "    case x",
+                "    when 1 then",
+                "        for i in 0..x do",
+                "            write_line(i)",
+                "        od",
+                "    else",
+                "        write_line(x)",
+                "    esac",
+                "si"
+            ])
+
+            assert_formats(source, source)
+        si
+
+        @Test()
+        a_comment_after_a_loop_is_not_written_onto_its_od_line() is
+            let source = lines([
+                "for i in 0..3 do",
+                "    write_line(i)",
+                "od",
+                "// a comment after the loop",
+                "write_line(\"done\")"
+            ])
+
+            assert_formats(source, source)
+        si
+
+        // A statement arm ends its own line; no blank line is added after it.
+        @Test()
+        a_statement_arm_in_a_case_expression_adds_no_blank_line() is
+            let source = lines([
+                "f(x: int) -> int =>",
+                "    case x",
+                "    when 1 then 2",
+                "    else throw System.Exception(\"an unknown value {{x}} was seen\")",
+                "    esac"
+            ])
+
+            let expected = lines([
+                "f(x: int) -> int =>",
+                "    case x",
+                "    when 1 then 2",
+                "    else",
+                "        throw System.Exception(",
+                "            \"an unknown value {{x}} was seen\"",
+                "        )",
+                "    esac"
+            ])
+
+            assert_formats(source, expected)
+        si
+
+        @Test()
+        a_range_with_an_operator_chain_operand_stays_tight() is
+            let source = lines([
+                "let r = 0 .. count - 1"
+            ])
+
+            let expected = lines([
+                "let r = 0..count - 1"
+            ])
+
+            assert_formats(source, expected)
+        si
+
+        // A comment trailing a line does not count toward its width, so it
+        // never makes the code beside it break.
+        @Test()
+        a_trailing_comment_does_not_make_its_line_break() is
+            let source = lines([
+                "write_line(\"ghul has two kinds of comment\") /* and either can sit here */"
+            ])
+
+            assert_formats(source, source, 64)
+        si
+    si
+si

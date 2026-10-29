@@ -11,16 +11,13 @@ namespace Syntax.Process.Printer is
     // calls, parameter and argument lists.
     partial FORMATTER is
 
-        // A range between two single terms reads tight: `1..10`, `a.b..c.e`,
-        // `(a + 1)..(b + 2)`. A term ends in a token that cannot join the
-        // range operator, so the spaces come off. Any other operand shape -
-        // a binary, a unary, an unwrap - keeps the spaced form.
-        // A binary chain is one breaking unit: the whole left-nested spine
-        // shares a single group with a soft break after each operator, so a
-        // chain that does not fit breaks one operand per line with each
-        // operator left at the end of the line above it. Breaks go after an
-        // operator only - a line-start operator opens something new, so a
-        // break before one would change what the next line re-parses as.
+        // A binary chain is one breaking unit: the left-nested spine of its
+        // lowest-precedence operator shares a single group with a soft break
+        // after each operator, so a chain that does not fit breaks one
+        // operand per line with each operator left at the end of the line
+        // above it. Breaks go after an operator only - a line-start operator
+        // opens something new, so a break before one would change what the
+        // next line re-parses as.
         visit(binary: Expressions.BINARY) is
             note(binary.location)
 
@@ -40,15 +37,32 @@ namespace Syntax.Process.Printer is
             _builder.end_group()
         si
 
+        // A condition alone on its line, between a keyword and `then` or
+        // `do`, already sits one level in: a chain there keeps its operands
+        // at that level rather than indenting the rest again.
+        emit_condition(condition: Expressions.Expression) is
+            if let binary: Expressions.BINARY = condition /\ !is_tight_range(binary) then
+                note(binary.location)
+                _builder.begin_group()
+                _emit_binary_chain(binary)
+                _builder.end_group()
+            else
+                condition.accept(self)
+            fi
+        si
+
         // Emit a chain's operands and operators in tree order, a soft break
-        // after each operator. Only the left spine is flattened into the
-        // enclosing group; a binary right operand recurses through
-        // visit(BINARY) and breaks as its own unit, so a nested chain indents
-        // once rather than once per enclosing operator.
+        // after each operator. Only the left spine of operators of the
+        // chain's own precedence is flattened into the enclosing group, so
+        // `a * b - c * d` breaks after the `-` and keeps each product whole;
+        // any other binary operand recurses through visit(BINARY) and breaks
+        // as its own unit, so a nested chain indents once rather than once
+        // per enclosing operator.
         _emit_binary_chain(binary: Expressions.BINARY) is
             if
                 let left_binary: Expressions.BINARY = cast Expressions.BINARY?(binary.left) /\
-                !is_tight_range(left_binary)
+                !is_tight_range(left_binary) /\
+                _precedence(left_binary) == _precedence(binary)
             then
                 _emit_binary_chain(left_binary)
             else
@@ -60,6 +74,9 @@ namespace Syntax.Process.Printer is
             _builder.line()
             binary.right.accept(self)
         si
+
+        _precedence(binary: Expressions.BINARY) -> Syntax.Parsers.Expressions.PRECEDENCE =>
+            Syntax.Parsers.Expressions.EXPRESSION.auto_precedence_for(binary.actual_operation ?? binary.operation.name)
 
         write_operation(binary: Expressions.BINARY) is
             if binary.actual_operation? then
@@ -76,8 +93,29 @@ namespace Syntax.Process.Printer is
                 return false
             fi
 
-            return is_range_term(binary.left) /\ is_range_term(binary.right)
+            return _ends_in_term(binary.left) /\ _starts_with_term(binary.right)
         si
+
+        // A range is written tight unless that would run its operator into
+        // an operator beside it: `0..n - 1` and `i + 1..n` read as written,
+        // but `0..-1` would scan `..-` as a single operator.
+        _ends_in_term(e: Expressions.Expression) -> bool =>
+            if let b: Expressions.BINARY = e then
+                _ends_in_term(b.right)
+            elif let u: Expressions.UNARY = e then
+                _ends_in_term(u.right)
+            else
+                is_range_term(e)
+            fi
+
+        _starts_with_term(e: Expressions.Expression) -> bool =>
+            if let b: Expressions.BINARY = e then
+                _starts_with_term(b.left)
+            elif let c: Expressions.CALL = e /\ _is_pipe_stage(c) then
+                _starts_with_term(c.arguments.expressions[0])
+            else
+                is_range_term(e)
+            fi
 
         // An operand that needs no separating space beside a range operator:
         // it ends in a name character or a closing delimiter.
@@ -99,6 +137,10 @@ namespace Syntax.Process.Printer is
 
             write(cast char(34))
 
+            // A string literal is never broken: an expression inside one
+            // is laid out flat whatever the width.
+            _builder.begin_group()
+
             for fragment in interpolation.values do
                 if fragment.is_expression then
                     write('{')
@@ -118,6 +160,8 @@ namespace Syntax.Process.Printer is
                 fi
             od
 
+            _builder.end_flat()
+
             write(cast char(34))
         si
 
@@ -128,7 +172,32 @@ namespace Syntax.Process.Printer is
                 return
             fi
 
-            for c in literal.value_string do
+            _emit_literal_characters(literal.value_string, literal.location.end)
+        si
+
+        // A literal's characters, brace-escaped, split back into the
+        // adjacent literals the author chained it from: each chained
+        // fragment after the first starts its own line.
+        _emit_literal_characters(value: string, end: int) is
+            let i mut = 0
+
+            while i <= value.length do
+                while
+                    let b: TRIVIA.STRING_BREAK = _next_string_break(end) /\
+                    b.offset == i
+                do
+                    write(cast char(34))
+                    _builder.hard_line()
+                    write(cast char(34))
+                    _consume()
+                od
+
+                if i == value.length then
+                    break
+                fi
+
+                let c = value[i]
+
                 if c == '{' then
                     write('{')
                     write('{')
@@ -138,8 +207,17 @@ namespace Syntax.Process.Printer is
                 else
                     write_escape_char(c)
                 fi
+
+                i = i + 1
             od
         si
+
+        _next_string_break(end: int) -> TRIVIA? =>
+            if _has_trivia /\ isa TRIVIA.STRING_BREAK(_peek) /\ _peek.location.start < end then
+                _peek
+            else
+                null
+            fi
 
         // --- faithfulness fix: the inherited write_escape_char renders
         //     control characters via string.format("X", ci), which returns
@@ -188,19 +266,7 @@ namespace Syntax.Process.Printer is
         visit(string: Expressions.Literals.STRING) is
             note(string.location)
             write(cast char(34))
-
-            for c in string.value_string do
-                if c == '{' then
-                    write('{')
-                    write('{')
-                elif c == '}' then
-                    write('}')
-                    write('}')
-                else
-                    write_escape_char(c)
-                fi
-            od
-
+            _emit_literal_characters(string.value_string, string.location.end)
             write(cast char(34))
         si
 
@@ -385,10 +451,71 @@ namespace Syntax.Process.Printer is
 
             let initializer = variable.initializer
             if initializer? then
-                write(" = ")
-                initializer.accept(self)
+                write(" ")
+                emit_right_hand_side("=", initializer)
             fi
         si
+
+        visit(element: Expressions.TUPLE_ELEMENT) is
+            note(element.location)
+            element.name.accept(self)
+
+            let type_expression = element.type_expression
+
+            if !isa TypeExpressions.INFER(type_expression) then
+                write(": ")
+                type_expression.accept(self)
+            fi
+
+            if let element.initializer? then
+                write(" ")
+                emit_right_hand_side("=", initializer)
+            fi
+        si
+
+        visit(assign: Statements.ASSIGNMENT) is
+            note(assign.location)
+            assign.left.accept(self)
+            write(" ")
+            emit_right_hand_side("=", assign.right)
+            write_terminator()
+        si
+
+        visit(expression: Bodies.EXPRESSION) is
+            emit_right_hand_side("=>", expression.expression)
+        si
+
+        // The right-hand side of `=>` or `=`. One that opens with a bracket
+        // stays on the line and breaks inside its own brackets; any other
+        // moves to the next line, one level in, when it does not fit.
+        emit_right_hand_side(operator: string, expression: Expressions.Expression) is
+            write(operator)
+
+            if _opens_with_bracket(expression) then
+                write(" ")
+                expression.accept(self)
+                return
+            fi
+
+            _builder.begin_group()
+            _builder.begin_nest(4)
+            _builder.line()
+            expression.accept(self)
+            _builder.end_nest()
+            _builder.end_group()
+        si
+
+        _opens_with_bracket(expression: Expressions.Expression) -> bool =>
+            if let call: Expressions.CALL = expression then
+                !call.is_thread_first
+            else
+                isa Expressions.VAL_BLOCK(expression) \/
+                    isa Expressions.TUPLE(expression) \/
+                    isa Expressions.SEQUENCE(expression) \/
+                    isa Expressions.COMPREHENSION(expression) \/
+                    isa Expressions.CONSTRUCT(expression) \/
+                    isa Expressions.FUNCTION(expression)
+            fi
 
         // --- faithfulness fix: a body-less property (a field) is terminated
         //     with `;` and a newline, which the plain printer omits ---
@@ -505,23 +632,48 @@ namespace Syntax.Process.Printer is
 
         // --- wrapping: call argument lists and function parameter lists ---
 
+        // A pipe stage is not noted itself: its span can start on a later
+        // line than its head's, and noting it first would mark the lines
+        // the head has yet to write as already passed.
         visit(call: Expressions.CALL) is
-            note(call.location)
-            if call.is_thread_first /\ call.arguments.count >= 1 then
-                call.arguments.expressions[0].accept(self)
-                write(if call.propagates_absence then " ~> " else " |> " fi)
-                emit_callee(call.function)
-                emit_inferred_type_arguments(call.function)
-                write("(")
-                emit_argument_list(call.arguments, 1)
-                write(")")
+            if _is_pipe_stage(call) then
+                _builder.begin_group()
+                _builder.begin_nest(4)
+                _emit_pipe_chain(call)
+                _builder.end_nest()
+                _builder.end_group()
             else
+                note(call.location)
                 emit_callee(call.function)
                 emit_inferred_type_arguments(call.function)
                 write("(")
                 emit_argument_list(call.arguments, 0, call.argument_names)
                 write(")")
             fi
+        si
+
+        _is_pipe_stage(call: Expressions.CALL) -> bool =>
+            call.is_thread_first /\ call.arguments.count >= 1
+
+        // A chain of `|>` and `~>` stages is one breaking unit: broken, each
+        // stage starts its own line with its operator, one level in from the
+        // chain's head.
+        _emit_pipe_chain(call: Expressions.CALL) is
+            let left = call.arguments.expressions[0]
+
+            if let stage: Expressions.CALL = left /\ _is_pipe_stage(stage) then
+                _emit_pipe_chain(stage)
+            else
+                left.accept(self)
+            fi
+
+            _builder.line()
+            write(if call.propagates_absence then "~> " else "|> " fi)
+            emit_callee(call.function)
+            emit_inferred_type_arguments(call.function)
+            write("(")
+            emit_argument_list(call.arguments, 1)
+            write(")")
         si
 
         // A callee that writes its own type arguments prints without
@@ -759,7 +911,37 @@ namespace Syntax.Process.Printer is
         // to `arguments`: the parser moved each value into the list and
         // kept the name beside it.
         emit_argument_list(arguments: Expressions.LIST, start: int, names: Collections.List[Identifiers.Identifier]?) is
+            emit_argument_list(arguments, start, names, true)
+        si
+
+        // `hug` is for a call's arguments only: the elements of a tuple or
+        // an array literal break one per line as written.
+        emit_argument_list(arguments: Expressions.LIST, start: int, names: Collections.List[Identifiers.Identifier]?, hug: bool) is
             if arguments.count <= start then
+                return
+            fi
+
+            let last = arguments.count - 1
+
+            // A last argument that opens a bracket of its own - an array
+            // literal, a block, a function literal whose body is one - hugs
+            // the call when it breaks: `f([` ... `])`, `map(x => (` ... `))`.
+            // The arguments before it stay on the call's line.
+            if hug /\ !arguments.has_trailing_comma /\ _hugs(arguments.expressions[last]) then
+                _builder.begin_group()
+                _builder.begin_nest(4)
+
+                for i in start..last do
+                    _emit_argument(arguments, i, names)
+                    _builder.text(",")
+                    _builder.line()
+                od
+
+                _builder.end_nest()
+                _builder.end_group()
+
+                _emit_argument(arguments, last, names)
+
                 return
             fi
 
@@ -774,12 +956,7 @@ namespace Syntax.Process.Printer is
                     _builder.line()
                 fi
 
-                if names? /\ i < names.count then
-                    names[i].accept(self)
-                    write(" = ")
-                fi
-
-                arguments.expressions[i].accept(self)
+                _emit_argument(arguments, i, names)
                 first = false
             od
 
@@ -793,6 +970,277 @@ namespace Syntax.Process.Printer is
             _builder.end_nest()
             _builder.soft_line()
             _builder.end_group()
+        si
+
+        _emit_argument(arguments: Expressions.LIST, i: int, names: Collections.List[Identifiers.Identifier]?) is
+            if names? /\ i < names.count then
+                names[i].accept(self)
+                write(" = ")
+            fi
+
+            arguments.expressions[i].accept(self)
+        si
+
+        _hugs(argument: Expressions.Expression) -> bool =>
+            if let function: Expressions.FUNCTION = argument then
+                if let expression: Bodies.EXPRESSION = function.body then
+                    _opens_broken_bracket(expression.expression)
+                else
+                    isa Bodies.BLOCK(function.body)
+                fi
+            else
+                _opens_broken_bracket(argument)
+            fi
+
+        _opens_broken_bracket(e: Expressions.Expression) -> bool =>
+            if let block: Expressions.VAL_BLOCK = e then
+                block.is_parenthesised
+            elif let sequence: Expressions.SEQUENCE = e then
+                sequence.elements.count > 0
+            elif isa Expressions.COMPREHENSION(e) then
+                true
+            else
+                false
+            fi
+
+        // Several variables in one `let` break one per line, each after the
+        // first one level in.
+        visit(variables: Variables.LIST) is
+            note(variables.location)
+
+            if variables |> Ghul.Pipes.count() <= 1 then
+                for v in variables do
+                    v.accept(self)
+                od
+
+                return
+            fi
+
+            _builder.begin_group()
+            _builder.begin_nest(4)
+
+            let first mut = true
+            for v in variables do
+                if !first then
+                    write(",")
+                    _builder.line()
+                fi
+                v.accept(self)
+                first = false
+            od
+
+            _builder.end_nest()
+            _builder.end_group()
+        si
+
+        // A tuple type breaks as an argument list does.
+        visit(tuple: TypeExpressions.TUPLE) is
+            note(tuple.location)
+            write("(")
+
+            _builder.begin_group()
+            _builder.begin_nest(4)
+            _builder.soft_line()
+
+            let first mut = true
+            for e in tuple.elements do
+                if !first then
+                    write(",")
+                    _builder.line()
+                fi
+                e.accept(self)
+                first = false
+            od
+
+            _builder.end_nest()
+            _builder.soft_line()
+            _builder.end_group()
+
+            write(")")
+        si
+
+        // A comprehension that does not fit puts its brackets on lines of
+        // their own, with the element and each `for` and `if` clause on a
+        // line one level in between them.
+        visit(comprehension: Expressions.COMPREHENSION) is
+            note(comprehension.location)
+
+            write(if comprehension.is_lazy then "{{" else "[" fi)
+
+            _builder.begin_group()
+            _builder.begin_nest(4)
+            _builder.soft_line()
+
+            comprehension.element.accept(self)
+
+            let clause: Expressions.COMPREHENSION_CLAUSE? mut = comprehension.first
+
+            while let c = clause do
+                _builder.line()
+
+                if let f: Expressions.COMPREHENSION_FOR = c then
+                    write("for ")
+                    f.variable.accept(self)
+                    write(" in ")
+                    f.source.accept(self)
+                elif let i: Expressions.COMPREHENSION_IF = c then
+                    write("if ")
+                    i.condition.accept(self)
+                fi
+
+                clause = c.inner
+            od
+
+            _builder.end_nest()
+            _builder.soft_line()
+            _builder.end_group()
+
+            write(if comprehension.is_lazy then "}}" else "]" fi)
+
+            let type_expression = comprehension.type_expression
+
+            if !isa Trees.TypeExpressions.INFER(type_expression) then
+                write(": ")
+                type_expression.accept(self)
+            fi
+        si
+
+        // A tuple breaks as an argument list does, and so does a single
+        // element in parentheses, which is a parenthesised expression.
+        visit(tuple: Expressions.TUPLE) is
+            note(tuple.location)
+            write("(")
+
+            if tuple.elements.count == 1 /\ !tuple.elements.has_trailing_comma then
+                _builder.begin_group()
+                _builder.begin_nest(4)
+                _builder.soft_line()
+                tuple.elements.expressions[0].accept(self)
+                _builder.end_nest()
+                _builder.soft_line()
+                _builder.end_group()
+            else
+                emit_argument_list(tuple.elements, 0, null, false)
+            fi
+
+            write(")")
+        si
+
+        // An array literal written on one line breaks as an argument list
+        // does. One written over several lines keeps the author's rows -
+        // a board, a matrix, a lookup table - with the brackets on lines of
+        // their own; each row breaks one element per line only if it does
+        // not fit.
+        visit(sequence: Expressions.SEQUENCE) is
+            note(sequence.location)
+
+            let elements = sequence.elements
+
+            write("[")
+
+            if elements.count == 0 then
+                write("]")
+            elif sequence.location.start_line == sequence.location.end_line then
+                if elements |> Ghul.Pipes.all(e => _is_simple_element(e)) then
+                    _emit_filled(elements)
+                else
+                    emit_argument_list(elements, 0, null, false)
+                fi
+
+                write("]")
+            else
+                _emit_sequence_rows(elements)
+                write_line()
+                write("]")
+            fi
+
+            let type_expression = sequence.type_expression
+
+            if !isa Trees.TypeExpressions.INFER(type_expression) then
+                write(": ")
+                type_expression.accept(self)
+            fi
+        si
+
+        // Literals and names: short and alike, so a list of them that does
+        // not fit is filled rather than run down the page one per line.
+        _is_simple_element(e: Expressions.Expression) -> bool =>
+            if let unary: Expressions.UNARY = e then
+                isa Expressions.Literals.Literal(unary.right)
+            else
+                isa Expressions.Literals.Literal(e) \/
+                    isa Expressions.IDENTIFIER(e) \/
+                    isa Expressions.MEMBER(e)
+            fi
+
+        // Broken, the brackets take lines of their own and the elements
+        // between them are filled: as many on each line as fit.
+        _emit_filled(elements: Expressions.LIST) is
+            _builder.begin_group()
+            _builder.begin_nest(4)
+            _builder.soft_line()
+
+            let first mut = true
+
+            for e in elements do
+                if first then
+                    e.accept(self)
+                else
+                    write(",")
+                    _builder.begin_group()
+                    _builder.line()
+                    e.accept(self)
+                    _builder.end_group()
+                fi
+
+                first = false
+            od
+
+            if elements.has_trailing_comma then
+                write(",")
+            fi
+
+            _builder.end_nest()
+            _builder.soft_line()
+            _builder.end_group()
+        si
+
+        // Each row the author wrote starts a line of its own. A row too
+        // long for the width is filled: as many elements as fit on each
+        // line, the rest carried on to the next.
+        _emit_sequence_rows(elements: Expressions.LIST) is
+            _builder.begin_nest(4)
+
+            let previous: Expressions.Expression? mut = null
+
+            for e in elements do
+                if let p = previous then
+                    write(",")
+
+                    if e.location.start_line > p.location.end_line then
+                        write_line()
+                        flush_leading(e.location.start)
+                        e.accept(self)
+                    else
+                        _builder.begin_group()
+                        _builder.line()
+                        e.accept(self)
+                        _builder.end_group()
+                    fi
+                else
+                    write_line()
+                    flush_leading(e.location.start)
+                    e.accept(self)
+                fi
+
+                previous = e
+            od
+
+            if elements.has_trailing_comma then
+                write(",")
+            fi
+
+            _builder.end_nest()
         si
 
         _has_arguments(arguments: Expressions.LIST) -> bool is

@@ -127,8 +127,39 @@ namespace Syntax.Process.Printer is
         TERMINATOR_MARKER: char static => cast char(1)
 
         write_terminator() is
-            write(TERMINATOR_MARKER)
+            if _inline_statement then
+                return
+            fi
+
+            // Unmeasured: settled away almost everywhere, it must not be
+            // what pushes a line over the width.
+            _at_block_start = false
+            _at_line_start = false
+            _builder.emit(DOC.UNMEASURED("{TERMINATOR_MARKER}"))
             write_line()
+        si
+
+        // True while a control-flow construct is laid out with its sole
+        // statement on the keyword's line: that statement's terminator is
+        // the soft break that follows it, not a forced line break.
+        _inline_statement: bool
+
+        // Whether the author wrote a construct on one line. An if, loop or
+        // case arm stays on one line only where it was written that way and
+        // still fits: whether a short one reads better on one line or
+        // spread out is the author's call, which the tree does not record.
+        _written_on_one_line(location: LOCATION) -> bool =>
+            location.start_line == location.end_line /\
+                !_has_trivia_before(location.end)
+
+        // A soft break where the author wrote the construct on one line,
+        // a forced one otherwise.
+        _break(flat: bool) is
+            if flat then
+                _builder.line()
+            else
+                write_line()
+            fi
         si
 
         // A line break stands in for a statement terminator, so a marker
@@ -313,7 +344,12 @@ namespace Syntax.Process.Printer is
             while _has_trivia /\ _peek.location.start < limit do
                 let t = _peek
 
-                if isa TRIVIA.BLANK_LINE(t) then
+                if isa TRIVIA.STRING_BREAK(t) then
+                    // Its literal has already been written - left out of
+                    // a layout that dropped it - and the chained form is
+                    // not recoverable here.
+                    _consume()
+                elif isa TRIVIA.BLANK_LINE(t) then
                     // A blank line written inside an expression the layout
                     // joins onto one line has nowhere to go, and emitting it
                     // here puts it after the whole construct instead - one
@@ -336,16 +372,39 @@ namespace Syntax.Process.Printer is
         // Emit comments that start on a line we have already emitted: they
         // trail that line. Called from write_line, before the newline.
         flush_trailing_comments() is
+            while _has_trivia /\ isa TRIVIA.STRING_BREAK(_peek) /\ _peek.location.start_line <= _last_line do
+                _consume()
+            od
+
             while
                 _has_trivia /\
                 _is_comment(_peek) /\
                 _peek.location.start_line <= _last_line
             do
-                _builder.text(" ")
-                emit_comment(_peek)
+                let text = _comment_text(_peek)
+
+                if text? /\ text.index_of('\n') < 0 then
+                    note(_peek.location)
+                    _builder.emit(DOC.UNMEASURED(" {text}"))
+                else
+                    _builder.text(" ")
+                    emit_comment(_peek)
+                fi
+
                 _consume()
             od
         si
+
+        _comment_text(t: TRIVIA) -> string? =>
+            if let lc: TRIVIA.LINE_COMMENT = t then
+                lc.text
+            elif let dc: TRIVIA.DOC_COMMENT = t then
+                dc.text
+            elif let bc: TRIVIA.BLOCK_COMMENT = t then
+                bc.text
+            else
+                null
+            fi
 
         // Emit everything left over (file-trailing comments).
         flush_remaining() is
