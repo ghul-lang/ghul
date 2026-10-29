@@ -51,15 +51,17 @@ namespace Syntax.Process.Printer is
             let first mut = true
 
             for item in items do
-                flush_leading(item.location.start)
-
                 // Nothing has been written yet before the very first item
                 // (the root Definitions.LIST is visited before anything
                 // else), so `at_line_start` is still at its unset default
                 // there - only break between items, never before the first.
+                // The break comes before the item's leading comments, or
+                // they run onto a line the previous item left open.
                 if !first /\ !at_line_start then
                     write_line()
                 fi
+
+                flush_leading(item.location.start)
 
                 item.accept(self)
 
@@ -88,6 +90,13 @@ namespace Syntax.Process.Printer is
         si
 
         visit(block: Bodies.BLOCK) is
+            let was_inline = _inline_statement
+            _inline_statement = false
+            _emit_block(block)
+            _inline_statement = was_inline
+        si
+
+        _emit_block(block: Bodies.BLOCK) is
             // An empty body renders on the header's line - `init() is si` -
             // rather than splitting over two. A body carrying comments keeps
             // the general path so they stay inside the block.
@@ -159,15 +168,66 @@ namespace Syntax.Process.Printer is
 
         // --- visits the plain printer never implemented ---
 
+        // A single variable stays on the `let` line, and the body follows on
+        // the next line at the same indent unless the author wrote the whole
+        // thing on one line and it fits. Several variables take block form:
+        // `let` alone, one variable per line one level in, `in` alone, and
+        // the body one level in under it.
         visit(let_in: Expressions.LET_IN) is
             note(let_in.location)
-            write("let ")
-            if let_in.want_dispose then
-                write("use ")
+
+            write(if let_in.want_dispose then "let use" else "let" fi)
+
+            let variables = LIST[Variables.VARIABLE]()
+
+            for v in let_in.variables do
+                variables.add(v)
+            od
+
+            if variables.count <= 1 then
+                // An expression's span can run on to the token after it, so
+                // it is where the body starts that says whether the author
+                // wrote it on the `let` line.
+                let flat =
+                    let_in.expression.location.start_line == let_in.location.start_line /\
+                    !_has_trivia_before(let_in.expression.location.start)
+
+                write(" ")
+                let_in.variables.accept(self)
+                write(" in")
+
+                _builder.begin_group()
+                _break(flat)
+                flush_leading(let_in.expression.location.start)
+                let_in.expression.accept(self)
+                _builder.end_group()
+
+                return
             fi
-            let_in.variables.accept(self)
-            write(" in ")
+
+            indent()
+
+            let i mut = 0
+            for v in variables do
+                write_line()
+                flush_leading(v.location.start)
+                v.accept(self)
+
+                if i < variables.count - 1 then
+                    write(",")
+                fi
+
+                i = i + 1
+            od
+
+            outdent()
+            write_line()
+            write("in")
+            indent()
+            write_line()
+            flush_leading(let_in.expression.location.start)
             let_in.expression.accept(self)
+            outdent()
         si
 
         visit(assert_in: Expressions.ASSERT_IN) is
@@ -264,6 +324,12 @@ namespace Syntax.Process.Printer is
         visit(if_statement: Statements.IF) is
             note(if_statement.location)
 
+            if _can_inline(if_statement.location, if_statement.branches |> Ghul.Pipes.map(b => b.body)) then
+                _emit_inline(() => emit_if_expression(if_statement))
+                write_line()
+                return
+            fi
+
             let branches = LIST[Statements.IF_BRANCH]()
             for b in if_statement.branches do
                 branches.add(b)
@@ -280,25 +346,11 @@ namespace Syntax.Process.Printer is
                 fi
 
                 if let branch.binding? then
-                    if first then
-                        write("if let ")
-                    else
-                        write("elif let ")
-                    fi
-                    binding.accept(self)
-                    if let branch.condition? then
-                        write(" /\\ ")
-                        condition.accept(self)
-                    fi
-                    write_line(" then")
+                    _emit_binding_header(if first then "if let" else "elif let" fi, binding, branch.condition, "then")
+                    write_line()
                 elif let branch.condition? then
-                    if first then
-                        write("if ")
-                    else
-                        write("elif ")
-                    fi
-                    condition.accept(self)
-                    write_line(" then")
+                    _emit_condition_header(if first then "if" else "elif" fi, () => condition.accept(self), "then")
+                    write_line()
                 else
                     write_line("else")
                 fi
@@ -340,6 +392,38 @@ namespace Syntax.Process.Printer is
         //     visit(Statements.IF); this renders the clause payload
         //     only. ---
 
+        // The head of an `if`, `elif` or `while`, plain or `let`: a breaking
+        // unit. Broken, the keyword stands alone, the condition - or each
+        // clause - takes a line one level in, and the closing `then` or
+        // `do` returns to the keyword's indent.
+        _emit_condition_header(keyword: string, emit_condition: () -> void, closer: string) is
+            write(keyword)
+
+            _builder.begin_group()
+            _builder.begin_nest(4)
+            _builder.line()
+            emit_condition()
+            _builder.end_nest()
+            _builder.line()
+            write(closer)
+            _builder.end_group()
+        si
+
+        _emit_binding_header(keyword: string, binding: Statements.REFUTABLE_BINDING, condition: Expressions.Expression?, closer: string) is
+            _emit_condition_header(
+                keyword,
+                () is
+                    binding.accept(self)
+
+                    if condition? then
+                        write(" /\\ ")
+                        condition.accept(self)
+                    fi
+                si,
+                closer
+            )
+        si
+
         visit(rb: Statements.REFUTABLE_BINDING) is
             note(rb.location)
 
@@ -347,7 +431,8 @@ namespace Syntax.Process.Printer is
 
             for c in rb.clauses do
                 if !first then
-                    write(", ")
+                    write(",")
+                    _builder.line()
                 fi
 
                 if c.is_inferred_name then
@@ -385,6 +470,11 @@ namespace Syntax.Process.Printer is
 
         visit(for_statement: Statements.FOR) is
             note(for_statement.location)
+
+            if let for_statement.body? /\ _can_inline(for_statement.location, [body]) then
+                _emit_inline(() => emit_for_expression(for_statement))
+                return
+            fi
 
             write("for ")
 
@@ -431,17 +521,21 @@ namespace Syntax.Process.Printer is
         visit(`do: Statements.DO) is
             note(`do.location)
 
-            if let `do.binding? then
-                write("while let ")
-                binding.accept(self)
-                write(" ")
-            elif let `do.condition? then
-                write("while ")
-                condition.accept(self)
-                write(" ")
+            if _can_inline(`do.location, [`do.body]) then
+                _emit_inline(() => emit_do_expression(`do))
+                write_line()
+                return
             fi
 
-            write_line("do")
+            if let `do.binding? then
+                _emit_binding_header("while let", binding, null, "do")
+            elif let `do.condition? then
+                _emit_condition_header("while", () => condition.accept(self), "do")
+            else
+                write("do")
+            fi
+
+            write_line()
             indent()
             `do.body.accept(self)
 
@@ -550,13 +644,31 @@ namespace Syntax.Process.Printer is
             return `try.location.end
         si
 
+        // A statement-position if or loop the author wrote on one line,
+        // each of whose bodies is at most one statement, is laid out as its
+        // expression form: on one line where it fits.
+        _can_inline(location: LOCATION, bodies: Statements.LIST{}) -> bool =>
+            _written_on_one_line(location) /\ bodies |> Ghul.Pipes.all(b => _has_at_most_one_statement(b))
+
+        _has_at_most_one_statement(body: Statements.LIST) -> bool =>
+            body.statements |> Ghul.Pipes.count() <= 1
+
+        _emit_inline(emit: () -> void) is
+            let was_inline = _inline_statement
+            _inline_statement = true
+            emit()
+            _inline_statement = was_inline
+        si
+
         emit_if_expression(if_statement: Statements.IF) is
+            let flat = _written_on_one_line(if_statement.location)
+
             _builder.begin_group()
 
             let first mut = true
             for branch in if_statement.branches do
                 if !first /\ !at_line_start then
-                    _builder.line()
+                    _break(flat)
                 fi
 
                 // Trivia (a comment, a blank line) between one branch's
@@ -569,31 +681,15 @@ namespace Syntax.Process.Printer is
                 fi
 
                 if let branch.binding? then
-                    if first then
-                        write("if let ")
-                    else
-                        write("elif let ")
-                    fi
-                    binding.accept(self)
-                    if let branch.condition? then
-                        write(" /\\ ")
-                        condition.accept(self)
-                    fi
-                    write(" then")
+                    _emit_binding_header(if first then "if let" else "elif let" fi, binding, branch.condition, "then")
                 elif let branch.condition? then
-                    if first then
-                        write("if ")
-                    else
-                        write("elif ")
-                    fi
-                    condition.accept(self)
-                    write(" then")
+                    _emit_condition_header(if first then "if" else "elif" fi, () => condition.accept(self), "then")
                 else
                     write("else")
                 fi
 
                 _builder.begin_nest(4)
-                _builder.line()
+                _break(flat)
                 emit_branch_value(branch.body)
 
                 // A statement arm - a `return`, say - writes its own line
@@ -608,7 +704,7 @@ namespace Syntax.Process.Printer is
             flush_leading(if_statement.location.end)
 
             if !at_line_start then
-                _builder.line()
+                _break(flat)
             fi
 
             write("fi")
@@ -689,47 +785,49 @@ namespace Syntax.Process.Printer is
                 expression.accept(self)
             fi
 
-            write_line(" do")
-            indent()
+            write(" do")
+            _emit_loop_body(for_statement.location, for_statement.body)
+        si
 
-            if let for_statement.body? then
-                body.accept(self)
+        // A loop's body and its closing `od`: on the `do` line where the
+        // author wrote the loop on one line and it fits.
+        _emit_loop_body(location: LOCATION, body: Statements.LIST?) is
+            let flat = _written_on_one_line(location)
+
+            _builder.begin_group()
+            _builder.begin_nest(4)
+            _break(flat)
+
+            if body? then
+                if flat then
+                    emit_branch_value(body)
+                else
+                    body.accept(self)
+                fi
             fi
 
-            outdent()
+            _builder.end_nest()
 
             // Nested blocks each end with their own terminator, and the inner
             // one leaves the line open: `od` must not run onto it.
             if !at_line_start then
-                write_line()
+                _break(flat)
             fi
 
             write("od")
+            _builder.end_group()
         si
 
         emit_do_expression(do_statement: Statements.DO) is
             if let do_statement.binding? then
-                write("while let ")
-                binding.accept(self)
-                write(" ")
+                _emit_binding_header("while let", binding, null, "do")
             elif let do_statement.condition? then
-                write("while ")
-                condition.accept(self)
-                write(" ")
+                _emit_condition_header("while", () => condition.accept(self), "do")
+            else
+                write("do")
             fi
 
-            write_line("do")
-            indent()
-            do_statement.body.accept(self)
-            outdent()
-
-            // Nested blocks each end with their own terminator, and the inner
-            // one leaves the line open: `od` must not run onto it.
-            if !at_line_start then
-                write_line()
-            fi
-
-            write("od")
+            _emit_loop_body(do_statement.location, do_statement.body)
         si
 
         // --- faithfulness fix: `case` statement / expression. The base
@@ -782,6 +880,21 @@ namespace Syntax.Process.Printer is
         emit_case_match_at(match: Statements.CASE_MATCH, as_expression: bool, limit: int) is
             note(match.location)
 
+            // The previous arm may have ended in a block terminator of its
+            // own, leaving the line open: `when` must not run onto it.
+            if !at_line_start then
+                write_line()
+            fi
+
+            // An arm the author wrote on one line keeps its body on the
+            // `when ... then` line, where it fits.
+            let flat =
+                _has_at_most_one_statement(match.statements) /\
+                _arm_start_line(match) == _arm_body_line(match) /\
+                !_has_trivia_before(match.location.end)
+
+            _builder.begin_group()
+
             if let match.pattern? then
                 write("when ")
                 pattern.accept(self)
@@ -791,7 +904,7 @@ namespace Syntax.Process.Printer is
                     guard.accept(self)
                 fi
 
-                write_line(" then")
+                write(" then")
             elif match.expressions? then
                 write("when ")
                 let first mut = true
@@ -802,16 +915,33 @@ namespace Syntax.Process.Printer is
                     e.accept(self)
                     first = false
                 od
-                write_line(" then")
+                write(" then")
             else
-                write_line("else")
+                write("else")
             fi
+
+            if flat then
+                _builder.begin_nest(4)
+                _builder.line()
+                _emit_inline(() => emit_branch_value(match.statements))
+                _builder.end_nest()
+                _builder.end_group()
+                write_line()
+                return
+            fi
+
+            _builder.end_group()
+            write_line()
 
             indent()
 
             if as_expression then
                 emit_branch_value(match.statements)
-                write_line()
+
+                // A statement arm - a `throw`, say - ends its own line.
+                if !at_line_start then
+                    write_line()
+                fi
             else
                 match.statements.accept(self)
             fi
@@ -823,6 +953,28 @@ namespace Syntax.Process.Printer is
 
             outdent()
         si
+
+        // An arm's span starts at the end of whatever precedes it - the
+        // first arm's at its `case` - so the line its `when` is on comes from
+        // what follows the keyword.
+        _arm_start_line(match: Statements.CASE_MATCH) -> int =>
+            if let match.pattern? then
+                pattern.location.start_line
+            elif let match.expressions? /\ expressions.count > 0 then
+                expressions.expressions[0].location.start_line
+            else
+                match.location.start_line
+            fi
+
+        // A statement's span runs on to the token that ends it, which for a
+        // line break is the next arm's `when`, so it is where the body
+        // starts that says whether the author put it on the arm's line.
+        _arm_body_line(match: Statements.CASE_MATCH) -> int =>
+            if let body = match.statements.last then
+                body.location.start_line
+            else
+                _arm_start_line(match)
+            fi
 
         emit_case_expression(case_statement: Statements.CASE) is
             emit_case_header(case_statement)
