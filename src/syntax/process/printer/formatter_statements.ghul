@@ -242,16 +242,48 @@ namespace Syntax.Process.Printer is
                 e.location.start
             fi
 
+        // The body follows on the next line at the same indent, as a single
+        // variable `let ... in` does, unless the author wrote it on the
+        // `assert` line and it fits.
         visit(assert_in: Expressions.ASSERT_IN) is
             note(assert_in.location)
-            write("assert ")
-            assert_in.condition.accept(self)
-            if assert_in.message? then
-                write(" else ")
-                assert_in.message!.accept(self)
-            fi
-            write(" in ")
+            _emit_assertion(assert_in.condition, assert_in.message)
+            write(" in")
+
+            let flat =
+                assert_in.expression.location.start_line == assert_in.location.start_line /\
+                !_has_trivia_before(assert_in.expression.location.start)
+
+            _builder.begin_group()
+            _break(flat)
+            flush_leading(_start_of(assert_in.expression))
             assert_in.expression.accept(self)
+            _builder.end_group()
+        si
+
+        visit(`assert: Statements.ASSERT) is
+            note(`assert.location)
+            _emit_assertion(`assert.expression, `assert.message)
+            write_terminator()
+        si
+
+        // `assert` and its condition, with the message on a line of its
+        // own one level in when the whole does not fit.
+        _emit_assertion(condition: Expressions.Expression, message: Expressions.Expression?) is
+            write("assert ")
+
+            _builder.begin_group()
+            condition.accept(self)
+
+            if message? then
+                _builder.begin_nest(4)
+                _builder.line()
+                write("else ")
+                message.accept(self)
+                _builder.end_nest()
+            fi
+
+            _builder.end_group()
         si
 
         visit(recurse: Expressions.RECURSE) is
