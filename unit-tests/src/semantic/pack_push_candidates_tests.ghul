@@ -25,11 +25,15 @@ namespace Semantic.UnitTests is
 
         owner() -> CLASS => CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Owner", LIST[string](), Semantic.BLOCK_SCOPE())
 
-        static_method(owner: CLASS, name: string) -> STATIC_METHOD is
-            let l = TEST_INNATE_SYMBOL_LOOKUP()
+        // One lookup for the whole test, so formals built from it are the
+        // same type and overloads declared with them are alike.
+        static_method(owner: CLASS, name: string) -> STATIC_METHOD =>
+            static_method(owner, name, TEST_INNATE_SYMBOL_LOOKUP().get_int_type())
+
+        static_method(owner: CLASS, name: string, argument: Type) -> STATIC_METHOD is
             let f = STATIC_METHOD(loc(), loc(), owner, name, Semantic.BLOCK_SCOPE())
-            f.arguments = LIST[Type]([l.get_int_type()])
-            f.return_type = l.get_int_type()
+            f.arguments = LIST[Type]([argument])
+            f.return_type = argument
             return f
         si
 
@@ -69,15 +73,35 @@ namespace Semantic.UnitTests is
             are_same(packed, result)
         si
 
-        // Two overloads the adaptation applies to give no reason to push
-        // either: no retry is made, and the call reports its original
-        // resolution failure.
+        // Overloads the adaptation applies to that take the same formals -
+        // one declared where the call is, one imported - would type the
+        // arguments alike, so the first is pushed and resolution then runs
+        // over both.
         @Test()
-        Calling__find_single__when_two_overloads_adapt__returns_null() is
+        Calling__find_single__when_two_alike_overloads_adapt__returns_the_first() is
             let o = owner()
+            let l = TEST_INNATE_SYMBOL_LOOKUP()
+            let first = static_method(o, "two", l.get_int_type())
             let group = FUNCTION_GROUP(loc(), o, "two")
-            group.add(static_method(o, "two"))
-            group.add(static_method(o, "two"))
+            group.add(first)
+            group.add(static_method(o, "two", l.get_int_type()))
+
+            let result = Semantic.PACK_PUSH_CANDIDATES().find_single(group, true, (f: Function) => true)
+
+            are_same(first, result)
+        si
+
+        // Overloads the adaptation applies to whose formals differ give no
+        // reason to push either: pushing one's would type the arguments
+        // against the other's. No retry is made, and the call reports its
+        // original resolution failure.
+        @Test()
+        Calling__find_single__when_two_overloads_with_different_formals_adapt__returns_null() is
+            let o = owner()
+            let l = TEST_INNATE_SYMBOL_LOOKUP()
+            let group = FUNCTION_GROUP(loc(), o, "two")
+            group.add(static_method(o, "two", l.get_int_type()))
+            group.add(static_method(o, "two", l.get_string_type()))
 
             let result = Semantic.PACK_PUSH_CANDIDATES().find_single(group, true, (f: Function) => true)
 
