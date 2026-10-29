@@ -884,6 +884,33 @@ namespace Syntax.Process is
             return null
         si
 
+        // The type a use of the local wants of the unannotated function
+        // literal it is initialized with, once a use has asked for one the
+        // literal's own type did not fit. Marks the local as holding such
+        // a literal, so its uses know to ask.
+        _stored_literal_slot(variable: Trees.Variables.VARIABLE, init: Trees.Expressions.Expression) -> Type? is
+            if variable.is_explicit_type \/ variable.is_mutable_marked \/ variable.is_refutable \/ variable.is_argument then
+                return null
+            fi
+
+            let literal = COMPILE_CALLS.parenthesised_literal(init)
+
+            if !literal? \/ !isa Trees.TypeExpressions.INFER(literal.type_expression) then
+                return null
+            fi
+
+            if let simple: Trees.Variables.SIMPLE_VARIABLE_LEFT = variable.left then
+                if let holder: Semantic.Symbols.LiteralHolder = find(simple.name) then
+                    holder.stores_inferred_literal = true
+                    holder.literal_owner = current_function
+
+                    return holder.literal_slot
+                fi
+            fi
+
+            return null
+        si
+
         pre(variable: Trees.Variables.VARIABLE) -> bool is
             // Attribute pragmas on a formal-argument parameter — walk
             // their argument expressions here since this override
@@ -960,6 +987,8 @@ namespace Syntax.Process is
                         init.set_expected_type(Semantic.Types.INFERRED_VARIABLE_TYPE(later), "{{0}} is not assignable to {{1}}")
                         awaits = true
                     fi
+                elif let slot = _stored_literal_slot(variable, init) then
+                    init.set_expected_type(slot, "{{0}} is not assignable to {{1}}")
                 fi
 
                 let await_state = _variable_left_state.get_or_add(variable.left)
