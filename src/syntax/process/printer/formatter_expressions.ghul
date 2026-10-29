@@ -782,7 +782,10 @@ namespace Syntax.Process.Printer is
             if let call: Expressions.CALL = expression then
                 // A pipe chain whose head is a bracketed literal opens with
                 // that bracket, and stays on the line as the literal would.
-                if _is_pipe_stage(call) then
+                // A yield infix is an operator, whatever the tree makes of it.
+                if call.is_yield_infix then
+                    false
+                elif _is_pipe_stage(call) then
                     _is_bracket_literal(_pipe_head(call))
                 else
                     // Only a call of a name: one on a longer receiver, such
@@ -931,6 +934,16 @@ namespace Syntax.Process.Printer is
         // line than its head's, and noting it first would mark the lines
         // the head has yet to write as already passed.
         visit(call: Expressions.CALL) is
+            // `value || next_state` reached the tree as a call, and is
+            // written back as the operator it was written as.
+            if call.is_yield_infix /\ call.arguments.count == 2 then
+                note(call.location)
+                call.arguments.expressions[0].accept(self)
+                write(" ")
+                emit_right_hand_side("||", call.arguments.expressions[1])
+                return
+            fi
+
             if _is_pipe_stage(call) then
                 _builder.begin_group()
                 _emit_pipe_chain(call)
@@ -1238,9 +1251,11 @@ namespace Syntax.Process.Printer is
             // A last argument that opens a bracket of its own - an array
             // literal, a block - or is a function literal hugs the call when
             // it breaks: `f([` ... `])`, `map(x => (` ... `))`, `any(x =>`
-            // with the body on the next line. The arguments before it stay on
-            // the call's line.
-            if hug /\ !arguments.has_trailing_comma /\ _hugs(arguments.expressions[last]) then
+            // with the body on the next line. The arguments before it, which
+            // must all be short, stay on the call's line.
+            let leading_short = (start..last) |> Ghul.Pipes.all(i => _is_short_operand(arguments.expressions[i]))
+
+            if hug /\ leading_short /\ !arguments.has_trailing_comma /\ _hugs(arguments.expressions[last]) then
                 _builder.begin_group()
                 _builder.begin_nest(4)
 
