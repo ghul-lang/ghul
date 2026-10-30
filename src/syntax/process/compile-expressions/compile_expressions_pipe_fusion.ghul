@@ -736,6 +736,8 @@ namespace Syntax.Process is
                 fi
             fi
 
+            _note_fused_iteration(fused, plan.source.value!)
+
             if consumer_kind =~ "collect" \/ consumer_kind =~ "collect_array" then
                 _try_presize(fused, plan, call, consumer_kind, built.final.type)
             fi
@@ -747,6 +749,23 @@ namespace Syntax.Process is
                 if PIPE_CONSUMER_KIND.takes_function(consumer_kind) then call.arguments.expressions[1] else null fi)
 
             return fused
+        si
+
+        // Say what the fused loop's iterator local iterates and the calls
+        // it makes on it, so a target that can walk the source's storage
+        // directly does so rather than making the iterator. Nothing where
+        // the source is itself an iterator.
+        _note_fused_iteration(fused: IR.Values.FUSED_CONSUMER, receiver: IR.Values.Value) is
+            if !fused.has_iterator then
+                return
+            fi
+
+            let iteration = IR.FOR_ITERATION(receiver, fused.iterator_init)
+
+            iteration.move_next = fused.move_next
+            iteration.current = fused.read_current
+
+            fused.iterator.iteration = iteration
         si
 
         // Size a fused collect's result up front where the source's count
@@ -789,6 +808,8 @@ namespace Syntax.Process is
                 else
                     source_load
                 fi
+
+            _note_fused_iteration(fused, source_load)
 
             if consumer_kind =~ "collect_array" then
                 fused.presize_array = true
