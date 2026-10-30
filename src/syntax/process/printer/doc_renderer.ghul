@@ -96,6 +96,16 @@ namespace Syntax.Process.Printer is
                     cmds.add(RENDER_CMD(c.indent, c.flat, if _was_broken(choice.id) then choice.broken else choice.flat fi))
                 fi
 
+                if let conditional: DOC.CONDITIONAL_GROUP = d then
+                    cmds.add(
+                        RENDER_CMD(
+                            c.indent,
+                            c.flat,
+                            _chosen(conditional.alternatives, _width - pos, c.indent, c.flat, cmds)
+                        )
+                    )
+                fi
+
                 if isa DOC.LINE(d) then
                     if c.flat then
                         out.append(' ')
@@ -183,6 +193,10 @@ namespace Syntax.Process.Printer is
                     local.add(RENDER_CMD(c.indent, true, if _was_broken(choice.id) then choice.broken else choice.flat fi))
                 fi
 
+                if let conditional: DOC.CONDITIONAL_GROUP = d then
+                    local.add(RENDER_CMD(c.indent, true, conditional.alternatives[0]))
+                fi
+
                 if isa DOC.LINE(d) then
                     remaining = remaining - 1
                 fi
@@ -192,8 +206,47 @@ namespace Syntax.Process.Printer is
                 fi
             od
 
-            let rest_index mut = rest.count - 1
+            return _fits_rest(remaining, LIST[RENDER_CMD](), rest)
+        si
+
+        // Which alternative of a conditional group to render: the first whose
+        // own content reaches a line break of its own within the width, and
+        // the last when none does. In flat mode nothing may break, so the
+        // most preferred alternative is the only answer.
+        _chosen(alternatives: LIST[DOC], width: int, indent: int, flat: bool, rest: LIST[RENDER_CMD]) -> DOC is
+            let last = alternatives.count - 1
+
+            if flat then
+                return alternatives[0]
+            fi
+
+            for i in 0..last do
+                if _fits_at_break(width, indent, alternatives[i], rest) then
+                    return alternatives[i]
+                fi
+            od
+
+            return alternatives[last]
+        si
+
+        // True if `doc`, laid out so that its own groups break as they will,
+        // reaches its first line break within `width` columns. Unlike _fits
+        // this does not ask whether all of `doc` fits flat: it asks whether
+        // what `doc` would put before its first break does.
+        _fits_at_break(width: int, indent: int, doc: DOC, rest: LIST[RENDER_CMD]) -> bool is
             let pending = LIST[RENDER_CMD]()
+            pending.add(RENDER_CMD(indent, false, doc))
+
+            return _fits_rest(width, pending, rest)
+        si
+
+        // Measure `pending`, then `rest`, each in its own mode, up to the
+        // first break either takes: a break ends the line, so what follows
+        // it cannot make the line too long.
+        _fits_rest(width: int, pending: LIST[RENDER_CMD], rest: LIST[RENDER_CMD]) -> bool is
+            let remaining mut = width
+
+            let rest_index mut = rest.count - 1
 
             do
                 if remaining < 0 then
@@ -249,6 +302,10 @@ namespace Syntax.Process.Printer is
 
                 if let choice: DOC.IF_BROKEN = d then
                     pending.add(RENDER_CMD(c.indent, c.flat, if _was_broken(choice.id) then choice.broken else choice.flat fi))
+                fi
+
+                if let conditional: DOC.CONDITIONAL_GROUP = d then
+                    pending.add(RENDER_CMD(c.indent, c.flat, conditional.alternatives[0]))
                 fi
 
                 if isa DOC.LINE(d) then
