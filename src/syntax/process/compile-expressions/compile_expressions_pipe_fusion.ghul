@@ -1277,7 +1277,8 @@ namespace Syntax.Process is
         //
         // The handler is used only through the string builder runtime
         // operations, which each target lowers for its own handler type.
-        // Returns false where the separator did not compile.
+        // Returns false where the separator did not compile, or where an
+        // element needs the runtime's `$` and the runtime has none.
         _build_fused_join(
             fused: IR.Values.FUSED_CONSUMER,
             call: Trees.Expressions.CALL,
@@ -1318,12 +1319,32 @@ namespace Syntax.Process is
             fused.join_append_separator =
                 IR.Values.RUNTIME(IR.RuntimeOperation.APPEND_TEXT, handler_load, separator_local.load(), null)
 
-            fused.join_append_element =
-                IR.Values.RUNTIME(
-                    IR.RuntimeOperation.APPEND_VALUE,
-                    [handler_load, element_load]:IR.Values.Value,
-                    null,
-                    element_type)
+            // The runtime's join writes each element as an interpolation
+            // of a type parameter, which is through `$`. An element whose
+            // own type interpolates as formatted text reads the same
+            // appended directly; any other - a bool, an optional, an array,
+            // a trait, a tuple - is written through `$` here too.
+            let classifier = Semantic.INTERPOLATED_VALUE_CLASSIFIER(_innate_symbol_lookup)
+
+            if classifier.classify(element_type, false) =~ Semantic.InterpolatedValueRendering.FORMATTED then
+                fused.join_append_element =
+                    IR.Values.RUNTIME(
+                        IR.RuntimeOperation.APPEND_VALUE,
+                        [handler_load, element_load]:IR.Values.Value,
+                        null,
+                        element_type)
+            elif let display = classifier.display_function then
+                let text = display.call(call.location, null, [element_load]:IR.Values.Value, null, _function_caller)
+
+                fused.join_append_element =
+                    IR.Values.RUNTIME(
+                        IR.RuntimeOperation.APPEND_VALUE,
+                        [handler_load, text]:IR.Values.Value,
+                        null,
+                        string_type)
+            else
+                return false
+            fi
 
             fused.finish = IR.Values.RUNTIME(IR.RuntimeOperation.BUILD_STRING, handler_load, string_type)
 
