@@ -446,7 +446,24 @@ namespace Semantic is
                 return null
             fi
 
-            let method = inlined.inlined_into!.method
+            // A literal inlined into another inlined literal is emitted
+            // where that one is, so the walk goes on out to the function
+            // that has a body of its own. A name an inlined literal on the
+            // way owns, other than its parameter, is a local of that
+            // function too.
+            let method mut = inlined.inlined_into!.method
+
+            while let enclosing: Symbols.Closure = method /\ enclosing.is_inlined do
+                if symbol.owner == enclosing then
+                    if symbol.is_boxed then
+                        return _load_boxed_local(location, symbol)
+                    fi
+
+                    return Load.LOCAL_VARIABLE(symbol)
+                fi
+
+                method = enclosing.inlined_into!.method
+            od
 
             if symbol.owner == method then
                 if isa Symbols.LOCAL_ARGUMENT(symbol) then
@@ -477,6 +494,19 @@ namespace Semantic is
             fi
 
             return raw
+        si
+
+        // The function an inlined literal's body is emitted into: the one
+        // it was inlined into, or where that one is emitted if it was
+        // inlined itself.
+        _emitted_into(closure: Symbols.Closure) -> Symbols.Function is
+            let method mut = closure.inlined_into!.method
+
+            while let enclosing: Symbols.Closure = method /\ enclosing.is_inlined do
+                method = enclosing.inlined_into!.method
+            od
+
+            return method
         si
 
         // Whether the walk is directly inside a literal being compiled
@@ -510,6 +540,15 @@ namespace Semantic is
 
             if _current_inlined_closure == symbol.owner then
                 return Load.LOCAL_VARIABLE(parameter)
+            fi
+
+            // Inside a literal inlined into the owner, directly or through
+            // further inlined literals, the body is emitted where the
+            // owner's is, and the local is that function's own.
+            if let current = _current_inlined_closure then
+                if _emitted_into(current) == _emitted_into(cast Symbols.Closure(symbol.owner)) then
+                    return Load.LOCAL_VARIABLE(parameter)
+                fi
             fi
 
             if let function = _symbol_table.current_function then

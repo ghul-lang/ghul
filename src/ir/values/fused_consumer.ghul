@@ -35,12 +35,29 @@ namespace IR.Values is
         // the INDEXED_VALUE from the counter and the incoming element.
         is_index: bool public
 
+        // An inlined map/filter stage has no delegate: `param_store`
+        // writes the incoming element into the local the stage literal's
+        // parameter loads as, and `apply` is the literal's body, compiled
+        // to read it and any captured locals as the enclosing body's own.
+        param_local: IR.LOCAL? public
+        param_store: Value? public
+
+        is_inlined: bool => param_local?
+
         is_countdown: bool => is_take \/ is_skip
 
         init(is_filter: bool, delegate_local: IR.LOCAL, delegate_init: Value, apply: Value, output: IR.LOCAL?) is
             self.is_filter = is_filter
             self.delegate_local = delegate_local
             self.delegate_init = delegate_init
+            self.apply = apply
+            self.output = output
+        si
+
+        init(param_local: IR.LOCAL, param_store: Value, apply: Value, is_filter: bool, output: IR.LOCAL?) is
+            self.is_filter = is_filter
+            self.param_local = param_local
+            self.param_store = param_store
             self.apply = apply
             self.output = output
         si
@@ -224,6 +241,8 @@ namespace IR.Values is
             for stage in stages do
                 if stage.is_countdown \/ stage.is_index then
                     expansion.store(expansion.declare(stage.counter), stage.count_init!)
+                elif let param = stage.param_local then
+                    expansion.declare(param)
                 else
                     expansion.store(expansion.declare(stage.delegate_local), stage.delegate_init)
                 fi
@@ -272,10 +291,16 @@ namespace IR.Values is
                     if stage.is_skip then
                         expansion.continue_if(loop, IR.BRANCH.GE, counter.load(), Literal.NUMBER(0, int_type))
                     fi
-                elif stage.is_filter then
-                    expansion.continue_if(loop, IR.BRANCH.Z, stage.apply)
                 else
-                    expansion.store(expansion.declare(stage.output!), stage.apply)
+                    if let store = stage.param_store then
+                        expansion.add(store)
+                    fi
+
+                    if stage.is_filter then
+                        expansion.continue_if(loop, IR.BRANCH.Z, stage.apply)
+                    else
+                        expansion.store(expansion.declare(stage.output!), stage.apply)
+                    fi
                 fi
             od
 
