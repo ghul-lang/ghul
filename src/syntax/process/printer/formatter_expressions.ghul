@@ -745,9 +745,12 @@ namespace Syntax.Process.Printer is
             emit_right_hand_side("=>", expression.expression)
         si
 
-        // The right-hand side of `=>` or `=`. One that opens with a bracket
-        // stays on the line and breaks inside its own brackets; any other
-        // moves to the next line, one level in, when it does not fit.
+        // The right-hand side of `=>` or `=`. Every kind moves to the next
+        // line, one level in, when it does not fit; what fitting means is
+        // what differs. A literal between brackets of its own needs room
+        // for its opening bracket and no more, so it stays put. A value
+        // that breaks inside brackets of its own needs its head, what
+        // stands before those brackets. Anything else needs all of itself.
         emit_right_hand_side(operator: string, expression: Expressions.Expression) is
             write(operator)
 
@@ -763,8 +766,36 @@ namespace Syntax.Process.Printer is
             _definition_body = false
 
             if _opens_with_bracket(expression) /\ ((hugged == 0 /\ !definition) \/ _is_bracket_literal(expression)) then
-                write(" ")
+                // A literal written between brackets of its own - a block,
+                // a tuple, an array - keeps its opening bracket on the line
+                // that introduces it, whatever that line costs: moving it
+                // down buys nothing when what overflows is to its left.
+                if _is_bracket_literal(expression) then
+                    write(" ")
+                    expression.accept(self)
+                    return
+                fi
+
+                // Otherwise the value stays on the line, but its head - what
+                // stands before the bracket it breaks inside - still has to
+                // fit. A group holding the break alone measures as far as
+                // that bracket and no further, so the value moves to the
+                // next line only where its own head would overflow, and
+                // takes the indent with it when it does.
+                let head = _builder.new_group_id()
+
+                _builder.begin_nest(4)
+                _builder.begin_group()
+                _builder.line()
+                _builder.end_tracked_group(head)
+                _builder.end_nest()
+
+                _builder.begin_capture()
                 expression.accept(self)
+                let value = _builder.end_capture()
+
+                _builder.emit(DOC.IF_BROKEN(head, DOC.NEST(4, value), value))
+
                 return
             fi
 
