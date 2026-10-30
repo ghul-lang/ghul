@@ -1,0 +1,59 @@
+namespace Semantic.Symbols.UnitTests is
+    use Collections.LIST
+
+    use Source.LOCATION
+
+    use Logging.DIAGNOSTICS_STORE
+    use Semantic.SYMBOL_LOADER
+    use Semantic.SYMBOL_TABLE
+    use Semantic.Symbols.CLASS
+    use Semantic.Symbols.Function
+    use Semantic.Symbols.LOCAL_VARIABLE
+
+    use TestClass = Microsoft.VisualStudio.TestTools.UnitTesting.TestClassAttribute
+    use Test = Microsoft.VisualStudio.TestTools.UnitTesting.TestMethodAttribute
+    use Assertions
+    use NSubstitute.SubstituteExtensions.returns_for_any_args
+
+    // A literal inlined into a function's body has no frame of its own:
+    // it reads the receiver as the function it is inlined into does, and
+    // captures nothing to do it.
+    @TestClass()
+    class CLOSURE_INLINED_RECEIVER_TESTS is
+        init() is si
+
+        loc() -> LOCATION => LOCATION("test.ghul", 1, 1, 1, 1)
+
+        loader() -> SYMBOL_LOADER is
+            let logger = DIAGNOSTICS_STORE()
+            let symbol_table = SYMBOL_TABLE(logger)
+
+            return SYMBOL_LOADER(logger, symbol_table, Semantic.FUNCTION_CALLER(symbol_table, IR.VALUE_BOXER(logger)), IR.VALUE_BOXER(logger), Semantic.UnitTests.TEST_INNATE_SYMBOL_LOOKUP())
+        si
+
+        @Test()
+        Calling__load_self__on_an_inlined_closure__should_answer_what_the_function_it_is_inlined_into_answers() is
+            let host = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "HOST", LIST[string](), Semantic.BLOCK_SCOPE())
+            let method = NSubstitute.Substitute.`for`[Function]([loc(), loc(), host, "m", Semantic.BLOCK_SCOPE()]:object)
+            let receiver = cast IR.Values.Value(IR.Values.DUMMY(Semantic.Types.ERROR(), loc()))
+            let symbol_loader = loader()
+
+            method.load_self(loc(), symbol_loader) |> returns_for_any_args(receiver, null)
+
+            let closure = Semantic.Symbols.STATIC_CLOSURE(loc(), host, "$anon_0", host, false)
+            let local_ids = IoC.CONTAINER.instance.local_id_generator
+
+            local_ids.enter_function()
+
+            let parameter = LOCAL_VARIABLE(loc(), Semantic.BLOCK_SCOPE(), "x")
+            let local = LOCAL_VARIABLE(loc(), Semantic.BLOCK_SCOPE(), "x")
+
+            local_ids.leave_function()
+
+            closure.inlined_into = (method, parameter, local)
+
+            are_same(receiver, closure.load_self(loc(), symbol_loader))
+            is_false(closure.is_self_captured)
+        si
+    si
+si
