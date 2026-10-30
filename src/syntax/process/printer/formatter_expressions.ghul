@@ -313,28 +313,23 @@ namespace Syntax.Process.Printer is
         // A numeric literal as written, its `_` digit separators put back.
         visit(integer: Expressions.Literals.INTEGER) is
             note(integer.location)
-            _emit_numeric(integer.value_string, integer.location.end)
+            _emit_numeric(integer.value_string, integer.location.start, integer.location.end)
         si
 
         visit(float: Expressions.Literals.FLOAT) is
             note(float.location)
-            _emit_numeric(float.value_string, float.location.end)
+            _emit_numeric(float.value_string, float.location.start, float.location.end)
         si
 
-        _emit_numeric(value: string, end: int) is
+        _emit_numeric(value: string, from: int, to: int) is
             let text = System.Text.StringBuilder()
+            let separators = separator_offsets(from, to)
             let i mut = 0
 
             while i <= value.length do
-                while
-                    _has_trivia /\
-                    isa TRIVIA.DIGIT_SEPARATOR(_peek) /\
-                    _peek.location.start < end /\
-                    cast TRIVIA.DIGIT_SEPARATOR(_peek).offset == i
-                do
+                if separators |> Ghul.Pipes.any(o => o == i) then
                     text.append('_')
-                    _consume()
-                od
+                fi
 
                 if i == value.length then
                     break
@@ -1615,6 +1610,21 @@ namespace Syntax.Process.Printer is
             _builder.end_group()
         si
 
+        // One element of a row. A row is kept whatever it costs, so an
+        // element the author wrote on one line is held to one line too:
+        // letting it break would strand half of it below the row and lose
+        // the row the rest of this is preserving. An element the author
+        // wrote over several lines keeps its own layout.
+        _emit_row_element(e: Expressions.Expression) is
+            if e.location.start_line == e.location.end_line then
+                _builder.begin_group()
+                e.accept(self)
+                _builder.end_flat()
+            else
+                e.accept(self)
+            fi
+        si
+
         // Each row the author wrote is a line, whatever it costs. The rows
         // of a written-out table are its structure - a board, a matrix, a
         // permutation, a sample series - and re-flowing one to the width
@@ -1633,15 +1643,15 @@ namespace Syntax.Process.Printer is
                     if e.location.start_line > p.location.end_line then
                         write_line()
                         flush_leading(e.location.start)
-                        e.accept(self)
+                        _emit_row_element(e)
                     else
                         write(" ")
-                        e.accept(self)
+                        _emit_row_element(e)
                     fi
                 else
                     write_line()
                     flush_leading(e.location.start)
-                    e.accept(self)
+                    _emit_row_element(e)
                 fi
 
                 previous = e
