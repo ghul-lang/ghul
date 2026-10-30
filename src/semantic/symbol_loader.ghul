@@ -262,6 +262,14 @@ namespace Semantic is
                 fi
             fi
 
+            // A literal being compiled inline has no frame: a variable the
+            // function its body is emitted into owns is stored as that
+            // function stores it, and one from further out through that
+            // function's own frame.
+            if let inlined = _store_through_inlined_method(location, symbol, value, is_initialize) then
+                return inlined
+            fi
+
             // Boxed store from inside the closure body that
             // captured this local: route through the closure's
             // frame so we hit the shared BOX[T] cell, not the
@@ -507,6 +515,42 @@ namespace Semantic is
             od
 
             return method
+        si
+
+        // As `_load_through_inlined_method`, for a store. Null when the walk
+        // is not directly inside an inlined literal, or when the variable is
+        // one the literal itself owns.
+        _store_through_inlined_method(location: Source.LOCATION, symbol: Symbols.Variable, value: Value, is_initialize: bool) -> Value? is
+            let inlined = _current_inlined_closure
+
+            if !inlined? \/ symbol.owner == inlined then
+                return null
+            fi
+
+            let method mut = inlined.inlined_into!.method
+            let owns mut = symbol.owner == method
+
+            while !owns /\ isa Symbols.Closure(method) /\ (cast Symbols.Closure(method)).is_inlined do
+                let enclosing = cast Symbols.Closure(method)
+
+                owns = symbol.owner == enclosing
+                method = enclosing.inlined_into!.method
+                owns = owns \/ symbol.owner == method
+            od
+
+            if owns then
+                if symbol.is_boxed then
+                    return _store_boxed_local(location, symbol, value, is_initialize)
+                fi
+
+                return Store.LOCAL_VARIABLE(symbol, _value_boxer.box_if_needed(value, symbol.type!))
+            fi
+
+            if !isa Symbols.Closure(method) then
+                return null
+            fi
+
+            return method.store_captured_value(location, symbol, value, self)
         si
 
         // Whether the walk is directly inside a literal being compiled
