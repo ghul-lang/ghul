@@ -109,5 +109,69 @@ namespace Syntax.Process.Printer.UnitTests is
             // breaks, the inner stays flat.
             are_equal("outer\nx y", render(b.build(), 6))
         si
+
+        // `head(` and a group that breaks after it: what the first
+        // alternative puts before its own first break is `prefix head(`.
+        head_then_broken_group(prefix: string) -> DOC is
+            let b = DOC_BUILDER()
+            b.text(prefix)
+            b.text("head(")
+            b.begin_group()
+            b.begin_nest(4)
+            b.soft_line()
+            b.text("argument")
+            b.end_nest()
+            b.soft_line()
+            b.end_group()
+            b.text(")")
+
+            return b.build()
+        si
+
+        conditional(prefix: string) -> DOC is
+            let b = DOC_BUILDER()
+
+            b.conditional_group(
+                [
+                    head_then_broken_group(prefix),
+                    DOC.CONCAT(
+                        [DOC.TEXT("!"), head_then_broken_group(prefix)] |>
+                            Ghul.Pipes.collect_mutable()
+                    )
+                ] |> Ghul.Pipes.collect_mutable()
+            )
+
+            return b.build()
+        si
+
+        // The first alternative is measured only as far as the break its own
+        // group would take, so a long argument it would carry below does not
+        // count against it.
+        @Test()
+        a_conditional_group_takes_the_first_alternative_whose_head_fits() is
+            are_equal("head(\n    argument\n)", render(conditional(""), 8))
+        si
+
+        // The same alternative, with more before it than the width allows,
+        // is passed over for the next.
+        @Test()
+        a_conditional_group_passes_over_an_alternative_whose_head_is_too_wide() is
+            are_equal("!xxxxxhead(\n    argument\n)", render(conditional("xxxxx"), 8))
+        si
+
+        // Nothing may break in flat mode, so there is no fit to measure and
+        // the most preferred alternative is the answer.
+        @Test()
+        a_conditional_group_in_flat_mode_takes_its_first_alternative() is
+            let b = DOC_BUILDER()
+            b.begin_group()
+            let alternatives: Collections.LIST[DOC] =
+                _([DOC.TEXT("first"), DOC.TEXT("second")])
+
+            b.conditional_group(alternatives)
+            b.end_flat()
+
+            are_equal("first", render(b.build(), 1))
+        si
     si
 si
