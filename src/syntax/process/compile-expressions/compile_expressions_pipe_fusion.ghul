@@ -169,7 +169,7 @@ namespace Syntax.Process is
             fi
 
             _note_fusion_site(`for.location, "for", true, recognizer, true)
-            _note_fused_functions(`for.location, fusion!, null)
+            _note_fused_functions(`for.location, fusion!, null, false)
 
             return fusion
         si
@@ -218,7 +218,7 @@ namespace Syntax.Process is
         // Record for the study how a site that fused runs each function
         // it was given: every map and filter stage's, and the consumer's
         // own where it takes one. Inert unless the study is enabled.
-        _note_fused_functions(site: Source.LOCATION, fusion: PIPE_FUSION, consumer_function: Trees.Expressions.Expression?) is
+        _note_fused_functions(site: Source.LOCATION, fusion: PIPE_FUSION, consumer_function: Trees.Expressions.Expression?, consumer_inlined: bool) is
             if !PIPE_FUSION_STUDY.enabled then
                 return
             fi
@@ -232,7 +232,7 @@ namespace Syntax.Process is
             od
 
             if let argument = consumer_function then
-                PIPE_FUSION_STUDY.note_fused_function(site, argument.location, "consumer", false, _closure_of(argument))
+                PIPE_FUSION_STUDY.note_fused_function(site, argument.location, "consumer", consumer_inlined, _closure_of(argument))
             fi
         si
 
@@ -742,11 +742,18 @@ namespace Syntax.Process is
                 _try_presize(fused, plan, call, consumer_kind, built.final.type)
             fi
 
+            // Nothing past here declines, so the consumer's own function
+            // can be inlined without needing to be put back.
+            if PIPE_CONSUMER_KIND.takes_function(consumer_kind) then
+                _try_inline_consumer_function(fused, call.arguments.expressions[1], built.final, consumer_kind)
+            fi
+
             _note_fusion_site(call.location, _pipes_function_name(call) ?? consumer_kind, true, recognizer, true)
             _note_fused_functions(
                 call.location,
                 plan,
-                if PIPE_CONSUMER_KIND.takes_function(consumer_kind) then call.arguments.expressions[1] else null fi)
+                if PIPE_CONSUMER_KIND.takes_function(consumer_kind) then call.arguments.expressions[1] else null fi,
+                fused.consumer_param?)
 
             return fused
         si
@@ -1341,6 +1348,46 @@ namespace Syntax.Process is
 
             stage.param_local = cast Semantic.Symbols.Variable(local)
             stage.inline_body = block
+        si
+
+        // Inline a consumer's function argument - an any, all, find or
+        // sum_by predicate or selector, or an each action - into the loop,
+        // as a map stage's is: the surviving element is stored into the
+        // local the literal's parameter loads as, and the body is applied
+        // in place of the delegate call. A literal that cannot be inlined
+        // keeps the delegate already built for it.
+        _try_inline_consumer_function(
+            fused: IR.Values.FUSED_CONSUMER,
+            argument: Trees.Expressions.Expression,
+            element: IR.LOCAL,
+            consumer_kind: string
+        ) is
+            let stage = PIPE_FUSION_STAGE()
+
+            stage.argument = argument
+
+            _try_inline_stage(stage)
+
+            if !stage.is_inlined then
+                return
+            fi
+
+            let param = stage.param_local!
+            let body = stage.inline_body!
+
+            fused.consumer_arg = null
+            fused.consumer_arg_init = null
+            fused.consumer_param = param.ir_local
+            fused.consumer_param_store = IR.Values.Store.LOCAL_VARIABLE(param, element.load())
+
+            // each runs its action for what it does and ignores what it
+            // answers.
+            fused.consumer_apply =
+                if consumer_kind =~ "each" /\ body.type? /\ !body.type.is_void then
+                    IR.Values.DISCARD(body)
+                else
+                    body
+                fi
         si
 
         // Put an inlined stage's literal back as an ordinary closure, for a
