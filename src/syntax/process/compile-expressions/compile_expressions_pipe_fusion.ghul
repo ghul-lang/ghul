@@ -169,6 +169,7 @@ namespace Syntax.Process is
             fi
 
             _note_fusion_site(`for.location, "for", true, recognizer, true)
+            _note_fused_functions(`for.location, fusion!, null)
 
             return fusion
         si
@@ -213,6 +214,34 @@ namespace Syntax.Process is
                     recognizer.decline_reason ?? _chain_resolve_reason ?? "unknown"
                 fi)
         si
+
+        // Record for the study how a site that fused runs each function
+        // it was given: every map and filter stage's, and the consumer's
+        // own where it takes one. Inert unless the study is enabled.
+        _note_fused_functions(site: Source.LOCATION, fusion: PIPE_FUSION, consumer_function: Trees.Expressions.Expression?) is
+            if !PIPE_FUSION_STUDY.enabled then
+                return
+            fi
+
+            for stage in fusion.stages_outermost_first do
+                if !stage.is_countdown /\ !stage.is_index then
+                    if let argument = stage.argument then
+                        PIPE_FUSION_STUDY.note_fused_function(site, argument.location, "stage", stage.inline_body?, _closure_of(argument))
+                    fi
+                fi
+            od
+
+            if let argument = consumer_function then
+                PIPE_FUSION_STUDY.note_fused_function(site, argument.location, "consumer", false, _closure_of(argument))
+            fi
+        si
+
+        _closure_of(expression: Trees.Expressions.Expression) -> Semantic.Symbols.Closure? =>
+            if isa Trees.Expressions.FUNCTION(expression) then
+                cast Semantic.Symbols.Closure?(_symbol_table.scope_for(expression))
+            else
+                null
+            fi
 
         // Record a call to a Ghul.Pipes function for the study, whether or
         // not fusion recognises it, so the sites fusion reaches can be read
@@ -691,6 +720,10 @@ namespace Syntax.Process is
             fi
 
             _note_fusion_site(call.location, _pipes_function_name(call) ?? consumer_kind, true, recognizer, true)
+            _note_fused_functions(
+                call.location,
+                plan,
+                if PIPE_CONSUMER_KIND.takes_function(consumer_kind) then call.arguments.expressions[1] else null fi)
 
             return fused
         si

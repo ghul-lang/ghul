@@ -8,7 +8,7 @@ namespace Syntax.Process is
     // nothing in this class alters what the compiler concludes, reports
     // or emits.
     //
-    // The report answers two questions a corpus sweep asks of fusion.
+    // The report answers the questions a corpus sweep asks of fusion.
     // One record per site where a chain of Ghul.Pipes combinators is
     // consumed says whether that chain fused and, when it did not, the
     // reason the recogniser or the resolver gave - so the reasons can be
@@ -16,7 +16,11 @@ namespace Syntax.Process is
     // Ghul.Pipes call gives the total combinator surface the site
     // records are a fraction of.
     //
-    // Both are keyed by source position, and a later record for a
+    // A third record, per function a fused site runs, says whether the
+    // function is inlined into the loop or called through a delegate, and
+    // whether that delegate captures anything: what fusion still allocates.
+    //
+    // All are keyed by source position, and a later record for a
     // position replaces the one before it: compile-expressions walks a
     // body more than once - speculatively, on overload retry, and again
     // in the combined-solve rounds - and what a site finally decided is
@@ -85,6 +89,50 @@ namespace Syntax.Process is
                 "{if reason.length == 0 then "-" else reason fi}"
         si
 
+        // Record how a fused site runs one of the functions it was
+        // given - a stage's mapper or predicate, or the consumer's own
+        // function argument. `closure` is the literal's closure, or null
+        // where the argument is not a literal. Whether the literal
+        // captures anything is read when the report is written, once
+        // every walk of its body has settled what it captures.
+        note_fused_function(
+            site: Source.LOCATION,
+            function: Source.LOCATION,
+            role: string,
+            inlined: bool,
+            closure: Semantic.Symbols.Closure?
+        ) static is
+            if !enabled then
+                return
+            fi
+
+            _function_records[_position(function)] = (_position(site), role, inlined, closure)
+        si
+
+        _functions: MutableMap[string, (site: string, role: string, inlined: bool, closure: Semantic.Symbols.Closure?)]? static
+
+        _function_records: MutableMap[string, (site: string, role: string, inlined: bool, closure: Semantic.Symbols.Closure?)] static is
+            if !_functions? then
+                _functions = MAP[string, (site: string, role: string, inlined: bool, closure: Semantic.Symbols.Closure?)]()
+            fi
+
+            return _functions
+        si
+
+        // How a fused function runs: in the loop itself, or through a
+        // delegate - one built once where the literal captures nothing,
+        // or one built with a frame each time the site runs where it does.
+        _function_lowering(inlined: bool, closure: Semantic.Symbols.Closure?) -> string static =>
+            if inlined then
+                "inlined"
+            elif !closure? then
+                "function-value"
+            elif (closure.captured_values?.count ?? 0) > 0 \/ closure.is_self_captured then
+                "delegate-capturing"
+            else
+                "delegate-capture-free"
+            fi
+
         // Record a call to a Ghul.Pipes function, whether or not fusion
         // ever looked at it.
         note_call(location: Source.LOCATION, name: string) static is
@@ -109,6 +157,12 @@ namespace Syntax.Process is
 
                 for position in _call_records.keys do
                     writer.write_line("call\t{position}\t{_call_records[position]}")
+                od
+
+                for position in _function_records.keys do
+                    let (site, role, inlined, closure) = _function_records[position]
+
+                    writer.write_line("function\t{position}\t{site}\t{role}\t{_function_lowering(inlined, closure)}")
                 od
 
                 writer.flush()
