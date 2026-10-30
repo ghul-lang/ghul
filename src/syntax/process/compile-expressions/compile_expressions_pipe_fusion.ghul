@@ -169,6 +169,7 @@ namespace Syntax.Process is
             fi
 
             _note_fusion_site(`for.location, "for", true, recognizer, true)
+            _note_fused_functions(`for.location, fusion!, null)
 
             return fusion
         si
@@ -213,6 +214,34 @@ namespace Syntax.Process is
                     recognizer.decline_reason ?? _chain_resolve_reason ?? "unknown"
                 fi)
         si
+
+        // Record for the study how a site that fused runs each function
+        // it was given: every map and filter stage's, and the consumer's
+        // own where it takes one. Inert unless the study is enabled.
+        _note_fused_functions(site: Source.LOCATION, fusion: PIPE_FUSION, consumer_function: Trees.Expressions.Expression?) is
+            if !PIPE_FUSION_STUDY.enabled then
+                return
+            fi
+
+            for stage in fusion.stages_outermost_first do
+                if !stage.is_countdown /\ !stage.is_index then
+                    if let argument = stage.argument then
+                        PIPE_FUSION_STUDY.note_fused_function(site, argument.location, "stage", stage.inline_body?, _closure_of(argument))
+                    fi
+                fi
+            od
+
+            if let argument = consumer_function then
+                PIPE_FUSION_STUDY.note_fused_function(site, argument.location, "consumer", false, _closure_of(argument))
+            fi
+        si
+
+        _closure_of(expression: Trees.Expressions.Expression) -> Semantic.Symbols.Closure? =>
+            if isa Trees.Expressions.FUNCTION(expression) then
+                cast Semantic.Symbols.Closure?(_symbol_table.scope_for(expression))
+            else
+                null
+            fi
 
         // Record a call to a Ghul.Pipes function for the study, whether or
         // not fusion recognises it, so the sites fusion reaches can be read
@@ -567,6 +596,17 @@ namespace Syntax.Process is
                 fi
 
                 fused.seed_init = IR.Values.DEFAULT(built.final.type)
+            elif consumer_kind =~ "product" then
+                // As `sum`, from the element type's one and with the one
+                // multiply instruction, for the types the runtime's
+                // `product` takes whose `*` is that instruction.
+                let one = _multiplicative_identity(built.final.type)
+
+                if !one? then
+                    return _decline_consumer(call, recognizer, consumer_kind, "product-element-not-multiply-instruction")
+                fi
+
+                fused.seed_init = one
             fi
 
             // find / first return a MAYBE: seed with the empty MAYBE, and
@@ -589,9 +629,10 @@ namespace Syntax.Process is
                 fused.wrap_element = IR.Values.NEW(maybe_type, wrap_ctor, wrap_args)
             fi
 
-            // collect_mutable returns a fresh LIST[element]; seed it empty and
-            // add the surviving element each iteration.
-            if consumer_kind =~ "collect" then
+            // collect_mutable returns a fresh LIST[element], and collect_set
+            // a fresh SET[element]; seed it empty and add the surviving
+            // element each iteration.
+            if consumer_kind =~ "collect" \/ consumer_kind =~ "collect_set" then
                 let list_type = call.value!.type!
 
                 let ctor = _resolve_ctor_by_arity(list_type, 0)
@@ -606,8 +647,17 @@ namespace Syntax.Process is
                 let add_args = Collections.LIST[IR.Values.Value]()
                 add_args.add(final_element_load)
 
-                fused.add_element = add_fn.call(
+                let add_call = add_fn.call(
                     call.location, IR.Values.Load.TEMP(result, list_type), add_args, null, _function_caller)
+
+                // A set's add answers whether the element was new, which
+                // nothing here reads.
+                fused.add_element =
+                    if add_fn.return_type? /\ !add_fn.return_type.is_void then
+                        IR.Values.DISCARD(add_call)
+                    else
+                        add_call
+                    fi
             fi
 
             if consumer_kind =~ "collect_array" then
@@ -691,6 +741,10 @@ namespace Syntax.Process is
             fi
 
             _note_fusion_site(call.location, _pipes_function_name(call) ?? consumer_kind, true, recognizer, true)
+            _note_fused_functions(
+                call.location,
+                plan,
+                if PIPE_CONSUMER_KIND.takes_function(consumer_kind) then call.arguments.expressions[1] else null fi)
 
             return fused
         si
@@ -1221,8 +1275,10 @@ namespace Syntax.Process is
         // formatted values produces the same characters as a string per
         // element appended in turn.
         //
-        // Returns false where the handler's members do not resolve, which
-        // is the runtime being older than the handler shape this expects.
+        // The handler is used only through the string builder runtime
+        // operations, which each target lowers for its own handler type.
+        // Returns false where the separator did not compile, or where an
+        // element needs the runtime's `$` and the runtime has none.
         _build_fused_join(
             fused: IR.Values.FUSED_CONSUMER,
             call: Trees.Expressions.CALL,
@@ -1233,15 +1289,6 @@ namespace Syntax.Process is
         ) -> bool is
             let handler_type = _innate_symbol_lookup.get_interpolated_string_handler_type()
             let string_type = _innate_symbol_lookup.get_string_type()
-
-            let ctor = _resolve_ctor_by_arity(handler_type, 2)
-            let append_literal = _resolve_member_by_arity(handler_type, "append_literal", 1)
-            let to_string_and_clear = _resolve_member_by_arity(handler_type, "to_string_and_clear", 0)
-            let append_formatted = _resolve_generic_member_by_arity(handler_type, "append_formatted", 1)
-
-            if !ctor? \/ !append_literal? \/ !to_string_and_clear? \/ !append_formatted? then
-                return false
-            fi
 
             // The two counts are the builder's sizing hints, and neither
             // is known before the loop runs.
@@ -1272,40 +1319,36 @@ namespace Syntax.Process is
             fused.join_append_separator =
                 IR.Values.RUNTIME(IR.RuntimeOperation.APPEND_TEXT, handler_load, separator_local.load(), null)
 
-            fused.join_append_element =
-                IR.Values.RUNTIME(
-                    IR.RuntimeOperation.APPEND_VALUE,
-                    [handler_load, element_load]:IR.Values.Value,
-                    null,
-                    element_type)
+            // The runtime's join writes each element as an interpolation
+            // of a type parameter, which is through `$`. An element whose
+            // own type interpolates as formatted text reads the same
+            // appended directly; any other - a bool, an optional, an array,
+            // a trait, a tuple - is written through `$` here too.
+            let classifier = Semantic.INTERPOLATED_VALUE_CLASSIFIER(_innate_symbol_lookup)
+
+            if classifier.classify(element_type, false) =~ Semantic.InterpolatedValueRendering.FORMATTED then
+                fused.join_append_element =
+                    IR.Values.RUNTIME(
+                        IR.RuntimeOperation.APPEND_VALUE,
+                        [handler_load, element_load]:IR.Values.Value,
+                        null,
+                        element_type)
+            elif let display = classifier.display_function then
+                let text = display.call(call.location, null, [element_load]:IR.Values.Value, null, _function_caller)
+
+                fused.join_append_element =
+                    IR.Values.RUNTIME(
+                        IR.RuntimeOperation.APPEND_VALUE,
+                        [handler_load, text]:IR.Values.Value,
+                        null,
+                        string_type)
+            else
+                return false
+            fi
 
             fused.finish = IR.Values.RUNTIME(IR.RuntimeOperation.BUILD_STRING, handler_load, string_type)
 
             return true
-        si
-
-        // The one generic overload of `name` on `type` taking `arity`
-        // arguments, or null.
-        _resolve_generic_member_by_arity(type: Type, name: string, arity: int) -> Semantic.Symbols.Function? is
-            let member = type.find_member(name)
-
-            if !member? \/ !isa Semantic.Symbols.FUNCTION_GROUP(member) then
-                return null
-            fi
-
-            let found: Semantic.Symbols.Function? mut = null
-
-            for f in (cast Semantic.Symbols.FUNCTION_GROUP(member)).functions do
-                if f.is_generic /\ f.arguments.count == arity then
-                    if found? then
-                        return null
-                    fi
-
-                    found = f
-                fi
-            od
-
-            return found
         si
 
         // Whether `type`'s addition is the `add` instruction, which is what
@@ -1341,6 +1384,25 @@ namespace Syntax.Process is
             od
 
             return false
+        si
+
+        // The one of `type` for a fused `product`, where the runtime has a
+        // `product` over it and its `*` is the multiply instruction; null
+        // otherwise.
+        _multiplicative_identity(type: Type) -> IR.Values.Value? is
+            let lookup = _innate_symbol_lookup
+
+            if type.matches(lookup.get_int_type()) \/ type.matches(lookup.get_uint_type()) then
+                return IR.Values.Literal.NUMBER(1, type)
+            elif type.matches(lookup.get_long_type()) \/ type.matches(lookup.get_ulong_type()) then
+                return IR.Values.Literal.NUMBER(1L, type)
+            elif type.matches(lookup.get_single_type()) then
+                return IR.Values.Literal.NUMBER(1.0s, type)
+            elif type.matches(lookup.get_double_type()) then
+                return IR.Values.Literal.NUMBER(1.0, type)
+            fi
+
+            return null
         si
 
         // Drop what the literals in a stage body captured, so the walk that
