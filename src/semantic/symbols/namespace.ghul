@@ -73,6 +73,11 @@ namespace Semantic.Symbols is
             return name
         si
 
+        // A symbol this namespace declares under `name` itself, without
+        // the one a referenced assembly contributes, which `find_direct`
+        // answers until a declaration hides it.
+        find_declared(name: string) -> Symbol? => _symbols[name]
+
         find_direct(name: string) -> Symbol? is
             let declared = super.find_direct(name)
 
@@ -232,8 +237,30 @@ namespace Semantic.Symbols is
             DotNet.HIDDEN_SYMBOLS.prune_hidden(qn, matches)
         si
 
+        // A namespace declared in source takes its name over from a symbol
+        // a referenced assembly contributes under it: the core library
+        // declares `Ghul.Math` as a namespace where the .NET type map
+        // registers `System.Math` under the same name, and the declaration
+        // is what the name means from then on in the compilation.
         declare_namespace(location: LOCATION, name: string, `namespace: Symbols.NAMESPACE, symbol_definition_listener: SymbolDefinitionListener?) is
-            declare(location, `namespace, symbol_definition_listener)
+            let existing = find_declared(name)
+
+            if existing? /\ existing != `namespace then
+                IoC.CONTAINER.instance.logger.error(location, "redefining symbol {name} as a namespace", existing.location, "symbol declared here")
+                IoC.CONTAINER.instance.logger.error(existing.location, "symbol {name} is redefined as a namespace", location, "redefined here")
+
+                return
+            fi
+
+            if existing? then
+                return
+            fi
+
+            if symbol_definition_listener? then
+                symbol_definition_listener.add_symbol_definition(location, `namespace)
+            fi
+
+            put_direct(name, `namespace)
         si
 
         declare_class(location: LOCATION, span: LOCATION, name: string, arguments: Collections.List[string], enclosing: Scope, symbol_definition_listener: SymbolDefinitionListener?) -> Symbol is
