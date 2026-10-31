@@ -157,6 +157,20 @@ namespace IR.Values is
         wrap_element: Value? public
         add_element: Value? public
 
+        // min / max / min_by / max_by keep the best element so far in
+        // `extremum_best` and, for the _by kinds, the key that won it in
+        // `extremum_key`; `extremum_candidate` holds the current element's
+        // key for the one element being handled. `extremum_seen` says any
+        // element was reached at all. `extremum_better` compares the stored
+        // key with the candidate, and `extremum_wrap` builds the result
+        // MAYBE over the best element. All pre-built against those locals.
+        extremum_best: IR.LOCAL? public
+        extremum_key: IR.LOCAL? public
+        extremum_candidate: IR.LOCAL? public
+        extremum_seen: IR.LOCAL? public
+        extremum_better: Value? public
+        extremum_wrap: Value? public
+
         // A consumer whose result is derived from the result local after
         // the loop rather than being that local: `collect` fills a list
         // and hands back its array. Pre-built against the result local;
@@ -216,6 +230,11 @@ namespace IR.Values is
         si
 
         is_void: bool => Syntax.Process.PIPE_CONSUMER_KIND.is_void(consumer_kind)
+
+        // One of the four kinds that keep the best element of a whole
+        // read: min, max, min_by, max_by.
+        _is_extremum(kind: string) -> bool =>
+            kind =~ "min" \/ kind =~ "max" \/ kind =~ "min_by" \/ kind =~ "max_by"
 
         // The fused loop, leaving the consumer's result (nothing for a
         // void `each`).
@@ -319,6 +338,17 @@ namespace IR.Values is
 
             expansion.close(loop)
 
+            // A min / max that reached an element answers with the best
+            // one wrapped; one that reached none keeps the empty MAYBE
+            // the result was seeded with.
+            if let seen = extremum_seen then
+                let wrapped = expansion.region()
+
+                expansion.exit_if(wrapped, IR.BRANCH.Z, seen.load())
+                expansion.store(result, extremum_wrap!)
+                expansion.close(wrapped)
+            fi
+
             if let derived = finish then
                 expansion.add(derived)
             elif !is_void then
@@ -350,6 +380,20 @@ namespace IR.Values is
                 let seen = join_seen!
 
                 expansion.store(expansion.declare(local), separator)
+                expansion.store(expansion.declare(seen), Literal.NUMBER(0, seen.type))
+            fi
+
+            if let seen = extremum_seen then
+                expansion.declare(extremum_best!)
+
+                if let key = extremum_key then
+                    expansion.declare(key)
+                fi
+
+                if let candidate = extremum_candidate then
+                    expansion.declare(candidate)
+                fi
+
                 expansion.store(expansion.declare(seen), Literal.NUMBER(0, seen.type))
             fi
         si
@@ -402,6 +446,40 @@ namespace IR.Values is
             elif consumer_kind =~ "first" then
                 expansion.store(result, wrap_element!)
                 expansion.exit(loop)
+            elif _is_extremum(consumer_kind) then
+                let seen = extremum_seen!
+                let best = extremum_best!
+                let candidate = extremum_candidate!
+
+                // The key the element is judged by: the element itself
+                // for min and max, or what the selector called on it
+                // returns for the _by kinds - one selector call per
+                // element, as the runtime's own loop makes.
+                expansion.store(candidate, consumer_apply ?? element)
+
+                // An element already reached can be taken over by a
+                // better one; none has been reached yet is the seeding
+                // case below. The seen flag is only set there, after
+                // this test, so the two never overlap.
+                let takeover = expansion.region()
+                expansion.exit_if(takeover, IR.BRANCH.Z, seen.load())
+
+                let when_better = expansion.region()
+                expansion.exit_if(when_better, IR.BRANCH.Z, extremum_better!)
+
+                expansion.store(extremum_key!, candidate.load())
+                expansion.store(best, element)
+                expansion.close(when_better)
+
+                expansion.close(takeover)
+
+                let seed = expansion.region()
+                expansion.exit_if(seed, IR.BRANCH.NZ, seen.load())
+
+                expansion.store(seen, Literal.NUMBER(1, seen.type))
+                expansion.store(extremum_key!, candidate.load())
+                expansion.store(best, element)
+                expansion.close(seed)
             elif presize_array then
                 let element_type = presize_element_type!
                 let index = presize_index!

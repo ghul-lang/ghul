@@ -684,6 +684,88 @@ namespace Syntax.Process is
                 fused.wrap_element = IR.Values.NEW(maybe_type, wrap_ctor, wrap_args)
             fi
 
+            // min / max / min_by / max_by answer with the best element of
+            // a whole read, or an empty MAYBE when there is none. The
+            // best element and the key that won it stay in locals the
+            // loop compares through the key type's own ordering
+            // operator, resolved as the written `<` or `>` resolves; a
+            // key type with no such operator keeps the runtime's loop.
+            if
+                consumer_kind =~ "min" \/ consumer_kind =~ "max" \/
+                consumer_kind =~ "min_by" \/ consumer_kind =~ "max_by"
+            then
+                let maybe_type = call.value!.type!
+
+                let empty_ctor = _resolve_ctor_by_arity(maybe_type, 0)
+                let wrap_ctor = _resolve_ctor_by_arity(maybe_type, 1)
+
+                if !empty_ctor? \/ !wrap_ctor? then
+                    return _decline_consumer(call, recognizer, consumer_kind)
+                fi
+
+                fused.seed_init = IR.Values.NEW(maybe_type, empty_ctor, Collections.LIST[IR.Values.Value](0))
+
+                let element_type = built.final.type
+                let key_type = fused.consumer_apply?.type ?? element_type
+
+                let comparison =
+                    if consumer_kind =~ "min" \/ consumer_kind =~ "min_by" then
+                        IR.Comparison.LESS
+                    else
+                        IR.Comparison.GREATER
+                    fi
+
+                fused.extremum_best = IR.LOCAL(".fc_best.{id}", element_type)
+                fused.extremum_key = IR.LOCAL(".fc_key.{id}", key_type)
+                fused.extremum_candidate = IR.LOCAL(".fc_candidate.{id}", key_type)
+                fused.extremum_seen = IR.LOCAL(".fc_seen.{id}", _innate_symbol_lookup.get_int_type())
+
+                let stored = IR.Values.Load.TEMP(fused.extremum_key!, key_type)
+                let candidate = IR.Values.Load.TEMP(fused.extremum_candidate!, key_type)
+
+                // A key type whose ordering is the one compare instruction
+                // reads it directly; any other orders through its own
+                // `<>` - the operator the relational four are derived
+                // from, so it is the one every orderable type declares -
+                // and reads the answer against zero. A type with neither
+                // keeps the runtime's loop.
+                if _is_compare_instruction_type(key_type) then
+                    fused.extremum_better =
+                        IR.Values.COMPARE(comparison, candidate, stored, _is_unsigned_key(key_type), _innate_symbol_lookup.get_bool_type())
+                else
+                    let order =
+                        compile_operators.resolve_operator_value(
+                            call.location,
+                            "<>",
+                            Collections.LIST[Semantic.Types.Type]([key_type, key_type]))
+
+                    if !order? then
+                        return _decline_consumer(call, recognizer, consumer_kind, "extremum-key-not-orderable")
+                    fi
+
+                    let ordered =
+                        compile_operators._build_operator_call(
+                            order!,
+                            "<>",
+                            candidate,
+                            stored,
+                            call.location)
+
+                    fused.extremum_better =
+                        IR.Values.COMPARE(
+                            comparison,
+                            ordered,
+                            IR.Values.Literal.NUMBER(0, _innate_symbol_lookup.get_int_type()),
+                            false,
+                            _innate_symbol_lookup.get_bool_type())
+                fi
+
+                let wrap_args = Collections.LIST[IR.Values.Value]()
+                wrap_args.add(IR.Values.Load.TEMP(fused.extremum_best!, element_type))
+
+                fused.extremum_wrap = IR.Values.NEW(maybe_type, wrap_ctor, wrap_args)
+            fi
+
             // collect_mutable returns a fresh LIST[element], and collect_set
             // a fresh SET[element]; seed it empty and add the surviving
             // element each iteration.
@@ -1607,6 +1689,46 @@ namespace Syntax.Process is
 
             return false
         si
+        // As _is_add_instruction_type, for the relational compare: every
+        // scalar the compare instruction orders.
+        _is_compare_instruction_type(type: Type?) -> bool is
+            if !type? then
+                return false
+            fi
+
+            for orderable in
+                [
+                    _innate_symbol_lookup.get_byte_type(),
+                    _innate_symbol_lookup.get_ubyte_type(),
+                    _innate_symbol_lookup.get_short_type(),
+                    _innate_symbol_lookup.get_ushort_type(),
+                    _innate_symbol_lookup.get_int_type(),
+                    _innate_symbol_lookup.get_uint_type(),
+                    _innate_symbol_lookup.get_long_type(),
+                    _innate_symbol_lookup.get_ulong_type(),
+                    _innate_symbol_lookup.get_word_type(),
+                    _innate_symbol_lookup.get_uword_type(),
+                    _innate_symbol_lookup.get_single_type(),
+                    _innate_symbol_lookup.get_double_type()
+                ]
+            do
+                if type.matches(orderable) then
+                    return true
+                fi
+            od
+
+            return false
+        si
+
+        // Whether an instruction-ordered key type is one of the unsigned
+        // widths, whose compare is the unsigned instruction.
+        _is_unsigned_key(type: Type) -> bool =>
+            type.matches(_innate_symbol_lookup.get_ubyte_type()) \/
+            type.matches(_innate_symbol_lookup.get_ushort_type()) \/
+            type.matches(_innate_symbol_lookup.get_uint_type()) \/
+            type.matches(_innate_symbol_lookup.get_ulong_type()) \/
+            type.matches(_innate_symbol_lookup.get_uword_type())
+
 
         // The one of `type` for a fused `product`, where the runtime has a
         // `product` over it and its `*` is the multiply instruction; null
