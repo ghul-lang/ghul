@@ -6,8 +6,6 @@ on:
   pull_request:
     types: [opened, synchronize, reopened]
 
-  merge_group:
-
   # Daily, against the head of ghul-runtime rather than the release a user
   # would get, to catch it drifting from the compiler.
   schedule:
@@ -35,21 +33,18 @@ concurrency:
 # harness's parallelism, not a larger runner - past 8 vCPU buys nothing,
 # because the bottleneck is per-test compiler-subprocess IPC.
 #
-# Three events, three shapes. A pull request runs the entry gate for the merge
-# queue: the bootstrap, the unit tests built with the bootstrap compiler
-# alongside it, and the integration, analysis and ghul-runtime jobs that
-# follow it. The integration tests are there because they are what most
-# often fails a queue run, and a failure caught on the pull request costs one
-# run rather than the queue group it would fail and the groups built on it.
-# The merge queue's
-# run (`merge_group`) is the one whose result binds: the full suite, on the
-# group's combined tree, and the packages it packs are the release. A push to
-# main is the release build, and on the happy path it builds nothing:
-# `version` finds the merge queue's run for this very commit, carries its
-# packages, and only the publish runs. The test jobs are gated on `version`'s
-# `build` and `full_suite` outputs, and `gate` is where the three shapes are
-# reconciled into one verdict - see `version` for the reasoning and the
-# fallback.
+# Two events, two shapes that build, plus the release build. A pull request
+# runs the whole suite - nothing is optional, nothing is skipped - on the
+# request merged with `main` as it stood when the run started, and builds the
+# release artefacts at the version the release will carry. Branch protection
+# requires the branch to be up to date with `main` before merging, so the
+# squash commit that lands is the tree the run tested, and the run's `Gate`
+# is the required check. A push to `main` is the release build, and on the
+# happy path it builds nothing: `version` finds the merged pull request's
+# run, checks that run tested this very tree, carries its artefacts, and only
+# the publish runs. The test jobs are gated on `version`'s `build` and
+# `full_suite` outputs, and `gate` is where the shapes are reconciled into
+# one verdict - see `version` for the reasoning and the fallback.
 #
 # This is a default for well-meant contributions, not a control. A `pull_request`
 # run uses the workflow file from the pull request itself, so a contributor can
@@ -94,18 +89,17 @@ jobs:
 
     # Compute the next version: the patch bump of the latest vX.Y.Z tag, unless
     # the checked-in VERSION file declares a higher minor/major floor (a marker
-    # in a commit or PR body can no longer trigger a bump). Pull request builds
-    # get a -beta.<run> prerelease so they never collide with a real release.
-    # The action only reads the repo - it never tags or releases.
-    #
-    # The merge queue's run packs the release, so its version has to be the
-    # one the release build will compute, and that is the patch bump of the
-    # latest tag. A release build still in flight on main has not tagged
-    # yet, so wait for it before choosing; a version chosen too early is
-    # caught at the release build, which then rebuilds, but costs a full
-    # run.
+    # in a commit or PR body can no longer trigger a bump). A pull request
+    # into main builds the version the release will carry, so it has to be
+    # the one the release build will compute: the patch bump of the latest
+    # tag. A release build still in flight on main has not tagged yet, so
+    # wait for it before choosing; a version chosen too early is caught at
+    # the release build, which then rebuilds, but costs a full run. A pull
+    # request into any other branch - a layer stacked on an open one - gets
+    # a -beta.<run> prerelease instead, so it never collides with a real
+    # release. The action only reads the repo - it never tags or releases.
     - name: Wait for any release build in flight
-      if: github.event_name == 'merge_group'
+      if: github.event_name == 'pull_request' && github.base_ref == 'main'
       env:
         GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       run: |
@@ -125,35 +119,30 @@ jobs:
       id: version
       uses: ghul-lang/create-version@v1.0.0
       with:
-        prerelease: ${{ github.event_name == 'pull_request' && format('beta.{0}', github.run_number) || '' }}
+        prerelease: ${{ github.event_name == 'pull_request' && github.base_ref != 'main' && format('beta.{0}', github.run_number) || '' }}
 
     # Resolve the ghul.compiler version that bootstraps this build, and
     # decide what this run owes: `build` says whether it bootstraps and
-    # tests at all, `full_suite` whether it runs the whole suite or only
-    # the entry gate.
+    # tests at all, `full_suite` whether it runs the whole suite. The two
+    # agree everywhere except a release build that carries a pull request's
+    # artefacts, where both are false and nothing is built at all.
     #
     # On a pull request: the latest published version that is actually
     # downloadable from NuGet (skipping a release still propagating), and
-    # the entry gate - the bootstrap, the unit tests beside it, and the
-    # integration tests, the analysis tests and the ghul-runtime build that
-    # follow it.
+    # the whole suite - nothing is optional. A pull request into main also
+    # packs the release, so it records the tree it tested - the checkout is
+    # the request merged with main - for the release build to check
+    # against.
     #
-    # On the merge queue's run: the same resolution, and the full suite.
-    # The queue tests the group's combined tree, and what it packs is what
-    # the release publishes, so this run also waits for any release build
-    # still in flight on main before choosing a version: the version is
-    # the patch bump of the latest tag, and a release that has not tagged
-    # yet would otherwise be given the same number.
-    #
-    # On a push to main (the release build): the merge queue fast-forwards
-    # main to the very commit its run tested, so that run is found by this
-    # commit's sha. When it passed and packed this run's version, its
-    # packages are carried into this run as the release artefacts and
-    # nothing is built or tested again: what was tested is what ships.
-    # When it cannot be found, failed, or packed another version - a direct
-    # push, a version taken by a release that tagged after the queue run
-    # chose - nothing is known about this tree, and the full suite runs and
-    # packs the release here as it would have in the queue.
+    # On a push to main (the release build): the squash commit names the
+    # pull request it came from, and that request's successful run is found
+    # by its head. When that run tested this very tree and packed this
+    # run's version, its packages are carried into this run as the release
+    # artefacts and nothing is built or tested again: what was tested is
+    # what ships. When main moved under the pull request after its run,
+    # the version was taken by a release that tagged in between, or no run
+    # is found - a direct push - nothing is known about this tree, and the
+    # full suite runs and packs the release here.
     #
     # The bootstrap compiler version is published as the
     # `bootstrap-compiler-version` artifact; on a release run that is the
@@ -193,10 +182,6 @@ jobs:
         full_suite=true
         case "${{ github.event_name }}" in
         pull_request)
-          full_suite=false
-          compiler=$(resolve_latest)
-          ;;
-        merge_group)
           compiler=$(resolve_latest)
           ;;
         schedule)
@@ -205,12 +190,24 @@ jobs:
           compiler=$(resolve_latest)
           ;;
         push)
-          # Release build: carry what the merge queue built and tested for
-          # this commit.
-          run=$(gh api "repos/${{ github.repository }}/actions/workflows/ci.yml/runs?head_sha=${{ github.sha }}&event=merge_group" \
-                  --jq 'first(.workflow_runs[] | select(.conclusion == "success") | .id) // empty' 2>/dev/null || true)
+          # Release build: carry what the merged pull request's run built
+          # and tested, when that run tested this very tree. The lookup can
+          # briefly miss a just-merged request, so it retries for a minute
+          # before falling back to building here.
+          pr=""
+          for _ in $(seq 1 6); do
+            pr=$(gh api "repos/${{ github.repository }}/commits/${{ github.sha }}/pulls" \
+                   --jq 'first(.[] | select(.merged_at != null and .head.repo.fork == false) | .number) // empty' 2>/dev/null || true)
+            [ -n "${pr}" ] && break
+            sleep 10
+          done
+          head_sha=$([ -n "${pr}" ] && gh api "repos/${{ github.repository }}/pulls/${pr}" --jq .head.sha 2>/dev/null || true)
+          run=$([ -n "${head_sha}" ] && gh api "repos/${{ github.repository }}/actions/workflows/ci.yml/runs?head_sha=${head_sha}&event=pull_request&status=success&per_page=5" \
+                  --jq 'first(.workflow_runs[] | .id) // empty' 2>/dev/null || true)
+          tree=$(git rev-parse "${{ github.sha }}^{tree}")
           if [ -n "${run}" ] \
              && gh run download "${run}" -n bootstrap-compiler-version -D carried 2>/dev/null \
+             && [ "$(tr -d '[:space:]' < carried/tested-tree.txt 2>/dev/null)" = "${tree}" ] \
              && gh run download "${run}" -n ghul-compiler-package -D carried/nupkg 2>/dev/null \
              && gh run download "${run}" -n ghul-analysis-protocol-package -D carried/nupkg 2>/dev/null \
              && gh run download "${run}" -n ghul-compiler-aot -D carried/aot 2>/dev/null \
@@ -224,9 +221,9 @@ jobs:
             compiler=$(tr -d '[:space:]' < carried/bootstrap-compiler-version.txt)
             build=false
             full_suite=false
-            echo "carrying the packages the merge queue built and tested in run ${run}"
+            echo "carrying the packages pull request #${pr} built and tested in run ${run}, whose tested tree is this commit's"
           else
-            echo "::warning::no successful merge queue run packed ${{ steps.version.outputs.package }} for ${{ github.sha }} (run ${run:-not found}); building and testing here"
+            echo "::warning::no successful pull request run tested tree ${tree} and packed ${{ steps.version.outputs.package }} (pull request ${pr:-not found}, run ${run:-not found}); building and testing here"
             compiler=$(resolve_latest)
           fi
           ;;
@@ -238,12 +235,13 @@ jobs:
         echo "Bootstrap compiler: ${compiler}"
         echo "Bootstrap compiler: \`${compiler}\`" >> "$GITHUB_STEP_SUMMARY"
         if [ "${build}" = false ]; then
-          echo "Packages: carried from merge queue run ${run}; nothing built or tested here" >> "$GITHUB_STEP_SUMMARY"
-        elif [ "${full_suite}" = false ]; then
-          echo "Test suite: entry gate only (bootstrap, unit tests, integration tests, analysis tests, ghul-runtime build)" >> "$GITHUB_STEP_SUMMARY"
+          echo "Packages: carried from pull request #${pr}'s run ${run}; nothing built or tested here" >> "$GITHUB_STEP_SUMMARY"
         fi
         mkdir -p artifact
         printf '%s\n' "${compiler}" > artifact/bootstrap-compiler-version.txt
+        # The tree this run tests - on a pull request the request merged
+        # with main - for the release build to check against.
+        git rev-parse 'HEAD^{tree}' > artifact/tested-tree.txt
 
     - name: Upload the carried compiler package
       if: steps.compiler_version.outputs.build == 'false'
@@ -260,8 +258,8 @@ jobs:
         path: carried/nupkg/ghul.analysis.protocol.${{ steps.version.outputs.package }}.nupkg
 
     # Carried like the packages: the release build does not run the AOT job,
-    # so the archive the merge queue built and smoke-tested is what the
-    # release publishes.
+    # so the archive the pull request's run built and smoke-tested is what
+    # the release publishes.
     - name: Upload the carried AOT compiler archive
       if: steps.compiler_version.outputs.build == 'false'
       uses: actions/upload-artifact@v7
@@ -454,84 +452,6 @@ jobs:
         path: ./analysis-protocol/nupkg/ghul.analysis.protocol.${{ needs.version.outputs.package }}.nupkg
 
 
-  # The entry gate's half of the unit tests. A pull request's run is sized
-  # against the code review, which is the one check the queue cannot take
-  # over, so it waits on nothing: the tests are built with the compiler
-  # that bootstraps this commit and run alongside the bootstrap. Source
-  # has to build under that compiler anyway, so the only thing this
-  # cannot see is a change to what the compiler accepts, and the queue's
-  # `unit_tests` above, built by the compiler this commit produces, sees
-  # exactly that.
-  unit_tests_gate:
-    name: Run unit tests at the gate
-    needs: [version]
-    if: needs.version.outputs.build == 'true' && needs.version.outputs.full_suite != 'true'
-    runs-on: ubuntu-latest
-
-    timeout-minutes: 10
-
-    steps:
-    - uses: actions/checkout@v7
-
-    - name: Set up .NET 10
-      uses: actions/setup-dotnet@v6
-      with:
-        dotnet-version: '10.0.x'
-
-    - name: Restore local .NET tools
-      run: dotnet tool restore
-
-    - name: Install the bootstrap compiler
-      run: |
-        for attempt in 1 2 3 4 5; do
-          if dotnet tool update --local ghul.compiler --allow-downgrade --version ${{ needs.version.outputs.compiler }}; then
-            exit 0
-          fi
-          echo "install attempt ${attempt} failed; retrying in 15s..."
-          sleep 15
-        done
-        exit 1
-
-    - name: Set build number
-      run: |
-        echo "namespace Source is class BUILD is number: string static => \"${{ needs.version.outputs.tag }}\"; si si" >src/source/build.ghul
-
-    - name: Run unit tests
-      run: dotnet test unit-tests
-
-    - name: Run WebAssembly library unit tests
-      run: dotnet test wasm/tests/wasm-tests.ghulproj
-
-    # The unit tests pin bytes; this asks an engine whether it accepts
-    # them. Node is required, so a missing engine fails the step rather
-    # than leaving it to check nothing.
-    - name: Set up Node.js for WebAssembly validation
-      uses: actions/setup-node@v7
-      with:
-        node-version: '24'
-
-    - name: Validate the WebAssembly module matrix in an engine
-      run: wasm/tests/engine-check.sh
-      env:
-        WASM_ENGINES: node
-
-    - name: Run LLVM library unit tests
-      run: dotnet test llvm/tests/llvm-tests.ghulproj
-
-    # The unit tests pin text; this asks LLVM whether it accepts it. The
-    # tools are LLVM 23, the release ghul-llvm is built from, and the script fails
-    # when it finds none.
-    - name: Install the LLVM tools
-      run: |
-        curl -fsSL https://apt.llvm.org/llvm-snapshot.gpg.key | sudo gpg --dearmor -o /usr/share/keyrings/apt.llvm.org.gpg
-        codename=$(lsb_release -cs)
-        echo "deb [signed-by=/usr/share/keyrings/apt.llvm.org.gpg] https://apt.llvm.org/${codename}/ llvm-toolchain-${codename}-23 main" | sudo tee /etc/apt/sources.list.d/llvm-23.list
-        sudo apt-get update -qq
-        sudo apt-get install -y -qq llvm-23
-
-    - name: Check the LLVM module matrix with LLVM's own tools
-      run: llvm/tests/llvm-check.sh
-
   # The suite is far larger than one runner can hold: on 4 vCPU it takes
   # around eight minutes end to end. `--shard` divides it between runners
   # instead, striped by discovery order so no shard collects a whole
@@ -539,7 +459,7 @@ jobs:
   # discovered tests, so the log shows none was dropped.
   #
   # Five shards rather than more: the account runs at most twenty jobs at
-  # once, and with a merge queue run, pull request runs and reviews sharing
+  # once, and with pull request runs, release builds and reviews sharing
   # them, further shards wait for a runner rather than run in parallel, and
   # each one adds its own setup time.
   #
@@ -770,7 +690,7 @@ jobs:
   # The compiler reproduces itself on the llvm target, as bootstrap does on
   # .NET: the bootstrapped compiler builds a native compiler from its own
   # source, which builds the same source again, and the two passes must
-  # write the same module and the same executable. Run in the merge queue
+  # write the same module and the same executable. Run on the full suite
   # only, as each pass is a full native build of the compiler.
   llvm_bootstrap:
     needs: [version, bootstrap]
@@ -834,7 +754,7 @@ jobs:
     # The native compiler the second pass built, packed as the Native AOT
     # compiler is so ghul-cli installs either the same way: the executable
     # as `ghul-compiler` in a `ghul-compiler` directory. It compiles for wasm and llvm.
-    # Carried by the release build from the merge queue run that built it.
+    # Carried by the release build from the pull request run that built it.
     - name: Pack the llvm-built compiler
       shell: bash
       run: |
@@ -1487,7 +1407,7 @@ jobs:
     # linked and carries its own runtime, so those five files are the whole
     # payload. Built here rather than in a job of its own so that what the
     # smoke tests exercised is what ships, and carried by the release build
-    # from the merge queue run that produced it.
+    # from the pull request run that produced it.
     - name: Pack the AOT compiler
       shell: bash
       run: |
@@ -1807,16 +1727,16 @@ jobs:
         echo "shards: $RESULT"
         [ "$RESULT" = success ] || { [ "$RESULT" = skipped ] && [ "$FULL_SUITE" != true ]; }
 
-  # The one verdict the publish jobs wait on. In the merge queue every test
-  # job but the gate's own unit tests ran and must have passed; on a pull
-  # request only the entry gate ran and the rest was skipped; on a release
-  # build carrying the queue's packages nothing ran at all, and `version`
-  # having carried them is the verdict. A `needs` list cannot say that: a
+  # The one verdict the publish jobs wait on. On a pull request, and on a
+  # release build that runs the suite itself, every test job ran and must
+  # have passed; on a release build carrying the pull request's packages
+  # nothing ran at all, and `version` having carried them is the verdict.
+  # A `needs` list cannot say that: a
   # skipped job in it skips the dependent too unless the dependent runs `always()`, and
   # then a skipped job satisfies it. This job runs regardless and checks
   # that nothing was skipped that should have run.
   gate:
-    needs: [version, bootstrap, unit_tests, unit_tests_gate, analysis_tests, llvm_self_type_check, llvm_bootstrap, wasm_bootstrap, integration_tests, wasm_validation, llvm_tests, llvm_static, cross_assembly_tests, bare_invocation_test, native_aot_test, runtime_tests, examples_tests, format_round_trip, rosetta_tests]
+    needs: [version, bootstrap, unit_tests, analysis_tests, llvm_self_type_check, llvm_bootstrap, wasm_bootstrap, integration_tests, wasm_validation, llvm_tests, llvm_static, cross_assembly_tests, bare_invocation_test, native_aot_test, runtime_tests, examples_tests, format_round_trip, rosetta_tests]
     name: Gate
 
     if: always()
@@ -1829,11 +1749,10 @@ jobs:
     - name: Check every required job passed
       env:
         BUILD: ${{ needs.version.outputs.build }}
-        FULL_SUITE: ${{ needs.version.outputs.full_suite }}
         RESULTS: ${{ toJSON(needs) }}
       run: |
         set -euo pipefail
-        echo "build: ${BUILD}, full suite: ${FULL_SUITE}"
+        echo "build: ${BUILD}"
         ok=true
         jobs=$(echo "${RESULTS}" | jq -r 'keys[]')
         [ -n "${jobs}" ]
@@ -1843,65 +1762,18 @@ jobs:
           case "${job}:${result}" in
             *:success) continue ;;
             *:skipped)
-              [ "${BUILD}" != true ] && continue
-              case "${job}" in
-                bootstrap|analysis_tests|runtime_tests|integration_tests|llvm_self_type_check) ;;
-                unit_tests_gate) [ "${FULL_SUITE}" = true ] && continue ;;
-                *) [ "${FULL_SUITE}" != true ] && continue ;;
-              esac ;;
+              [ "${BUILD}" != true ] && continue ;;
           esac
           echo "::error::${job}: ${result}"
           ok=false
         done
         [ "${ok}" = true ]
 
-  # These three condition on the gate explicitly rather than through `needs`
+  # These condition on the gate explicitly rather than through `needs`
   # alone: a job's default condition is false when any job upstream of it
   # was skipped, however far upstream, and a release run that carries the
-  # merge queue's packages skips every build and test job. `!cancelled()` opts out of
+  # pull request's packages skips every build and test job. `!cancelled()` opts out of
   # that rule and the gate's own result is what stands in for it.
-  publish_beta_package:
-    needs: [version, gate]
-    name: Publish beta package
-
-    timeout-minutes: 5
-
-    runs-on: ubuntu-latest
-
-    # Declared rather than inherited: this repository's default workflow token
-    # is read-only, and pushing to the GitHub feed needs packages:write.
-    permissions:
-      contents: read
-      packages: write
-
-    # Skipped on a fork regardless: GitHub downgrades the token a fork's pull
-    # request gets to read-only, so the scope above cannot be granted there.
-    if: ${{ !cancelled() && needs.gate.result == 'success' && github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork == false }}
-    steps:
-    - uses: actions/checkout@v7
-
-    - name: Download ghul compiler tool package
-      uses: actions/download-artifact@v8
-      with:
-        name: ghul-compiler-package
-        path: nupkg
-
-    - name: Download analysis protocol package
-      uses: actions/download-artifact@v8
-      with:
-        name: ghul-analysis-protocol-package
-        path: nupkg
-
-    - name: Publish beta package to GitHub
-      run: dotnet nuget push ./nupkg/ghul.compiler.${{ needs.version.outputs.package }}.nupkg -k ${GITHUB_TOKEN} -s https://nuget.pkg.github.com/ghul-lang/index.json --skip-duplicate --no-symbols
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-    - name: Publish analysis protocol beta package to GitHub
-      run: dotnet nuget push ./nupkg/ghul.analysis.protocol.${{ needs.version.outputs.package }}.nupkg -k ${GITHUB_TOKEN} -s https://nuget.pkg.github.com/ghul-lang/index.json --skip-duplicate --no-symbols
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
   publish_release_package:
     needs: [version, gate]
     name: Publish release package
@@ -1993,8 +1865,8 @@ jobs:
         name: ghul-compiler-wasm
         path: wasm
 
-    # A push from the merge queue can carry several squashed pull requests,
-    # one commit each; the notes list every one of them.
+    # A push to main is normally one squashed pull request; the range covers
+    # a direct push of several commits too, and the notes list each.
     - name: Create changelog
       run: |
         range="${{ github.event.before }}..${{ github.sha }}"
