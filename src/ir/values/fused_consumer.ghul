@@ -30,6 +30,15 @@ namespace IR.Values is
         counter: IR.LOCAL public
         count_init: Value? public
 
+        // A `take_while`/`skip_while` stage carries its predicate as a
+        // filter does. take_while leaves the loop at the first element the
+        // predicate rejects; skip_while drops elements while it accepts
+        // them, then passes the rest through, its `skip_flag` saying which
+        // side of that boundary the loop is on.
+        is_take_while: bool public
+        is_skip_while: bool public
+        skip_flag: IR.LOCAL? public
+
         // An index stage carries a running counter like a countdown does,
         // but produces an output local as a map stage does: `apply` builds
         // the INDEXED_VALUE from the counter and the incoming element.
@@ -267,7 +276,8 @@ namespace IR.Values is
 
             // Each stage's lambda delegate is built once before the loop; a
             // take/skip stage instead seeds its running counter with the
-            // count evaluated once.
+            // count evaluated once; a skip_while's flag starts on the
+            // dropping side of its boundary.
             for stage in stages do
                 if stage.is_countdown \/ stage.is_index then
                     expansion.store(expansion.declare(stage.counter), stage.count_init!)
@@ -275,6 +285,10 @@ namespace IR.Values is
                     expansion.declare(param)
                 else
                     expansion.store(expansion.declare(stage.delegate_local), stage.delegate_init)
+                fi
+
+                if let flag = stage.skip_flag then
+                    expansion.store(expansion.declare(flag), Literal.NUMBER(1, int_type))
                 fi
             od
 
@@ -326,7 +340,20 @@ namespace IR.Values is
                         expansion.add(store)
                     fi
 
-                    if stage.is_filter then
+                    if stage.is_take_while then
+                        expansion.exit_if(loop, IR.BRANCH.Z, stage.apply)
+                    elif stage.is_skip_while then
+                        // While the flag is set the predicate still holds
+                        // of some prefix, and its elements are dropped;
+                        // the first one it rejects clears the flag, and
+                        // every element after passes untested.
+                        let dropping = expansion.region()
+
+                        expansion.exit_if(dropping, IR.BRANCH.Z, stage.skip_flag!.load())
+                        expansion.continue_if(loop, IR.BRANCH.NZ, stage.apply)
+                        expansion.store(stage.skip_flag!, Literal.NUMBER(0, int_type))
+                        expansion.close(dropping)
+                    elif stage.is_filter then
                         expansion.continue_if(loop, IR.BRANCH.Z, stage.apply)
                     else
                         expansion.store(expansion.declare(stage.output!), stage.apply)

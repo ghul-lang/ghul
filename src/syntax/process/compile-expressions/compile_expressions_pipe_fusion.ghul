@@ -205,9 +205,13 @@ namespace Syntax.Process is
             let fields = Collections.LIST[Semantic.Symbols.Field?]()
             let stages = fusion.stages_outermost_first
 
+            let existing_flags = `for.fused_flag_fields
+            let flags = Collections.LIST[Semantic.Symbols.Field?]()
+
             for index in 0..stages.count do
                 let stage = stages[index]
                 let previous = if existing? /\ index < existing.count then existing[index] else null fi
+                let previous_flag = if existing_flags? /\ index < existing_flags.count then existing_flags[index] else null fi
 
                 let type: Type? =
                     if stage.is_countdown \/ stage.is_index then
@@ -224,9 +228,17 @@ namespace Syntax.Process is
                     else
                         null
                     fi)
+
+                flags.add(
+                    if stage.is_skip_while then
+                        frame.declare_or_retype_anonymous_field(previous_flag, "fused", _innate_symbol_lookup.get_bool_type())
+                    else
+                        null
+                    fi)
             od
 
             `for.fused_fields = fields
+            `for.fused_flag_fields = flags
         si
 
         // Record for the pipe-fusion study what a consumption site
@@ -981,10 +993,10 @@ namespace Syntax.Process is
         si
 
         // Whether every stage passes each element through: map and index
-        // do, filter, take and skip do not.
+        // do, filter, take, skip and the while pair do not.
         _stages_keep_count(plan: PIPE_FUSION) -> bool is
             for stage in plan.stages_outermost_first do
-                if stage.is_filter \/ stage.is_countdown then
+                if stage.is_filter \/ stage.is_countdown \/ stage.is_take_while \/ stage.is_skip_while then
                     return false
                 fi
             od
@@ -1152,8 +1164,18 @@ namespace Syntax.Process is
                     let body = stage.inline_body!
                     let store = cast IR.Values.Value(IR.Values.Store.LOCAL_VARIABLE(param, current.load()))
 
-                    if stage.is_filter then
-                        ops.add(IR.Values.FUSED_CONSUMER_STAGE(param.ir_local, store, body, true, null))
+                    if stage.is_filter \/ stage.is_take_while \/ stage.is_skip_while then
+                        let op =
+                            IR.Values.FUSED_CONSUMER_STAGE(param.ir_local, store, body, stage.is_filter, null)
+
+                        op.is_take_while = stage.is_take_while
+                        op.is_skip_while = stage.is_skip_while
+
+                        if stage.is_skip_while then
+                            op.skip_flag = IR.LOCAL(".fc_skip.{_next_fused_local_id()}", _innate_symbol_lookup.get_int_type())
+                        fi
+
+                        ops.add(op)
                     else
                         let output = IR.LOCAL(".fc_map.{_next_fused_local_id()}", body.type!)
 
@@ -1185,8 +1207,17 @@ namespace Syntax.Process is
                 let apply = cast IR.Values.Value(IR.Values.Call.CLOSURE(
                     delegate_local.load(), result_type, func_type.is_action, func_type, call_arguments))
 
-                if stage.is_filter then
-                    ops.add(IR.Values.FUSED_CONSUMER_STAGE(true, delegate_local, delegate, apply, null))
+                if stage.is_filter \/ stage.is_take_while \/ stage.is_skip_while then
+                    let op = IR.Values.FUSED_CONSUMER_STAGE(stage.is_filter, delegate_local, delegate, apply, null)
+
+                    op.is_take_while = stage.is_take_while
+                    op.is_skip_while = stage.is_skip_while
+
+                    if stage.is_skip_while then
+                        op.skip_flag = IR.LOCAL(".fc_skip.{_next_fused_local_id()}", _innate_symbol_lookup.get_int_type())
+                    fi
+
+                    ops.add(op)
                 else
                     let output = IR.LOCAL(".fc_map.{_next_fused_local_id()}", result_type)
 
