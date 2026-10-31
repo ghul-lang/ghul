@@ -48,7 +48,7 @@ namespace Syntax.Process is
         _note_chain_root(call: Trees.Expressions.CALL) is
             let stack = _chain_roots
 
-            if !stack? \/ stack.count == 0 then
+            if !stack? \/ stack.count == 0 \/ _lowering_chain_roots then
                 return
             fi
 
@@ -137,7 +137,17 @@ namespace Syntax.Process is
         // generator that runs its chain fused, where the chain is one this
         // can.
         _lower_chain_roots(roots: Collections.List[(call: Trees.Expressions.CALL, function: Semantic.Symbols.Function?, context: Semantic.ClosureContext, scope: Semantic.Scope)]) is
-            for root in roots do
+            // Outermost first: a root in a stage of another is compiled
+            // again when that stage is inlined, so it is lowered after, in
+            // the stage's new home. A root is recorded when its call has
+            // compiled, which is after any root inside it, so the outermost
+            // are last. Lowering compiles what it inlines again, which must
+            // not record roots of its own.
+            _lowering_chain_roots = true
+
+            for index in 0..roots.count do
+                let root = roots[roots.count - 1 - index]
+
                 _logger.speculate()
                 _symbol_use_locations.speculate()
 
@@ -148,7 +158,11 @@ namespace Syntax.Process is
                     _symbol_use_locations.roll_back()
                 yrt
             od
+
+            _lowering_chain_roots = false
         si
+
+        _lowering_chain_roots: bool
 
         _lower_chain_root(
             call: Trees.Expressions.CALL,
@@ -156,7 +170,7 @@ namespace Syntax.Process is
             context: Semantic.ClosureContext,
             scope: Semantic.Scope
         ) is
-            if !function? then
+            if !function? \/ _logger.is_suppressed("pipe-fusion", call.location) then
                 return
             fi
 
