@@ -1,0 +1,104 @@
+namespace Syntax.Process is
+    use IR
+    use IR.Values
+
+    // A generated generator that runs a fused pipe chain no consumption
+    // site reads has no literal behind it. Its MoveNext drives the
+    // chain's source from the parameter it was passed, applies the
+    // inlined stages, and yields each element that comes through; its
+    // outer method constructs the frame from its arguments, as any
+    // generator's does.
+    partial GENERATE_IL is
+        _gen_fused_iterable(closure: Semantic.Symbols.Closure) is
+            let description = closure.fused_iterable
+
+            if !description? then
+                return
+            fi
+
+            let state_machine = Semantic.Symbols.state_machine_for(closure)
+
+            if !state_machine? then
+                return
+            fi
+
+            let frame = state_machine.frame
+
+            if !frame? then
+                return
+            fi
+
+            frame.declare()
+
+            _gen_generator_move_next(
+                cast Semantic.Scope(closure),
+                state_machine,
+                frame,
+                () => _gen_fused_iterable_body(description, state_machine, frame))
+
+            _without_position(() is _emit_generator_outer_method(closure, frame, state_machine) si)
+        si
+
+        _gen_fused_iterable_body(
+            description: FUSED_ITERABLE,
+            state_machine: Semantic.Symbols.STATE_MACHINE,
+            frame: Semantic.Symbols.STATE_MACHINE_FRAME
+        ) is
+            let fusion = description.fusion
+            let location = fusion.source.location
+            let source = cast Value(Values.Load.LOCAL_ARGUMENT(description.source))
+
+            let iterator =
+                if let read_iterator = fusion.source_read_iterator then
+                    read_iterator.call(location, source, Collections.LIST[Value](0), null, _function_caller)
+                else
+                    source
+                fi
+
+            let stage_inits = Collections.LIST[Value?]()
+
+            for parameter in description.stage_parameters do
+                stage_inits.add(if let p = parameter then cast Value(Load.LOCAL_ARGUMENT(p)) else null fi)
+            od
+
+            let state = FUSED_LOOP_STATE(frame, description.iterator_field, description.stage_fields, stage_inits)
+
+            add(_build_frame_field_store(frame, description.iterator_field, iterator))
+
+            let stage_delegates = Collections.LIST[TEMP?]()
+            let stage_counters = Collections.LIST[TEMP?]()
+
+            _setup_fused_stages(fusion, stage_delegates, stage_counters, state)
+
+            let loop = Values.LOOP(LABEL(), LABEL(), _innate_symbol_lookup.get_void_type())
+
+            _open_structured(loop)
+
+            _gen_fused_take_guards(fusion, stage_counters, loop, state)
+
+            let has_next =
+                fusion.source_move_next!.call(
+                    location,
+                    _build_frame_field_load(frame, description.iterator_field),
+                    Collections.LIST[Value](0),
+                    null,
+                    _function_caller)
+
+            add(Values.BREAK(loop, BRANCH.Z, has_next))
+
+            let element =
+                fusion.source_read_current!.call(
+                    location,
+                    _build_frame_field_load(frame, description.iterator_field),
+                    Collections.LIST[Value](0),
+                    null,
+                    _function_caller)
+
+            let value = _apply_fused_stages(fusion, element, stage_delegates, stage_counters, loop, state)
+
+            _gen_yield_value(state_machine, value)
+
+            _close_structured(loop)
+        si
+    si
+si

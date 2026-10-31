@@ -1,0 +1,415 @@
+namespace Syntax.Process is
+    use Semantic.Types.Type
+
+    // A pipe chain whose value no consumption site reads - bound to a
+    // local, returned, passed to a function fusion has no lowering for -
+    // lowered to one call to a generated generator that runs the chain
+    // fused. See FUSED_ITERABLE.
+    partial COMPILE_EXPRESSIONS is
+        // The fusible stage calls of the walk under way that nothing has
+        // consumed yet, one list per body being compiled. A stage call is
+        // recorded when it compiles, and drops out when an outer stage
+        // takes it as its source or a site fuses the chain it is in.
+        _chain_roots: Collections.LIST[Collections.LIST[(call: Trees.Expressions.CALL, function: Semantic.Symbols.Function?, context: Semantic.ClosureContext, scope: Semantic.Scope)]]?
+
+        // The generators made for each root, kept across compiles of a
+        // body so that a root is only ever given one.
+        _fused_iterables: Collections.MAP[Trees.Expressions.CALL, Semantic.Symbols.FUSED_ITERABLE_GENERATOR]?
+
+        begin_chain_roots() is
+            if !_chain_roots? then
+                _chain_roots = Collections.LIST[Collections.LIST[(call: Trees.Expressions.CALL, function: Semantic.Symbols.Function?, context: Semantic.ClosureContext, scope: Semantic.Scope)]]()
+            fi
+
+            _chain_roots.add(Collections.LIST[(call: Trees.Expressions.CALL, function: Semantic.Symbols.Function?, context: Semantic.ClosureContext, scope: Semantic.Scope)]())
+        si
+
+        begin_chain_roots_walk() is
+            if let stack = _chain_roots /\ stack.count > 0 then
+                stack[stack.count - 1].clear()
+            fi
+        si
+
+        // The body's walks have settled: lower the chains its last walk
+        // left with no site reading them, when the body compiled clean.
+        end_chain_roots(is_clean: bool) is
+            let stack = _chain_roots!
+            let roots = stack[stack.count - 1]
+
+            stack.remove_at(stack.count - 1)
+
+            if is_clean then
+                _lower_chain_roots(roots)
+            fi
+        si
+
+        // Record a call to a fusible stage as a chain root for now, and
+        // the chain it takes its source from as no longer one.
+        _note_chain_root(call: Trees.Expressions.CALL) is
+            let stack = _chain_roots
+
+            if !stack? \/ stack.count == 0 \/ _lowering_chain_roots then
+                return
+            fi
+
+            let role = _chain_stage_role(call)
+
+            if !role? then
+                return
+            fi
+
+            let roots = stack[stack.count - 1]
+
+            if call.arguments.expressions.count > 0 then
+                _forget_chain_root(roots, call.arguments.expressions[0])
+            fi
+
+            // A call can compile more than once in a walk - an argument
+            // overload resolution walks again - and is recorded once, as
+            // its latest compile left it.
+            _forget_chain_root(roots, call)
+
+            roots.add((call, _symbol_table.current_function, _symbol_table.current_closure_context, _symbol_table.current_scope))
+        si
+
+        // A site has fused the chain `expression` heads, so none of its
+        // calls is a root.
+        _forget_chain(expression: Trees.Expressions.Expression?) is
+            if let stack = _chain_roots /\ stack.count > 0 then
+                let roots = stack[stack.count - 1]
+                let current mut = expression
+
+                // Only the stages the site peeled: the call it stopped at is
+                // its source, and whatever chain feeds that is a value still.
+                while let call: Trees.Expressions.CALL = current /\ _is_peelable_stage(call) do
+                    _forget_chain_root(roots, call)
+
+                    if call.arguments.expressions.count == 0 then
+                        return
+                    fi
+
+                    current = call.arguments.expressions[0]
+                od
+            fi
+        si
+
+        _forget_chain_root(
+            roots: Collections.LIST[(call: Trees.Expressions.CALL, function: Semantic.Symbols.Function?, context: Semantic.ClosureContext, scope: Semantic.Scope)],
+            expression: Trees.Expressions.Expression
+        ) is
+            for index in 0..roots.count do
+                if roots[index].call == expression then
+                    roots.remove_at(index)
+
+                    return
+                fi
+            od
+        si
+
+        // Whether `call` is a stage a site's chain is peeled through:
+        // one of the chain stages, or a memo, which a site elides.
+        _is_peelable_stage(call: Trees.Expressions.CALL) -> bool is
+            if let global_call: IR.Values.Call.GLOBAL = call.value then
+                let role: string mut
+
+                if _innate_symbol_lookup.get_pipes_fusion_functions().try_get_value(global_call.function.root_specialized_from, role ref) then
+                    return PIPE_CONSUMER_KIND.is_stage_role(role)
+                fi
+            fi
+
+            return false
+        si
+
+        // The fusion role of a call that is a map, filter, take, skip or
+        // index stage, or null. A memo is not one: a value that is read
+        // more than once is what its cache is for, and a standalone chain
+        // is exactly a value that can be.
+        _chain_stage_role(call: Trees.Expressions.CALL) -> string? is
+            if let global_call: IR.Values.Call.GLOBAL = call.value then
+                let role: string mut
+
+                if _innate_symbol_lookup.get_pipes_fusion_functions().try_get_value(global_call.function.root_specialized_from, role ref) then
+                    if role =~ "map" \/ role =~ "filter" \/ role =~ "take" \/ role =~ "skip" \/ role =~ "index" then
+                        return role
+                    fi
+                fi
+            fi
+
+            return null
+        si
+
+        // Lower each root the body's last walk left to a call to a
+        // generator that runs its chain fused, where the chain is one this
+        // can.
+        _lower_chain_roots(roots: Collections.List[(call: Trees.Expressions.CALL, function: Semantic.Symbols.Function?, context: Semantic.ClosureContext, scope: Semantic.Scope)]) is
+            // Outermost first: a root in a stage of another is compiled
+            // again when that stage is inlined, so it is lowered after, in
+            // the stage's new home. A root is recorded when its call has
+            // compiled, which is after any root inside it, so the outermost
+            // are last. Lowering compiles what it inlines again, which must
+            // not record roots of its own.
+            _lowering_chain_roots = true
+
+            for index in 0..roots.count do
+                let root = roots[roots.count - 1 - index]
+
+                _logger.speculate()
+                _symbol_use_locations.speculate()
+
+                try
+                    _lower_chain_root(root.call, root.function, root.context, root.scope)
+                finally
+                    _logger.roll_back()
+                    _symbol_use_locations.roll_back()
+                yrt
+            od
+
+            _lowering_chain_roots = false
+        si
+
+        _lowering_chain_roots: bool
+
+        _lower_chain_root(
+            call: Trees.Expressions.CALL,
+            function: Semantic.Symbols.Function?,
+            context: Semantic.ClosureContext,
+            scope: Semantic.Scope
+        ) is
+            if !function? \/ _logger.is_suppressed("pipe-fusion", call.location) then
+                return
+            fi
+
+            if !isa IR.Values.Call.GLOBAL(call.value) then
+                return
+            fi
+
+            let root_call = cast IR.Values.Call.GLOBAL(call.value)
+            let chain_type = root_call.type
+
+            if chain_type.is_wild \/ chain_type.has_function_generic_argument_foreign_to(null) \/ (Semantic.Symbols.sequence_element_type(chain_type)?.is_type_variable ?? true) then
+                return
+            fi
+
+            let recognizer = PIPE_FUSION_RECOGNIZER(_innate_symbol_lookup.get_pipes_fusion_functions())
+            let fusion = recognizer.recognize_any(call)
+
+            if !fusion? \/ fusion.stages_outermost_first.count == 0 then
+                return
+            fi
+
+            for stage in fusion.stages_outermost_first do
+                if !stage.is_countdown /\ !stage.is_index /\ !_could_inline(stage) then
+                    return
+                fi
+            od
+
+            if !_resolve_chain_fusion(fusion, false) then
+                return
+            fi
+
+            let source_value = fusion.source.value!
+            let source_type = source_value.type!
+
+            if source_type.is_wild \/ source_type.has_function_generic_argument_foreign_to(null) then
+                return
+            fi
+
+            let generator = _fused_iterable_for(call, context, scope)
+            let source = generator.declare_parameter(call.location, "$source", source_type)
+
+            // The stages are inlined with the generator as the function
+            // their bodies are emitted into, so what they read from outside
+            // becomes its parameters rather than captures.
+            _symbol_table.enter_scope(function)
+            _symbol_table.enter_scope(scope)
+            _symbol_table.enter_scope(generator)
+
+            for stage in fusion.stages_outermost_first do
+                if !stage.is_countdown /\ !stage.is_index then
+                    _try_inline_stage(stage)
+                fi
+            od
+
+            _symbol_table.leave_scope(generator)
+
+            let all_inlined = fusion.stages_outermost_first |> Ghul.Pipes.all(stage => stage.is_countdown \/ stage.is_index \/ stage.is_inlined)
+            let captured = (generator.captured_values?.count ?? 0) > 0 \/ generator.is_self_captured
+
+            // A value of a type that names a type parameter of the class
+            // the chain is written in cannot be passed to the generator,
+            // which is generated without that class's type parameters.
+            let passes_wild = generator.passed |> Ghul.Pipes.any(p => p.parameter.type?.is_wild ?? false)
+
+            if !all_inlined \/ captured \/ passes_wild then
+                _symbol_table.leave_scope(scope)
+                _symbol_table.leave_scope(function)
+
+                for stage in fusion.stages_outermost_first do
+                    _restore_inlined_stage(stage)
+                od
+
+                return
+            fi
+
+            // What the call passes: the source, then each value the stages
+            // read from outside, loaded where the chain is written - a boxed
+            // local as its box.
+            let arguments = Collections.LIST[IR.Values.Value]([source_value])
+            let parameter_types = Collections.LIST[Type]([source_type])
+            let parameter_names = Collections.LIST[string](["$source"])
+
+            // A take or skip count, or an index start, evaluated once where
+            // the chain is written, as the stage's pipe would evaluate it.
+            let int_type = _innate_symbol_lookup.get_int_type()
+            let stage_parameters = Collections.LIST[Semantic.Symbols.Variable?]()
+            let stages = fusion.stages_outermost_first
+
+            for index in 0..stages.count do
+                let stage = stages[index]
+
+                if let argument = stage.argument /\ (stage.is_countdown \/ stage.is_index) then
+                    let parameter = generator.declare_parameter(call.location, "$stage_{index}", int_type)
+
+                    stage_parameters.add(parameter)
+                    arguments.add(argument.value!)
+                    parameter_types.add(int_type)
+                    parameter_names.add(parameter.name)
+                else
+                    stage_parameters.add(null)
+                fi
+            od
+
+            for p in generator.passed do
+                if let outer = p.outer then
+                    if outer.is_boxed then
+                        arguments.add(_symbol_loader.load_outer_local_variable(call.location, outer))
+                    else
+                        arguments.add(outer.load(call.location, null, _symbol_loader))
+                    fi
+                else
+                    arguments.add(_symbol_loader.load_self(call.location))
+                fi
+
+                parameter_types.add(p.parameter.type!)
+                parameter_names.add(p.parameter.name)
+            od
+
+            _symbol_table.leave_scope(scope)
+            _symbol_table.leave_scope(function)
+
+            generator.arguments = parameter_types
+            generator.argument_names = parameter_names
+            generator.set_return_type(chain_type)
+
+            _declare_fused_iterable(call, generator, function, context)
+
+            let state_machine = Semantic.Symbols.state_machine_for(generator)!
+            let frame = state_machine.frame!
+
+            frame.declare()
+
+            let iterator_type =
+                if let read_iterator = fusion.source_read_iterator then
+                    read_iterator.return_type!
+                else
+                    source_type
+                fi
+
+            let iterator_field = frame.declare_or_retype_anonymous_field(generator.fused_iterable?.iterator_field, "for_iterator", iterator_type)
+
+            let existing_fields = generator.fused_iterable?.stage_fields
+            let stage_fields = Collections.LIST[Semantic.Symbols.Field?]()
+
+            for index in 0..stages.count do
+                let stage = stages[index]
+                let previous = if existing_fields? /\ index < existing_fields.count then existing_fields[index] else null fi
+
+                stage_fields.add(
+                    if stage.is_countdown \/ stage.is_index then
+                        frame.declare_or_retype_anonymous_field(previous, "fused", int_type)
+                    else
+                        null
+                    fi)
+            od
+
+            generator.fused_iterable = FUSED_ITERABLE(fusion, source, iterator_field, stage_fields, stage_parameters)
+
+            root_call.retarget(generator, arguments)
+        si
+
+        // Whether a stage's function is a literal _try_inline_stage can
+        // inline, as far as its shape says: one plain parameter and an
+        // expression body.
+        _could_inline(stage: PIPE_FUSION_STAGE) -> bool is
+            if !isa Trees.Expressions.FUNCTION(stage.argument) then
+                return false
+            fi
+
+            let literal = cast Trees.Expressions.FUNCTION(stage.argument)
+
+            if
+                literal.is_recursive \/
+                literal.is_memo \/
+                literal.contains_let_await \/
+                literal.arguments.expressions.count != 1 \/
+                !isa Trees.Bodies.EXPRESSION(literal.body)
+            then
+                return false
+            fi
+
+            if let parameter: Trees.Expressions.VARIABLE = literal.arguments.expressions[0] then
+                return !parameter.is_destructuring
+            fi
+
+            return false
+        si
+
+        // The generator for `call`: the one an earlier compile of this
+        // body made, or a new one, not yet declared anywhere.
+        _fused_iterable_for(
+            call: Trees.Expressions.CALL,
+            context: Semantic.ClosureContext,
+            scope: Semantic.Scope
+        ) -> Semantic.Symbols.FUSED_ITERABLE_GENERATOR is
+            let made = _fused_iterables ?? Collections.MAP[Trees.Expressions.CALL, Semantic.Symbols.FUSED_ITERABLE_GENERATOR]()
+
+            _fused_iterables = made
+
+            let existing: Semantic.Symbols.FUSED_ITERABLE_GENERATOR mut
+
+            if made.try_get_value(call, existing ref) then
+                return existing
+            fi
+
+            return
+                Semantic.Symbols.FUSED_ITERABLE_GENERATOR(
+                    call.location,
+                    cast Semantic.Scope(context),
+                    "$fused_iterable_{made.count}_{call.location.start_line}",
+                    scope)
+        si
+
+        // Declare a generator that lowered its chain into the function the
+        // chain is written in, once.
+        _declare_fused_iterable(
+            call: Trees.Expressions.CALL,
+            generator: Semantic.Symbols.FUSED_ITERABLE_GENERATOR,
+            function: Semantic.Symbols.Function,
+            context: Semantic.ClosureContext
+        ) is
+            let made = _fused_iterables!
+
+            if made.contains_key(call) then
+                return
+            fi
+
+            function.declare_closure_symbol(call.location, generator)
+
+            generator.mark_synthesized()
+
+            context.add_closure(generator)
+
+            made[call] = generator
+        si
+    si
+si

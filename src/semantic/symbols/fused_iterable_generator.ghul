@@ -1,0 +1,99 @@
+namespace Semantic.Symbols is
+    use IR.Values.Value
+    use Source.LOCATION
+
+    // A generated generator that runs a fused pipe chain, and captures
+    // nothing. Each value its inlined stages read from outside it - an
+    // enclosing local or parameter, or the receiver - is a parameter of
+    // its own instead, passed where the chain is written, so making one
+    // allocates only its state machine's frame. A `let mut` local is
+    // passed as the box it is held in, so a store reaches the shared
+    // cell as a capture's would.
+    class FUSED_ITERABLE_GENERATOR: STATIC_GENERATOR_CLOSURE is
+        // The values passed after the source, in parameter order: the
+        // variable read from outside, or null for the receiver, and the
+        // parameter it is read through.
+        passed: Collections.LIST[(outer: Variable?, parameter: Variable)]
+
+        init(location: LOCATION, owner: Scope, name: string, enclosing_scope: Scope) is
+            super.init(location, owner, name, enclosing_scope, false)
+
+            passed = Collections.LIST[(outer: Variable?, parameter: Variable)]()
+        si
+
+        // Declare one of the generator's parameters.
+        declare_parameter(location: LOCATION, name: string, type: Types.Type) -> Variable is
+            if let existing: Variable = find_direct(name) then
+                if let settable: Types.SettableTyped = existing then
+                    settable.set_type(type)
+                fi
+
+                return existing
+            fi
+
+            start_declaring_arguments()
+
+            let declared = cast Variable(declare_variable(location, name, false, null))
+
+            end_declaring_arguments()
+
+            declared.mark_synthesized()
+            declared.define()
+
+            if let settable: Types.SettableTyped = declared then
+                settable.set_type(type)
+            fi
+
+            return declared
+        si
+
+        // The parameter `outer` is read through, declared on first use.
+        // A boxed local is passed as its box.
+        parameter_for(location: LOCATION, outer: Variable?, type: Types.Type) -> Variable is
+            for p in passed do
+                if p.outer == outer then
+                    return p.parameter
+                fi
+            od
+
+            let parameter = declare_parameter(location, "$passed_{passed.count}", type)
+
+            passed.add((outer, parameter))
+
+            return parameter
+        si
+
+        load_captured_value(location: LOCATION, symbol: Variable, loader: SYMBOL_LOADER) -> Value =>
+            IR.Values.Load.LOCAL_ARGUMENT(parameter_for(location, symbol, symbol.storage_type!))
+
+        store_captured_value(location: LOCATION, symbol: Variable, value: Value, loader: SYMBOL_LOADER) -> Value is
+            let parameter = parameter_for(location, symbol, symbol.storage_type!)
+
+            if symbol.is_boxed then
+                if let value_member = loader.resolve_box_value_member(symbol) then
+                    return
+                        value_member.store(
+                            LOCATION.internal,
+                            IR.Values.TYPE_WRAPPER(symbol.storage_type!, IR.Values.Load.LOCAL_ARGUMENT(parameter)),
+                            value,
+                            loader,
+                            false)
+                fi
+            fi
+
+            return IR.Values.Store.LOCAL_VARIABLE(parameter, value)
+        si
+
+        load_self(location: LOCATION, loader: SYMBOL_LOADER) -> Value is
+            let context = IoC.CONTAINER.instance.symbol_table.current_instance_context
+
+            if !context? then
+                return super.load_self(location, loader)
+            fi
+
+            return IR.Values.Load.LOCAL_ARGUMENT(parameter_for(location, null, context.own_instantiation))
+        si
+
+        to_string() -> string => "[fused iterable generator {name}]"
+    si
+si
