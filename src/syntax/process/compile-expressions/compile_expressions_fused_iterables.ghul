@@ -197,12 +197,12 @@ namespace Syntax.Process is
                 return
             fi
 
-            for stage in fusion.stages_outermost_first do
-                if !stage.is_countdown /\ !stage.is_index /\ !_could_inline(stage) then
-                    return
-                fi
-            od
-
+            // A map or filter stage whose function is not a literal
+            // _try_inline_stage can inline - a named function, a
+            // block-bodied literal - runs as a call of the function value
+            // the chain passes for it, as the stage's pipe would. What
+            // this refuses is a stage whose argument did not compile to a
+            // function at all, which _resolve_chain_fusion checks below.
             if !_resolve_chain_fusion(fusion, false) then
                 return
             fi
@@ -232,15 +232,25 @@ namespace Syntax.Process is
 
             _symbol_table.leave_scope(generator)
 
-            let all_inlined = fusion.stages_outermost_first |> Ghul.Pipes.all(stage => stage.is_countdown \/ stage.is_index \/ stage.is_inlined)
+            let all_ready = fusion.stages_outermost_first |> Ghul.Pipes.all(stage =>
+                stage.is_countdown \/ stage.is_index \/ stage.is_inlined \/ _stage_keeps_delegate(stage))
             let captured = (generator.captured_values?.count ?? 0) > 0 \/ generator.is_self_captured
 
             // A value of a type that names a type parameter of the class
             // the chain is written in cannot be passed to the generator,
             // which is generated without that class's type parameters.
-            let passes_wild = generator.passed |> Ghul.Pipes.any(p => p.parameter.type?.is_wild ?? false)
+            // A stage's function value is one more such value the chain
+            // passes, and a function type can name one in either side.
+            let passes_wild =
+                generator.passed |> Ghul.Pipes.any(p => p.parameter.type?.is_wild ?? false) \/
+                fusion.stages_outermost_first |> Ghul.Pipes.any(stage =>
+                    _stage_keeps_delegate(stage) /\
+                    (
+                        stage.argument!.value!.type!.is_wild \/
+                        stage.argument!.value!.type!.has_function_generic_argument_foreign_to(null)
+                    ))
 
-            if !all_inlined \/ captured \/ passes_wild then
+            if !all_ready \/ captured \/ passes_wild then
                 _symbol_table.leave_scope(scope)
                 _symbol_table.leave_scope(function)
 
@@ -258,8 +268,9 @@ namespace Syntax.Process is
             let parameter_types = Collections.LIST[Type]([source_type])
             let parameter_names = Collections.LIST[string](["$source"])
 
-            // A take or skip count, or an index start, evaluated once where
-            // the chain is written, as the stage's pipe would evaluate it.
+            // A take or skip count, an index start, or the function value a
+            // stage keeps its delegate for, evaluated once where the chain
+            // is written, as the stage's pipe would evaluate it.
             let int_type = _innate_symbol_lookup.get_int_type()
             let stage_parameters = Collections.LIST[Semantic.Symbols.Variable?]()
             let stages = fusion.stages_outermost_first
@@ -273,6 +284,15 @@ namespace Syntax.Process is
                     stage_parameters.add(parameter)
                     arguments.add(argument.value!)
                     parameter_types.add(int_type)
+                    parameter_names.add(parameter.name)
+                elif _stage_keeps_delegate(stage) then
+                    let delegate_type = stage.argument!.value!.type!
+
+                    let parameter = generator.declare_parameter(call.location, "$stage_{index}", delegate_type)
+
+                    stage_parameters.add(parameter)
+                    arguments.add(stage.argument!.value!)
+                    parameter_types.add(delegate_type)
                     parameter_names.add(parameter.name)
                 else
                     stage_parameters.add(null)
@@ -324,17 +344,39 @@ namespace Syntax.Process is
                 let stage = stages[index]
                 let previous = if existing_fields? /\ index < existing_fields.count then existing_fields[index] else null fi
 
-                stage_fields.add(
-                    if stage.is_countdown \/ stage.is_index then
-                        frame.declare_or_retype_anonymous_field(previous, "fused", int_type)
-                    else
-                        null
-                    fi)
+                let slot: Semantic.Symbols.Field? mut = null
+
+                if stage.is_countdown \/ stage.is_index then
+                    slot = frame.declare_or_retype_anonymous_field(previous, "fused", int_type)
+                elif _stage_keeps_delegate(stage) then
+                    slot = frame.declare_or_retype_anonymous_field(previous, "fused", stage.argument!.value!.type!)
+                fi
+
+                stage_fields.add(slot)
             od
 
             generator.fused_iterable = FUSED_ITERABLE(fusion, source, iterator_field, stage_fields, stage_parameters)
 
             root_call.retarget(generator, arguments)
+        si
+
+        // Whether `stage` runs in the generator as a call of the function
+        // value the chain passes for it: a map or filter that was not
+        // inlined, with its argument compiled to a function value. A take,
+        // skip or index keeps a counter instead, and an inlined stage has
+        // no function of its own left to call.
+        _stage_keeps_delegate(stage: PIPE_FUSION_STAGE) -> bool is
+            if stage.is_countdown \/ stage.is_index \/ stage.is_inlined then
+                return false
+            fi
+
+            let argument = stage.argument
+
+            if !argument? then
+                return false
+            fi
+
+            return argument.value?
         si
 
         // Whether a stage's function is a literal _try_inline_stage can
