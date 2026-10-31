@@ -362,17 +362,11 @@ namespace Syntax.Process is
             // A recognised, fusible Pipe[T] chain is lowered to one
             // inline loop over the pinned base, applying the map/filter
             // stages per element, instead of iterating the built pipe
-            // objects. Not in a state machine, whose iterator must live
-            // on the frame to survive yield/await re-entry - those fall
-            // through to the normal loop below. A loop in expression
-            // position also takes the normal path: its result-value
+            // objects. In a state machine the loop keeps its state in
+            // frame fields, so it survives yield and await. A loop in
+            // expression position takes the normal path: its result-value
             // convergence hangs off this method's shape.
-            if
-                !`for.want_value /\
-                `for.fusion? /\
-                !Semantic.Symbols.state_machine_for(current_function)? /\
-                !Semantic.Symbols.async_state_machine_for(current_function)?
-            then
+            if !`for.want_value /\ `for.fusion? then
                 _visit_fused_for(`for)
 
                 return
@@ -510,9 +504,35 @@ namespace Syntax.Process is
         _setup_fused_stages(
             fusion: Syntax.Process.PIPE_FUSION,
             stage_delegates: Collections.LIST[TEMP?],
-            stage_counters: Collections.LIST[TEMP?]
+            stage_counters: Collections.LIST[TEMP?],
+            state: FUSED_LOOP_STATE?
         ) is
-            for stage in fusion.stages_outermost_first do
+            let stages = fusion.stages_outermost_first
+
+            for index in 0..stages.count do
+                let stage = stages[index]
+
+                // In a state machine, a counter or a hoisted delegate lives
+                // in the stage's frame field instead of a local.
+                if let stage_slot = state?.stage_field(index) then
+                    let value =
+                        if stage.is_index then
+                            if let start = stage.argument then
+                                start.value!
+                            else
+                                cast Value(Literal.NUMBER(0, _innate_symbol_lookup.get_int_type()))
+                            fi
+                        else
+                            stage.argument!.value!
+                        fi
+
+                    add(_build_frame_field_store(state!.frame, stage_slot, value))
+                    stage_delegates.add(null)
+                    stage_counters.add(null)
+
+                    continue
+                fi
+
                 if stage.is_countdown then
                     // take/skip: evaluate the count once into a running
                     // counter the loop decrements per pulled element.
@@ -552,16 +572,38 @@ namespace Syntax.Process is
         _gen_fused_take_guards(
             fusion: Syntax.Process.PIPE_FUSION,
             stage_counters: Collections.List[TEMP?],
-            loop: Values.LOOP
+            loop: Values.LOOP,
+            state: FUSED_LOOP_STATE?
         ) is
             let int_type = _innate_symbol_lookup.get_int_type()
 
             for index in 0..fusion.stages_outermost_first.count do
                 if fusion.stages_outermost_first[index].is_take then
-                    add(Values.BREAK(loop, BRANCH.LE, stage_counters[index]!.load(), Literal.NUMBER(0, int_type)))
+                    add(Values.BREAK(loop, BRANCH.LE, _fused_counter_load(stage_counters, state, index), Literal.NUMBER(0, int_type)))
                 fi
             od
         si
+
+        // A frame-field counter one up or one down.
+        _fused_step(state: FUSED_LOOP_STATE, `field: Semantic.Symbols.Field, operation: IR.ArithmeticOperation) -> Value is
+            let int_type = _innate_symbol_lookup.get_int_type()
+
+            return
+                IR.Values.ARITHMETIC(
+                    operation,
+                    _build_frame_field_load(state.frame, `field),
+                    Literal.NUMBER(1, int_type),
+                    int_type).unmarked()
+        si
+
+        // A stage's counter or delegate, from its frame field in a state
+        // machine and from its local otherwise.
+        _fused_counter_load(stage_slots: Collections.List[TEMP?], state: FUSED_LOOP_STATE?, index: int) -> Value =>
+            if let stage_slot = state?.stage_field(index) then
+                _build_frame_field_load(state!.frame, stage_slot)
+            else
+                stage_slots[index]!.load()
+            fi
 
         // Apply a fused chain's stages to `element` innermost-first,
         // returning the fully-transformed value. A map result and an index
@@ -574,7 +616,8 @@ namespace Syntax.Process is
             element: Value,
             stage_delegates: Collections.List[TEMP?],
             stage_counters: Collections.List[TEMP?],
-            loop: Values.LOOP
+            loop: Values.LOOP,
+            state: FUSED_LOOP_STATE?
         ) -> Value is
             let int_type = _innate_symbol_lookup.get_int_type()
 
@@ -585,16 +628,27 @@ namespace Syntax.Process is
             while index >= 0 do
                 let stage = fusion.stages_outermost_first[index]
 
+                let stage_slot = state?.stage_field(index)
+
                 if stage.is_take then
                     // This element spends one of the take's count; the loop
                     // checks the count before pulling the next element (see
                     // _gen_fused_take_guards). The element passes through
                     // unchanged.
-                    add(IR.Values.DECREMENT(stage_counters[index]!.local, int_type))
+                    if let f = stage_slot then
+                        add(_build_frame_field_store(state!.frame, f, _fused_step(state!, f, IR.ArithmeticOperation.SUBTRACT)))
+                    else
+                        add(IR.Values.DECREMENT(stage_counters[index]!.local, int_type))
+                    fi
                 elif stage.is_skip then
                     // Decrement the counter; while it stays non-negative this
                     // is a leading element to drop, so pull the next one.
-                    add(Values.CONTINUE(loop, BRANCH.GE, IR.Values.PRE_DECREMENT(stage_counters[index]!.local, int_type), Literal.NUMBER(0, int_type)))
+                    if let f = stage_slot then
+                        add(_build_frame_field_store(state!.frame, f, _fused_step(state!, f, IR.ArithmeticOperation.SUBTRACT)))
+                        add(Values.CONTINUE(loop, BRANCH.GE, _build_frame_field_load(state!.frame, f), Literal.NUMBER(0, int_type)))
+                    else
+                        add(Values.CONTINUE(loop, BRANCH.GE, IR.Values.PRE_DECREMENT(stage_counters[index]!.local, int_type), Literal.NUMBER(0, int_type)))
+                    fi
                 else
                     let stage_result: Value mut
 
@@ -611,12 +665,22 @@ namespace Syntax.Process is
                         // INDEXED_VALUE(counter, current) with the counter
                         // post-incremented in place - no INDEX_PIPE object.
                         let arguments = Collections.LIST[Value]()
-                        arguments.add(cast Value(IR.Values.POST_INCREMENT(stage_counters[index]!.local, int_type)))
+
+                        if let f = stage_slot then
+                            // The counter as it was, then one past it.
+                            let counted = TEMP(current_block, "fused_index", _build_frame_field_load(state!.frame, f))
+
+                            add(_build_frame_field_store(state!.frame, f, _fused_step(state!, f, IR.ArithmeticOperation.ADD)))
+                            arguments.add(counted.load())
+                        else
+                            arguments.add(cast Value(IR.Values.POST_INCREMENT(stage_counters[index]!.local, int_type)))
+                        fi
+
                         arguments.add(current_value)
 
                         stage_result = IR.Values.NEW(stage.indexed_value_type!, stage.indexed_value_constructor!, arguments)
                     else
-                        let delegate = stage_delegates[index]!.load()
+                        let delegate = _fused_counter_load(stage_delegates, state, index)
                         let func_type = stage.argument!.value!.type!
 
                         let result_type =
@@ -770,16 +834,39 @@ namespace Syntax.Process is
 
             variable.walk(self)
 
-            let temp = TEMP(current_block, "fused_iterator", iterator)
+            // In a generator or asynchronous body the loop's state has to
+            // survive the suspensions in its body, so it lives in the
+            // frame fields compile-expressions declared for it.
+            let frame = _current_state_machine_frame()
+
+            let state: FUSED_LOOP_STATE? =
+                if frame? /\ `for.iterator_field? then
+                    FUSED_LOOP_STATE(frame, `for.iterator_field!, `for.fused_fields)
+                else
+                    null
+                fi
+
+            let temp: TEMP? = if !state? then TEMP(current_block, "fused_iterator", iterator) else null fi
+
+            if let s = state then
+                add(_build_frame_field_store(s.frame, s.iterator_field, iterator))
+            fi
 
             // As for an ordinary `for`, a target that can walk the source's
             // storage directly is told what the iterator local iterates.
             let iteration: IR.FOR_ITERATION? =
-                if fusion.source_read_iterator? then IR.FOR_ITERATION(source.value!, iterator) else null fi
+                if temp? /\ fusion.source_read_iterator? then IR.FOR_ITERATION(source.value!, iterator) else null fi
 
             if let i = iteration then
-                temp.local.iteration = i
+                temp!.local.iteration = i
             fi
+
+            let load_iterator = () =>
+                if let s = state then
+                    _build_frame_field_load(s.frame, s.iterator_field)
+                else
+                    temp!.load()
+                fi
 
             // Per-stage setup: an inlined stage needs a slot for its
             // parameter local; a delegate stage hoists its function value
@@ -789,24 +876,24 @@ namespace Syntax.Process is
             let stage_delegates = Collections.LIST[TEMP?]()
             let stage_counters = Collections.LIST[TEMP?]()
 
-            _setup_fused_stages(fusion, stage_delegates, stage_counters)
+            _setup_fused_stages(fusion, stage_delegates, stage_counters, state)
 
             let structured = _open_structured_loop(loop)
 
-            _gen_fused_take_guards(fusion, stage_counters, structured)
+            _gen_fused_take_guards(fusion, stage_counters, structured, state)
 
-            let has_next = fusion.source_move_next!.call(source.location, temp.load(), Collections.LIST[Value](0), null, _function_caller)
+            let has_next = fusion.source_move_next!.call(source.location, load_iterator(), Collections.LIST[Value](0), null, _function_caller)
 
             add(Values.BREAK(structured, BRANCH.Z, has_next))
 
-            let element = fusion.source_read_current!.call(source.location, temp.load(), Collections.LIST[Value](0), null, _function_caller)
+            let element = fusion.source_read_current!.call(source.location, load_iterator(), Collections.LIST[Value](0), null, _function_caller)
 
             if let i = iteration then
                 i.move_next = has_next
                 i.current = element
             fi
 
-            let current_value = _apply_fused_stages(fusion, element, stage_delegates, stage_counters, structured)
+            let current_value = _apply_fused_stages(fusion, element, stage_delegates, stage_counters, structured, state)
 
             gen_destructuring_initialize(variable.left, current_value)
 

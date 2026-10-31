@@ -168,10 +168,64 @@ namespace Syntax.Process is
                 return null
             fi
 
+            _declare_fused_state_fields(`for, fusion!)
+
             _note_fusion_site(`for.location, "for", true, recognizer, true)
             _note_fused_functions(`for.location, fusion!, null, false)
 
             return fusion
+        si
+
+        // Inside a generator or asynchronous body, what a fused loop
+        // carries from one element to the next has to survive the
+        // suspensions in the loop body, so it lives in frame fields: the
+        // source's iterator in the loop's own iterator field, and each
+        // counter and each stage delegate that is not inlined in a field
+        // of its own. A stage's parameter and what it produces are used
+        // before the body runs, and stay ordinary locals. Outside a state
+        // machine, nothing.
+        _declare_fused_state_fields(`for: Trees.Statements.FOR, fusion: PIPE_FUSION) is
+            let frame = _enclosing_state_machine_frame()
+
+            if !frame? then
+                return
+            fi
+
+            let iterator_type =
+                if let read_iterator = fusion.source_read_iterator then
+                    read_iterator.return_type!
+                else
+                    fusion.source.value!.type!
+                fi
+
+            `for.iterator_field = frame.declare_or_retype_anonymous_field(`for.iterator_field, "for_iterator", iterator_type)
+
+            let existing = `for.fused_fields
+            let fields = Collections.LIST[Semantic.Symbols.Field?]()
+            let stages = fusion.stages_outermost_first
+
+            for index in 0..stages.count do
+                let stage = stages[index]
+                let previous = if existing? /\ index < existing.count then existing[index] else null fi
+
+                let type: Type? =
+                    if stage.is_countdown \/ stage.is_index then
+                        _innate_symbol_lookup.get_int_type()
+                    elif !stage.is_inlined then
+                        stage.argument?.value?.type
+                    else
+                        null
+                    fi
+
+                fields.add(
+                    if let t = type then
+                        frame.declare_or_retype_anonymous_field(previous, "fused", t)
+                    else
+                        null
+                    fi)
+            od
+
+            `for.fused_fields = fields
         si
 
         // Record for the pipe-fusion study what a consumption site
@@ -1135,20 +1189,7 @@ namespace Syntax.Process is
         // decline after that walk restores the nodes, by walking the whole
         // lambda again.
         _try_inline_stage(stage: PIPE_FUSION_STAGE) is
-            // A body whose statements become a state machine keeps its
-            // loops as pipe objects, so the stage's delegate is still
-            // built and called. Inlining marks the literal to load its
-            // names as the enclosing body's locals, which in a state
-            // machine they are not, so the delegate's own method would be
-            // emitted reading locals that do not exist there.
             let enclosing = _symbol_table.current_function
-
-            if
-                Semantic.Symbols.state_machine_for(enclosing)? \/
-                Semantic.Symbols.async_state_machine_for(enclosing)?
-            then
-                return
-            fi
 
             if !isa Trees.Expressions.FUNCTION(stage.argument) then
                 return
