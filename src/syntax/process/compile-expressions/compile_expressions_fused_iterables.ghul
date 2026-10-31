@@ -179,7 +179,7 @@ namespace Syntax.Process is
             fi
 
             for stage in fusion.stages_outermost_first do
-                if stage.is_countdown \/ stage.is_index \/ !_could_inline(stage) then
+                if !stage.is_countdown /\ !stage.is_index /\ !_could_inline(stage) then
                     return
                 fi
             od
@@ -206,12 +206,14 @@ namespace Syntax.Process is
             _symbol_table.enter_scope(generator)
 
             for stage in fusion.stages_outermost_first do
-                _try_inline_stage(stage)
+                if !stage.is_countdown /\ !stage.is_index then
+                    _try_inline_stage(stage)
+                fi
             od
 
             _symbol_table.leave_scope(generator)
 
-            let all_inlined = fusion.stages_outermost_first |> Ghul.Pipes.all(stage => stage.is_inlined)
+            let all_inlined = fusion.stages_outermost_first |> Ghul.Pipes.all(stage => stage.is_countdown \/ stage.is_index \/ stage.is_inlined)
             let captured = (generator.captured_values?.count ?? 0) > 0 \/ generator.is_self_captured
 
             if !all_inlined \/ captured then
@@ -231,6 +233,27 @@ namespace Syntax.Process is
             let arguments = Collections.LIST[IR.Values.Value]([source_value])
             let parameter_types = Collections.LIST[Type]([source_type])
             let parameter_names = Collections.LIST[string](["$source"])
+
+            // A take or skip count, or an index start, evaluated once where
+            // the chain is written, as the stage's pipe would evaluate it.
+            let int_type = _innate_symbol_lookup.get_int_type()
+            let stage_parameters = Collections.LIST[Semantic.Symbols.Variable?]()
+            let stages = fusion.stages_outermost_first
+
+            for index in 0..stages.count do
+                let stage = stages[index]
+
+                if let argument = stage.argument /\ (stage.is_countdown \/ stage.is_index) then
+                    let parameter = generator.declare_parameter(call.location, "$stage_{index}", int_type)
+
+                    stage_parameters.add(parameter)
+                    arguments.add(argument.value!)
+                    parameter_types.add(int_type)
+                    parameter_names.add(parameter.name)
+                else
+                    stage_parameters.add(null)
+                fi
+            od
 
             for p in generator.passed do
                 if let outer = p.outer then
@@ -270,7 +293,22 @@ namespace Syntax.Process is
 
             let iterator_field = frame.declare_or_retype_anonymous_field(generator.fused_iterable?.iterator_field, "for_iterator", iterator_type)
 
-            generator.fused_iterable = FUSED_ITERABLE(fusion, source, iterator_field)
+            let existing_fields = generator.fused_iterable?.stage_fields
+            let stage_fields = Collections.LIST[Semantic.Symbols.Field?]()
+
+            for index in 0..stages.count do
+                let stage = stages[index]
+                let previous = if existing_fields? /\ index < existing_fields.count then existing_fields[index] else null fi
+
+                stage_fields.add(
+                    if stage.is_countdown \/ stage.is_index then
+                        frame.declare_or_retype_anonymous_field(previous, "fused", int_type)
+                    else
+                        null
+                    fi)
+            od
+
+            generator.fused_iterable = FUSED_ITERABLE(fusion, source, iterator_field, stage_fields, stage_parameters)
 
             root_call.retarget(generator, arguments)
         si
