@@ -14,7 +14,7 @@ namespace Syntax.Process is
 
         // The generators made for each root, kept across compiles of a
         // body so that a root is only ever given one.
-        _fused_iterables: Collections.MAP[Trees.Expressions.CALL, Semantic.Symbols.Closure]?
+        _fused_iterables: Collections.MAP[Trees.Expressions.CALL, Semantic.Symbols.FUSED_ITERABLE_GENERATOR]?
 
         begin_chain_roots() is
             if !_chain_roots? then
@@ -156,7 +156,7 @@ namespace Syntax.Process is
             context: Semantic.ClosureContext,
             scope: Semantic.Scope
         ) is
-            if !function? \/ function.is_instance then
+            if !function? then
                 return
             fi
 
@@ -179,7 +179,7 @@ namespace Syntax.Process is
             fi
 
             for stage in fusion.stages_outermost_first do
-                if stage.is_countdown \/ stage.is_index \/ !_inlines_without_capture(stage) then
+                if stage.is_countdown \/ stage.is_index \/ !_could_inline(stage) then
                     return
                 fi
             od
@@ -195,8 +195,14 @@ namespace Syntax.Process is
                 return
             fi
 
-            let generator = _fused_iterable_for(call, function, context, scope)
+            let generator = _fused_iterable_for(call, context, scope)
+            let source = generator.declare_parameter(call.location, "$source", source_type)
 
+            // The stages are inlined with the generator as the function
+            // their bodies are emitted into, so what they read from outside
+            // becomes its parameters rather than captures.
+            _symbol_table.enter_scope(function)
+            _symbol_table.enter_scope(scope)
             _symbol_table.enter_scope(generator)
 
             for stage in fusion.stages_outermost_first do
@@ -209,6 +215,9 @@ namespace Syntax.Process is
             let captured = (generator.captured_values?.count ?? 0) > 0 \/ generator.is_self_captured
 
             if !all_inlined \/ captured then
+                _symbol_table.leave_scope(scope)
+                _symbol_table.leave_scope(function)
+
                 for stage in fusion.stages_outermost_first do
                     _restore_inlined_stage(stage)
                 od
@@ -216,11 +225,36 @@ namespace Syntax.Process is
                 return
             fi
 
-            let source = _fused_iterable_parameter(generator, call.location, "$source", source_type)
+            // What the call passes: the source, then each value the stages
+            // read from outside, loaded where the chain is written - a boxed
+            // local as its box.
+            let arguments = Collections.LIST[IR.Values.Value]([source_value])
+            let parameter_types = Collections.LIST[Type]([source_type])
+            let parameter_names = Collections.LIST[string](["$source"])
 
-            generator.arguments = Collections.LIST[Type]([source_type])
-            generator.argument_names = Collections.LIST[string](["$source"])
+            for p in generator.passed do
+                if let outer = p.outer then
+                    if outer.is_boxed then
+                        arguments.add(_symbol_loader.load_outer_local_variable(call.location, outer))
+                    else
+                        arguments.add(outer.load(call.location, null, _symbol_loader))
+                    fi
+                else
+                    arguments.add(_symbol_loader.load_self(call.location))
+                fi
+
+                parameter_types.add(p.parameter.type!)
+                parameter_names.add(p.parameter.name)
+            od
+
+            _symbol_table.leave_scope(scope)
+            _symbol_table.leave_scope(function)
+
+            generator.arguments = parameter_types
+            generator.argument_names = parameter_names
             generator.set_return_type(chain_type)
+
+            _declare_fused_iterable(call, generator, function, context)
 
             let state_machine = Semantic.Symbols.state_machine_for(generator)!
             let frame = state_machine.frame!
@@ -238,52 +272,74 @@ namespace Syntax.Process is
 
             generator.fused_iterable = FUSED_ITERABLE(fusion, source, iterator_field)
 
-            root_call.retarget(generator, Collections.LIST[IR.Values.Value]([source_value]))
+            root_call.retarget(generator, arguments)
         si
 
-        // Whether a stage's function is a literal whose walk as a closure
-        // read nothing it would have to capture, so that inlining it into
-        // a generator that captures nothing reads only the generator's
-        // own parameters and what any method can reach.
-        _inlines_without_capture(stage: PIPE_FUSION_STAGE) -> bool is
+        // Whether a stage's function is a literal _try_inline_stage can
+        // inline, as far as its shape says: one plain parameter and an
+        // expression body.
+        _could_inline(stage: PIPE_FUSION_STAGE) -> bool is
             if !isa Trees.Expressions.FUNCTION(stage.argument) then
                 return false
             fi
 
-            let closure = cast Semantic.Symbols.Closure?(_symbol_table.scope_for(stage.argument!))
+            let literal = cast Trees.Expressions.FUNCTION(stage.argument)
 
-            if !closure? then
+            if
+                literal.is_recursive \/
+                literal.is_memo \/
+                literal.contains_let_await \/
+                literal.arguments.expressions.count != 1 \/
+                !isa Trees.Bodies.EXPRESSION(literal.body)
+            then
                 return false
             fi
 
-            return (closure.captured_values?.count ?? 0) == 0 /\ !closure.is_self_captured
+            if let parameter: Trees.Expressions.VARIABLE = literal.arguments.expressions[0] then
+                return !parameter.is_destructuring
+            fi
+
+            return false
         si
 
         // The generator for `call`: the one an earlier compile of this
-        // body made, or a new one declared into `function`.
+        // body made, or a new one, not yet declared anywhere.
         _fused_iterable_for(
             call: Trees.Expressions.CALL,
-            function: Semantic.Symbols.Function,
             context: Semantic.ClosureContext,
             scope: Semantic.Scope
-        ) -> Semantic.Symbols.Closure is
-            let made = _fused_iterables ?? Collections.MAP[Trees.Expressions.CALL, Semantic.Symbols.Closure]()
+        ) -> Semantic.Symbols.FUSED_ITERABLE_GENERATOR is
+            let made = _fused_iterables ?? Collections.MAP[Trees.Expressions.CALL, Semantic.Symbols.FUSED_ITERABLE_GENERATOR]()
 
             _fused_iterables = made
 
-            let existing: Semantic.Symbols.Closure mut
+            let existing: Semantic.Symbols.FUSED_ITERABLE_GENERATOR mut
 
             if made.try_get_value(call, existing ref) then
                 return existing
             fi
 
-            let generator =
-                Semantic.Symbols.STATIC_GENERATOR_CLOSURE(
+            return
+                Semantic.Symbols.FUSED_ITERABLE_GENERATOR(
                     call.location,
                     cast Semantic.Scope(context),
-                    "$fused_iterable_{made.count}",
-                    scope,
-                    false)
+                    "$fused_iterable_{made.count}_{call.location.start_line}",
+                    scope)
+        si
+
+        // Declare a generator that lowered its chain into the function the
+        // chain is written in, once.
+        _declare_fused_iterable(
+            call: Trees.Expressions.CALL,
+            generator: Semantic.Symbols.FUSED_ITERABLE_GENERATOR,
+            function: Semantic.Symbols.Function,
+            context: Semantic.ClosureContext
+        ) is
+            let made = _fused_iterables!
+
+            if made.contains_key(call) then
+                return
+            fi
 
             function.declare_closure_symbol(call.location, generator)
 
@@ -292,36 +348,6 @@ namespace Syntax.Process is
             context.add_closure(generator)
 
             made[call] = generator
-
-            return generator
-        si
-
-        _fused_iterable_parameter(
-            generator: Semantic.Symbols.Closure,
-            location: Source.LOCATION,
-            name: string,
-            type: Type
-        ) -> Semantic.Symbols.Variable is
-            let declared: Semantic.Symbols.Variable mut
-
-            if let existing: Semantic.Symbols.Variable = generator.find_direct(name) then
-                declared = existing
-            else
-                generator.start_declaring_arguments()
-
-                declared = cast Semantic.Symbols.Variable?(generator.declare_variable(location, name, false, null))!
-
-                generator.end_declaring_arguments()
-
-                declared.mark_synthesized()
-                declared.define()
-            fi
-
-            if let settable: Semantic.Types.SettableTyped = declared then
-                settable.set_type(type)
-            fi
-
-            return declared
         si
     si
 si
