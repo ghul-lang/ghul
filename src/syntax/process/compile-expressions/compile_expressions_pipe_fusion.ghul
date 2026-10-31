@@ -461,7 +461,7 @@ namespace Syntax.Process is
             let recognizer = PIPE_FUSION_RECOGNIZER(_innate_symbol_lookup.get_pipes_fusion_functions())
             let fusion = recognizer.recognize_any(chain_before)
 
-            if !_resolve_chain_fusion(fusion, false) then
+            if !_resolve_chain_fusion(fusion) then
                 _note_fusion_site(call.location, _pipes_function_name(call) ?? consumer_kind, true, recognizer, false)
 
                 return null
@@ -736,6 +736,8 @@ namespace Syntax.Process is
                 fi
             fi
 
+            _note_fused_iteration(fused, plan.source.value!)
+
             if consumer_kind =~ "collect" \/ consumer_kind =~ "collect_array" then
                 _try_presize(fused, plan, call, consumer_kind, built.final.type)
             fi
@@ -747,6 +749,23 @@ namespace Syntax.Process is
                 if PIPE_CONSUMER_KIND.takes_function(consumer_kind) then call.arguments.expressions[1] else null fi)
 
             return fused
+        si
+
+        // Say what the fused loop's iterator local iterates and the calls
+        // it makes on it, so a target that can walk the source's storage
+        // directly does so rather than making the iterator. Nothing where
+        // the source is itself an iterator.
+        _note_fused_iteration(fused: IR.Values.FUSED_CONSUMER, receiver: IR.Values.Value) is
+            if !fused.has_iterator then
+                return
+            fi
+
+            let iteration = IR.FOR_ITERATION(receiver, fused.iterator_init)
+
+            iteration.move_next = fused.move_next
+            iteration.current = fused.read_current
+
+            fused.iterator.iteration = iteration
         si
 
         // Size a fused collect's result up front where the source's count
@@ -789,6 +808,8 @@ namespace Syntax.Process is
                 else
                     source_load
                 fi
+
+            _note_fused_iteration(fused, source_load)
 
             if consumer_kind =~ "collect_array" then
                 fused.presize_array = true
@@ -877,6 +898,16 @@ namespace Syntax.Process is
         ) -> IR.Values.FUSED_CONSUMER? is
             _chain_resolve_reason = reason
 
+            // A consumer can decline after its chain resolved, which is
+            // after the stage literals were inlined. The call then runs
+            // as written, calling each literal, so each goes back to
+            // being an ordinary closure.
+            if let fusion = recognizer.fusion then
+                for stage in fusion.stages_outermost_first do
+                    _restore_inlined_stage(stage)
+                od
+            fi
+
             _note_fusion_site(call.location, _pipes_function_name(call) ?? consumer_kind, true, recognizer, false)
 
             return null
@@ -962,6 +993,29 @@ namespace Syntax.Process is
                             IR.Values.NEW(indexed_type, stage.indexed_value_constructor!, build_arguments)))
 
                     current = output
+
+                    index = index - 1
+
+                    continue
+                fi
+
+                if stage.is_inlined then
+                    // The literal's body runs in the loop: the element is
+                    // stored into the local its parameter loads as, and the
+                    // body reads that and any captured locals directly.
+                    let param = stage.param_local!
+                    let body = stage.inline_body!
+                    let store = cast IR.Values.Value(IR.Values.Store.LOCAL_VARIABLE(param, current.load()))
+
+                    if stage.is_filter then
+                        ops.add(IR.Values.FUSED_CONSUMER_STAGE(param.ir_local, store, body, true, null))
+                    else
+                        let output = IR.LOCAL(".fc_map.{_next_fused_local_id()}", body.type!)
+
+                        ops.add(IR.Values.FUSED_CONSUMER_STAGE(param.ir_local, store, body, false, output))
+
+                        current = output
+                    fi
 
                     index = index - 1
 
@@ -1111,6 +1165,26 @@ namespace Syntax.Process is
                 return
             fi
 
+            // A literal that reaches an enclosing generic method's type
+            // parameters names them through its own captured type
+            // arguments. Inlined into the method, they are the method's
+            // own; inlined into another literal, whose frame declares
+            // them again as its class's parameters, nothing maps them,
+            // so the body would name the method's in a frame's method.
+            let closure_for_type_arguments = cast Semantic.Symbols.Closure?(_symbol_table.scope_for(function))
+
+            if closure_for_type_arguments?.captured_type_arguments? then
+                let target mut = enclosing
+
+                while let inlined: Semantic.Symbols.Closure = target /\ inlined.is_inlined do
+                    target = inlined.inlined_into!.method
+                od
+
+                if isa Semantic.Symbols.Closure(target) then
+                    return
+                fi
+            fi
+
             let variable = cast Trees.Expressions.VARIABLE(param)
 
             // The harvest below declares one enclosing-method local, for
@@ -1142,6 +1216,31 @@ namespace Syntax.Process is
 
             if !param_type? \/ param_type.is_sentinel \/ param_type.is_error then
                 return
+            fi
+
+            // The parameter local the loop stores each element into takes
+            // the parameter's type, so it waits until that has settled:
+            // this walk keeps the delegate, and the obligation asks for
+            // another, which inlines the stage once inference has decided.
+            if !param_type.is_settled then
+                Semantic.OBLIGATIONS.defer("inline-stage", param_type, function.location)
+
+                return
+            fi
+
+            // So do the values the literal captures: its walk as a closure
+            // records each one's type, and a walk on which they have all
+            // settled records them as they will stay.
+            if let captured = closure.captured_values then
+                for value in captured do
+                    if let typed: Semantic.Types.Typed = value then
+                        if let type = typed.type /\ !type.is_settled then
+                            Semantic.OBLIGATIONS.defer("inline-stage", type, function.location)
+
+                            return
+                        fi
+                    fi
+                od
             fi
 
             let body = cast Trees.Bodies.EXPRESSION?(function.body)
@@ -1224,26 +1323,7 @@ namespace Syntax.Process is
             // now hold loop-context IR and the closure is still the only
             // thing that could be called instead.
             if !harvested? \/ !harvested.type? \/ harvested.type.is_error then
-                closure.inlined_into = null
-
-                if Driver.COMPILER_ENVIRONMENT.fusion_late_decline then
-                    IO.Std.error.write_line(
-                        "fusion: late decline restoring {function.location}")
-                fi
-
-                let restore_site = RETRY_SITE_STATS.enter("fusion.restore")
-
-                _reset_nested_captures(body)
-
-                _logger.speculate()
-                _symbol_use_locations.speculate()
-
-                function.walk(self)
-
-                _logger.roll_back()
-                _symbol_use_locations.roll_back()
-
-                restore_site.dispose()
+                _rewalk_as_closure(function, closure, body)
 
                 return
             fi
@@ -1261,6 +1341,58 @@ namespace Syntax.Process is
 
             stage.param_local = cast Semantic.Symbols.Variable(local)
             stage.inline_body = block
+        si
+
+        // Put an inlined stage's literal back as an ordinary closure, for a
+        // chain that ends up running as written. Nothing for a stage that
+        // was not inlined.
+        _restore_inlined_stage(stage: PIPE_FUSION_STAGE) is
+            let closure = stage.inlined_closure
+
+            if !closure? \/ !isa Trees.Expressions.FUNCTION(stage.argument) then
+                return
+            fi
+
+            let function = cast Trees.Expressions.FUNCTION(stage.argument)
+            let body = cast Trees.Bodies.EXPRESSION?(function.body)
+
+            if !body? then
+                return
+            fi
+
+            closure.inlined_block = null
+            closure.inlined_body_node = null
+
+            stage.inlined_closure = null
+            stage.param_local = null
+            stage.inline_body = null
+
+            _rewalk_as_closure(function, closure, body)
+        si
+
+        // Walk `function` again as the closure it was written as, after its
+        // body was compiled inline, so its nodes hold closure-context IR.
+        _rewalk_as_closure(function: Trees.Expressions.FUNCTION, closure: Semantic.Symbols.Closure, body: Trees.Bodies.EXPRESSION) is
+            closure.inlined_into = null
+
+            if Driver.COMPILER_ENVIRONMENT.fusion_late_decline then
+                IO.Std.error.write_line(
+                    "fusion: late decline restoring {function.location}")
+            fi
+
+            let restore_site = RETRY_SITE_STATS.enter("fusion.restore")
+
+            _reset_nested_captures(body)
+
+            _logger.speculate()
+            _symbol_use_locations.speculate()
+
+            function.walk(self)
+
+            _logger.roll_back()
+            _symbol_use_locations.roll_back()
+
+            restore_site.dispose()
         si
 
         // Fill in what a fused `join` needs: the interpolation handler the
