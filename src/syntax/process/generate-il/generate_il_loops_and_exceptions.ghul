@@ -507,10 +507,40 @@ namespace Syntax.Process is
             stage_counters: Collections.LIST[TEMP?],
             state: FUSED_LOOP_STATE?
         ) is
+            _setup_fused_stages(fusion, stage_delegates, stage_counters, Collections.LIST[TEMP?](), state)
+        si
+
+        // As above, where the caller holds the skip_while stages' dropping
+        // flags, built by stage position in step with the other lists.
+        _setup_fused_stages(
+            fusion: Syntax.Process.PIPE_FUSION,
+            stage_delegates: Collections.LIST[TEMP?],
+            stage_counters: Collections.LIST[TEMP?],
+            stage_flags: Collections.LIST[TEMP?],
+            state: FUSED_LOOP_STATE?
+        ) is
             let stages = fusion.stages_outermost_first
 
             for index in 0..stages.count do
                 let stage = stages[index]
+
+                // A skip_while's dropping flag starts on the dropping side
+                // of its boundary: a frame field where the loop suspends,
+                // a local otherwise.
+                if stage.is_skip_while then
+                    let true_flag = IR.Values.Literal.NUMBER(1, _innate_symbol_lookup.get_bool_type())
+
+                    if let flag_slot = state?.stage_flag(index) then
+                        add(_build_frame_field_store(state!.frame, flag_slot, true_flag))
+                        stage_flags.add(null)
+                    else
+                        let flag = TEMP(current_block, "fused_skip", true_flag)
+
+                        stage_flags.add(flag)
+                    fi
+                else
+                    stage_flags.add(null)
+                fi
 
                 // In a state machine, a counter or a hoisted delegate lives
                 // in the stage's frame field instead of a local.
@@ -600,6 +630,15 @@ namespace Syntax.Process is
 
         // A stage's counter or delegate, from its frame field in a state
         // machine and from its local otherwise.
+        // A skip_while stage's dropping flag: its frame field where the
+        // loop suspends, its local otherwise.
+        _fused_flag_load(stage_flags: Collections.List[TEMP?], state: FUSED_LOOP_STATE?, index: int) -> Value =>
+            if let flag_slot = state?.stage_flag(index) then
+                _build_frame_field_load(state!.frame, flag_slot)
+            else
+                stage_flags[index]!.load()
+            fi
+
         _fused_counter_load(stage_slots: Collections.List[TEMP?], state: FUSED_LOOP_STATE?, index: int) -> Value =>
             if let stage_slot = state?.stage_field(index) then
                 _build_frame_field_load(state!.frame, stage_slot)
@@ -618,6 +657,19 @@ namespace Syntax.Process is
             element: Value,
             stage_delegates: Collections.List[TEMP?],
             stage_counters: Collections.List[TEMP?],
+            loop: Values.LOOP,
+            state: FUSED_LOOP_STATE?
+        ) -> Value =>
+            _apply_fused_stages(fusion, element, stage_delegates, stage_counters, Collections.LIST[TEMP?](), loop, state)
+
+        // As above, where the caller holds the skip_while stages' dropping
+        // flags, by stage position in step with the other lists.
+        _apply_fused_stages(
+            fusion: Syntax.Process.PIPE_FUSION,
+            element: Value,
+            stage_delegates: Collections.List[TEMP?],
+            stage_counters: Collections.List[TEMP?],
+            stage_flags: Collections.List[TEMP?],
             loop: Values.LOOP,
             state: FUSED_LOOP_STATE?
         ) -> Value is
@@ -696,6 +748,40 @@ namespace Syntax.Process is
                         call_arguments.add(current_value)
 
                         stage_result = IR.Values.Call.CLOSURE(delegate, result_type, func_type.is_action, func_type, call_arguments)
+                    fi
+
+                    if stage.is_take_while then
+                        // The first element the predicate rejects ends the
+                        // loop: every element after it would be rejected
+                        // too.
+                        add(Values.BREAK(loop, BRANCH.Z, stage_result))
+
+                        index = index - 1
+
+                        continue
+                    elif stage.is_skip_while then
+                        // The element is dropped while the flag and the
+                        // predicate both hold, and the flag clears at the
+                        // first element that fails either - so the first
+                        // rejection ends the dropping and every element
+                        // after passes untested.
+                        let flag = _fused_flag_load(stage_flags, state, index)
+                        let dropping = TEMP(
+                            current_block,
+                            "fused_dropping",
+                            IR.Values.ALL_OF(Collections.LIST[Value]([flag, stage_result]), _innate_symbol_lookup.get_bool_type()))
+
+                        add(Values.CONTINUE(loop, BRANCH.NZ, dropping.load()))
+
+                        if let flag_slot = state?.stage_flag(index) then
+                            add(_build_frame_field_store(state!.frame, flag_slot, dropping.load()))
+                        else
+                            stage_flags[index]!.store(dropping.load())
+                        fi
+
+                        index = index - 1
+
+                        continue
                     fi
 
                     if stage.is_filter then
@@ -843,7 +929,7 @@ namespace Syntax.Process is
 
             let state: FUSED_LOOP_STATE? =
                 if frame? /\ `for.iterator_field? then
-                    FUSED_LOOP_STATE(frame, `for.iterator_field!, `for.fused_fields)
+                    FUSED_LOOP_STATE(frame, `for.iterator_field!, `for.fused_fields, null, `for.fused_flag_fields)
                 else
                     null
                 fi
@@ -877,8 +963,9 @@ namespace Syntax.Process is
             // start.
             let stage_delegates = Collections.LIST[TEMP?]()
             let stage_counters = Collections.LIST[TEMP?]()
+            let stage_flags = Collections.LIST[TEMP?]()
 
-            _setup_fused_stages(fusion, stage_delegates, stage_counters, state)
+            _setup_fused_stages(fusion, stage_delegates, stage_counters, stage_flags, state)
 
             let structured = _open_structured_loop(loop)
 
@@ -895,7 +982,7 @@ namespace Syntax.Process is
                 i.current = element
             fi
 
-            let current_value = _apply_fused_stages(fusion, element, stage_delegates, stage_counters, structured, state)
+            let current_value = _apply_fused_stages(fusion, element, stage_delegates, stage_counters, stage_flags, structured, state)
 
             gen_destructuring_initialize(variable.left, current_value)
 
