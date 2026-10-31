@@ -1,0 +1,125 @@
+namespace Semantic.Symbols.UnitTests is
+    use Collections.LIST
+
+    use Source.LOCATION
+
+    use Logging.DIAGNOSTICS_STORE
+    use Semantic.SYMBOL_LOADER
+    use Semantic.SYMBOL_TABLE
+    use Semantic.Symbols.CLASS
+    use Semantic.Symbols.FUSED_ITERABLE_GENERATOR
+    use Semantic.Symbols.LOCAL_VARIABLE
+    use Semantic.Symbols.Variable
+
+    use TestClass = Microsoft.VisualStudio.TestTools.UnitTesting.TestClassAttribute
+    use Test = Microsoft.VisualStudio.TestTools.UnitTesting.TestMethodAttribute
+    use Assertions
+
+    // A generated generator for a fused pipe chain captures nothing: what
+    // its inlined stages read from outside becomes a parameter, declared
+    // once per outer variable and passed where the chain is written.
+    @TestClass()
+    class FUSED_ITERABLE_GENERATOR_TESTS is
+        init() is si
+
+        loc() -> LOCATION => LOCATION("test.ghul", 1, 1, 1, 1)
+
+        loader() -> SYMBOL_LOADER is
+            let logger = DIAGNOSTICS_STORE()
+            let symbol_table = SYMBOL_TABLE(logger)
+
+            return SYMBOL_LOADER(logger, symbol_table, Semantic.FUNCTION_CALLER(symbol_table, IR.VALUE_BOXER(logger)), IR.VALUE_BOXER(logger), Semantic.UnitTests.TEST_INNATE_SYMBOL_LOOKUP())
+        si
+
+        generator() -> FUSED_ITERABLE_GENERATOR is
+            let host = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "HOST", LIST[string](), Semantic.BLOCK_SCOPE())
+
+            return FUSED_ITERABLE_GENERATOR(loc(), host, "$fused_iterable_0", Semantic.BLOCK_SCOPE())
+        si
+
+        outer(name: string) -> Variable is
+            let local_ids = IoC.CONTAINER.instance.local_id_generator
+
+            local_ids.enter_function()
+
+            let variable = LOCAL_VARIABLE(loc(), Semantic.BLOCK_SCOPE(), name)
+
+            local_ids.leave_function()
+
+            variable.set_type(Semantic.Types.ERROR())
+
+            return variable
+        si
+
+        @Test()
+        Calling__load_captured_value__should_read_a_parameter_and_record_no_capture() is
+            let g = generator()
+            let k = outer("k")
+
+            let value = g.load_captured_value(loc(), k, loader())
+
+            is_true(isa IR.Values.Load.LOCAL_ARGUMENT(value))
+            are_equal(1, g.passed.count)
+            are_same(k, g.passed[0].outer)
+            are_equal(0, g.captured_values?.count ?? 0)
+        si
+
+        @Test()
+        Calling__load_captured_value__twice_for_one_variable_should_declare_one_parameter() is
+            let g = generator()
+            let k = outer("k")
+            let l = outer("l")
+
+            g.load_captured_value(loc(), k, loader())
+            g.load_captured_value(loc(), l, loader())
+            g.load_captured_value(loc(), k, loader())
+
+            are_equal(2, g.passed.count)
+            are_same(k, g.passed[0].outer)
+            are_same(l, g.passed[1].outer)
+        si
+    si
+
+    // A call retargeted at a generated function keeps what the source
+    // wrote, for what judges the call as written.
+    @TestClass()
+    class CALL_GLOBAL_RETARGET_TESTS is
+        init() is si
+
+        loc() -> LOCATION => LOCATION("test.ghul", 1, 1, 1, 1)
+
+        function(name: string) -> Semantic.Symbols.Function is
+            let owner = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "OWNER", LIST[string](), Semantic.BLOCK_SCOPE())
+            let f = Semantic.Symbols.STATIC_METHOD(loc(), loc(), owner, name, Semantic.BLOCK_SCOPE())
+
+            f.set_return_type(Semantic.Types.ERROR())
+
+            return f
+        si
+
+        @Test()
+        Calling__retarget__should_keep_the_written_function_and_arguments() is
+            let written = function("written")
+            let generated = function("generated")
+            let written_arguments = LIST[IR.Values.Value]([cast IR.Values.Value(IR.Values.DUMMY(Semantic.Types.ERROR(), loc()))])
+            let call = IR.Values.Call.GLOBAL(written, written_arguments, Semantic.Types.ERROR())
+
+            call.retarget(generated, LIST[IR.Values.Value]())
+
+            are_same(generated, call.function)
+            are_same(written, call.written_function)
+            are_same(written_arguments, call.written_arguments)
+        si
+
+        @Test()
+        Calling__retarget__twice_should_keep_what_was_first_written() is
+            let written = function("written")
+            let call = IR.Values.Call.GLOBAL(written, LIST[IR.Values.Value](), Semantic.Types.ERROR())
+
+            call.retarget(function("first"), LIST[IR.Values.Value]())
+            call.retarget(function("second"), LIST[IR.Values.Value]())
+
+            are_same(written, call.written_function)
+        si
+    si
+si
