@@ -866,6 +866,10 @@ jobs:
 
     timeout-minutes: 45
 
+    outputs:
+      core: ${{ steps.libraries.outputs.core }}
+      runtime: ${{ steps.libraries.outputs.runtime }}
+
     steps:
     - uses: actions/checkout@v7
 
@@ -937,6 +941,81 @@ jobs:
         path: |
           ghul-compiler-wasm.tar.gz
           ghul-compiler-wasm.tar.gz.sha256
+
+  # The analysis tests again, against the compiler the wasm bootstrap built,
+  # run under Node with the library sources it compiles in place of
+  # assemblies: the analyser a machine with no .NET runs. Tests of what
+  # that analyser does not advertise, or whose fixture is a .NET assembly,
+  # skip themselves.
+  wasm_analysis_tests:
+    needs: [version, bootstrap, wasm_bootstrap]
+    if: needs.version.outputs.full_suite == 'true'
+    name: Run analysis tests on wasm
+
+    runs-on: ubuntu-latest
+
+    timeout-minutes: 15
+
+    steps:
+    - uses: actions/checkout@v7
+
+    - name: Set up .NET 10
+      uses: actions/setup-dotnet@v6
+      with:
+        dotnet-version: '10.0.x'
+
+    - name: Set up Node
+      uses: actions/setup-node@v7
+      with:
+        node-version: '24'
+
+    - name: Download ghul.compiler package
+      uses: actions/download-artifact@v8
+      with:
+        name: ghul-compiler-package
+        path: nupkg
+
+    - name: Download the wasm-built compiler
+      uses: actions/download-artifact@v8
+      with:
+        name: ghul-compiler-wasm
+        path: wasm-compiler-archive
+
+    - name: Restore local .NET tools
+      run: dotnet tool restore
+
+    - name: Install the freshly-built compiler
+      run: dotnet tool uninstall --local ghul.compiler || true; dotnet tool install --local ghul.compiler --version ${{ needs.version.outputs.package }} --add-source nupkg
+
+    - name: Checkout ghul-core
+      uses: actions/checkout@v7
+      with:
+        repository: ghul-lang/ghul-core
+        path: libraries/ghul-core
+        ref: ${{ needs.wasm_bootstrap.outputs.core }}
+
+    - name: Checkout ghul-runtime
+      uses: actions/checkout@v7
+      with:
+        repository: ghul-lang/ghul-runtime
+        path: libraries/ghul-runtime
+        ref: ${{ needs.wasm_bootstrap.outputs.runtime }}
+
+    - name: Unpack the compiler and list the library sources
+      shell: bash
+      run: |
+        set -euo pipefail
+        mkdir -p wasm-compiler
+        tar -C wasm-compiler -xzf wasm-compiler-archive/ghul-compiler-wasm.tar.gz
+        build/llvm-self-sources.sh "${{ runner.temp }}/wasm-libraries" libraries/ghul-core libraries/ghul-runtime
+
+    # A test that hangs is stopped and named after five minutes rather than
+    # holding the job until its timeout.
+    - name: Run analysis tests
+      env:
+        ANALYSIS_TESTS_WASM_COMPILER: ${{ github.workspace }}/wasm-compiler/ghul.mjs
+        ANALYSIS_TESTS_WASM_LIBRARIES: ${{ runner.temp }}/wasm-libraries/libraries.rsp
+      run: dotnet test analysis-tests -p:SkipCompilerProjectRef=true --blame-hang --blame-hang-timeout 5m
 
   # The wasm integration tests compare what the compiler said and the text
   # form it wrote, but no engine reads the modules. This builds each one
@@ -1816,7 +1895,7 @@ jobs:
   # then a skipped job satisfies it. This job runs regardless and checks
   # that nothing was skipped that should have run.
   gate:
-    needs: [version, bootstrap, unit_tests, unit_tests_gate, analysis_tests, llvm_self_type_check, llvm_bootstrap, wasm_bootstrap, integration_tests, wasm_validation, llvm_tests, llvm_static, cross_assembly_tests, bare_invocation_test, native_aot_test, runtime_tests, examples_tests, format_round_trip, rosetta_tests]
+    needs: [version, bootstrap, unit_tests, unit_tests_gate, analysis_tests, llvm_self_type_check, llvm_bootstrap, wasm_bootstrap, wasm_analysis_tests, integration_tests, wasm_validation, llvm_tests, llvm_static, cross_assembly_tests, bare_invocation_test, native_aot_test, runtime_tests, examples_tests, format_round_trip, rosetta_tests]
     name: Gate
 
     if: always()
