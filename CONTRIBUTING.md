@@ -118,12 +118,12 @@ compiler's own emission looks like.
 
 ## Testing
 
-Everything below must pass before a pull request can merge. A pull request's
-own CI run is the entry check for the merge queue - the bootstrap, with the
-unit tests running beside it - and the merge queue then runs all of it on the
-pull request merged with `main` and with anything queued ahead of it, before
-the merge happens. Run what is relevant to your change locally; there is no
-need to run the whole suite yourself, because the queue will.
+Everything below must pass before a pull request can merge: its own CI run
+runs all of it, on the pull request merged with `main`. The branch has to be
+up to date with `main` at the merge, so the run's result is about the very
+tree that lands, and the release build on `main` publishes the packages that
+run built and tested. Run what is relevant to your change locally; there is
+no need to run the whole suite yourself, because CI will.
 
 | Suite | Command | Time | Notes |
 |---|---|---|---|
@@ -278,9 +278,12 @@ Other things worth knowing:
 - Keep the title under about seventy characters. Don't append the pull request
   number - GitHub does that on merge.
 - Every pull request needs a passing CI run and an approving review before it
-  can enter the merge queue, which tests it against `main` as it will land
-  and merges it as one squashed commit. Pull requests that are ready at the
-  same time are tested and released together.
+  merges, as one squashed commit. The branch must be up to date with `main`
+  when it merges - GitHub disables the merge button until it is, and updating
+  the branch runs the suite again on the new combination - so prefer waiting
+  for, or stacking on, an open pull request over racing one. A change that
+  builds on another open pull request goes up as a stacked pull request on
+  top of it, which GitHub retargets at `main` when the one beneath merges.
 - Source files use Unix line endings. The one deliberate exception is
   `integration-tests/parse/carriage-returns/test.ghul`, which is test data.
 - If a test fails and you cannot see how your change caused it, say so in the
@@ -316,10 +319,10 @@ knowing before they surprise you:
   for a while. This is normal and is not a problem with your branch.
 - **The tests run on GitHub's runners rather than this repository's**, so they
   are slower than the timings above. Everything else about them is the same, and
-  the full suite still has to pass in the merge queue.
-- **Two jobs are skipped.** GitHub withholds repository secrets from a fork - 
-  correctly, since anyone can open a pull request. The automated code review and
-  the beta package publish both need them, so both sit out. A maintainer reviews
+  the full suite still has to pass before the pull request merges.
+- **One job is skipped.** GitHub withholds repository secrets from a fork -
+  correctly, since anyone can open a pull request. The automated code review
+  needs them, so it sits out. A maintainer reviews
   your change by hand instead, which is also how it gets the approval it needs to
   merge.
 
