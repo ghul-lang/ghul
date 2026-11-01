@@ -620,7 +620,7 @@ namespace Syntax.Process is
                 // and it is that type whose addition has to be the `add`
                 // instruction.
                 if consumer_kind =~ "sum_by" then
-                    if !_is_add_instruction_type(result_type) then
+                    if !_instruction_scalar(result_type)? then
                         return _decline_consumer(call, recognizer, consumer_kind, "sum-element-not-add-instruction")
                     fi
 
@@ -658,7 +658,7 @@ namespace Syntax.Process is
                 // whose `+` is an operator method - decimal, bigint, an
                 // INumber implementor of its own - cannot be added that
                 // way, and keeps the runtime's sum.
-                if !_is_add_instruction_type(built.final.type) then
+                if !_instruction_scalar(built.final.type)? then
                     return _decline_consumer(call, recognizer, consumer_kind, "sum-element-not-add-instruction")
                 fi
 
@@ -741,27 +741,15 @@ namespace Syntax.Process is
                 // from, so it is the one every orderable type declares -
                 // and reads the answer against zero. A type with neither
                 // keeps the runtime's loop.
-                if _is_compare_instruction_type(key_type) then
+                if let scalar = _instruction_scalar(key_type) then
                     fused.extremum_better =
-                        IR.Values.COMPARE(comparison, candidate, stored, _is_unsigned_key(key_type), _innate_symbol_lookup.get_bool_type())
+                        IR.Values.COMPARE(comparison, candidate, stored, _is_unsigned_scalar(scalar), _innate_symbol_lookup.get_bool_type())
                 else
-                    let order =
-                        compile_operators.resolve_operator_value(
-                            call.location,
-                            "<>",
-                            Collections.LIST[Semantic.Types.Type]([key_type, key_type]))
+                    let ordered = compile_operators.build_order(call.location, key_type, candidate, stored)
 
-                    if !order? then
+                    if !ordered? then
                         return _decline_consumer(call, recognizer, consumer_kind, "extremum-key-not-orderable")
                     fi
-
-                    let ordered =
-                        compile_operators._build_operator_call(
-                            order!,
-                            "<>",
-                            candidate,
-                            stored,
-                            call.location)
 
                     fused.extremum_better =
                         IR.Values.COMPARE(
@@ -1686,80 +1674,28 @@ namespace Syntax.Process is
             return true
         si
 
-        // Whether `type`'s addition is the `add` instruction, which is what
-        // a fused sum emits. It is, for every integer width and both float
-        // widths: the compiler emits a bare `add` for each of them, narrow
-        // ones included. `decimal` and `bigint` are not here because their
-        // addition is a call to the type's own operator, and neither is a
+        // The scalar kind of `type` where the arithmetic and compare
+        // instructions work on it directly, and null otherwise. They do
+        // for every integer width and both float widths, narrow ones
+        // included: the compiler emits a bare `add` or compare for each
+        // of them. `decimal` and `bigint` are not scalars here because
+        // their operators are calls to the type's own, and neither is a
         // type parameter, whose instantiation is not known here.
-        _is_add_instruction_type(type: Type?) -> bool is
-            if !type? then
-                return false
+        _instruction_scalar(type: Type?) -> IR.Scalar? is
+            if let scalar = _value_converter.scalar(type) /\ scalar != IR.Scalar.BOOL /\ scalar != IR.Scalar.CHAR then
+                return scalar
             fi
 
-            for addable in
-                [
-                    _innate_symbol_lookup.get_byte_type(),
-                    _innate_symbol_lookup.get_ubyte_type(),
-                    _innate_symbol_lookup.get_short_type(),
-                    _innate_symbol_lookup.get_ushort_type(),
-                    _innate_symbol_lookup.get_int_type(),
-                    _innate_symbol_lookup.get_uint_type(),
-                    _innate_symbol_lookup.get_long_type(),
-                    _innate_symbol_lookup.get_ulong_type(),
-                    _innate_symbol_lookup.get_word_type(),
-                    _innate_symbol_lookup.get_uword_type(),
-                    _innate_symbol_lookup.get_single_type(),
-                    _innate_symbol_lookup.get_double_type()
-                ]
-            do
-                if type.matches(addable) then
-                    return true
-                fi
-            od
-
-            return false
-        si
-        // As _is_add_instruction_type, for the relational compare: every
-        // scalar the compare instruction orders.
-        _is_compare_instruction_type(type: Type?) -> bool is
-            if !type? then
-                return false
-            fi
-
-            for orderable in
-                [
-                    _innate_symbol_lookup.get_byte_type(),
-                    _innate_symbol_lookup.get_ubyte_type(),
-                    _innate_symbol_lookup.get_short_type(),
-                    _innate_symbol_lookup.get_ushort_type(),
-                    _innate_symbol_lookup.get_int_type(),
-                    _innate_symbol_lookup.get_uint_type(),
-                    _innate_symbol_lookup.get_long_type(),
-                    _innate_symbol_lookup.get_ulong_type(),
-                    _innate_symbol_lookup.get_word_type(),
-                    _innate_symbol_lookup.get_uword_type(),
-                    _innate_symbol_lookup.get_single_type(),
-                    _innate_symbol_lookup.get_double_type()
-                ]
-            do
-                if type.matches(orderable) then
-                    return true
-                fi
-            od
-
-            return false
+            return null
         si
 
-        // Whether an instruction-ordered key type is one of the unsigned
-        // widths, whose compare is the unsigned instruction.
-        _is_unsigned_key(type: Type) -> bool =>
-            type.matches(_innate_symbol_lookup.get_ubyte_type()) \/
-            type.matches(_innate_symbol_lookup.get_ushort_type()) \/
-            type.matches(_innate_symbol_lookup.get_uint_type()) \/
-            type.matches(_innate_symbol_lookup.get_ulong_type()) \/
-            type.matches(_innate_symbol_lookup.get_uword_type())
-
+        // Whether an instruction scalar is one of the unsigned widths,
+        // whose compare is the unsigned instruction.
+        _is_unsigned_scalar(scalar: IR.Scalar) -> bool =>
+            case scalar
+            when IR.Scalar.UINT8, IR.Scalar.UINT16, IR.Scalar.UINT32, IR.Scalar.UINT64, IR.Scalar.UINT_NATIVE then true
+            else false
+            esac
 
         // The one of `type` for a fused `product`, where the runtime has a
         // `product` over it and its `*` is the multiply instruction; null
