@@ -1,6 +1,40 @@
 namespace IR.Values is
     use Semantic.Types.Type
 
+    // What one stage of a fused chain does with each element that
+    // reaches it.
+    enum FusedStageKind is
+        // Passes on the result of its function applied to the element.
+        MAP,
+
+        // Passes the element on where its predicate accepts it.
+        FILTER,
+
+        // Passes on the first so many elements, counted once into a
+        // running counter; the loop stops pulling once that runs out.
+        TAKE,
+
+        // Drops the first so many elements, counted as a take's are, and
+        // passes on the rest.
+        SKIP,
+
+        // Passes elements on until its predicate first rejects one, which
+        // ends the loop.
+        TAKE_WHILE,
+
+        // Drops elements while its predicate accepts them, then passes
+        // the rest on untested.
+        SKIP_WHILE,
+
+        // Passes on each element paired with a running count, as an
+        // INDEXED_VALUE.
+        INDEX,
+
+        // Passes the element on unchanged: a memo, which a fused loop
+        // reads through.
+        NOOP
+    si
+
     // One map/filter stage of a fused-consumer loop. The stage's lambda
     // delegate is hoisted into a local (built once) and `apply` invokes it
     // on the current element, yielding either a bool (a `filter` stage -
@@ -15,7 +49,15 @@ namespace IR.Values is
     // says which are live.
     @suppress("field-definite-assignment")
     class FUSED_CONSUMER_STAGE is
-        is_filter: bool public
+        kind: FusedStageKind
+
+        is_filter: bool => kind == FusedStageKind.FILTER
+        is_take: bool => kind == FusedStageKind.TAKE
+        is_skip: bool => kind == FusedStageKind.SKIP
+        is_take_while: bool => kind == FusedStageKind.TAKE_WHILE
+        is_skip_while: bool => kind == FusedStageKind.SKIP_WHILE
+        is_index: bool => kind == FusedStageKind.INDEX
+
         delegate_local: IR.LOCAL public
         delegate_init: Value public
         apply: Value public
@@ -25,8 +67,6 @@ namespace IR.Values is
         // once into `counter` and each element decrements it (the
         // loop stops pulling once a take's runs out, skip drops the element
         // while its remains). `is_countdown` marks either.
-        is_take: bool public
-        is_skip: bool public
         counter: IR.LOCAL public
         count_init: Value? public
 
@@ -35,14 +75,7 @@ namespace IR.Values is
         // predicate rejects; skip_while drops elements while it accepts
         // them, then passes the rest through, its `skip_flag` saying which
         // side of that boundary the loop is on.
-        is_take_while: bool public
-        is_skip_while: bool public
         skip_flag: IR.LOCAL? public
-
-        // An index stage carries a running counter like a countdown does,
-        // but produces an output local as a map stage does: `apply` builds
-        // the INDEXED_VALUE from the counter and the incoming element.
-        is_index: bool public
 
         // An inlined map/filter stage has no delegate: `param_store`
         // writes the incoming element into the local the stage literal's
@@ -55,31 +88,33 @@ namespace IR.Values is
 
         is_countdown: bool => is_take \/ is_skip
 
-        init(is_filter: bool, delegate_local: IR.LOCAL, delegate_init: Value, apply: Value, output: IR.LOCAL?) is
-            self.is_filter = is_filter
+        init(kind: FusedStageKind, delegate_local: IR.LOCAL, delegate_init: Value, apply: Value, output: IR.LOCAL?) is
+            self.kind = kind
             self.delegate_local = delegate_local
             self.delegate_init = delegate_init
             self.apply = apply
             self.output = output
         si
 
-        init(param_local: IR.LOCAL, param_store: Value, apply: Value, is_filter: bool, output: IR.LOCAL?) is
-            self.is_filter = is_filter
+        init(param_local: IR.LOCAL, param_store: Value, apply: Value, kind: FusedStageKind, output: IR.LOCAL?) is
+            self.kind = kind
             self.param_local = param_local
             self.param_store = param_store
             self.apply = apply
             self.output = output
         si
 
-        init(is_take: bool, is_skip: bool, counter: IR.LOCAL, count_init: Value) is
-            self.is_take = is_take
-            self.is_skip = is_skip
+        init(kind: FusedStageKind, counter: IR.LOCAL, count_init: Value) is
+            self.kind = kind
             self.counter = counter
             self.count_init = count_init
         si
 
+        // An index stage carries a running counter like a countdown does,
+        // but produces an output local as a map stage does: `apply` builds
+        // the INDEXED_VALUE from the counter and the incoming element.
         init(counter: IR.LOCAL, start_init: Value, output: IR.LOCAL, apply: Value) is
-            self.is_index = true
+            kind = FusedStageKind.INDEX
             self.counter = counter
             self.count_init = start_init
             self.output = output
