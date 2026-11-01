@@ -1,6 +1,16 @@
 namespace Syntax.Process is
     use Semantic.Types.Type
 
+    // A stage call recorded as the outermost of a chain nothing reads,
+    // with where it was compiled: the function, closure context and
+    // scope its lowering compiles in again.
+    class CHAIN_ROOT(
+        call: Trees.Expressions.CALL public,
+        function: Semantic.Symbols.Function? public,
+        context: Semantic.ClosureContext public,
+        scope: Semantic.Scope public
+    )
+
     // A pipe chain whose value no consumption site reads - bound to a
     // local, returned, passed to a function fusion has no lowering for -
     // lowered to one call to a generated generator that runs the chain
@@ -10,7 +20,7 @@ namespace Syntax.Process is
         // consumed yet, one list per body being compiled. A stage call is
         // recorded when it compiles, and drops out when an outer stage
         // takes it as its source or a site fuses the chain it is in.
-        _chain_roots: Collections.LIST[Collections.LIST[(call: Trees.Expressions.CALL, function: Semantic.Symbols.Function?, context: Semantic.ClosureContext, scope: Semantic.Scope)]]?
+        _chain_roots: Collections.LIST[Collections.LIST[CHAIN_ROOT]]?
 
         // The generators made for each root, kept across compiles of a
         // body so that a root is only ever given one.
@@ -18,10 +28,10 @@ namespace Syntax.Process is
 
         begin_chain_roots() is
             if !_chain_roots? then
-                _chain_roots = Collections.LIST[Collections.LIST[(call: Trees.Expressions.CALL, function: Semantic.Symbols.Function?, context: Semantic.ClosureContext, scope: Semantic.Scope)]]()
+                _chain_roots = Collections.LIST[Collections.LIST[CHAIN_ROOT]]()
             fi
 
-            _chain_roots.add(Collections.LIST[(call: Trees.Expressions.CALL, function: Semantic.Symbols.Function?, context: Semantic.ClosureContext, scope: Semantic.Scope)]())
+            _chain_roots.add(Collections.LIST[CHAIN_ROOT]())
         si
 
         begin_chain_roots_walk() is
@@ -52,9 +62,7 @@ namespace Syntax.Process is
                 return
             fi
 
-            let role = _chain_stage_role(call)
-
-            if !role? then
+            if !_is_chain_stage(call) then
                 return
             fi
 
@@ -69,7 +77,7 @@ namespace Syntax.Process is
             // its latest compile left it.
             _forget_chain_root(roots, call)
 
-            roots.add((call, _symbol_table.current_function, _symbol_table.current_closure_context, _symbol_table.current_scope))
+            roots.add(CHAIN_ROOT(call, _symbol_table.current_function, _symbol_table.current_closure_context, _symbol_table.current_scope))
         si
 
         // A site has fused the chain `expression` heads, so none of its
@@ -94,7 +102,7 @@ namespace Syntax.Process is
         si
 
         _forget_chain_root(
-            roots: Collections.LIST[(call: Trees.Expressions.CALL, function: Semantic.Symbols.Function?, context: Semantic.ClosureContext, scope: Semantic.Scope)],
+            roots: Collections.LIST[CHAIN_ROOT],
             expression: Trees.Expressions.Expression
         ) is
             for index in 0..roots.count do
@@ -108,33 +116,26 @@ namespace Syntax.Process is
 
         // Whether `call` is a stage a site's chain is peeled through:
         // one of the chain stages, or a memo, which a site elides.
-        _is_peelable_stage(call: Trees.Expressions.CALL) -> bool is
-            if let global_call: IR.Values.Call.GLOBAL = call.value then
-                let role: string mut
+        _is_peelable_stage(call: Trees.Expressions.CALL) -> bool =>
+            PIPE_CONSUMER_KIND.is_stage_role(_fusion_role(call))
 
-                if _innate_symbol_lookup.get_pipes_fusion_functions().try_get_value(global_call.function.root_specialized_from, role ref) then
-                    return PIPE_CONSUMER_KIND.is_stage_role(role)
-                fi
-            fi
+        // Whether `call` is a chain stage other than a memo. A memo is not
+        // a root: a value that is read more than once is what its cache is
+        // for, and a standalone chain is exactly a value that can be.
+        _is_chain_stage(call: Trees.Expressions.CALL) -> bool is
+            let role = _fusion_role(call)
 
-            return false
+            return PIPE_CONSUMER_KIND.is_stage_role(role) /\ role !~ "memo"
         si
 
-        // The fusion role of a call that is a map, filter, take, skip or
-        // index stage, or null. A memo is not one: a value that is read
-        // more than once is what its cache is for, and a standalone chain
-        // is exactly a value that can be.
-        _chain_stage_role(call: Trees.Expressions.CALL) -> string? is
+        // The fusion role of a call to one of the pipe functions fusion
+        // recognises, or null for any other call.
+        _fusion_role(call: Trees.Expressions.CALL) -> string? is
             if let global_call: IR.Values.Call.GLOBAL = call.value then
                 let role: string mut
 
                 if _innate_symbol_lookup.get_pipes_fusion_functions().try_get_value(global_call.function.root_specialized_from, role ref) then
-                    if
-                        role =~ "map" \/ role =~ "filter" \/ role =~ "take" \/ role =~ "skip" \/
-                        role =~ "index" \/ role =~ "take_while" \/ role =~ "skip_while"
-                    then
-                        return role
-                    fi
+                    return role
                 fi
             fi
 
@@ -144,7 +145,7 @@ namespace Syntax.Process is
         // Lower each root the body's last walk left to a call to a
         // generator that runs its chain fused, where the chain is one this
         // can.
-        _lower_chain_roots(roots: Collections.List[(call: Trees.Expressions.CALL, function: Semantic.Symbols.Function?, context: Semantic.ClosureContext, scope: Semantic.Scope)]) is
+        _lower_chain_roots(roots: Collections.List[CHAIN_ROOT]) is
             // Outermost first: a root in a stage of another is compiled
             // again when that stage is inlined, so it is lowered after, in
             // the stage's new home. A root is recorded when its call has
