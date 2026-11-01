@@ -1160,7 +1160,7 @@ namespace Syntax.Process is
                         op.is_skip_while = stage.is_skip_while
 
                         if stage.is_skip_while then
-                            op.skip_flag = IR.LOCAL(".fc_skip.{_next_fused_local_id()}", _innate_symbol_lookup.get_int_type())
+                            op.skip_flag = IR.LOCAL(".fc_skip.{_next_fused_local_id()}", _innate_symbol_lookup.get_bool_type())
                         fi
 
                         ops.add(op)
@@ -1202,7 +1202,7 @@ namespace Syntax.Process is
                     op.is_skip_while = stage.is_skip_while
 
                     if stage.is_skip_while then
-                        op.skip_flag = IR.LOCAL(".fc_skip.{_next_fused_local_id()}", _innate_symbol_lookup.get_int_type())
+                        op.skip_flag = IR.LOCAL(".fc_skip.{_next_fused_local_id()}", _innate_symbol_lookup.get_bool_type())
                     fi
 
                     ops.add(op)
@@ -1274,11 +1274,22 @@ namespace Syntax.Process is
             return result
         si
 
-        // Attempt to inline a stage's `map`/`filter` lambda so the fused
-        // loop runs its body directly, with no delegate or closure
-        // frame. Only literal, single-parameter, expression-bodied
-        // lambdas qualify; anything else keeps the delegate path
-        // (`stage` left unmodified).
+        // Inline a stage's map or filter literal into the fused loop, as
+        // _try_inline_literal does, recording on the stage what the loop
+        // needs to run its body. A stage that cannot be inlined is left as
+        // it was, keeping its delegate.
+        _try_inline_stage(stage: PIPE_FUSION_STAGE) is
+            if let inlined = _try_inline_literal(stage.argument) then
+                stage.inlined_closure = inlined.closure
+                stage.param_local = inlined.param_local
+                stage.inline_body = inlined.body
+            fi
+        si
+
+        // Compile a function literal's body in place, so a fused loop can
+        // run it directly, with no delegate or closure frame. Only literal,
+        // single-parameter, expression-bodied lambdas qualify; anything
+        // else gives null and keeps the delegate path.
         //
         // Mechanism: declare a synthetic local, owned by the enclosing
         // method, for the parameter, then re-walk the body with that
@@ -1291,14 +1302,14 @@ namespace Syntax.Process is
         // wants it, so the closure's own method is never emitted. Only a
         // decline after that walk restores the nodes, by walking the whole
         // lambda again.
-        _try_inline_stage(stage: PIPE_FUSION_STAGE) is
+        _try_inline_literal(argument: Trees.Expressions.Expression?) -> INLINED_LITERAL? is
             let enclosing = _symbol_table.current_function
 
-            if !isa Trees.Expressions.FUNCTION(stage.argument) then
-                return
+            if !isa Trees.Expressions.FUNCTION(argument) then
+                return null
             fi
 
-            let function = cast Trees.Expressions.FUNCTION(stage.argument)
+            let function = cast Trees.Expressions.FUNCTION(argument)
 
             if
                 function.is_recursive \/
@@ -1307,13 +1318,13 @@ namespace Syntax.Process is
                 function.arguments.expressions.count != 1 \/
                 !isa Trees.Bodies.EXPRESSION(function.body)
             then
-                return
+                return null
             fi
 
             let param = function.arguments.expressions[0]
 
             if !isa Trees.Expressions.VARIABLE(param) then
-                return
+                return null
             fi
 
             // A literal that reaches an enclosing generic method's type
@@ -1332,7 +1343,7 @@ namespace Syntax.Process is
                 od
 
                 if isa Semantic.Symbols.Closure(target) then
-                    return
+                    return null
                 fi
             fi
 
@@ -1346,7 +1357,7 @@ namespace Syntax.Process is
             // an unpack in the fused loop; until then the stage keeps
             // the delegate.
             if variable.is_destructuring then
-                return
+                return null
             fi
 
             let param_name = variable.name.name
@@ -1354,19 +1365,19 @@ namespace Syntax.Process is
             let closure = cast Semantic.Symbols.Closure?(_symbol_table.scope_for(function))
 
             if !closure? then
-                return
+                return null
             fi
 
             let param_symbol = closure.find_direct(param_name)
 
             if !param_symbol? \/ !isa Semantic.Types.Typed(param_symbol) then
-                return
+                return null
             fi
 
             let param_type = (cast Semantic.Types.Typed(param_symbol)).type
 
             if !param_type? \/ param_type.is_sentinel \/ param_type.is_error then
-                return
+                return null
             fi
 
             // The parameter local the loop stores each element into takes
@@ -1376,7 +1387,7 @@ namespace Syntax.Process is
             if !param_type.is_settled then
                 Semantic.OBLIGATIONS.defer("inline-stage", param_type, function.location)
 
-                return
+                return null
             fi
 
             // So do the values the literal captures: its walk as a closure
@@ -1388,7 +1399,7 @@ namespace Syntax.Process is
                         if let type = typed.type /\ !type.is_settled then
                             Semantic.OBLIGATIONS.defer("inline-stage", type, function.location)
 
-                            return
+                            return null
                         fi
                     fi
                 od
@@ -1397,7 +1408,7 @@ namespace Syntax.Process is
             let body = cast Trees.Bodies.EXPRESSION?(function.body)
 
             if !body? then
-                return
+                return null
             fi
 
             // The parameter local the fused loop stores each element into.
@@ -1431,7 +1442,7 @@ namespace Syntax.Process is
                 local_id_generator.leave_function()
 
                 if !isa Semantic.Symbols.Variable(declared) \/ !isa Semantic.Types.SettableTyped(declared) then
-                    return
+                    return null
                 fi
 
                 declared.il_name_override = ".fused_param.{_next_fused_local_id()}"
@@ -1476,7 +1487,7 @@ namespace Syntax.Process is
             if !harvested? \/ !harvested.type? \/ harvested.type.is_error then
                 _rewalk_as_closure(function, closure, body)
 
-                return
+                return null
             fi
 
             // The body's IL is emitted into this block by generate-il's
@@ -1488,10 +1499,7 @@ namespace Syntax.Process is
             closure.inlined_block = block
             closure.inlined_body_node = body.expression
 
-            stage.inlined_closure = closure
-
-            stage.param_local = cast Semantic.Symbols.Variable(local)
-            stage.inline_body = block
+            return INLINED_LITERAL(closure, cast Semantic.Symbols.Variable(local), block)
         si
 
         // Inline a consumer's function argument - an any, all, find or
@@ -1506,18 +1514,14 @@ namespace Syntax.Process is
             element: IR.LOCAL,
             consumer_kind: string
         ) is
-            let stage = PIPE_FUSION_STAGE()
+            let inlined = _try_inline_literal(argument)
 
-            stage.argument = argument
-
-            _try_inline_stage(stage)
-
-            if !stage.is_inlined then
+            if !inlined? then
                 return
             fi
 
-            let param = stage.param_local!
-            let body = stage.inline_body!
+            let param = inlined.param_local
+            let body = inlined.body
 
             fused.consumer_arg = null
             fused.consumer_arg_init = null
