@@ -42,9 +42,9 @@ concurrency:
 # is the required check. A push to `main` is the release build, and on the
 # happy path it builds nothing: `version` finds the merged pull request's
 # run, checks that run tested this very tree, carries its artefacts, and only
-# the publish runs. The test jobs are gated on `version`'s `build` and
-# `full_suite` outputs, and `gate` is where the shapes are reconciled into
-# one verdict - see `version` for the reasoning and the fallback.
+# the publish runs. The test jobs are gated on `version`'s `build` output,
+# and `gate` is where the shapes are reconciled into one verdict - see
+# `version` for the reasoning and the fallback.
 #
 # This is a default for well-meant contributions, not a control. A `pull_request`
 # run uses the workflow file from the pull request itself, so a contributor can
@@ -75,7 +75,6 @@ jobs:
       package: ${{ steps.version.outputs.package }}
       compiler: ${{ steps.compiler_version.outputs.compiler }}
       build: ${{ steps.compiler_version.outputs.build }}
-      full_suite: ${{ steps.compiler_version.outputs.full_suite }}
 
     permissions:
       contents: read
@@ -122,10 +121,9 @@ jobs:
         prerelease: ${{ github.event_name == 'pull_request' && github.base_ref != 'main' && format('beta.{0}', github.run_number) || '' }}
 
     # Resolve the ghul.compiler version that bootstraps this build, and
-    # decide what this run owes: `build` says whether it bootstraps and
-    # tests at all, `full_suite` whether it runs the whole suite. The two
-    # agree everywhere except a release build that carries a pull request's
-    # artefacts, where both are false and nothing is built at all.
+    # decide what this run owes: `build` says whether it bootstraps and runs
+    # the whole suite at all. It is false only on a release build that carries
+    # a pull request's artefacts, where nothing is built.
     #
     # On a pull request: the latest published version that is actually
     # downloadable from NuGet (skipping a release still propagating), and
@@ -179,7 +177,6 @@ jobs:
 
         compiler=""
         build=true
-        full_suite=true
         case "${{ github.event_name }}" in
         pull_request)
           compiler=$(resolve_latest)
@@ -220,7 +217,6 @@ jobs:
              && [ -f "carried/wasm/ghul-compiler-wasm.tar.gz" ]; then
             compiler=$(tr -d '[:space:]' < carried/bootstrap-compiler-version.txt)
             build=false
-            full_suite=false
             echo "carrying the packages pull request #${pr} built and tested in run ${run}, whose tested tree is this commit's"
           else
             echo "::warning::no successful pull request run tested tree ${tree} and packed ${{ steps.version.outputs.package }} (pull request ${pr:-not found}, run ${run:-not found}); building and testing here"
@@ -231,7 +227,6 @@ jobs:
 
         echo "compiler=${compiler}" >> "$GITHUB_OUTPUT"
         echo "build=${build}" >> "$GITHUB_OUTPUT"
-        echo "full_suite=${full_suite}" >> "$GITHUB_OUTPUT"
         echo "Bootstrap compiler: ${compiler}"
         echo "Bootstrap compiler: \`${compiler}\`" >> "$GITHUB_STEP_SUMMARY"
         if [ "${build}" = false ]; then
@@ -298,7 +293,7 @@ jobs:
   unit_tests:
     name: Run unit tests
     needs: [version, bootstrap]
-    if: needs.version.outputs.full_suite == 'true'
+    if: needs.version.outputs.build == 'true'
     runs-on: ubuntu-latest
 
     timeout-minutes: 10
@@ -694,7 +689,7 @@ jobs:
   # only, as each pass is a full native build of the compiler.
   llvm_bootstrap:
     needs: [version, bootstrap]
-    if: needs.version.outputs.full_suite == 'true'
+    if: needs.version.outputs.build == 'true'
     name: Bootstrap the compiler on llvm
 
     runs-on: ubuntu-latest
@@ -779,7 +774,7 @@ jobs:
   # the two passes must write the same module and loader.
   wasm_bootstrap:
     needs: [version, bootstrap]
-    if: needs.version.outputs.full_suite == 'true'
+    if: needs.version.outputs.build == 'true'
     name: Bootstrap the compiler on wasm
 
     runs-on: ubuntu-latest
@@ -863,7 +858,7 @@ jobs:
   # again with the bootstrapped compiler and has Node validate it.
   wasm_validation:
     needs: [version, bootstrap]
-    if: needs.version.outputs.full_suite == 'true'
+    if: needs.version.outputs.build == 'true'
     name: Validate wasm modules
 
     runs-on: ubuntu-latest
@@ -904,7 +899,7 @@ jobs:
   # llvm_static.
   llvm_tests:
     needs: [version, bootstrap]
-    if: needs.version.outputs.full_suite == 'true'
+    if: needs.version.outputs.build == 'true'
     name: Run llvm tests (${{ matrix.optimisation }})
 
     runs-on: ubuntu-latest
@@ -1020,7 +1015,7 @@ jobs:
   # a separate job because the SDK image llvm_tests runs in has no docker.
   llvm_static:
     needs: [version, llvm_tests]
-    if: needs.version.outputs.full_suite == 'true'
+    if: needs.version.outputs.build == 'true'
     name: Run llvm programs in an empty image (${{ matrix.optimisation }})
 
     runs-on: ubuntu-latest
@@ -1057,7 +1052,7 @@ jobs:
   # #2288 lists.
   format_round_trip:
     needs: [version, bootstrap]
-    if: needs.version.outputs.full_suite == 'true'
+    if: needs.version.outputs.build == 'true'
     name: Run formatter round trip
 
     runs-on: ubuntu-latest
@@ -1102,7 +1097,7 @@ jobs:
   # emission surface too.
   cross_assembly_shards:
     needs: [version, bootstrap]
-    if: needs.version.outputs.full_suite == 'true'
+    if: needs.version.outputs.build == 'true'
     name: Cross-assembly shard
 
     # Each test is a `dotnet build`, so the suite is MSBuild-bound and
@@ -1181,14 +1176,14 @@ jobs:
     - name: Check every shard passed
       env:
         RESULT: ${{ needs.cross_assembly_shards.result }}
-        FULL_SUITE: ${{ needs.version.outputs.full_suite }}
+        BUILD: ${{ needs.version.outputs.build }}
       run: |
         echo "shards: $RESULT"
-        [ "$RESULT" = success ] || { [ "$RESULT" = skipped ] && [ "$FULL_SUITE" != true ]; }
+        [ "$RESULT" = success ] || { [ "$RESULT" = skipped ] && [ "$BUILD" != true ]; }
 
   bare_invocation_test:
     needs: [version, bootstrap]
-    if: needs.version.outputs.full_suite == 'true'
+    if: needs.version.outputs.build == 'true'
     name: Run bare invocation test
 
     runs-on: ubuntu-latest
@@ -1242,7 +1237,7 @@ jobs:
 
   native_aot_test:
     needs: [version, bootstrap]
-    if: needs.version.outputs.full_suite == 'true'
+    if: needs.version.outputs.build == 'true'
     name: Run Native AOT test
 
     runs-on: ubuntu-latest
@@ -1519,7 +1514,7 @@ jobs:
   # to compile against what the bootstrapped compiler produced.
   examples_tests:
     needs: [version, bootstrap]
-    if: needs.version.outputs.full_suite == 'true'
+    if: needs.version.outputs.build == 'true'
     name: Run examples tests
 
     runs-on: ubuntu-latest
@@ -1607,7 +1602,7 @@ jobs:
   # the integration shards.
   rosetta_shards:
     needs: [version, bootstrap]
-    if: needs.version.outputs.full_suite == 'true'
+    if: needs.version.outputs.build == 'true'
     name: Rosetta Code shard
 
     runs-on: ubuntu-latest
@@ -1722,10 +1717,10 @@ jobs:
     - name: Check every shard passed
       env:
         RESULT: ${{ needs.rosetta_shards.result }}
-        FULL_SUITE: ${{ needs.version.outputs.full_suite }}
+        BUILD: ${{ needs.version.outputs.build }}
       run: |
         echo "shards: $RESULT"
-        [ "$RESULT" = success ] || { [ "$RESULT" = skipped ] && [ "$FULL_SUITE" != true ]; }
+        [ "$RESULT" = success ] || { [ "$RESULT" = skipped ] && [ "$BUILD" != true ]; }
 
   # The one verdict the publish jobs wait on. On a pull request, and on a
   # release build that runs the suite itself, every test job ran and must
