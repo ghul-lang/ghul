@@ -1784,9 +1784,12 @@ jobs:
 
     # Declared rather than inherited: this repository's default workflow token
     # is read-only, and pushing to the GitHub feed needs packages:write.
+    # id-token lets the job ask GitHub for the short-lived token nuget.org
+    # trades for a publishing key; nothing here holds a NuGet secret.
     permissions:
       contents: read
       packages: write
+      id-token: write
 
     if: ${{ !cancelled() && needs.gate.result == 'success' && github.event_name == 'push' }}
 
@@ -1810,20 +1813,31 @@ jobs:
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+    # Each key nuget.org hands back is single use and lasts an hour, so every
+    # push to nuget.org has its own exchange immediately before it.
+    - name: Ask nuget.org for a publishing key for the compiler
+      id: login_compiler
+      uses: NuGet/login@v1
+      with:
+        # The nuget.org profile name, which is not an email address.
+        user: ${{ secrets.NUGET_USER }}
+
     - name: Publish release package to NuGet
-      run: dotnet nuget push ./nupkg/ghul.compiler.${{ needs.version.outputs.package }}.nupkg -k ${NUGET_TOKEN} -s https://api.nuget.org/v3/index.json --skip-duplicate --no-symbols
-      env:
-        NUGET_TOKEN: ${{ secrets.NUGET_TOKEN }}
+      run: dotnet nuget push ./nupkg/ghul.compiler.${{ needs.version.outputs.package }}.nupkg --api-key ${{ steps.login_compiler.outputs.NUGET_API_KEY }} --source https://api.nuget.org/v3/index.json --skip-duplicate --no-symbols
 
     - name: Publish analysis protocol release package to GitHub
       run: dotnet nuget push ./nupkg/ghul.analysis.protocol.${{ needs.version.outputs.package }}.nupkg -k ${GITHUB_TOKEN} -s https://nuget.pkg.github.com/ghul-lang/index.json --skip-duplicate --no-symbols
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+    - name: Ask nuget.org for a publishing key for the analysis protocol
+      id: login_protocol
+      uses: NuGet/login@v1
+      with:
+        user: ${{ secrets.NUGET_USER }}
+
     - name: Publish analysis protocol release package to NuGet
-      run: dotnet nuget push ./nupkg/ghul.analysis.protocol.${{ needs.version.outputs.package }}.nupkg -k ${NUGET_TOKEN} -s https://api.nuget.org/v3/index.json --skip-duplicate --no-symbols
-      env:
-        NUGET_TOKEN: ${{ secrets.NUGET_TOKEN }}
+      run: dotnet nuget push ./nupkg/ghul.analysis.protocol.${{ needs.version.outputs.package }}.nupkg --api-key ${{ steps.login_protocol.outputs.NUGET_API_KEY }} --source https://api.nuget.org/v3/index.json --skip-duplicate --no-symbols
 
   create_release:
     needs: [version, gate, publish_release_package]
