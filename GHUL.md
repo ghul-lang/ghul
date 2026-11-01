@@ -367,19 +367,22 @@ let band = "top";
 
 The text inside the braces is an *expression*. So a string literal inside the braces is written normally: `"{format("hello")}"` needs no escapes for its inner quotes. To write a literal brace, double it: `"{{"` and `"}}"`. The escapes are `\t`, `\n`, `\r`, `\\`, and `\u` followed by exactly four hex digits for any character code. So the euro sign is `"\u20AC"` and the escape character is `"\u001B"`. Four hex digits are one UTF-16 code unit, which is one `char`. Write a code point above `U+FFFF` as its surrogate pair: `"\uD83D\uDE00"` is one grinning face, and is two `char` values. The `\u` escape always takes exactly four digits, so it never takes the text after it: `"\u0041cat"` is `Acat`. Any other character after a `\` is that character, so `\"` is a quote.
 
-An **array** type is written `E[]`, or `ARRAY[E]`, the same type under its own name. An array has a fixed size and is read-only: it has no assigning indexer. An array's length is its `count`. An array literal is a comma-separated list in square brackets. Its element type is the most specific type that every element is compatible with, or `object` if there is no closer common ancestor:
+A **list** of `E` is written `E[]`. `E[]` is `Collections.List[E]`, the .NET `IReadOnlyList<E>`: anything with a `count` and a read-only indexer. The two spellings are the same type, so either is valid wherever the other is, and diagnostics, hover and inlays show `E[]`. An **array** type is written `ARRAY[E]`. An array is a list with a fixed size: it has no assigning indexer, and its length is its `count`. An array literal is a comma-separated list in square brackets. Its element type is the most specific type that every element is compatible with, or `object` if there is no closer common ancestor:
 
 ```ghul
-let primes = [2, 3, 5, 7, 11];          // int[]
-let mixed = ["frog", 1234, 12.5];       // object[]
+let primes = [2, 3, 5, 7, 11];          // ARRAY[int]
+let mixed = ["frog", 1234, 12.5];       // ARRAY[object]
 let p = primes[2];                      // indexing, 0-based
+let names: string[] = ["ada", "grace"]; // an array is a list
 ```
+
+Write `E[]` wherever a value is only read: a parameter, a field, a return type. Write `ARRAY[E]` where the value must be an array: a .NET method that takes or returns one, a `typeof`, a `cast`.
 
 The empty array literal `[]` is valid wherever the context gives the element type. These contexts are an explicitly typed `let`, a `return`, the parameter type of a call argument, a sibling element in an enclosing array literal, and the other arms of an `if` or `case` expression that the `[]` is an arm of. An untyped immutable local initialized with `[]` takes its element type from its later uses in the same body. Examples are passing the local where an array is expected, and putting it in an array literal that is passed where an array is expected. When no use gives the element type, the element type is `object`.
 
 A non-empty array literal passed as an argument can be built at the type of its parameter. This happens when each element converts to the parameter's element type, but the literal built from its elements alone does not convert to the parameter type. Tuples are the common case, because tuples are value types and value types are invariant. For example, passed to a parameter of type `(name: string, operation: Operation[string]){}`, `[("+", APPEND())]` is built as a sequence of `(name: string, operation: Operation[string])` pairs, with each tuple converted as any tuple value converts. It is not built as a `(string, APPEND)[]`. For a generic parameter, the compiler matches the parameter after the call has bound its type arguments.
 
-A sequence of `E` is anything a `for` loop can iterate. Its type is written `E{}`. `E{}` is `Collections.Iterable[E]`, the .NET `IEnumerable<E>`, in the same way that `E[]` is an array. The two spellings are the same type, so either is valid wherever the other is. Diagnostics, hover and inlays show `E{}`. The braces follow the element type in every type position, and combine with the other suffixes: `int{}?` is an optional sequence, `int[]{}` is a sequence of arrays and `int{}{}` is a sequence of sequences. Put a tuple type or function type in parentheses first, as for `[]`:
+A sequence of `E` is anything a `for` loop can iterate. Its type is written `E{}`. `E{}` is `Collections.Iterable[E]`, the .NET `IEnumerable<E>`, in the same way that `E[]` is `Collections.List[E]`. The two spellings are the same type, so either is valid wherever the other is. Diagnostics, hover and inlays show `E{}`. The braces follow the element type in every type position, and combine with the other suffixes: `int{}?` is an optional sequence, `int[]{}` is a sequence of lists and `int{}{}` is a sequence of sequences. Put a tuple type or function type in parentheses first, as for `[]`:
 
 ```ghul
 total(values: int{}) -> int => values |> sum()
@@ -498,14 +501,14 @@ A program starts at a function named `entry`. In a file with no namespace, the p
 
 An `entry` function can declare any subset of two parameters. The compiler recognises each parameter by its declared type, not its name:
 
-- a `string[]` holds the command-line arguments
+- a `string[]`, or an `ARRAY[string]`, holds the command-line arguments
 - a `Ghul.Environment` gives access to the process environment. `Ghul.Environment` is a ghul-runtime trait that reads and writes the process's environment variables.
 
 So `entry()`, `entry(args: string[])`, `entry(env: Ghul.Environment)` and `entry(args: string[], env: Ghul.Environment)` are all valid, with the parameters in either order. The compiler also recognises the environment parameter when its type is named through a `use`: `use Ghul;` then `entry(env: Environment)`, `use Ghul.Environment;` then `entry(env: Environment)`, or the alias `use X = Ghul.Environment;` then `entry(env: X)`. `entry` returns either nothing or an `int` exit status.
 
-Only the environment parameter changes how the program starts. When `entry` declares it, the compiler synthesises a private wrapper with the real entry-point signature: no parameters, or one `string[]` when `entry` also declares the arguments. The wrapper resolves `Ghul.Environment` and calls `entry`. When `entry` does not declare the environment parameter, `entry` compiles directly to the program's real entry point.
+The real entry-point signature takes no parameters or one `ARRAY[string]`. When `entry` declares the environment parameter, or declares its arguments as a `string[]`, the compiler synthesises a private wrapper with that signature, which resolves `Ghul.Environment`, and calls `entry`. Otherwise `entry` compiles directly to the program's real entry point.
 
-This recognition applies only to a global function found by name: the default `entry`, or the name that `--entry` gives. It does not apply to a class's static method used as the entry point. Such a method takes a `string[]` or no parameters.
+This recognition applies only to a global function found by name: the default `entry`, or the name that `--entry` gives. It does not apply to a class's static method used as the entry point. Such a method takes an `ARRAY[string]` or no parameters.
 
 A function with the build's entry-point name and any other signature is an error at the function. The error names the part of the signature that is invalid:
 
@@ -1777,7 +1780,7 @@ See <https://ghul.dev/functional-programming.html>.
 The collection types are:
 
 - `Collections.Iterable[T]`, written `T{}`: any sequence (the .NET `IEnumerable<T>`)
-- `Collections.List[T]`: the read-only list trait (the .NET `IReadOnlyList<T>`)
+- `Collections.List[T]`, written `T[]`: the read-only list trait (the .NET `IReadOnlyList<T>`)
 - `Collections.LIST[T]`: the mutable list
 - `MAP` and `Map`: the mutable dictionary and its read-only trait, named in the same way as `LIST` and `List`
 - `SET`: the mutable hash set. `Set` (the .NET `IReadOnlySet<T>`) is its read-only trait, and `MutableSet` (`ISet<T>`) is its mutable trait.
@@ -1920,7 +1923,7 @@ let lengths = [name.length for name in names if name?]
 
 A `for` clause reads its source as a `for` loop does. So any value a loop can iterate is a valid source, and the clause's variable can be destructured (`for (key, value) in map`). Each clause can use the variables of the clauses before it. The element expression can use all the variables. An `if` clause keeps only the elements for which its condition is true, and narrows what it tests. So `name.length` above has `name` as a `string`. Clauses need no separator, so a long comprehension can span several lines.
 
-The result is an array of the element's type, or of the type that the context expects: `let objects: object[] = [x for x in ints]`. The `: T[]` annotation of a list literal also works on a comprehension. The closing bracket ends the comprehension, so pipes work on either side of it: `[x for x in xs |> filter(odd)] |> sum()`. A comprehension builds its whole array before anything reads it, so its source must end. `[n * n for n in from(1)]` never finishes, and gives an `unbounded-comprehension-source` warning. For an unbounded sequence, or one to read lazily, use the lazy form below.
+The result is an array of the element's type, or of the type that the context expects: `let objects: ARRAY[object] = [x for x in ints]`. The `: ARRAY[T]` annotation of an array literal also works on a comprehension. The closing bracket ends the comprehension, so pipes work on either side of it: `[x for x in xs |> filter(odd)] |> sum()`. A comprehension builds its whole array before anything reads it, so its source must end. `[n * n for n in from(1)]` never finishes, and gives an `unbounded-comprehension-source` warning. For an unbounded sequence, or one to read lazily, use the lazy form below.
 
 The same clauses in braces make a lazy comprehension. Its result is a `Pipe[T]` of the element's type, not an array:
 
@@ -2055,7 +2058,7 @@ ghūl compiles to .NET IL, and can use most types in any .NET assembly. The comp
 Some common types have different names:
 
 - `System.Console` is `IO.Std`.
-- `IReadOnlyList<T>` is `Collections.List[T]`.
+- `IReadOnlyList<T>` is `Collections.List[T]`, written `T[]`. A .NET array `T[]` is `ARRAY[T]`.
 - `IReadOnlySet<T>` is `Collections.Set[T]`.
 - `IEnumerable<T>` is `Collections.Iterable[T]`.
 - `IComparable<T>` and `IEquatable<T>` are `Ghul.Comparable[T]` and `Ghul.Equatable[T]`.
