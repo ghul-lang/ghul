@@ -62,7 +62,7 @@ namespace Syntax.Process is
                 if let `namespace = cast Definitions.NAMESPACE?(unwrapped) then
                     _process_list(`namespace.body)
                 elif let function = cast Definitions.FUNCTION?(unwrapped) then
-                    if let wrapper = _maybe_synthesise_wrapper(function, uses, has_named_entry) then
+                    if let wrapper = _maybe_synthesise_wrapper(function, uses, has_named_entry, _is_entry_marked(d)) then
                         to_add.add(wrapper)
                     fi
                 fi
@@ -92,14 +92,30 @@ namespace Syntax.Process is
             return false
         si
 
-        _maybe_synthesise_wrapper(function: Definitions.FUNCTION, uses: Collections.List[Definitions.USE], has_named_entry: bool) -> Definitions.FUNCTION? is
+        // Whether `definition` carries the `@entry()` or `@IL.entrypoint()`
+        // pragma, which names an entry point whatever it is called.
+        _is_entry_marked(definition: Definitions.Definition) -> bool is
+            let current mut = definition
+
+            while let pragma: Definitions.PRAGMA = current do
+                if pragma.is_name_equal_to("entry") \/ pragma.is_name_equal_to(IL_PRAGMAS.ENTRYPOINT) then
+                    return true
+                fi
+
+                current = pragma.definition
+            od
+
+            return false
+        si
+
+        _maybe_synthesise_wrapper(function: Definitions.FUNCTION, uses: Collections.List[Definitions.USE], has_named_entry: bool, is_entry_marked: bool) -> Definitions.FUNCTION? is
             if function.is_top_level_entry /\ has_named_entry then
                 return null
             fi
 
             let name = function.name
 
-            if !name? \/ !(name.name =~ _entry_point.name) then
+            if !is_entry_marked /\ (!name? \/ !(name.name =~ _entry_point.name)) then
                 return null
             fi
 
@@ -246,7 +262,7 @@ namespace Syntax.Process is
             let call =
                 Expressions.CALL(
                     location,
-                    Expressions.IDENTIFIER(internal, Identifiers.Identifier(internal, _entry_point.name)),
+                    Expressions.IDENTIFIER(internal, Identifiers.Identifier(internal, original.name?.name ?? _entry_point.name)),
                     Expressions.LIST(internal, call_args)
                 )
 
