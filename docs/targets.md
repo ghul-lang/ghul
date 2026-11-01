@@ -38,7 +38,7 @@ The `llvm` target's code generation is at an early stage. It compiles:
 - exceptions thrown, caught, and cleaned up after with `finally`
 - local variables, `ref` arguments to locals and to array elements, loops over ranges and other loops, conditionals, integer division checked as on .NET, and calls
 - the host operations, such as writing to the console
-- an `entry` that takes the command-line arguments as a `string[]`
+- an `entry` that takes the command-line arguments as a `string[]` or an `ARRAY[string]`
 
 It reports anything else as `code generation for <construct> is not supported on the llvm target`. It reports this only in code that the program reaches. An executable compiles only what its entry point calls, so an unsupported construct elsewhere in a library is not reported. A namespace named `llvm` at the root of the program is an error on this target, reported as `a namespace named llvm not supported on the llvm target`, because LLVM reserves the names that start with `llvm.` for its own intrinsics. A namespace with that name nested inside another namespace, such as `Outer.llvm`, is valid.
 

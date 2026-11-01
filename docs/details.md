@@ -31,7 +31,7 @@ A whole-file namespace (`namespace N` with no `is` ... `si` body) is one instanc
 
 The compiler collects a file's top-level statements into a synthesised entry-point function.
 
-- The entry point has the two signatures that the runtime can give an entry point (see [functions](../GHUL.md#functions)). The statements can read the command-line arguments as `args` and the process environment as `env`. A private `_entry(args: string[])` wrapper passes them in.
+- The entry point has the two signatures that the runtime can give an entry point (see [functions](../GHUL.md#functions)). The statements can read the command-line arguments as `args` and the process environment as `env`. A private `_entry(args: ARRAY[string])` wrapper passes them in.
 - `args` and `env` are the entry point's own parameters. So a `let` that declares a global variable named `args` or `env` is an error. Use another name. A `let` of either name inside a nested block among the statements is an ordinary local, and hides the parameter as anywhere else.
 
 A `let` among the top-level statements declares a global variable:
