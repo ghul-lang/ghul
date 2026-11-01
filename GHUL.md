@@ -367,7 +367,7 @@ let band = "top";
 
 The text inside the braces is an *expression*. So a string literal inside the braces is written normally: `"{format("hello")}"` needs no escapes for its inner quotes. To write a literal brace, double it: `"{{"` and `"}}"`. The escapes are `\t`, `\n`, `\r`, `\\`, and `\u` followed by exactly four hex digits for any character code. So the euro sign is `"\u20AC"` and the escape character is `"\u001B"`. Four hex digits are one UTF-16 code unit, which is one `char`. Write a code point above `U+FFFF` as its surrogate pair: `"\uD83D\uDE00"` is one grinning face, and is two `char` values. The `\u` escape always takes exactly four digits, so it never takes the text after it: `"\u0041cat"` is `Acat`. Any other character after a `\` is that character, so `\"` is a quote.
 
-An **array** type is written `E[]`. An array has a fixed size and is read-only: it has no assigning indexer. An array's length is its `count`. An array literal is a comma-separated list in square brackets. Its element type is the most specific type that every element is compatible with, or `object` if there is no closer common ancestor:
+An **array** type is written `E[]`, or `ARRAY[E]`, the same type under its own name. An array has a fixed size and is read-only: it has no assigning indexer. An array's length is its `count`. An array literal is a comma-separated list in square brackets. Its element type is the most specific type that every element is compatible with, or `object` if there is no closer common ancestor:
 
 ```ghul
 let primes = [2, 3, 5, 7, 11];          // int[]
