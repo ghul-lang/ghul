@@ -1784,7 +1784,8 @@ The collection types are:
 - `Collections.LIST[T]`: the mutable list
 - `MAP` and `Map`: the mutable dictionary and its read-only trait, named in the same way as `LIST` and `List`
 - `SET`: the mutable hash set. `Set` (the .NET `IReadOnlySet<T>`) is its read-only trait, and `MutableSet` (`ISet<T>`) is its mutable trait.
-- `MutableList`, `MutableMap`, `Bag`, `MutableBag` and `STACK`
+- `STACK`, `QUEUE`, `PRIORITY_QUEUE` and `LINKED_LIST`: the mutable stack, queue, priority queue and linked list
+- `MutableList`, `MutableMap`, `Bag` and `MutableBag`
 
 ghūl has no map literal syntax. To write a map with fixed contents, write a list literal of key and value pairs, and build the map from it with `MAP()`. The constructor throws if a key appears twice:
 
@@ -2052,7 +2053,7 @@ ghūl compiles to .NET IL, and can use most types in any .NET assembly. The comp
 
 - Method, property and field names become `snake_case`.
 - Enum names and enum members become `MACRO_CASE`.
-- Class, struct and trait names keep their .NET names, without .NET's generic arity suffix. So `Queue<T>` is `Collections.Queue[T]`.
+- Class, struct and trait names keep their .NET names, without .NET's generic arity suffix. So `SortedSet<T>` is `Collections.SortedSet[T]`.
 - The namespace `System.Collections.Generic` is `Collections`, and `System.IO` is `IO`.
 
 Some common types have different names:
