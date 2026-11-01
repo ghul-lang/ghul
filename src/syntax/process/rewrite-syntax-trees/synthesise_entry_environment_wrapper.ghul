@@ -3,7 +3,9 @@ namespace Syntax.Process is
     use Trees
 
     // Synthesises the private CLR-facing `_entry` wrapper a hand-written
-    // entry function needs when it declares a `Ghul.Environment` parameter.
+    // entry function needs when it declares a `Ghul.Environment` parameter
+    // or a `string[]` one: `string[]` is `Collections.List[string]`, and
+    // the runtime enters at an `ARRAY[string]`.
     //
     // A named function's signature is always fully explicit (GHUL.md), so
     // recognising the two argument shapes - a `string[]` and a
@@ -16,9 +18,10 @@ namespace Syntax.Process is
     // is considered - the same name select-entry-point itself matches -
     // and only when every one of its one or two parameters is one of the
     // two recognised shapes, with a `Ghul.Environment` one actually among
-    // them. Anything else (a lone `string[]`, no parameters, an
-    // unrecognised shape) is left untouched: select-entry-point's existing
-    // signature check decides its fate exactly as it always has.
+    // them or the `string[]` one written as the list it is. Anything else
+    // (a lone `ARRAY[string]`, no parameters, an unrecognised shape) is
+    // left untouched: select-entry-point's existing signature check
+    // decides its fate exactly as it always has.
     //
     // The wrapper takes the real Main-compatible shape - no parameters, or
     // one `string[]` when the original declared one - and its body is a
@@ -127,7 +130,18 @@ namespace Syntax.Process is
                 fi
             od
 
-            if !env_variable? then
+            // A `string[]` parameter is a `Collections.List[string]`, which
+            // is not the shape the runtime enters at; the wrapper takes the
+            // array and passes it on.
+            let args_needs_wrapper mut = false
+
+            if args_variable? then
+                if let array = cast TypeExpressions.ARRAY_?(args_variable.type_expression) then
+                    args_needs_wrapper = !array.is_array
+                fi
+            fi
+
+            if !env_variable? /\ !args_needs_wrapper then
                 return null
             fi
 
@@ -199,7 +213,7 @@ namespace Syntax.Process is
         _synthesise_wrapper(
             original: Definitions.FUNCTION,
             has_args: bool,
-            env_variable: Variables.VARIABLE,
+            env_variable: Variables.VARIABLE?,
             wraps_top_level: bool
         ) -> Definitions.FUNCTION is
             // The wrapper stands where the function it wraps stands, but
@@ -211,7 +225,7 @@ namespace Syntax.Process is
             let arg_vars = Collections.LIST[Variables.VARIABLE]()
 
             if has_args then
-                let args_type = TypeExpressions.ARRAY_(internal, TypeExpressions.NAMED(internal, Identifiers.Identifier(internal, "string")))
+                let args_type = TypeExpressions.ARRAY_(internal, TypeExpressions.NAMED(internal, Identifiers.Identifier(internal, "string")), true)
                 let args_param = Variables.VARIABLE(internal, Identifiers.Identifier(internal, _ARGS_PARAMETER_NAME), args_type, false, true, null)
 
                 args_param.mark_argument()
@@ -222,7 +236,7 @@ namespace Syntax.Process is
             let call_args = Collections.LIST[Expressions.Expression]()
 
             for variable in original.arguments.variables do
-                if variable == env_variable then
+                if env_variable? /\ variable == env_variable then
                     call_args.add(_environment_instance_expression(internal))
                 else
                     call_args.add(Expressions.IDENTIFIER(internal, Identifiers.Identifier(internal, _ARGS_PARAMETER_NAME)))
