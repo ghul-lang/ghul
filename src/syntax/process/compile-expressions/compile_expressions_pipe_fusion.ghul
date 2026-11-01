@@ -201,44 +201,54 @@ namespace Syntax.Process is
 
             `for.iterator_field = frame.declare_or_retype_anonymous_field(`for.iterator_field, "for_iterator", iterator_type)
 
-            let existing = `for.fused_fields
-            let fields = Collections.LIST[Semantic.Symbols.Field?]()
-            let stages = fusion.stages_outermost_first
+            let existing = `for.fused_stages
+            let stages = Collections.LIST[FUSED_STAGE_FIELDS]()
 
-            let existing_flags = `for.fused_flag_fields
-            let flags = Collections.LIST[Semantic.Symbols.Field?]()
-
-            for index in 0..stages.count do
-                let stage = stages[index]
+            for index in 0..fusion.stages_outermost_first.count do
                 let previous = if existing? /\ index < existing.count then existing[index] else null fi
-                let previous_flag = if existing_flags? /\ index < existing_flags.count then existing_flags[index] else null fi
 
-                let type: Type? =
-                    if stage.is_countdown \/ stage.is_index then
-                        _innate_symbol_lookup.get_int_type()
-                    elif !stage.is_inlined then
-                        stage.argument?.value?.type
-                    else
-                        null
-                    fi
-
-                fields.add(
-                    if let t = type then
-                        frame.declare_or_retype_anonymous_field(previous, "fused", t)
-                    else
-                        null
-                    fi)
-
-                flags.add(
-                    if stage.is_skip_while then
-                        frame.declare_or_retype_anonymous_field(previous_flag, "fused", _innate_symbol_lookup.get_bool_type())
-                    else
-                        null
-                    fi)
+                stages.add(_declare_stage_fields(frame, fusion.stages_outermost_first[index], previous, null))
             od
 
-            `for.fused_fields = fields
-            `for.fused_flag_fields = flags
+            `for.fused_stages = stages
+        si
+
+        // The frame fields `stage` keeps what it carries from one element
+        // to the next in, declared or retyped from `previous`: a take,
+        // skip or index stage's counter, the function value of a stage
+        // that runs as a delegate call, and a skip_while stage's dropping
+        // flag. An inlined stage's parameter and what a stage produces are
+        // used before the loop body runs, and stay ordinary locals.
+        _declare_stage_fields(
+            frame: Semantic.Symbols.STATE_MACHINE_FRAME_BASE,
+            stage: PIPE_FUSION_STAGE,
+            previous: FUSED_STAGE_FIELDS?,
+            parameter: Semantic.Symbols.Variable?
+        ) -> FUSED_STAGE_FIELDS is
+            let carried_type: Type? =
+                if stage.is_countdown \/ stage.is_index then
+                    _innate_symbol_lookup.get_int_type()
+                elif _stage_keeps_delegate(stage) then
+                    stage.argument!.value!.type
+                else
+                    null
+                fi
+
+            let carried =
+                if let t = carried_type then
+                    frame.declare_or_retype_anonymous_field(previous?.carried, "fused", t)
+                else
+                    null
+                fi
+
+            let flag =
+                if stage.is_skip_while then
+                    frame.declare_or_retype_anonymous_field(previous?.flag, "fused", _innate_symbol_lookup.get_bool_type())
+                else
+                    null
+                fi
+
+            return FUSED_STAGE_FIELDS(carried, flag, parameter)
         si
 
         // Record for the pipe-fusion study what a consumption site
