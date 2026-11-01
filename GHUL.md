@@ -402,7 +402,7 @@ xs[1..<0];       // 20, 30, 40, 50 — to the end
 xs[3..<<0];      // 30, 40, 50   — the last three
 ```
 
-The slice is a `Collections.List[E]` that reads the source. Nothing is copied, so a later change to a mutable source is visible in the slice. Arrays, strings and any type that implements `Collections.List[E]` accept a range index. A range index on a string returns a string, which is a copy of the slice. A range index is read-only: a slice cannot be assigned through. A type can declare its own `[r: System.Range]` indexer, and the compiler uses that indexer first.
+The slice is an `E[]` that reads the source. Nothing is copied, so a later change to a mutable source is visible in the slice. Arrays, strings and any type that implements `Collections.List[E]` accept a range index. A range index on a string returns a string, which is a copy of the slice. A range index is read-only: a slice cannot be assigned through. A type can declare its own `[r: System.Range]` indexer, and the compiler uses that indexer first.
 
 The from-the-end operators build a `System.Range`. A `System.Range` has endpoints that only have values relative to a length, so a `System.Range` cannot be iterated. `..` and `::` can be iterated. `for i in 1..<1 do` is an error.
 
@@ -578,7 +578,7 @@ Patterns can nest and can contain discards. So `(((a, b), c)) => …` and `((_, 
 A named function can also be written among the statements of a body. Such a nested function is a function literal assigned to a local variable with the function's name. So it captures, compiles and is called exactly as the equivalent `let` would be. The two spellings are interchangeable:
 
 ```ghul
-process(xs: Collections.List[int]) -> int is
+process(xs: int[]) -> int is
     score(x: int) -> int is
         if x < 0 then
             return 0;
@@ -1109,7 +1109,7 @@ The order of two strings follows .NET globalization. On .NET, `<>` and the relat
 - a struct whose state is all public and that declares no equality of its own, through its synthesised operator. The operator compares member by member, with each member type's own equality (see [structs](#structs)).
 - a class with an `@equality()` pragma, through its synthesised operator. The operator compares member by member and then compares the base class, with each member type's own equality (see [classes](#classes)).
 - a tuple, element by element, with each element type's own equality, at any depth of nesting
-- an array, a `List[T]` or a `LIST[T]`. It compares the counts, then element by element, with each element type's own equality. So `[[1, 2], [3]] =~ [[1, 2], [3]]` is true, and two lists of a type that declares `=~` compare with that `=~`. Here, elements of a class that declares neither `=~` nor `<>` compare by reference. The same comparison written directly on two such values is an error. A list of such values has a useful equality, and two such values alone have none.
+- a `T[]`, so an array or a `LIST[T]` too. It compares the counts, then element by element, with each element type's own equality. So `[[1, 2], [3]] =~ [[1, 2], [3]]` is true, and two lists of a type that declares `=~` compare with that `=~`. Here, elements of a class that declares neither `=~` nor `<>` compare by reference. The same comparison written directly on two such values is an error. A list of such values has a useful equality, and two such values alone have none.
 - a type that declares `<>` and no `=~`. An ordering defines equality, so `a =~ b` is `a <> b == 0`.
 - a bare type parameter, through the runtime's comparer for the type argument
 
@@ -1527,7 +1527,7 @@ An arm narrows in the same way as `if let`. `when v: T` narrows the scrutinee to
 
 ### sequence patterns
 
-A pattern in square brackets matches a `List[T]`, an array, or a lazy sequence (see below) by its length and binds its elements by position. It is accepted anywhere a destructure pattern is: `let`, `if let` and `while let`, a `case` arm's `when`, a `for` loop variable, a formal argument, and the left side of an assignment.
+A pattern in square brackets matches a `T[]`, so an array too, or a lazy sequence (see below) by its length and binds its elements by position. It is accepted anywhere a destructure pattern is: `let`, `if let` and `while let`, a `case` arm's `when`, a `for` loop variable, a formal argument, and the left side of an assignment.
 
 ```ghul
 let [a, b] = pair;                  // exactly two elements
@@ -1538,7 +1538,7 @@ if let [head, ..tail] = items then
     write_line("{head} then {tail.count} more");
 fi
 
-describe(xs: List[int]) -> string =>
+describe(xs: int[]) -> string =>
     case xs
     when [] then "empty"
     when [x] then "one: {x}"
@@ -1546,7 +1546,7 @@ describe(xs: List[int]) -> string =>
     esac
 ```
 
-`..name` as the last element binds everything after the leading ones. The rest is a `List[T]` view onto the source, not a copy, so a later change to a mutable source shows through it. A bare `..` or `.._` matches the remainder without binding it. Leading elements may be any pattern, nested patterns and `_` discards included. Only a final rest element is supported, and at most one.
+`..name` as the last element binds everything after the leading ones. The rest is a `T[]` view onto the source, not a copy, so a later change to a mutable source shows through it. A bare `..` or `.._` matches the remainder without binding it. Leading elements may be any pattern, nested patterns and `_` discards included. Only a final rest element is supported, and at most one.
 
 Without a rest element the pattern needs exactly that many elements; with one, at least that many. Where the pattern is refutable (`if let`, `while let`, a `case` arm) a mismatch fails the match. Everywhere else it throws `Ghul.AssertFailedException`.
 
@@ -1786,10 +1786,10 @@ The collection types are:
 - `SET`: the mutable hash set. `Set` (the .NET `IReadOnlySet<T>`) is its read-only trait, and `MutableSet` (`ISet<T>`) is its mutable trait.
 - `MutableList`, `MutableMap`, `Bag`, `MutableBag` and `STACK`
 
-ghūl has no map literal syntax. To write a map with fixed contents, write a list literal of key and value pairs, and collect it with `collect_map()`. `collect_map()` throws if a key appears twice:
+ghūl has no map literal syntax. To write a map with fixed contents, write a list literal of key and value pairs, and build the map from it with `MAP()`. The constructor throws if a key appears twice:
 
 ```ghul
-let scores = [("alice", 1), ("bob", 2)] |> collect_map();
+let scores = [("alice", 1), ("bob", 2)] |> MAP();
 let total = scores["alice"];
 ```
 
@@ -1808,9 +1808,9 @@ To turn a sequence into text, construct a `string` from it. `string(p)` converts
 The sequence combinators are global functions in `Ghul.Pipes`. Each one takes the sequence as its first argument, so the thread-first operator `|>` chains them. ghūl has the usual set of combinators, similar to LINQ. No combinator changes its source. The combinators are of two kinds:
 
 - lazy stages, which return a new sequence: `map`, `filter`, `flat_map`, `skip`, `take`, `cat`, `index`, `zip`, `sort`
-- terminals, which read the sequence and produce a value: `reduce`, `sum`, `product`, `collect`, `collect_mutable`, `collect_set`, `collect_map`, `collect_mutable_map`, `count`, `find`, `find_map`, `first`, `only`, `any`, `all`, `each`, `join`, `append_to`
+- terminals, which read the sequence and produce a value: `reduce`, `sum`, `product`, `list`, `count`, `find`, `find_map`, `first`, `only`, `any`, `all`, `each`, `join`, `append_to`
 
-`collect` produces an array, and `collect_mutable` produces a mutable `LIST`. The collecting terminals are function forms of the constructors above, and produce the same result: `collect` and `ARRAY(p)`, `collect_mutable` and `LIST(p)`, `collect_set` and `SET(p)`, `collect_mutable_map` and `MAP(p)`, `join` and `string(p, separator)`. `collect_map` is the exception: it returns the read-only `Map`.
+A collection is built from a sequence by its constructor, which takes the sequence as its argument and so stands at the end of a pipe: `p |> ARRAY()` builds an array now, `p |> LIST()` a mutable `LIST`, `p |> SET()` a `SET`, `p |> MAP()` a `MAP` from key and value pairs, and `string(p, separator)` is `join`. `list()` is the terminal for a read-only list: its result is a `T[]` filled from the sequence as it is read, so a source that never ends needs no limit. Written with no arguments, `collect`, `collect_mutable`, `collect_set`, `collect_map` and `collect_mutable_map` are older names for the constructors and are deprecated; `collect_map` with a key function and a value function stays, since no constructor takes them.
 
 `++` joins two sequences, as `cat` does: `[1, 2] ++ [3] ++ [4, 5]` is the elements 1 to 5 in order. It reads each operand lazily and has the same precedence as `+`. Both operands are sequences, so a single element goes in an array literal: `[x] ++ xs`.
 
@@ -1853,10 +1853,10 @@ A pipe can also start from a value instead of a collection:
 - `from(start)` counts up from `start` without end.
 - `from(start, step)` counts up from `start` in steps of `step`.
 
-To make a list of a given size, collect a bounded `repeat`:
+To make a list of a given size, build a `LIST` from a bounded `repeat`:
 
 ```ghul
-let seen = repeat(false, 100) |> collect_mutable();      // LIST[bool], a hundred of them
+let seen = repeat(false, 100) |> LIST();                 // LIST[bool], a hundred of them
 let squares = from(1) |> map(n => n * n) |> take(5);  // 1, 4, 9, 16, 25
 ```
 
