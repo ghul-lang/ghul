@@ -450,31 +450,14 @@ namespace Semantic is
         _load_through_inlined_method(location: Source.LOCATION, symbol: Symbols.Variable) -> Value? is
             let inlined = _current_inlined_closure
 
-            if !inlined? then
+            if !inlined? \/ symbol.owner == inlined then
                 return null
             fi
 
-            // A literal inlined into another inlined literal is emitted
-            // where that one is, so the walk goes on out to the function
-            // that has a body of its own. A name an inlined literal on the
-            // way owns, other than its parameter, is a local of that
-            // function too.
-            let method mut = inlined.inlined_into!.method
+            let method = _emitted_into(inlined)
 
-            while let enclosing: Symbols.Closure = method /\ enclosing.is_inlined do
-                if symbol.owner == enclosing then
-                    if symbol.is_boxed then
-                        return _load_boxed_local(location, symbol)
-                    fi
-
-                    return Load.LOCAL_VARIABLE(symbol)
-                fi
-
-                method = enclosing.inlined_into!.method
-            od
-
-            if symbol.owner == method then
-                if isa Symbols.LOCAL_ARGUMENT(symbol) then
+            if _is_local_of(method, symbol) then
+                if symbol.owner == method /\ isa Symbols.LOCAL_ARGUMENT(symbol) then
                     return Load.LOCAL_ARGUMENT(symbol)
                 fi
 
@@ -483,10 +466,6 @@ namespace Semantic is
                 fi
 
                 return Load.LOCAL_VARIABLE(symbol)
-            fi
-
-            if symbol.owner == inlined then
-                return null
             fi
 
             if !isa Symbols.Closure(method) then
@@ -502,6 +481,23 @@ namespace Semantic is
             fi
 
             return raw
+        si
+
+        // Whether `symbol` is a local of `method`, the function an inlined
+        // body is emitted into: one it owns, or one owned by a literal
+        // inlined into it, directly or through further inlined literals.
+        // An inlined literal has no frame, so its locals are the
+        // function's own.
+        _is_local_of(method: Symbols.Function, symbol: Symbols.Variable) -> bool is
+            if symbol.owner == method then
+                return true
+            fi
+
+            if let owner = cast Symbols.Closure?(symbol.owner) /\ owner.is_inlined then
+                return _emitted_into(owner) == method
+            fi
+
+            return false
         si
 
         // The function an inlined literal's body is emitted into: the one
@@ -527,18 +523,9 @@ namespace Semantic is
                 return null
             fi
 
-            let method mut = inlined.inlined_into!.method
-            let owns mut = symbol.owner == method
+            let method = _emitted_into(inlined)
 
-            while !owns /\ isa Symbols.Closure(method) /\ (cast Symbols.Closure(method)).is_inlined do
-                let enclosing = cast Symbols.Closure(method)
-
-                owns = symbol.owner == enclosing
-                method = enclosing.inlined_into!.method
-                owns = owns \/ symbol.owner == method
-            od
-
-            if owns then
+            if _is_local_of(method, symbol) then
                 if symbol.is_boxed then
                     return _store_boxed_local(location, symbol, value, is_initialize)
                 fi
