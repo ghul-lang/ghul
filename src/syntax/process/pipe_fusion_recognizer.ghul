@@ -3,18 +3,19 @@ namespace Syntax.Process is
 
     use Semantic
 
-    // One stage of a recognised pipe chain. Three kinds:
+    // One stage of a recognised pipe chain, its `kind` saying what it
+    // does with each element:
     //
-    // - map (is_filter false, is_index false): `argument` is the mapper.
-    // - filter (is_filter true): `argument` is the predicate.
-    // - index (is_index true): `argument` is the start, or null to start
-    //   at zero; the loop keeps a running counter and emits
+    // - map, filter, take_while, skip_while: `argument` is the function.
+    // - take, skip: `argument` is the count.
+    // - index: `argument` is the start, or null to start at zero; the
+    //   loop keeps a running counter and emits
     //   `INDEXED_VALUE[element](counter, current)` per element.
     //   compile-expressions fills `indexed_value_type` (the constructed
     //   `INDEXED_VALUE[element]` struct) and `indexed_value_constructor`.
     //
-    // A fourth kind is transparent: a `memo` stage (is_noop true) is
-    // recognised but never added to a chain's stage list. A memo pipe
+    // A memo stage (kind NOOP) is transparent: it is recognised but never
+    // added to a chain's stage list. A memo pipe
     // consumed inline by the one `for` loop or terminal consumer that
     // fuses a chain is unobservable - its cache is never read a second
     // time and its source runs exactly once with or without it - so the
@@ -31,23 +32,15 @@ namespace Syntax.Process is
     // the loop emits the body inline; otherwise it invokes the argument's
     // compiled delegate value.
     class PIPE_FUSION_STAGE is
-        is_filter: bool public
-        is_index: bool public
-        is_noop: bool public
+        kind: IR.Values.FusedStageKind
 
-        // A `take`/`skip` stage: `argument` is the int count expression,
-        // evaluated once into a running counter that the loop decrements per
-        // pulled element (take stops the loop when it runs out; skip drops
-        // the element while it remains).
-        is_take: bool public
-        is_skip: bool public
-
-        // A `take_while`/`skip_while` stage: `argument` is the predicate,
-        // called per element as a filter's is. take_while ends the loop at
-        // the first element it rejects; skip_while drops elements while it
-        // accepts them, then passes the rest through untested.
-        is_take_while: bool public
-        is_skip_while: bool public
+        is_filter: bool => kind == IR.Values.FusedStageKind.FILTER
+        is_index: bool => kind == IR.Values.FusedStageKind.INDEX
+        is_noop: bool => kind == IR.Values.FusedStageKind.NOOP
+        is_take: bool => kind == IR.Values.FusedStageKind.TAKE
+        is_skip: bool => kind == IR.Values.FusedStageKind.SKIP
+        is_take_while: bool => kind == IR.Values.FusedStageKind.TAKE_WHILE
+        is_skip_while: bool => kind == IR.Values.FusedStageKind.SKIP_WHILE
 
         // The stage's argument: a map/filter lambda or delegate, the int
         // count of a take/skip stage, or an index stage's start. Null for
@@ -82,35 +75,32 @@ namespace Syntax.Process is
         // resolved; otherwise the recogniser rejects the chain.
         is_index_ready: bool => indexed_value_type? /\ indexed_value_constructor?
 
-        init(is_filter: bool, argument: Trees.Expressions.Expression) is
-            self.is_filter = is_filter
+        // A map, filter, take, skip, take_while or skip_while stage over
+        // its argument.
+        init(kind: IR.Values.FusedStageKind, argument: Trees.Expressions.Expression) is
+            self.kind = kind
             self.argument = argument
         si
 
         init(chain_type: Semantic.Types.Type, start: Trees.Expressions.Expression?) is
-            self.is_index = true
+            kind = IR.Values.FusedStageKind.INDEX
             self.chain_type = chain_type
             self.argument = start
         si
 
-        init(is_take: bool, is_skip: bool, count: Trees.Expressions.Expression) is
-            self.is_take = is_take
-            self.is_skip = is_skip
-            self.argument = count
-        si
-
-        init(predicate: Trees.Expressions.Expression, is_take_while: bool, is_skip_while: bool) is
-            self.is_take_while = is_take_while
-            self.is_skip_while = is_skip_while
-            self.argument = predicate
-        si
-
-
-
         init() is
-            is_noop = true
+            kind = IR.Values.FusedStageKind.NOOP
         si
     si
+
+    // A function literal compiled to run in place in a fused loop: the
+    // literal, the local its parameter loads as, and the block its body
+    // is emitted into.
+    class INLINED_LITERAL(
+        closure: Semantic.Symbols.Closure public,
+        param_local: Semantic.Symbols.Variable public,
+        body: IR.Values.Value public
+    )
 
     // The literals written inside a stage body, outermost first. Each
     // one's captures are recorded against the symbols its enclosing
@@ -365,16 +355,18 @@ namespace Syntax.Process is
                 return null
             fi
 
-            if role =~ "map" \/ role =~ "filter" then
-                return PIPE_FUSION_STAGE(role =~ "filter", arguments[1])
-            fi
+            let kind: IR.Values.FusedStageKind? =
+                if role =~ "map" then IR.Values.FusedStageKind.MAP
+                elif role =~ "filter" then IR.Values.FusedStageKind.FILTER
+                elif role =~ "take" then IR.Values.FusedStageKind.TAKE
+                elif role =~ "skip" then IR.Values.FusedStageKind.SKIP
+                elif role =~ "take_while" then IR.Values.FusedStageKind.TAKE_WHILE
+                elif role =~ "skip_while" then IR.Values.FusedStageKind.SKIP_WHILE
+                else null
+                fi
 
-            if role =~ "take_while" \/ role =~ "skip_while" then
-                return PIPE_FUSION_STAGE(arguments[1], role =~ "take_while", role =~ "skip_while")
-            fi
-
-            if role =~ "take" \/ role =~ "skip" then
-                return PIPE_FUSION_STAGE(role =~ "take", role =~ "skip", arguments[1])
+            if let k = kind then
+                return PIPE_FUSION_STAGE(k, arguments[1])
             fi
 
             // A consumer role - the peel loop's source boundary, which is

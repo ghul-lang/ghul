@@ -3,58 +3,30 @@ namespace Syntax.Process is
 
     // Where a fused loop in a generator or asynchronous body keeps what
     // it carries from one element to the next: the source's iterator,
-    // and each stage's counter or delegate, all in frame fields so that
-    // they survive the suspensions in the loop body.
+    // and each stage's counter, delegate or flag, all in frame fields so
+    // that they survive the suspensions in the loop body.
     class FUSED_LOOP_STATE is
         frame: Semantic.Symbols.STATE_MACHINE_FRAME_BASE
         iterator_field: Semantic.Symbols.Field
 
-        _stage_fields: List[Semantic.Symbols.Field?]?
-        _stage_inits: List[IR.Values.Value?]?
-        _stage_flags: List[Semantic.Symbols.Field?]?
+        _stages: List[FUSED_STAGE_FIELDS]?
 
         init(
             frame: Semantic.Symbols.STATE_MACHINE_FRAME_BASE,
             iterator_field: Semantic.Symbols.Field,
-            stage_fields: List[Semantic.Symbols.Field?]?
-        ) is
-            self.init(frame, iterator_field, stage_fields, null)
-        si
-
-        // As above, where a stage's counter starts from `stage_inits` at
-        // its position rather than from the stage's own argument: the
-        // value a generated generator was passed it as.
-        init(
-            frame: Semantic.Symbols.STATE_MACHINE_FRAME_BASE,
-            iterator_field: Semantic.Symbols.Field,
-            stage_fields: List[Semantic.Symbols.Field?]?,
-            stage_inits: List[IR.Values.Value?]?
+            stages: List[FUSED_STAGE_FIELDS]?
         ) is
             self.frame = frame
             self.iterator_field = iterator_field
-            _stage_fields = stage_fields
-            _stage_inits = stage_inits
+            _stages = stages
         si
 
-        // As above, with the field a skip_while stage keeps its dropping
-        // flag in, by stage position.
-        init(
-            frame: Semantic.Symbols.STATE_MACHINE_FRAME_BASE,
-            iterator_field: Semantic.Symbols.Field,
-            stage_fields: List[Semantic.Symbols.Field?]?,
-            stage_inits: List[IR.Values.Value?]?,
-            stage_flags: List[Semantic.Symbols.Field?]?
-        ) is
-            self.init(frame, iterator_field, stage_fields, stage_inits)
-
-            _stage_flags = stage_flags
-        si
-
-        // What the stage at `index` starts its counter from, where that is
-        // not its own argument.
+        // What the stage at `index` starts its counter or delegate from,
+        // where that is not its own argument: the parameter a generated
+        // generator was passed it as.
         stage_init(index: int) -> IR.Values.Value? is
-            if let inits = _stage_inits /\ index < inits.count then
-                return inits[index]
+            if let parameter = _stage(index)?.parameter then
+                return IR.Values.Load.LOCAL_ARGUMENT(parameter)
             fi
 
             return null
@@ -62,22 +34,27 @@ namespace Syntax.Process is
 
         // The frame field of the stage at `index`, or null for a stage
         // that carries nothing from one element to the next.
-        stage_field(index: int) -> Semantic.Symbols.Field? is
-            if let fields = _stage_fields /\ index < fields.count then
-                return fields[index]
-            fi
-
-            return null
-        si
+        stage_field(index: int) -> Semantic.Symbols.Field? => _stage(index)?.carried
 
         // The frame field a skip_while stage at `index` keeps its dropping
         // flag in, where it has one.
-        stage_flag(index: int) -> Semantic.Symbols.Field? is
-            if let flags = _stage_flags /\ index < flags.count then
-                return flags[index]
+        stage_flag(index: int) -> Semantic.Symbols.Field? => _stage(index)?.flag
+
+        _stage(index: int) -> FUSED_STAGE_FIELDS? is
+            if let stages = _stages /\ index < stages.count then
+                return stages[index]
             fi
 
             return null
         si
     si
+
+    // The locals one stage of a fused loop keeps what it carries in,
+    // outside a state machine: a take, skip or index counter, or a hoisted
+    // delegate, and a skip_while stage's dropping flag. Null where the
+    // stage has none, or keeps it in a frame field instead.
+    class FUSED_STAGE_TEMPS(
+        carried: IR.TEMP? public,
+        flag: IR.TEMP? public
+    )
 si

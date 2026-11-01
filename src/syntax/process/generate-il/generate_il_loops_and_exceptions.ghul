@@ -496,54 +496,39 @@ namespace Syntax.Process is
             _loops.leave_loop()
         si
 
-        // Declare the per-stage locals a fused chain needs before its loop,
-        // filling `stage_delegates` / `stage_counters` parallel to the
-        // stages (null where a slot does not apply): an inlined stage's
-        // parameter local, a delegate stage's hoisted function value, an
-        // index stage's running counter initialised to its start.
+        // Declare the per-stage state a fused chain needs before its loop,
+        // by stage position: an inlined stage's parameter local, a delegate
+        // stage's hoisted function value, a take, skip or index stage's
+        // running counter initialised to its count or start, and a
+        // skip_while stage's dropping flag. In a state machine the counter,
+        // delegate and flag are stored into their frame fields instead, and
+        // the stage's temps are left null.
         _setup_fused_stages(
             fusion: Syntax.Process.PIPE_FUSION,
-            stage_delegates: Collections.LIST[TEMP?],
-            stage_counters: Collections.LIST[TEMP?],
             state: FUSED_LOOP_STATE?
-        ) is
-            _setup_fused_stages(fusion, stage_delegates, stage_counters, Collections.LIST[TEMP?](), state)
-        si
-
-        // As above, where the caller holds the skip_while stages' dropping
-        // flags, built by stage position in step with the other lists.
-        _setup_fused_stages(
-            fusion: Syntax.Process.PIPE_FUSION,
-            stage_delegates: Collections.LIST[TEMP?],
-            stage_counters: Collections.LIST[TEMP?],
-            stage_flags: Collections.LIST[TEMP?],
-            state: FUSED_LOOP_STATE?
-        ) is
+        ) -> Collections.LIST[FUSED_STAGE_TEMPS] is
+            let temps = Collections.LIST[FUSED_STAGE_TEMPS]()
             let stages = fusion.stages_outermost_first
 
             for index in 0..stages.count do
                 let stage = stages[index]
 
                 // A skip_while's dropping flag starts on the dropping side
-                // of its boundary: a frame field where the loop suspends,
-                // a local otherwise.
+                // of its boundary.
+                let flag: TEMP? mut = null
+
                 if stage.is_skip_while then
                     let true_flag = IR.Values.Literal.NUMBER(1, _innate_symbol_lookup.get_bool_type())
 
                     if let flag_slot = state?.stage_flag(index) then
                         add(_build_frame_field_store(state!.frame, flag_slot, true_flag))
-                        stage_flags.add(null)
                     else
-                        let flag = TEMP(current_block, "fused_skip", true_flag)
-
-                        stage_flags.add(flag)
+                        flag = TEMP(current_block, "fused_skip", true_flag)
                     fi
-                else
-                    stage_flags.add(null)
                 fi
 
-                // In a state machine, a counter or a hoisted delegate lives
-                // in the stage's frame field instead of a local.
+                let carried: TEMP? mut = null
+
                 if let stage_slot = state?.stage_field(index) then
                     let value =
                         if let passed = state!.stage_init(index) then
@@ -559,23 +544,14 @@ namespace Syntax.Process is
                         fi
 
                     add(_build_frame_field_store(state!.frame, stage_slot, value))
-                    stage_delegates.add(null)
-                    stage_counters.add(null)
-
-                    continue
-                fi
-
-                if stage.is_countdown then
+                elif stage.is_countdown then
                     // take/skip: evaluate the count once into a running
                     // counter the loop decrements per pulled element.
                     let counter = TEMP(current_block, "fused_countdown", _innate_symbol_lookup.get_int_type())
                     counter.store(stage.argument!.value!)
-                    stage_delegates.add(null)
-                    stage_counters.add(counter)
+                    carried = counter
                 elif stage.is_inlined then
                     add(Values.DECLARE_LOCAL(stage.param_local!.ir_local))
-                    stage_delegates.add(null)
-                    stage_counters.add(null)
                 elif stage.is_index then
                     // The counter starts at the caller's start where one
                     // was given, and at zero otherwise.
@@ -588,13 +564,15 @@ namespace Syntax.Process is
                         counter.store(Literal.NUMBER(0, int_type))
                     fi
 
-                    stage_delegates.add(null)
-                    stage_counters.add(counter)
+                    carried = counter
                 else
-                    stage_delegates.add(TEMP(current_block, "fused_stage", stage.argument!.value!))
-                    stage_counters.add(null)
+                    carried = TEMP(current_block, "fused_stage", stage.argument!.value!)
                 fi
+
+                temps.add(FUSED_STAGE_TEMPS(carried, flag))
             od
+
+            return temps
         si
 
         // Before the loop pulls an element, leave it when any
@@ -603,7 +581,7 @@ namespace Syntax.Process is
         // never advances the source past them.
         _gen_fused_take_guards(
             fusion: Syntax.Process.PIPE_FUSION,
-            stage_counters: Collections.List[TEMP?],
+            temps: Collections.List[FUSED_STAGE_TEMPS],
             loop: Values.LOOP,
             state: FUSED_LOOP_STATE?
         ) is
@@ -611,7 +589,7 @@ namespace Syntax.Process is
 
             for index in 0..fusion.stages_outermost_first.count do
                 if fusion.stages_outermost_first[index].is_take then
-                    add(Values.BREAK(loop, BRANCH.LE, _fused_counter_load(stage_counters, state, index), Literal.NUMBER(0, int_type)))
+                    add(Values.BREAK(loop, BRANCH.LE, _fused_carried_load(temps, state, index), Literal.NUMBER(0, int_type)))
                 fi
             od
         si
@@ -628,22 +606,22 @@ namespace Syntax.Process is
                     int_type).unmarked()
         si
 
-        // A stage's counter or delegate, from its frame field in a state
-        // machine and from its local otherwise.
         // A skip_while stage's dropping flag: its frame field where the
         // loop suspends, its local otherwise.
-        _fused_flag_load(stage_flags: Collections.List[TEMP?], state: FUSED_LOOP_STATE?, index: int) -> Value =>
+        _fused_flag_load(temps: Collections.List[FUSED_STAGE_TEMPS], state: FUSED_LOOP_STATE?, index: int) -> Value =>
             if let flag_slot = state?.stage_flag(index) then
                 _build_frame_field_load(state!.frame, flag_slot)
             else
-                stage_flags[index]!.load()
+                temps[index].flag!.load()
             fi
 
-        _fused_counter_load(stage_slots: Collections.List[TEMP?], state: FUSED_LOOP_STATE?, index: int) -> Value =>
+        // A stage's counter or delegate, from its frame field in a state
+        // machine and from its local otherwise.
+        _fused_carried_load(temps: Collections.List[FUSED_STAGE_TEMPS], state: FUSED_LOOP_STATE?, index: int) -> Value =>
             if let stage_slot = state?.stage_field(index) then
                 _build_frame_field_load(state!.frame, stage_slot)
             else
-                stage_slots[index]!.load()
+                temps[index].carried!.load()
             fi
 
         // Apply a fused chain's stages to `element` innermost-first,
@@ -655,21 +633,7 @@ namespace Syntax.Process is
         _apply_fused_stages(
             fusion: Syntax.Process.PIPE_FUSION,
             element: Value,
-            stage_delegates: Collections.List[TEMP?],
-            stage_counters: Collections.List[TEMP?],
-            loop: Values.LOOP,
-            state: FUSED_LOOP_STATE?
-        ) -> Value =>
-            _apply_fused_stages(fusion, element, stage_delegates, stage_counters, Collections.LIST[TEMP?](), loop, state)
-
-        // As above, where the caller holds the skip_while stages' dropping
-        // flags, by stage position in step with the other lists.
-        _apply_fused_stages(
-            fusion: Syntax.Process.PIPE_FUSION,
-            element: Value,
-            stage_delegates: Collections.List[TEMP?],
-            stage_counters: Collections.List[TEMP?],
-            stage_flags: Collections.List[TEMP?],
+            temps: Collections.List[FUSED_STAGE_TEMPS],
             loop: Values.LOOP,
             state: FUSED_LOOP_STATE?
         ) -> Value is
@@ -692,7 +656,7 @@ namespace Syntax.Process is
                     if let f = stage_slot then
                         add(_build_frame_field_store(state!.frame, f, _fused_step(state!, f, IR.ArithmeticOperation.SUBTRACT)))
                     else
-                        add(IR.Values.DECREMENT(stage_counters[index]!.local, int_type))
+                        add(IR.Values.DECREMENT(temps[index].carried!.local, int_type))
                     fi
                 elif stage.is_skip then
                     // Decrement the counter; while it stays non-negative this
@@ -701,7 +665,7 @@ namespace Syntax.Process is
                         add(_build_frame_field_store(state!.frame, f, _fused_step(state!, f, IR.ArithmeticOperation.SUBTRACT)))
                         add(Values.CONTINUE(loop, BRANCH.GE, _build_frame_field_load(state!.frame, f), Literal.NUMBER(0, int_type)))
                     else
-                        add(Values.CONTINUE(loop, BRANCH.GE, IR.Values.PRE_DECREMENT(stage_counters[index]!.local, int_type), Literal.NUMBER(0, int_type)))
+                        add(Values.CONTINUE(loop, BRANCH.GE, IR.Values.PRE_DECREMENT(temps[index].carried!.local, int_type), Literal.NUMBER(0, int_type)))
                     fi
                 else
                     let stage_result: Value mut
@@ -727,14 +691,14 @@ namespace Syntax.Process is
                             add(_build_frame_field_store(state!.frame, f, _fused_step(state!, f, IR.ArithmeticOperation.ADD)))
                             arguments.add(counted.load())
                         else
-                            arguments.add(cast Value(IR.Values.POST_INCREMENT(stage_counters[index]!.local, int_type)))
+                            arguments.add(cast Value(IR.Values.POST_INCREMENT(temps[index].carried!.local, int_type)))
                         fi
 
                         arguments.add(current_value)
 
                         stage_result = IR.Values.NEW(stage.indexed_value_type!, stage.indexed_value_constructor!, arguments)
                     else
-                        let delegate = _fused_counter_load(stage_delegates, state, index)
+                        let delegate = _fused_carried_load(temps, state, index)
                         let func_type = stage.argument!.value!.type!
 
                         let result_type =
@@ -765,7 +729,7 @@ namespace Syntax.Process is
                         // first element that fails either - so the first
                         // rejection ends the dropping and every element
                         // after passes untested.
-                        let flag = _fused_flag_load(stage_flags, state, index)
+                        let flag = _fused_flag_load(temps, state, index)
                         let dropping = TEMP(
                             current_block,
                             "fused_dropping",
@@ -776,7 +740,7 @@ namespace Syntax.Process is
                         if let flag_slot = state?.stage_flag(index) then
                             add(_build_frame_field_store(state!.frame, flag_slot, dropping.load()))
                         else
-                            stage_flags[index]!.store(dropping.load())
+                            temps[index].flag!.store(dropping.load())
                         fi
 
                         index = index - 1
@@ -929,7 +893,7 @@ namespace Syntax.Process is
 
             let state: FUSED_LOOP_STATE? =
                 if frame? /\ `for.iterator_field? then
-                    FUSED_LOOP_STATE(frame, `for.iterator_field!, `for.fused_fields, null, `for.fused_flag_fields)
+                    FUSED_LOOP_STATE(frame, `for.iterator_field!, `for.fused_stages)
                 else
                     null
                 fi
@@ -956,20 +920,13 @@ namespace Syntax.Process is
                     temp!.load()
                 fi
 
-            // Per-stage setup: an inlined stage needs a slot for its
-            // parameter local; a delegate stage hoists its function value
-            // into a local so the delegate is built once, not per element;
-            // an index stage needs a running counter, initialised to its
-            // start.
-            let stage_delegates = Collections.LIST[TEMP?]()
-            let stage_counters = Collections.LIST[TEMP?]()
-            let stage_flags = Collections.LIST[TEMP?]()
-
-            _setup_fused_stages(fusion, stage_delegates, stage_counters, stage_flags, state)
+            // A delegate stage hoists its function value so the delegate
+            // is built once, not per element.
+            let temps = _setup_fused_stages(fusion, state)
 
             let structured = _open_structured_loop(loop)
 
-            _gen_fused_take_guards(fusion, stage_counters, structured, state)
+            _gen_fused_take_guards(fusion, temps, structured, state)
 
             let has_next = fusion.source_move_next!.call(source.location, load_iterator(), Collections.LIST[Value](0), null, _function_caller)
 
@@ -982,7 +939,7 @@ namespace Syntax.Process is
                 i.current = element
             fi
 
-            let current_value = _apply_fused_stages(fusion, element, stage_delegates, stage_counters, stage_flags, structured, state)
+            let current_value = _apply_fused_stages(fusion, element, temps, structured, state)
 
             gen_destructuring_initialize(variable.left, current_value)
 
