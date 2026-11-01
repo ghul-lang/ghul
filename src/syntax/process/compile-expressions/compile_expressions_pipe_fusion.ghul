@@ -880,17 +880,29 @@ namespace Syntax.Process is
             fi
 
             if consumer_kind =~ "join" then
-                // `join(chain)` is its own overload whose body passes a
-                // separator to the two-argument one, and a referenced
-                // runtime's bodies are not there to read it from. Writing
-                // the separator here instead would put the fused text at
-                // the mercy of the two agreeing, silently, so the form
-                // without one is left to the runtime.
-                if call.arguments.expressions.count < 2 then
+                // The form that supplies a separator passes its value; the
+                // one without reads `Ghul.Pipes.JOIN_SEPARATOR` from the
+                // referenced runtime, so the fused text and the runtime's
+                // own join agree whatever runtime is linked. A runtime
+                // without the constant keeps its own loop.
+                let separator: IR.Values.Value? =
+                    if call.arguments.expressions.count >= 2 then
+                        call.arguments.expressions[1].value
+                    else
+                        let read = _innate_symbol_lookup.get_join_separator()
+
+                        if read? then
+                            read.call(call.location, null, Collections.LIST[IR.Values.Value](0), null, _function_caller)
+                        else
+                            null
+                        fi
+                    fi
+
+                if !separator? then
                     return _decline_consumer(call, recognizer, consumer_kind, "join-separator-not-given")
                 fi
 
-                if !_build_fused_join(fused, call, id, result, final_element_load, built.final.type) then
+                if !_build_fused_join(fused, call, id, result, final_element_load, built.final.type, separator!) then
                     return _decline_consumer(call, recognizer, consumer_kind, "join-handler-unresolved")
                 fi
             fi
@@ -1628,7 +1640,8 @@ namespace Syntax.Process is
             id: int,
             result: IR.LOCAL,
             element_load: IR.Values.Value,
-            element_type: Type
+            element_type: Type,
+            separator: IR.Values.Value
         ) -> bool is
             let handler_type = _innate_symbol_lookup.get_interpolated_string_handler_type()
             let string_type = _innate_symbol_lookup.get_string_type()
@@ -1644,14 +1657,6 @@ namespace Syntax.Process is
                     handler_type)
 
             let handler_load = cast IR.Values.Value(IR.Values.Load.TEMP(result, handler_type))
-
-            // The caller's own separator, which the recogniser has already
-            // required: the form that supplies none is declined there.
-            let separator = call.arguments.expressions[1].value
-
-            if !separator? then
-                return false
-            fi
 
             let separator_local = IR.LOCAL(".fc_separator.{id}", string_type)
 
