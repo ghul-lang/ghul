@@ -15,12 +15,17 @@ namespace Syntax.Process is
     //
     //   PascalCase        — abstract classes, exception classes (any
     //                       class with Exception among its ancestors),
-    //                       traits, unions, enums.
+    //                       traits, unions, enums. A name with more
+    //                       than one cased letter needs a lower-case
+    //                       one, so an all-caps word is not PascalCase.
     //                       Slug: non-pascal-case-name.
     //
-    //   UPPER_SNAKE_CASE  — concrete (instantiable) classes, structs,
-    //                       variants, enum members.
+    //   UPPER_SNAKE_CASE  — variants, enum members.
     //                       Slug: non-upper-snake-case-name.
+    //
+    //   either            — concrete classes and structs. A name that
+    //                       is neither PascalCase nor UPPER_SNAKE_CASE
+    //                       warns under non-upper-snake-case-name.
     //
     // Each is independently suppressable via the standard
     // `@suppress("<slug>")` pragma — pin per declaration, per file,
@@ -115,11 +120,8 @@ namespace Syntax.Process is
             // classes and implicitly-abstract ones (a class with a
             // user-written body-less instance method, marked during
             // declare-symbols) are recognised uniformly — this pass runs
-            // after declare-symbols for that reason. A class with no
-            // primary-constructor parameters whose every instance-shaped
-            // member is `static` is a static-utility container — never
-            // constructed — and conventionally either PascalCase or
-            // UPPER_SNAKE_CASE, so either passes.
+            // after declare-symbols for that reason. A concrete class can
+            // be written in either case.
             // An exception class is named where it is thrown and where it
             // is caught, which is where naming the concrete type is right,
             // and every exception imported from .NET is PascalCase already.
@@ -127,16 +129,14 @@ namespace Syntax.Process is
                 _check_pascal(`class.name, "exception class")
             elif _is_abstract_class(`class) then
                 _check_pascal(`class.name, "abstract class")
-            elif _is_static_only_class(`class) then
-                _check_pascal_or_upper_snake(`class.name, "class")
             else
-                _check_upper_snake(`class.name, "class")
+                _check_pascal_or_upper_snake(`class.name, "class")
             fi
         si
 
         visit(`struct: Trees.Definitions.STRUCT) is
 
-            _check_upper_snake(`struct.name, "struct")
+            _check_pascal_or_upper_snake(`struct.name, "struct")
         si
 
         visit(`trait: Trees.Definitions.TRAIT) is
@@ -200,7 +200,11 @@ namespace Syntax.Process is
                 return
             fi
 
-            _warn(identifier, kind, "non-upper-snake-case-name", "UPPER_SNAKE_CASE")
+            _logger.warn(
+                identifier.location,
+                "non-upper-snake-case-name",
+                "{kind} '{identifier.name}' is neither PascalCase nor UPPER_SNAKE_CASE"
+            )
         si
 
         _check_snake_or_upper_snake(identifier: Trees.Identifiers.Identifier, kind: string) is
@@ -301,60 +305,6 @@ namespace Syntax.Process is
             return bare
         si
 
-        // A class is "static-only" — and therefore not meaningfully
-        // instantiable — when it has no primary-constructor params
-        // and every instance-shaped member (function, property, field)
-        // is `static`. Nested type definitions don't count either way;
-        // a class containing only nested types is also non-instantiable.
-        // An empty class is *not* considered static-only: a bare
-        // `class FOO is si` is presumed to be a soon-to-be-populated
-        // instantiable shell.
-        _is_static_only_class(`class: Trees.Definitions.CLASS) -> bool static is
-            if let `class.primary_params? /\ primary_params.count > 0 then
-                return false
-            fi
-
-
-            let saw_instance_shaped mut = false
-
-            for member in `class.body do
-                let bare = member.without_pragmas
-
-                if isa Trees.Definitions.FUNCTION(bare) then
-                    let function = cast Trees.Definitions.FUNCTION(bare)
-
-                    // What the author wrote is what says whether this is
-                    // a container of statics. A member the compiler adds
-                    // - an equality operator, a hash, a bridge - is not
-                    // the author's instance member and must not take the
-                    // class out of the exemption.
-                    if function.is_synthesized then
-                        continue
-                    fi
-
-                    saw_instance_shaped = true
-
-                    if !function.modifiers.is_static then
-                        return false
-                    fi
-                elif isa Trees.Definitions.PROPERTY(bare) then
-                    saw_instance_shaped = true
-                    let property = cast Trees.Definitions.PROPERTY(bare)
-                    if !property.modifiers.is_static then
-                        return false
-                    fi
-                elif isa Trees.Variables.VARIABLE(bare) then
-                    saw_instance_shaped = true
-                    let variable = cast Trees.Variables.VARIABLE(bare)
-                    if !variable.is_static then
-                        return false
-                    fi
-                fi
-            od
-
-            return saw_instance_shaped
-        si
-
         _warn(identifier: Trees.Identifiers.Identifier, kind: string, slug: string, case_label: string) is
             _logger.warn(
                 identifier.location,
@@ -431,17 +381,32 @@ namespace Syntax.Process is
                 return false
             fi
 
+            let cased mut = if _is_cased(first) then 1 else 0 fi
+            let saw_lower mut = false
+
             i = i + 1
 
             while i < name.length do
-                if name[i] == '_' then
+                let c = name[i]
+
+                if c == '_' then
                     return false
+                fi
+
+                if _is_cased(c) then
+                    cased = cased + 1
+
+                    if char.is_lower(c) then
+                        saw_lower = true
+                    fi
                 fi
 
                 i = i + 1
             od
 
-            return true
+            // An all-caps word such as `TREE` is UPPER_SNAKE_CASE, not
+            // PascalCase; a single capital such as `T` is both.
+            return cased < 2 \/ saw_lower
         si
 
         // UPPER_SNAKE_CASE: every cased character is upper-case, and
