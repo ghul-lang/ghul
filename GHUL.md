@@ -1051,10 +1051,11 @@ si
 
 The compiler resolves an operator among the declarations that take the same number of operands as the use. A prefix `-` has one operand. So a member `-` with two operands (`self` and one argument) never matches a prefix `-`. Inside the type that declares such a member, a prefix `-` still finds the unary operator declared as a static member or at namespace scope.
 
-An operator's precedence comes from its first character. A declaration cannot set it. So an operator that looks like arithmetic has arithmetic precedence. From highest to lowest precedence:
+An operator's precedence comes from its first character. A declaration cannot set it. So an operator that looks like arithmetic has arithmetic precedence. The one exception is `**`, which binds tighter than the multiplication operators and groups to the right: `2 * 3 ** 2` is 18 and `2 ** 3 ** 2` is 512. From highest to lowest precedence:
 
 | level | characters |
 |-------|------------|
+| power | `**` (groups to the right) |
 | multiplication | `*` `/` `%` `×` `÷` `✕` `⊗` `⊘` `⊙` `⋅` `∗` |
 | addition | `+` `-` `⊕` `⊖` `±` `∓` |
 | bitwise | `&` `\|` `¦` `^` `∩` `∪` `⊻` `⊼` `⊽` |
@@ -1065,6 +1066,8 @@ An operator's precedence comes from its first character. A declaration cannot se
 | boolean | `∧` `∨`, and `/\` and `\/` |
 
 The unary `\` is the bitwise complement of an integer. Its result has the operand's type: `\5` is `-6` for an `int`, `\0` is `-1`, and `\x` is `250` for a `ubyte` `x` of 5. `\` is the unary partner of the binary `&`, `|` and `^`. `!` is the logical not of a `bool`. The boolean operators `/\` and `\/` are each one token.
+
+`**` raises its left operand to the power of its right one, and needs no `use`. An integer or `decimal` base takes an `int` exponent, and a `double` or `single` base takes one of its own type, so `2 ** 10` is 1024, `2L ** 40` is a `long`, and `x ** 0.5` is a square root. A `bigint` base takes an `int` exponent too. An integer power that does not fit its type throws `OverflowException`, where `*` wraps, and a negative integer exponent throws `ArgumentOutOfRangeException`. A negative `decimal` exponent gives the reciprocal. A prefix operator applies before `**`, as before any binary operator, so `-2 ** 2` is `(-2) ** 2`, which is 4.
 
 An operator is a function value wherever a function of its type is expected, whether it is declared as a function or built in (see [language details](docs/details.md#operators)). A built-in operator is an instruction rather than a method, so the compiler synthesises a function that applies it, once for each type it is used at in a function body. The name is written with the backtick escape: ``int.`+`` names the `+` of `int`, and a bare `` `+ `` names whichever `+` the expression `a + b` would resolve to for operands of the expected function type's parameter types: the same candidates, by the same overload resolution, so a `+` declared on the right operand's type or at namespace scope is found exactly as it would be in the expression. So `xs |> reduce(0, `+)` sums an `int` sequence, and `pairs |> map(`+)` adds the elements of each pair. A bare spelling with no expected function type is an error, as is one for which no operator resolves. A bare spelling can also head a call, where the written arguments resolve it as the operands of `a - b` would and a `*` takes the formal of the operator chosen: `` `-(10, *) `` is `x => 10 - x`, and `xs |> map(`+(*, 1))` adds one to each element. A call whose every argument is `*` has nothing to resolve from and is an error. `<`, `<=`, `>`, `>=`, `!=` and `!~` are derived from `<>`, `==` and `=~` and are not functions. An instance member is not a value, whether or not it is an operator, because it needs a receiver: ``string.`<>`` is an error, and a function literal takes its place.
 
