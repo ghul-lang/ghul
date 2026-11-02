@@ -1115,8 +1115,49 @@ namespace IR.Emitter is
             return assembly_name
         si
 
+        // What a host math intrinsic's operation name starts with.
+        HOST_MATH_PREFIX: string static => "host.math_"
+
+        // Whether `operation` names one of the math intrinsics, each of
+        // which a member of System.Math answers on this target.
+        is_host_math(operation: string?) -> bool static =>
+            operation? /\ operation.starts_with(HOST_MATH_PREFIX)
+
+        // A reference to the System.Math member a host math intrinsic
+        // names, with the signature read off the declaring function: the
+        // operation's own name spells the member with its first letter
+        // capitalised (`sqrt` is `Sqrt`, `ceiling` `Ceiling`, `atan2`
+        // `Atan2`), and every one takes and answers `double`.
+        resolve_host_math_target(
+            operation: string,
+            function: Semantic.Symbols.Function
+        ) -> System.Reflection.Metadata.EntityHandle is
+            let emitter = srm_assembly_emitter
+            let owner = cast System.Reflection.Metadata.EntityHandle(
+                emitter.add_type_reference_by_name("System.Runtime", "System", "Math"))
+            let suffix = operation.substring(HOST_MATH_PREFIX.length)
+            let member = "{suffix.substring(0, 1).to_upper()}{suffix.substring(1)}"
+
+            return cast System.Reflection.Metadata.EntityHandle(
+                emitter.add_named_member_reference(
+                    owner,
+                    member,
+                    "method System.Math::{member}",
+                    Emitter.SRM_SIGNATURE_ENCODER(emitter).method_signature(function)))
+        si
+
         resolve_call_target(function: Semantic.Symbols.Function) -> System.Reflection.Metadata.EntityHandle is
             let emitter = srm_assembly_emitter
+
+            // A `host.math_*` intrinsic names a member of System.Math on
+            // this target: there is no host to call, and none is needed.
+            // The call goes to the BCL member, never to the declaring
+            // function's stub body.
+            let intrinsic_root = cast Semantic.Symbols.Function?(function.root_specialized_from) ?? function
+
+            if let operation = intrinsic_root.intrinsic_operation /\ is_host_math(operation) then
+                return resolve_host_math_target(operation, intrinsic_root)
+            fi
 
             // A target this assembly defines is called through its own
             // MethodDef row. The row does not exist yet — the numbering
