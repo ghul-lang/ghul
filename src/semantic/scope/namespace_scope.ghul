@@ -26,6 +26,14 @@ namespace Semantic is
         _symbols: Collections.MAP[string,Symbol]
         _used_symbols: Collections.MAP[string,Symbol]
         _used_namespaces: Collections.LIST[Symbols.NAMESPACE]
+
+        // What `use default` brought in, kept apart from the explicit
+        // imports: a name an explicit `use` imports is looked up there
+        // and never here, so the default set can grow without a program's
+        // own imports becoming duplicates or ambiguities.
+        _default_used_symbols: Collections.MAP[string,Symbol]
+        _default_used_namespaces: Collections.LIST[Symbols.NAMESPACE]
+        _is_adding_defaults: bool
         _closures: Collections.SET[Symbols.Closure]?
 
         type: Type => Types.NONE.instance
@@ -46,6 +54,8 @@ namespace Semantic is
             _symbols = Collections.MAP[string,Symbol]()
             _used_symbols = Collections.MAP[string,Symbol]()
             _used_namespaces = Collections.LIST[Symbols.NAMESPACE]()
+            _default_used_symbols = Collections.MAP[string,Symbol]()
+            _default_used_namespaces = Collections.LIST[Symbols.NAMESPACE]()
         si
 
         add_closure(closure: Symbols.Closure) is
@@ -127,6 +137,28 @@ namespace Semantic is
                 fi
             od
 
+            // The default set is a fallback: it is consulted only for a
+            // name no explicit import answered, so an explicit import of
+            // `sqrt` is never joined by the default set's into one
+            // ambiguous overload set.
+            if !search.has_functions then
+                if _default_used_symbols.contains_key(name) then
+                    symbol = _default_used_symbols[name]
+
+                    if search.add(ns_location, symbol, false) then
+                        return cache_result(search)
+                    fi
+                fi
+
+                for ns in _default_used_namespaces do
+                    symbol = ns.find_direct(name)
+
+                    if search.add(ns_location, symbol, false) then
+                        return cache_result(search)
+                    fi
+                od
+            fi
+
             symbol = _namespace.enclosing_scope?.find_enclosing(name)
 
             if search.add(ns_location, symbol, false) then
@@ -143,7 +175,15 @@ namespace Semantic is
                 n.find_member_matches(prefix, matches)
             od
 
+            for n in _default_used_namespaces do
+                n.find_member_matches(prefix, matches)
+            od
+
             for s in _used_symbols do
+                Semantic.SYMBOL_STORE.add_match(s.key, s.value, matches)
+            od
+
+            for s in _default_used_symbols do
                 Semantic.SYMBOL_STORE.add_match(s.key, s.value, matches)
             od
         si
@@ -209,20 +249,46 @@ namespace Semantic is
             _namespace.declare_namespace(location, name, `namespace, symbol_definition_listener)
         si
 
+        // Between these two calls, what is added and what `get_used_symbol`
+        // answers is the default set's, so `use default`'s own imports
+        // group among themselves and stay out of the explicit imports.
+        begin_default_uses() is
+            _is_adding_defaults = true
+        si
+
+        end_default_uses() is
+            _is_adding_defaults = false
+        si
+
         add(`namespace: Symbols.NAMESPACE) is
-            _used_namespaces.add(`namespace)
+            if _is_adding_defaults then
+                _default_used_namespaces.add(`namespace)
+            else
+                _used_namespaces.add(`namespace)
+            fi
         si
 
         add(name: string, symbol: Symbol) is
-            _used_symbols[name] = symbol
+            if _is_adding_defaults then
+                _default_used_symbols[name] = symbol
+            else
+                _used_symbols[name] = symbol
+            fi
         si
 
+        // Whether an explicit `use` imported `name`. The default set is
+        // not counted: an explicit import under a name the default set
+        // also brings in is no duplicate, it is the one that wins.
         contains_used_symbol(name: string) -> bool => _used_symbols.contains_key(name)
 
         get_used_symbol(name: string) -> Symbol? is
             let result: Symbol mut
 
-            _used_symbols.try_get_value(name, result ref)
+            if _is_adding_defaults then
+                _default_used_symbols.try_get_value(name, result ref)
+            else
+                _used_symbols.try_get_value(name, result ref)
+            fi
 
             return result
         si
