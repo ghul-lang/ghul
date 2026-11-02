@@ -299,7 +299,7 @@ od
 write_line("{factorial}");     // 265252859812191058636308480000000
 ```
 
-Mixed operands are an error, exactly as `1.0D + 1` is. If `total` is a `bigint`, `total * 2` is an error; write `total * 2n`. `==` on a `bigint` is an error, as it is on every other struct. Compare `bigint` values with `=~`.
+Mixed operands are an error, exactly as `1.0 + 1` is. If `total` is a `bigint`, `total * 2` is an error; write `total * 2n`. `==` on a `bigint` is an error, as it is on every other struct. Compare `bigint` values with `=~`.
 
 A fractional literal is a `double` unless it has a suffix: `s` for single, `d` for double, `m` for decimal, in either case. The `m` suffix also works on a literal with only digits, to write an integral decimal (`100m`). Exponent notation is valid: `1.5e3`, `1.5E-3`.
 
