@@ -1051,11 +1051,10 @@ si
 
 The compiler resolves an operator among the declarations that take the same number of operands as the use. A prefix `-` has one operand. So a member `-` with two operands (`self` and one argument) never matches a prefix `-`. Inside the type that declares such a member, a prefix `-` still finds the unary operator declared as a static member or at namespace scope.
 
-An operator's precedence comes from its first character. A declaration cannot set it. So an operator that looks like arithmetic has arithmetic precedence. The one exception is `**`, which binds tighter than the multiplication operators and groups to the right: `2 * 3 ** 2` is 18 and `2 ** 3 ** 2` is 512. From highest to lowest precedence:
+An operator's precedence comes from its first character. A declaration cannot set it. So an operator that looks like arithmetic has arithmetic precedence. From highest to lowest precedence:
 
 | level | characters |
 |-------|------------|
-| power | `**` (groups to the right) |
 | multiplication | `*` `/` `%` `×` `÷` `✕` `⊗` `⊘` `⊙` `⋅` `∗` |
 | addition | `+` `-` `⊕` `⊖` `±` `∓` |
 | bitwise | `&` `\|` `¦` `^` `∩` `∪` `⊻` `⊼` `⊽` |

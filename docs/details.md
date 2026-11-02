@@ -439,7 +439,7 @@ Inside the block, the target's own members, inherited members and type parameter
 
 ## operators
 
-These rules add to GHUL.md's precedence table. The thread-first row lists two operators, not a first character (see [collections and pipes](../GHUL.md#collections-and-pipes)). An operator that starts with `?` has lower precedence than every level in the table. Every operator that the table does not list has precedence between shift and bitwise. Operators are left-associative, with two exceptions. An operator that starts with `?` is right-associative, so that a chain of such operators stays open to the next operator. An operator that starts with `**` is right-associative, as power is, so `2 ** 3 ** 2` is `2 ** (3 ** 2)`.
+These rules add to GHUL.md's precedence table. The thread-first row lists two operators, not a first character (see [collections and pipes](../GHUL.md#collections-and-pipes)). An operator that starts with `?` has lower precedence than every level in the table. Every operator that the table does not list has precedence between shift and bitwise. Operators are left-associative, except an operator that starts with `?`, which is right-associative, so that a chain of such operators stays open to the next operator.
 
 When the first character does not give the precedence you want, a `@precedence` pragma sets it explicitly. The pragma takes the operator and a level. The level is one of the eight levels `user-1` to `user-8`, which fall between the levels of the table, or one of the table's levels by name. The pragma before a definition covers that definition. The file-level `@@precedence` covers the rest of the file.
 
