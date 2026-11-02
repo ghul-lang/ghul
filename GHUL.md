@@ -43,7 +43,12 @@ ghūl keywords are lowercase. Identifiers follow a naming convention, and the co
 
 - `snake_case`: variables, functions, methods, properties
 - `PascalCase`: namespaces, traits, abstract classes, exception classes, unions, enums
-- `UPPER_SNAKE_CASE`: concrete classes, structs, variants, enum members
+- `UPPER_SNAKE_CASE`: union variants, enum members
+- either: concrete classes and structs
+
+A concrete class or struct can be written either way. The standard library uses `UPPER_SNAKE_CASE` for its concrete types (`LIST`, `MAP`, `STRING_BUILDER`), and so do the few .NET types that ghūl renames. Every other .NET type keeps its .NET name. Example code and most programs use `PascalCase` for their own types (`Order`, `Point`).
+
+A name of more than one letter is `PascalCase` only if it has a lower-case letter, so an all-caps word such as `TREE` is `UPPER_SNAKE_CASE` and not `PascalCase`. A single capital such as `T` is both.
 
 An exception class is `PascalCase`, whether or not it is abstract. An exception class is `Exception` or any class that derives from it, directly or indirectly. Code names an exception class where it throws the exception and where it catches it. Every exception imported from .NET is already `PascalCase`.
 
@@ -55,9 +60,7 @@ The compiler warns when a declaration in ghūl source does not follow the conven
 
 - `non-snake-case-name`: variables (including `let`, `for` and `catch` locals, and function arguments), functions, methods, properties.
 - `non-pascal-case-name`: abstract classes, exception classes, traits, unions, enums.
-- `non-upper-snake-case-name`: concrete classes, structs, variants, enum members.
-
-A class with only `static` members and no primary-constructor parameters is a static utility container. Nothing constructs it. Its name can be `PascalCase` or `UPPER_SNAKE_CASE`.
+- `non-upper-snake-case-name`: variants and enum members, and a concrete class or struct whose name is neither `PascalCase` nor `UPPER_SNAKE_CASE`.
 
 *More detail on this section: [language details](docs/details.md#naming-conventions).*
 
@@ -2053,8 +2056,8 @@ See <https://ghul.dev/dotnet-integration.html>.
 ghūl compiles to .NET IL, and can use most types in any .NET assembly. The compiler converts .NET names to ghūl conventions:
 
 - Method, property and field names become `snake_case`.
-- Enum names and enum members become `MACRO_CASE`.
-- Class, struct and trait names keep their .NET names, without .NET's generic arity suffix. So `SortedSet<T>` is `Collections.SortedSet[T]`.
+- Enum members become `UPPER_SNAKE_CASE`.
+- Type names keep their .NET names, without .NET's generic arity suffix, except a short list of core types that ghūl names in `UPPER_SNAKE_CASE` (`LIST`, `MAP`, `SET`, `STRING_BUILDER`, `RANDOM`, `TASK`, ...), listed below. So `SortedSet<T>` is `Collections.SortedSet[T]`.
 - The namespace `System.Collections.Generic` is `Collections`, and `System.IO` is `IO`.
 
 Some common types have different names:
@@ -2106,7 +2109,7 @@ A member `=~` or `<>` must be `pure`: declared `pure`, or provably store-free. O
 
 A backtick escapes an identifier that is a ghūl keyword: `` `class `` is the identifier `class`.
 
-A static property or field is `snake_case`, even when it looks like a constant, because only enum members become `MACRO_CASE`. So `CancellationToken.None` is `System.Threading.CancellationToken.none`.
+A static property or field is `snake_case`, even when it looks like a constant, because only enum members become `UPPER_SNAKE_CASE`. So `CancellationToken.None` is `System.Threading.CancellationToken.none`.
 
 An **indexer** is the one member that code reaches only through its own syntax. .NET does not fix an indexer's name: the property has the name its declaring language chose, and the type names the real one. `System.String` and `Text.STRING_BUILDER` both call theirs `Chars`. Code never writes the name: `[` and `]` find the indexer whatever its name is.
 
