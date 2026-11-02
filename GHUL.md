@@ -313,6 +313,8 @@ let o: object = "hello";         // ok, string is an object
 
 Each scalar type is also a constructor that takes any other scalar. The constructor converts exactly as a cast to that type does. `double(n)` is `cast double(n)`. `int(x)` truncates, as `cast int(x)` does. A value out of range wraps, as it does with a cast. `_(n)` converts to the scalar type that the context expects. The argument must be a scalar: `int("42")` does not parse a string. Convert a value held as `object` or as a type parameter with `cast`, which unboxes it.
 
+`pow` raises a number to a power. `pow(x, y)` on two `double`s calls the platform's power function. Every integer type and `bigint` also has a `pow` that takes an `int` exponent and returns the base's type: `pow(2, 10)` is 1024, and `pow(3L, 30)` is a `long`. An integer `pow` whose result does not fit its type throws `OverflowException`, where `*` wraps, and a negative exponent throws `ArgumentOutOfRangeException`. Because `pow` has several overloads, a call whose arguments are all untyped casts, such as `pow(cast(x), cast(y))`, has no type to infer: name it, as in `pow(double(x), double(y))`. `pow` is in `Ghul.Math`, so `use default` imports it.
+
 ```ghul
 let n = 7;
 let half = double(n) / 2.0;      // 3.5
