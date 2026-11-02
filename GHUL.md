@@ -10,8 +10,9 @@ This file is a condensed reference in one file. The full documentation is at <ht
 
 These mistakes cost the most rework. A section below explains each one. The last one is explained in the targets file.
 
-- **.NET members are `snake_case`.** Write `Math.sqrt(x)`, `Math.pi`, `s.length` and `list.count`. `Math.Sqrt`, `Math.PI` and `list.Count` are errors. The compiler converts .NET names, and `System.Math` is `Ghul.Math`.
-- **`write_line` must be imported.** Write `use IO.Std.write_line` before the code that calls it. Or start the file with `use default`, which imports `write_line`, the pipes and the collections.
+- **.NET members are `snake_case`.** Write `s.length`, `list.count` and `builder.append(x)`. `s.Length`, `list.Count` and `builder.Append(x)` are errors. The compiler converts .NET names.
+- **The maths functions are in `Ghul.Math`, imported by `use default`.** Write `sqrt(x)`, `floor(x)` and `pi`. `System.Math.sqrt(x)` still compiles, as .NET interop.
+- **`write_line` must be imported.** Write `use IO.Std.write_line` before the code that calls it. Or start the file with `use default`, which imports `write_line`, the pipes, the collections and the maths functions.
 - **Strings have no `+` operator.** Join strings with interpolation: `"{a}{b}"`.
 - **`==` on a `string` compares references.** Compare text with `=~`. Use `==` for scalars, enums and references.
 - **Numbers do not convert implicitly.** `1.0 + 1` is an error. Write `1.0 + double(1)` or `cast double(n)`. A big integer is a `bigint`, written with the `n` suffix. Do not use `System.Numerics.BigInteger`.
@@ -2071,7 +2072,6 @@ The core types have ghūl names in ghūl namespaces:
 
 - `System.Exception` is `Ghul.Exception`. The common exceptions in `System` are also in `Ghul`: `Ghul.InvalidOperationException`, `Ghul.NotImplementedException`, `Ghul.ArgumentException` and the others.
 - `System.Text.StringBuilder` is `Text.STRING_BUILDER`.
-- `System.Math` is `Ghul.Math`.
 - `System.Random` is `Ghul.RANDOM`.
 - `System.StringSplitOptions` and `System.StringComparison` are `Ghul.StringSplitOptions` and `Ghul.StringComparison`.
 - `System.Lazy<T>` is `Ghul.LAZY[T]`.
