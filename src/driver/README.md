@@ -83,9 +83,9 @@ Two prefixes number one other kind of site, and only that kind:
 - `cast:` numbers the targets of explicit casts: `cast double(n)` as `cast(n)`.
 - `signature:` numbers the signatures of the functions in a file with
   top-level statements that could be written with no types at all: named,
-  with a body, and with no modifier but `memo` or `pure`. A chosen one is
-  printed with its type parameters, parameter types and return type left out,
-  `step(n: int) -> int` as `step(n)`. A listed site reads
+  with a body, with no modifier but `memo` or `pure`, and with no `ref`
+  parameter. A chosen one is printed with its type parameters, parameter types
+  and return type left out, `step(n: int) -> int` as `step(n)`. A listed site reads
   `<n> signature <line>,<column> replace <start line>,<start column>,<end line>,<end column> <text>`:
   the span runs from the start of the name to the end of the last of the
   return type, the modifiers and the parameters (where it ends at a
