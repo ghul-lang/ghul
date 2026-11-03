@@ -1243,19 +1243,17 @@ namespace Semantic.Symbols is
             if is_static then
                 // A static member with no body is a slot each implementing
                 // type fills with a static of its own, reached through a
-                // bounded type parameter as `T.member(...)`. The targets
-                // that build the core library from source bind it when
-                // the generic is instantiated; on .NET an implementing
-                // type cannot fill the slot (see
-                // STATIC_INTERFACE_IMPLEMENTATION_CHECKER).
+                // bounded type parameter as `T.member(...)`. Only the core
+                // library declares one, where it is built from source: on
+                // .NET the same traits are .NET's own interfaces.
                 let static_method = _make_static_method(location, span, name, is_private, enclosing)
 
-                if has_body then
-                    IoC.CONTAINER.instance.logger.error(location, "cannot declare a static method with a body in a trait")
-                elif !IoC.CONTAINER.instance.target_profile.has_source_core_library then
-                    IoC.CONTAINER.instance.logger.error(location, "cannot declare a static method in a trait on the .NET target")
-                elif let slot: STATIC_METHOD = static_method then
-                    slot.is_static_interface_virtual = true
+                if !has_body /\ _may_require_static_member(location) then
+                    if let slot: STATIC_METHOD = static_method then
+                        slot.is_static_interface_virtual = true
+                    fi
+                else
+                    IoC.CONTAINER.instance.logger.error(location, "cannot declare static method in trait")
                 fi
 
                 result = static_method
@@ -1268,6 +1266,30 @@ namespace Semantic.Symbols is
             declare_function_group(location, result, symbol_definition_listener)
 
             return result
+        si
+
+        // Whether a static member declared at `location` may be one a trait
+        // requires: in the core library, built from source.
+        _may_require_static_member(location: LOCATION) -> bool is
+            let container = IoC.CONTAINER.instance
+
+            if !container.target_profile.has_source_core_library then
+                return false
+            fi
+
+            if container.build_flags.allow_static_trait_members then
+                return true
+            fi
+
+            if location.is_reflected \/ location.is_unknown then
+                return false
+            fi
+
+            if let library = container.build_flags.library_sources?.library_for(IO.Path.get_full_path(location.file_name)) then
+                return library.name =~ "ghul-runtime"
+            fi
+
+            return false
         si
 
         declare_generator_function(location: LOCATION, span: LOCATION, name: string, is_static: bool, is_private: bool, has_body: bool, enclosing: Scope, symbol_definition_listener: SymbolDefinitionListener?) -> Symbol is

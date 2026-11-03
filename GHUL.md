@@ -913,23 +913,17 @@ class TALLY: Counted is
 si
 ```
 
-A trait can require a static member: a `static` method with no body. Each implementing type implements it with a static method of the matching signature. The call is resolved by the type argument, so it can only be made through a type parameter the trait bounds, as `T.member(...)`. It cannot be called on an instance or on the trait itself, and a static a type inherits from a base class is not dispatched again for the derived type. This is how `Ghul.Parsable[T]` works: on .NET it is `System.IParsable<T>`, and `Ghul.FormatProvider` is `System.IFormatProvider`, so BCL types satisfy the bound as they are.
+`Ghul.Parsable[T]` is the trait of a type whose values can be read from text. On .NET it is `System.IParsable<T>`, and `Ghul.FormatProvider` is `System.IFormatProvider`, so the BCL's types satisfy it as they are. Used as a bound, it lets generic code call the type's static `try_parse` through the type parameter. The call is resolved by the type argument, so it is made only as `T.try_parse(...)` on a type parameter the trait bounds, not on an instance or on the trait itself:
 
 ```ghul
-trait Named[T] is
-    try_named(text: string, result: T ref) -> bool static
-si
-
-struct Kelvin(degrees: int public): Named[Kelvin] is
-    try_named(text: string, result: Kelvin ref) -> bool static is
-        result! = Kelvin(273)
-        return text =~ "freezing"
-    si
-si
-
-lookup[T: Named[T]](text: string) -> bool is
+read_or[T: Ghul.Parsable[T]](text: string, fallback: T) -> T is
     let value: T mut = _
-    return T.try_named(text, value ref)
+
+    if T.try_parse(text, null, value ref) then
+        return value
+    fi
+
+    return fallback
 si
 ```
 

@@ -12,7 +12,7 @@ use Ghul.Parsable;
 parse_or_throw[T: Parsable[T]](s: string) -> T => T.parse(s, null);
 ```
 
-A type cannot *implement* a static member of a .NET interface. Nothing connects a type's static member to the interface's static slot, and the runtime refuses to load a type that leaves such a slot empty. So declaring a concrete type that implements an interface with a static member is an error at the declaration. This applies to the generic-math interfaces above. So the built-in numeric types satisfy a bound on one of these interfaces, and a type of your own cannot. A trait written in ghūl can require a static member that a type implements; see [traits](../GHUL.md#traits).
+A type cannot *implement* a static member of a .NET interface. Nothing connects a type's static member to the interface's static slot, and the runtime refuses to load a type that leaves such a slot empty. So declaring a concrete type that implements an interface with a static member is an error at the declaration. This applies to the generic-math interfaces above. So the built-in numeric types satisfy a bound on one of these interfaces, and a type of your own cannot.
 
 Some of these interfaces declare an **operator** as a static member. `IAdditionOperators[TSelf, TOther, TResult]` declares addition, and `INumber[T]` extends it. Code uses such an operator as an operator, not through the type parameter, but only after importing the operator by name:
 
