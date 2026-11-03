@@ -815,6 +815,16 @@ namespace Syntax.Process is
                 return (cast Value(DUMMY(type, location)), cast Value(DUMMY(type, location)))
             fi
 
+            // A construction that has to infer its type arguments from an
+            // argument with no type yet waits for it rather than resolving
+            // against nothing.
+            if
+                Semantic.CALL_ARGUMENT_WAIT.is_inferred_construction(type) /\
+                Semantic.CALL_ARGUMENT_WAIT.untyped(argument_types)?
+            then
+                return (cast Value(Load.SYMBOL(null, function_group)), _unresolved_construction(cache_key, location, type, argument_types))
+            fi
+
             let named_restrict: Semantic.Symbols.Function[]? mut = null
 
             if argument_names? then
@@ -1356,7 +1366,7 @@ namespace Syntax.Process is
                 return null
             fi
 
-            let awaited = _awaited_argument(argument_types)
+            let awaited = Semantic.CALL_ARGUMENT_WAIT.awaited(argument_types)
 
             if !awaited? then
                 return null
@@ -1381,34 +1391,6 @@ namespace Syntax.Process is
             return Semantic.Types.INFERRED_VARIABLE_TYPE(origin)
         si
 
-        // The first placeholder an argument waits on: one inside its type
-        // that is still being inferred, or the one a rule's waiting result
-        // over it waits on. Null when every argument is typed.
-        _awaited_argument(argument_types: Collections.LIST[Semantic.Types.Type]) -> Semantic.Types.Type? is
-            for argument_type in argument_types do
-                if let join: Semantic.Types.INFERRED_JOIN_TYPE = argument_type then
-                    return join.awaiting
-                fi
-
-                if argument_type.contains_inferred then
-                    let awaited: Semantic.Types.INFERRED_VARIABLE_TYPE? mut = null
-
-                    argument_type.walk(
-                        t => if !awaited? then
-                            if let placeholder: Semantic.Types.INFERRED_VARIABLE_TYPE = t /\ !placeholder.is_settled then
-                                awaited = placeholder
-                            fi
-                        fi)
-
-                    if awaited? then
-                        return awaited
-                    fi
-                fi
-            od
-
-            return null
-        si
-
         // The value of a construction of a generic class `Foo(...)` that
         // could not be resolved. While an argument is still being inferred
         // it is a named unknown that waits on that argument: the class's
@@ -1424,11 +1406,9 @@ namespace Syntax.Process is
             argument_types: Collections.LIST[Semantic.Types.Type]
         ) -> Value is
             if
-                let caller = _symbol_table.current_function,
-                classy: Semantic.Symbols.Classy = type.symbol /\
-                !isa Semantic.Types.GENERIC(type) /\
-                classy.is_generic,
-                awaited = _awaited_argument(argument_types),
+                let caller = _symbol_table.current_function /\
+                Semantic.CALL_ARGUMENT_WAIT.is_inferred_construction(type),
+                awaited = Semantic.CALL_ARGUMENT_WAIT.awaited(argument_types),
                 origin = Semantic.RESULT_ORIGINS.origin_for(
                     cache_key,
                     location,

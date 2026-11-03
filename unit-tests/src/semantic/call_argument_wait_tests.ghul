@@ -1,0 +1,119 @@
+namespace Semantic.UnitTests is
+    use Collections.LIST
+
+    use Microsoft.VisualStudio.TestTools.UnitTesting.Assert
+
+    use Source.LOCATION
+
+    use Semantic.CALL_ARGUMENT_WAIT
+    use Semantic.Symbols.CLASS
+    use Semantic.Symbols.LOCAL_ARGUMENT
+    use Semantic.Types.GENERIC
+    use Semantic.Types.INFERRED_JOIN_TYPE
+    use Semantic.Types.INFERRED_VARIABLE_TYPE
+    use Semantic.Types.Type
+    use TestClass = Microsoft.VisualStudio.TestTools.UnitTesting.TestClassAttribute
+    use Test = Microsoft.VisualStudio.TestTools.UnitTesting.TestMethodAttribute
+    use Assertions
+
+    @TestClass()
+    class CALL_ARGUMENT_WAIT_TESTS is
+        init() is si
+
+        loc() -> LOCATION => LOCATION("test.ghul", 1, 1, 1, 1)
+
+        a_class(name: string) -> CLASS =>
+            CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), name, LIST[string](), Semantic.BLOCK_SCOPE())
+
+        a_generic_class(name: string) -> CLASS =>
+            CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), name, ["T"], Semantic.BLOCK_SCOPE())
+
+        a_placeholder(name: string) -> INFERRED_VARIABLE_TYPE =>
+            INFERRED_VARIABLE_TYPE(LOCAL_ARGUMENT(loc(), Semantic.BLOCK_SCOPE(), name))
+
+        @Test()
+        Calling__awaited__on_typed_arguments__should_return_null() is
+            is_null(CALL_ARGUMENT_WAIT.awaited(LIST[Type]([a_class("cat").type!, a_class("dog").type!])))
+        si
+
+        @Test()
+        Calling__awaited__on_a_placeholder_argument__should_return_it() is
+            let n = a_placeholder("n")
+
+            are_same(cast Type?(n), CALL_ARGUMENT_WAIT.awaited(LIST[Type]([a_class("cat").type!, n])))
+        si
+
+        @Test()
+        Calling__awaited__on_a_placeholder_inside_a_generic__should_return_the_placeholder() is
+            let n = a_placeholder("n")
+            let box = GENERIC(loc(), a_generic_class("Box"), LIST[Type]([n]))
+
+            are_same(cast Type?(n), CALL_ARGUMENT_WAIT.awaited(LIST[Type]([box])))
+        si
+
+        @Test()
+        Calling__awaited__on_a_waiting_join__should_return_what_it_awaits() is
+            // `1::size` with `size` still being inferred is a join that
+            // waits on `size`.
+            let size = a_placeholder("size")
+
+            are_same(cast Type?(size), CALL_ARGUMENT_WAIT.awaited(LIST[Type]([INFERRED_JOIN_TYPE(size)])))
+        si
+
+        @Test()
+        Calling__awaited__with_two_waiting_arguments__should_return_the_first() is
+            let first = a_placeholder("first")
+            let second = a_placeholder("second")
+
+            are_same(cast Type?(first), CALL_ARGUMENT_WAIT.awaited(LIST[Type]([first, INFERRED_JOIN_TYPE(second)])))
+        si
+
+        @Test()
+        Calling__awaited__with_a_join_before_a_placeholder__should_return_what_the_join_awaits() is
+            let size = a_placeholder("size")
+            let other = a_placeholder("other")
+
+            are_same(cast Type?(size), CALL_ARGUMENT_WAIT.awaited(LIST[Type]([INFERRED_JOIN_TYPE(size), other])))
+        si
+
+        @Test()
+        Calling__untyped__on_a_bare_placeholder_argument__should_return_it() is
+            let n = a_placeholder("n")
+
+            are_same(cast Type?(n), CALL_ARGUMENT_WAIT.untyped(LIST[Type]([a_class("cat").type!, n])))
+        si
+
+        @Test()
+        Calling__untyped__on_a_waiting_join__should_return_what_it_awaits() is
+            let size = a_placeholder("size")
+
+            are_same(cast Type?(size), CALL_ARGUMENT_WAIT.untyped(LIST[Type]([INFERRED_JOIN_TYPE(size)])))
+        si
+
+        @Test()
+        Calling__untyped__on_a_partly_typed_argument__should_return_null() is
+            // `[colors]` with `colors` still being inferred has a shape a
+            // resolution can use, so the construction resolves as before.
+            let box = GENERIC(loc(), a_generic_class("Box"), LIST[Type]([a_placeholder("n")]))
+
+            is_null(CALL_ARGUMENT_WAIT.untyped(LIST[Type]([box])))
+        si
+
+        @Test()
+        Calling__is_inferred_construction__on_a_generic_class_named_without_arguments__should_return_true() is
+            is_true(CALL_ARGUMENT_WAIT.is_inferred_construction(a_generic_class("LIST").type!))
+        si
+
+        @Test()
+        Calling__is_inferred_construction__on_a_class_with_its_arguments_given__should_return_false() is
+            let list = GENERIC(loc(), a_generic_class("LIST"), LIST[Type]([a_class("int").type!]))
+
+            is_false(CALL_ARGUMENT_WAIT.is_inferred_construction(list))
+        si
+
+        @Test()
+        Calling__is_inferred_construction__on_a_non_generic_class__should_return_false() is
+            is_false(CALL_ARGUMENT_WAIT.is_inferred_construction(a_class("cat").type!))
+        si
+    si
+si
