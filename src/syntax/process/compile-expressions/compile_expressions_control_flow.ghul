@@ -254,18 +254,64 @@ namespace Syntax.Process is
         _is_unsettled_generator_literal(function: Semantic.Symbols.Function) -> bool =>
             function.is_closure /\ (function.return_type?.is_inferred ?? false)
 
+        // Per generator literal whose element type its yields decide, the
+        // types yielded so far on the current walk of its body.
+        _generator_yields: Collections.MAP[Semantic.Symbols.Function, Collections.LIST[Type]]?
+
         // A generator literal whose return is left to be inferred takes
-        // it from its first yield: Pipe[T] over the type that yield
-        // produces. The yields after it are checked against that T.
+        // its element type from its yields: Pipe[T] over the join of the
+        // types they produce, as a function's return is the join of its
+        // returns. The first yield of a walk settles T, so the body reads
+        // a type from there on, and a later yield that T doesn't fit
+        // widens it to the join of every yield the walk has seen.
         _settle_generator_literal_return(function: Semantic.Symbols.Function, yielded_type: Semantic.Types.Type) is
             if !function.is_closure \/ !yielded_type.is_settled \/ yielded_type.is_error \/ isa Semantic.Types.NULL(yielded_type) then
                 return
             fi
 
-            if let return_type = function.return_type /\ return_type.is_inferred then
+            let return_type = function.return_type
+
+            if !return_type? then
+                return
+            fi
+
+            let yields_by_function mut = _generator_yields
+
+            if !yields_by_function? then
+                yields_by_function = Collections.MAP[Semantic.Symbols.Function, Collections.LIST[Type]]()
+                _generator_yields = yields_by_function
+            fi
+
+            if return_type.is_inferred then
                 if let pipe_type = Semantic.Symbols.generator_return_type(yielded_type) then
                     function.set_return_type(pipe_type)
+
+                    yields_by_function[function] = Collections.LIST[Type]([yielded_type])
                 fi
+
+                return
+            fi
+
+            let yields: Collections.LIST[Type] mut
+
+            if !yields_by_function.try_get_value(function, yields ref) then
+                return
+            fi
+
+            yields.add(yielded_type)
+
+            if let element_type = _yield_element_type_for(function) /\ element_type.is_assignable_from(yielded_type) then
+                return
+            fi
+
+            let lub = LEAST_UPPER_BOUND_MAP()
+
+            for t in yields do
+                lub.add(t)
+            od
+
+            if let joined = lub.get_result(), pipe_type = Semantic.Symbols.generator_return_type(joined) then
+                function.set_return_type(pipe_type)
             fi
         si
 

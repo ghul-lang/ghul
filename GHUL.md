@@ -234,12 +234,14 @@ tree = Tree.NODE(tree, 1, Tree.EMPTY);
 
 let pet mut = CAT();           // Animal
 pet = DOG();
+
+let xs mut = LIST([1, 2]);     // int[], the list trait both implement
+xs = [3, 4];
 ```
 
-The compiler uses the join only when it is a type that the author wrote. In these cases the local keeps the type of its initializer, and the compiler reports the assignment:
+In these cases the local keeps the type of its initializer, and the compiler reports the assignment:
 
 - the join is `object` or `System.ValueType`
-- the join is a trait, and neither the initializer nor any assigned value has that trait as its type
 - the initializer or an assigned value is a value type
 
 So `let i mut = 0; i = 1L` is an error, and so is assigning a value of an unrelated class. A written type (`let pet: Animal mut = CAT()`) always fixes this.
@@ -1789,7 +1791,7 @@ A function literal whose body contains `yield` is also a generator. It captures 
 
 1. its declared return type
 2. the slot it is assigned to, when that slot expects a `Pipe[T]`, `Iterable[T]` or `Iterator[T]`
-3. its first `yield`
+3. the join of the types its `yield`s produce, as a function's return type is the join of its `return`s
 
 A generator literal whose element type none of these decides is an error. A nested named function that yields is also a generator literal. It refers to itself by name for `yield in`:
 
