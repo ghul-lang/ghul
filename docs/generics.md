@@ -4,15 +4,15 @@ Read this file when you are writing generic library code. It continues sections 
 
 ## generics
 
-Code can reach a bound's *static* members through the type parameter, written `T.member(...)`. .NET's generic-math interfaces (`IParsable[T]`, `INumber[T]`, `IBinaryInteger[T]`, ...) are built on this mechanism:
+Code can reach a bound's *static* members through the type parameter, written `T.member(...)`. .NET's generic-math interfaces (`Ghul.Parsable[T]`, which is .NET's `IParsable<T>`, `INumber[T]`, `IBinaryInteger[T]`, ...) are built on this mechanism:
 
 ```ghul
-use System.IParsable;
+use Ghul.Parsable;
 
-parse[T: IParsable[T]](s: string) -> T => T.parse(s, null);
+parse_or_throw[T: Parsable[T]](s: string) -> T => T.parse(s, null);
 ```
 
-ghūl supports only using such a member. A type cannot *implement* a static interface member. Nothing connects a type's static member to the interface's static slot, and the runtime refuses to load a type that leaves such a slot empty. So declaring a concrete type that implements an interface with a static member is an error at the declaration. This applies to the generic-math interfaces above. So the built-in numeric types satisfy a bound on one of these interfaces, and a type of your own cannot.
+A type cannot *implement* a static member of a .NET interface. Nothing connects a type's static member to the interface's static slot, and the runtime refuses to load a type that leaves such a slot empty. So declaring a concrete type that implements an interface with a static member is an error at the declaration. This applies to the generic-math interfaces above. So the built-in numeric types satisfy a bound on one of these interfaces, and a type of your own cannot. A trait written in ghūl can require a static member that a type implements; see [traits](../GHUL.md#traits).
 
 Some of these interfaces declare an **operator** as a static member. `IAdditionOperators[TSelf, TOther, TResult]` declares addition, and `INumber[T]` extends it. Code uses such an operator as an operator, not through the type parameter, but only after importing the operator by name:
 
