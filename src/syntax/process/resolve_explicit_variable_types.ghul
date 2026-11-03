@@ -148,7 +148,7 @@ namespace Syntax.Process is
                     continue
                 fi
 
-                let type = if argument.type_ran_on then null else argument.type_expression.type fi
+                let type = if argument.type_ran_on \/ argument.is_poisoned then null else argument.type_expression.type fi
 
                 types.add(if type? then type else Semantic.Types.ERROR() fi)
 
@@ -186,6 +186,10 @@ namespace Syntax.Process is
             then
                 // An auto-property with no written type is reported with
                 // the property.
+                symbol.return_type = Semantic.Types.ERROR()
+            elif isa Trees.TypeExpressions.INFER(function.type_expression) /\ function.is_poisoned then
+                // A function already reported for its signature is not held
+                // to void as well, which its callers would report again.
                 symbol.return_type = Semantic.Types.ERROR()
             elif !isa Trees.TypeExpressions.INFER(function.type_expression) then
                 let resolved = function.type_expression.type
@@ -402,8 +406,24 @@ namespace Syntax.Process is
 
         visit(variable: Trees.Variables.VARIABLE) is
             // A poisoned variable has already drawn its diagnostic at its
-            // declaration; typing it again here only cascades.
+            // declaration; typing it again here only cascades. A poisoned
+            // argument is still typed as an error, so the body reads it
+            // without reporting it again.
             if variable.is_poisoned then
+                if variable.is_argument then
+                    for name in variable.names do
+                        let symbol = find(name)
+
+                        if let typed_symbol = cast Semantic.Types.SettableTyped?(symbol) /\ !typed_symbol.type? then
+                            typed_symbol.set_type(Semantic.Types.ERROR())
+                        fi
+
+                        if let argument = cast Semantic.Symbols.Variable?(symbol) then
+                            argument.is_reported_at_declaration = true
+                        fi
+                    od
+                fi
+
                 return
             fi
 
