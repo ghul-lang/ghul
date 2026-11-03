@@ -166,8 +166,9 @@ namespace Syntax.Process is
                             !(isa Definitions.FUNCTION(d) /\ candidates.contains(cast Definitions.FUNCTION(d))) /\
                             scanner.node_references(d, candidate.name!.name)
                         then
-                            candidate.not_nested_because =
-                                "{candidate.name!.name} is used by {_definition_name(d)}, so it can't be a nested function of the top-level statements"
+                            candidate.not_nested_because = "{candidate.name!.name} is used by {_definition_name(d)}"
+                            candidate.not_nested_hint =
+                                "a function with no types in its signature is nested in the top-level statements, where {_definition_name(d)} cannot call it"
                             candidates.remove(candidate)
                             changed = true
 
@@ -194,7 +195,11 @@ namespace Syntax.Process is
                     _logger.warn(
                         function.name!.location,
                         "file-private-function",
-                        "{function.name!.name} is private to this file, because its types are inferred: start its name with _ to say so, or write its types to make it a namespace function")
+                        "{function.name!.name} is private to this file")
+
+                    _logger.hint(
+                        function.name!.location,
+                        "a function with no types in its signature is private to its file, and a name that starts with '_' says so")
                 fi
 
                 names.add(function.name!.name)
@@ -248,8 +253,9 @@ namespace Syntax.Process is
                 let partner = _callees(function, refused, scanner)
                 let other = if partner.count > 0 then partner[0].name!.name else "another function" fi
 
-                function.not_nested_because =
-                    "{function.name!.name} and {other} call each other, which nested functions of the top-level statements can't, so both need their types"
+                function.not_nested_because = "{function.name!.name} and {other} call each other"
+                function.not_nested_hint =
+                    "functions with no types in their signatures are nested in the top-level statements, where two cannot call each other"
 
                 candidates.remove(function)
             od
@@ -323,6 +329,7 @@ namespace Syntax.Process is
         si
 
         _is_unannotated(function: Definitions.FUNCTION) -> bool =>
+            !function.is_poisoned /\
             function.name? /\
             !function.is_top_level_entry /\
             function.name.name !~ _entry_point.name /\
@@ -332,7 +339,7 @@ namespace Syntax.Process is
             function.generic_arguments.count == 0 /\
             function.modifiers.is_empty /\
             function.type_expression.is_inferred /\
-            function.arguments |> all(a => a.untyped_deferred /\ a.left.is_simple_name /\ a.name? /\ !a.initializer?)
+            function.arguments |> all(a => a.untyped_deferred /\ !a.is_poisoned /\ a.left.is_simple_name /\ a.name? /\ !a.initializer?)
 
         _as_nested_function(function: Definitions.FUNCTION) -> Statements.Statement is
             let arguments = Collections.LIST[Expressions.Expression]()
@@ -367,8 +374,15 @@ namespace Syntax.Process is
         // a file where the function can't be nested: one with no top-level
         // statements, or one where something outside them uses it.
         report_untyped_arguments(function: Definitions.FUNCTION, logger: Logger) static is
+            // The parser has reported a broken signature already.
+            if function.is_poisoned then
+                return
+            fi
+
+            let reported mut = false
+
             for a in function.arguments do
-                if a.untyped_deferred then
+                if a.untyped_deferred /\ !a.is_poisoned then
                     a.untyped_deferred = false
 
                     if let reason = function.not_nested_because then
@@ -379,8 +393,13 @@ namespace Syntax.Process is
 
                     a.poison(true)
                     function.poison(true)
+                    reported = true
                 fi
             od
+
+            if reported /\ function.not_nested_hint? then
+                logger.hint(function.name!.location, function.not_nested_hint)
+            fi
         si
 
         // A whole-file namespace carries the file's top-level statements on
