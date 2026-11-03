@@ -149,10 +149,6 @@ namespace Syntax.Process is
 
             let scanner = NAME_REFERENCE_SCANNER()
 
-            // A nested function is defined from its own statement onward, so
-            // two that call each other can't both be nested.
-            _refuse_mutual_recursion(candidates, scanner)
-
             // A candidate another definition that stays uses has to stay
             // too, and that can keep a further candidate it uses.
             let changed mut = true
@@ -225,45 +221,10 @@ namespace Syntax.Process is
             result
         si
 
-        // Every candidate on a cycle of calls stays a namespace function.
-        _refuse_mutual_recursion(candidates: Collections.MutableList[Definitions.FUNCTION], scanner: NAME_REFERENCE_SCANNER) is
-            let refused = Collections.LIST[Definitions.FUNCTION]()
-
-            for function in candidates do
-                let seen = Collections.SET[Definitions.FUNCTION]()
-                let pending = Collections.LIST[Definitions.FUNCTION](_callees(function, candidates, scanner))
-
-                while pending.count > 0 do
-                    let next = pending[pending.count - 1]
-
-                    pending.remove_at(pending.count - 1)
-
-                    if next == function then
-                        refused.add(function)
-                        break
-                    fi
-
-                    if seen.add(next) then
-                        pending.add_range(_callees(next, candidates, scanner))
-                    fi
-                od
-            od
-
-            for function in refused do
-                let partner = _callees(function, refused, scanner)
-                let other = if partner.count > 0 then partner[0].name!.name else "another function" fi
-
-                function.not_nested_because = "{function.name!.name} and {other} call each other"
-                function.not_nested_hint =
-                    "functions with no types in their signatures are nested in the top-level statements, where two cannot call each other"
-
-                candidates.remove(function)
-            od
-        si
-
         // The candidates in an order where each comes after the functions
-        // it calls, which is the order nested functions need: each is
-        // defined from its own statement onward. There are no cycles left.
+        // it calls where it can. Functions that call each other are created
+        // together ahead of their statements (NESTED_FUNCTION_GROUP), so a
+        // cycle can be in any order.
         _callees_first(candidates: Collections.List[Definitions.FUNCTION], scanner: NAME_REFERENCE_SCANNER) -> Collections.List[Definitions.FUNCTION] is
             let result = Collections.LIST[Definitions.FUNCTION]()
             let placed = Collections.SET[Definitions.FUNCTION]()
