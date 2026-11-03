@@ -254,18 +254,43 @@ namespace Syntax.Process is
         _is_unsettled_generator_literal(function: Semantic.Symbols.Function) -> bool =>
             function.is_closure /\ (function.return_type?.is_inferred ?? false)
 
+        // The joins of the yields of the generator literals whose element
+        // types their yields decide.
+        _generator_yield_join: Semantic.GENERATOR_YIELD_JOIN?
+
         // A generator literal whose return is left to be inferred takes
-        // it from its first yield: Pipe[T] over the type that yield
-        // produces. The yields after it are checked against that T.
+        // its element type from its yields (see GENERATOR_YIELD_JOIN):
+        // the first yield of a walk settles Pipe[T] at what it yields,
+        // and a later yield T doesn't fit widens it to Pipe[join].
         _settle_generator_literal_return(function: Semantic.Symbols.Function, yielded_type: Semantic.Types.Type) is
             if !function.is_closure \/ !yielded_type.is_settled \/ yielded_type.is_error \/ isa Semantic.Types.NULL(yielded_type) then
                 return
             fi
 
-            if let return_type = function.return_type /\ return_type.is_inferred then
+            let return_type = function.return_type
+
+            if !return_type? then
+                return
+            fi
+
+            let join mut = _generator_yield_join
+
+            if !join? then
+                join = Semantic.GENERATOR_YIELD_JOIN()
+                _generator_yield_join = join
+            fi
+
+            if return_type.is_inferred then
                 if let pipe_type = Semantic.Symbols.generator_return_type(yielded_type) then
                     function.set_return_type(pipe_type)
+                    join.first(function, yielded_type)
                 fi
+            elif
+                let element_type = _yield_element_type_for(function),
+                widened = join.widened(function, element_type, yielded_type),
+                pipe_type = Semantic.Symbols.generator_return_type(widened)
+            then
+                function.set_return_type(pipe_type)
             fi
         si
 
