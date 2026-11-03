@@ -10,11 +10,11 @@ namespace Syntax.Process is
     // is in the group, and so is one that names a local the list declares
     // after it, and every nested function a group member refers to, since
     // the member can be called before that one's statement runs.
-    // The members are created together at `position`, before the statement
-    // with that index, each in a shared cell so that members created earlier
-    // reach the ones created later. `position` is the start of the list, or
-    // just after the last `let` in the list that declares a name a member
-    // uses, since the members capture those locals when they are created.
+    // Each member is held in a cell, and every cell exists from the first
+    // member's creation, so a member reaches the others whenever they are
+    // created. A member is created at the start of the list, or just after
+    // the last `let` in the list that declares a name it uses, since it
+    // captures those locals when it is created.
     //
     // References are matched by name, as the written identifier, before
     // scopes are resolved. A name a function declares itself, as a
@@ -24,22 +24,25 @@ namespace Syntax.Process is
     // costs a cell.
     class NESTED_FUNCTION_GROUP is
         members: Collections.MutableList[Statements.FUNCTION]
-        position: int
 
-        // A statement before `position` that uses a member, so that the
-        // member would be called before the locals it captures exist.
+        // Where each member is created: before the statement with that index,
+        // or after the last statement where it is the list's length.
+        _positions: Collections.Map[Statements.FUNCTION, int]
+
+        // A statement that calls a nested function before every member it
+        // reaches has been created after the locals that member captures.
         too_early: (statement: Statements.Statement, member: Statements.FUNCTION)?
 
         is_empty: bool => members.count == 0
 
-        init(members: Collections.MutableList[Statements.FUNCTION], position: int, too_early: (Statements.Statement, Statements.FUNCTION)?) is
+        init(members: Collections.MutableList[Statements.FUNCTION], positions: Collections.Map[Statements.FUNCTION, int], too_early: (Statements.Statement, Statements.FUNCTION)?) is
             self.members = members
-            self.position = position
+            _positions = positions
             self.too_early = too_early
         si
 
-        // The list's statements in the order they are compiled and emitted:
-        // those before `position`, the members, then the rest.
+        // The list's statements in the order they are compiled and emitted,
+        // with each member moved to where it is created.
         order(list: Statements.LIST) -> Collections.List[Statements.Statement] is
             let result = Collections.LIST[Statements.Statement]()
 
@@ -49,21 +52,25 @@ namespace Syntax.Process is
                 return result
             fi
 
+            let count = list.statements |> Ghul.Pipes.count()
+
             for (index, statement) in list.statements |> Ghul.Pipes.index() do
-                if index == position then
-                    for member in members do
+                for member in members do
+                    if _positions[member] == index then
                         result.add(member)
-                    od
-                fi
+                    fi
+                od
 
                 if !contains(statement) then
                     result.add(statement)
                 fi
             od
 
-            if !(result |> Ghul.Pipes.any(s => contains(s))) then
-                result.add_range(members)
-            fi
+            for member in members do
+                if _positions[member] >= count then
+                    result.add(member)
+                fi
+            od
 
             return result
         si
@@ -96,7 +103,7 @@ namespace Syntax.Process is
             let members = Collections.LIST[Statements.FUNCTION]()
 
             if functions.count == 0 then
-                return NESTED_FUNCTION_GROUP(members, 0, null)
+                return NESTED_FUNCTION_GROUP(members, Collections.MAP[Statements.FUNCTION, int](), null)
             fi
 
             let scanner = NAME_REFERENCE_SCANNER()
@@ -142,7 +149,7 @@ namespace Syntax.Process is
             od
 
             if members.count == 0 then
-                return NESTED_FUNCTION_GROUP(members, 0, null)
+                return NESTED_FUNCTION_GROUP(members, Collections.MAP[Statements.FUNCTION, int](), null)
             fi
 
             // And whatever a member refers to, which it can call before that
@@ -173,40 +180,76 @@ namespace Syntax.Process is
                 fi
             od
 
-            let position mut = 0
+            let positions = Collections.MAP[Statements.FUNCTION, int]()
+
+            for member in ordered do
+                positions[member] = 0
+            od
 
             for (index, statement) in statements |> Ghul.Pipes.index() do
                 if let `let: Statements.LET = statement then
                     for variable in `let.variables do
                         for name in variable.names do
-                            if ordered |> Ghul.Pipes.any(member => uses_outer(member, name.name)) then
-                                position = index + 1
-                            fi
+                            for member in ordered do
+                                if uses_outer(member, name.name) then
+                                    positions[member] = index + 1
+                                fi
+                            od
                         od
                     od
                 fi
             od
 
+            // A call to a nested function reaches every member it calls, directly
+            // or through other nested functions, so it is safe only once the
+            // last of them has been created.
+            ready_at(start: Statements.FUNCTION) -> int is
+                let seen = Collections.SET[Statements.FUNCTION]()
+                let pending = Collections.LIST[Statements.FUNCTION]([start])
+                let latest mut = 0
+
+                while pending.count > 0 do
+                    let next = pending[pending.count - 1]
+                    pending.remove_at(pending.count - 1)
+
+                    if seen.add(next) then
+                        if positions.contains_key(next) then
+                            latest = Ghul.Math.max(latest, positions[next])
+                        fi
+
+                        for other in functions do
+                            if scanner.body_references(next.function.body, other.name.name) then
+                                pending.add(other)
+                            fi
+                        od
+                    fi
+                od
+
+                latest
+            si
+
             let too_early: (Statements.Statement, Statements.FUNCTION)? mut = null
 
             for (index, statement) in statements |> Ghul.Pipes.index() do
-                if index >= position \/ too_early? then
+                if too_early? then
                     break
                 fi
 
-                if isa Statements.FUNCTION(statement) /\ ordered.contains(cast Statements.FUNCTION(statement)) then
+                // A definition only refers to the functions it names; it calls
+                // them when it is itself called.
+                if isa Statements.FUNCTION(statement) then
                     continue
                 fi
 
-                for member in ordered do
-                    if _references(scanner, statement, member.name.name) then
-                        too_early = (statement, member)
+                for candidate in functions do
+                    if index < ready_at(candidate) /\ _references(scanner, statement, candidate.name.name) then
+                        too_early = (statement, candidate)
                         break
                     fi
                 od
             od
 
-            return NESTED_FUNCTION_GROUP(ordered, position, too_early)
+            return NESTED_FUNCTION_GROUP(ordered, positions, too_early)
         si
 
         _references(scanner: NAME_REFERENCE_SCANNER, statement: Statements.Statement, name: string) -> bool static =>
