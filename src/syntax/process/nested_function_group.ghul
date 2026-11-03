@@ -17,9 +17,11 @@ namespace Syntax.Process is
     // uses, since the members capture those locals when they are created.
     //
     // References are matched by name, as the written identifier, before
-    // scopes are resolved. A shadowing name can only put a function in the
-    // group that did not need to be there, which costs a cell, never a wrong
-    // answer.
+    // scopes are resolved. A name a function declares itself, as a
+    // parameter, a local or a literal's parameter, is not taken as a use of
+    // a later local with the same spelling. Any other shadowing name can
+    // put a function in the group that did not need to be there, which
+    // costs a cell.
     class NESTED_FUNCTION_GROUP is
         members: Collections.MutableList[Statements.FUNCTION]
         position: int
@@ -98,9 +100,14 @@ namespace Syntax.Process is
             fi
 
             let scanner = NAME_REFERENCE_SCANNER()
+            let declared = DECLARED_NAME_SCANNER()
+
+            uses_outer(function: Statements.FUNCTION, name: string) -> bool =>
+                scanner.body_references(function.function.body, name) /\ !declared.declares(function.function, name)
 
             // Names a local the list declares after the function's own
-            // statement, so it can only be created once that local exists.
+            // statement, so it can only be created once that local exists. A
+            // name the function declares itself is its own, not that local.
             for (index, statement) in statements |> Ghul.Pipes.index() do
                 if let `let: Statements.LET = statement then
                     for variable in `let.variables do
@@ -109,7 +116,7 @@ namespace Syntax.Process is
                                 if
                                     statements.index_of(function) < index /\
                                     !members.contains(function) /\
-                                    scanner.body_references(function.function.body, name.name)
+                                    uses_outer(function, name.name)
                                 then
                                     members.add(function)
                                 fi
@@ -172,7 +179,7 @@ namespace Syntax.Process is
                 if let `let: Statements.LET = statement then
                     for variable in `let.variables do
                         for name in variable.names do
-                            if ordered |> Ghul.Pipes.any(member => scanner.body_references(member.function.body, name.name)) then
+                            if ordered |> Ghul.Pipes.any(member => uses_outer(member, name.name)) then
                                 position = index + 1
                             fi
                         od
