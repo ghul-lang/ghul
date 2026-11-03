@@ -158,5 +158,56 @@ namespace Syntax.Process.Printer.UnitTests is
 
             is_true(formatter.format(source_file.definition).contains("let d: double = cast(3)"))
         si
+
+        // A file with top-level statements, whose functions can be
+        // written with no types in their signatures.
+        signature_fixture() -> string =>
+            "use IO.Std.write_line\n\nstep(n: int) -> int => n + 1\n\nfib(n: int) -> int memo => n\n\nshow[T](label: string, value: T) is\n    write_line(\"{{label}} {{value}}\")\nsi\n\nshow(\"x\", step(1))\n"
+
+        format_with(source: string, selection: string) -> string is
+            let logger = Logging.DIAGNOSTICS_STORE()
+            let source_file = Compiler.COMPILER().parse("strip.ghul", IO.StringReader(source), false, false, false, logger)
+            let formatter = FORMATTER(source_file.trivia, 100)
+
+            formatter.stripper = ANNOTATION_STRIPPER(selection)
+
+            formatter.format(source_file.definition)
+        si
+
+        @Test()
+        Listing__with_the_signature_prefix__should_give_each_signature_its_span_and_untyped_text() is
+            let sites = list_sites(signature_fixture(), "signature:list")
+
+            are_equal(3, sites.count)
+            are_equal("0 signature 3,1 replace 3,1,3,19 step(n)", sites[0])
+            are_equal("1 signature 5,1 replace 5,1,5,23 fib(n) memo", sites[1])
+            are_equal("2 signature 7,1 replace 7,1,7,31 show(label, value)", sites[2])
+        si
+
+        @Test()
+        Listing__without_the_signature_prefix__should_leave_signatures_out() is
+            for s in list_sites(signature_fixture()) do
+                is_false(s.contains(" signature "), s)
+            od
+        si
+
+        @Test()
+        Listing__signatures_in_a_file_with_no_top_level_statements__should_give_none() is
+            are_equal(0, list_sites("namespace N is\n    step(n: int) -> int => n + 1\nsi\n", "signature:list").count)
+        si
+
+        @Test()
+        Listing__a_signature_with_a_storage_class__should_leave_it_out() is
+            are_equal(0, list_sites("step(n: int) -> int static => n + 1\n\nstep(1)\n", "signature:list").count)
+        si
+
+        @Test()
+        Formatting__a_chosen_signature__should_print_it_without_its_types_and_keep_the_others() is
+            let formatted = format_with(signature_fixture(), "signature:0,2")
+
+            is_true(formatted.contains("step(n) => n + 1"), formatted)
+            is_true(formatted.contains("fib(n: int) -> int memo => n"), formatted)
+            is_true(formatted.contains("show(label, value) is"), formatted)
+        si
     si
 si

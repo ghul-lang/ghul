@@ -9,18 +9,32 @@ namespace Syntax.Process.Printer is
     //
     // A selection prefixed `cast:` numbers the targets of explicit casts
     // instead, and only those: `cast double(n)` printed as `cast(n)`.
+    //
+    // A selection prefixed `signature:` numbers the signatures of the
+    // functions in a file with top-level statements that could be written
+    // with no types at all, and only those. A chosen one is printed with
+    // its type parameters, parameter types and return type left out:
+    // `step(n: int) -> int` printed as `step(n)`.
     class ANNOTATION_STRIPPER(selection: string) is
         sites: Collections.LIST[string]
         _selected: Collections.SET[int]
         _all: bool
         _casts: bool
+        _signatures: bool
+
+        // Whether `selection` names one of the prefixed site kinds.
+        _prefixed(prefix: string) -> bool => selection.starts_with(prefix)
 
         init(..) is
             sites = Collections.LIST[string]()
             _selected = Collections.SET[int]()
-            _casts = selection.starts_with("cast:")
+            _casts = _prefixed("cast:")
+            _signatures = _prefixed("signature:")
 
-            let chosen = if _casts then selection.substring(5) else selection fi
+            let chosen =
+                if _casts then selection.substring(5)
+                elif _signatures then selection.substring(10)
+                else selection fi
 
             _all = chosen =~ "all"
 
@@ -47,13 +61,32 @@ namespace Syntax.Process.Printer is
         // the last ']' at or before the end of `to`. A call's location runs
         // on past its type arguments, so the end given is not the ']' itself.
         strip(kind: string, location: Source.LOCATION, mode: string, from: Source.LOCATION, to: Source.LOCATION) -> bool is
-            if (kind =~ "cast") != _casts then
+            if (kind =~ "cast") != _casts \/ _signatures then
                 return false
             fi
 
             let n = sites.count
 
             sites.add("{n} {kind} {location.start_line},{location.start_column} {mode} {from.start_line},{from.start_column},{from.end_line},{from.end_column} {to.end_line},{to.end_column}")
+
+            _all \/ _selected.contains(n)
+        si
+
+        // Numbers a function's signature, under a `signature:` selection,
+        // and says whether it is printed without its types. The listing
+        // gives the span from the start of the name to the end of the last
+        // of the return type, the modifiers and the parameters, and the text
+        // the signature reads as with the types left out, which runs to the
+        // end of the line. Where the span ends at a parameter, the closing
+        // `)` that follows it is not in the span.
+        strip_signature(from: Source.LOCATION, to: Source.LOCATION, replacement: string) -> bool is
+            if !_signatures then
+                return false
+            fi
+
+            let n = sites.count
+
+            sites.add("{n} signature {from.start_line},{from.start_column} replace {from.start_line},{from.start_column},{to.end_line},{to.end_column} {replacement}")
 
             _all \/ _selected.contains(n)
         si

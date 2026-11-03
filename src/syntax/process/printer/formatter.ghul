@@ -41,6 +41,84 @@ namespace Syntax.Process.Printer is
         _strip(kind: string, location: Source.LOCATION, mode: string, from: Source.LOCATION, to: Source.LOCATION) -> bool =>
             if let s = stripper then s.strip(kind, location, mode, from, to) else false fi
 
+        // The functions of a file with top-level statements that could be
+        // written with no types in their signatures: named, with a body,
+        // and with no modifier but `memo` or `pure`.
+        _file_level_functions: SET[Definitions.FUNCTION]
+
+        _note_file_level_functions(definitions: Definitions.LIST) is
+            if !definitions.top_level_statements? then
+                return
+            fi
+
+            for d in definitions do
+                if let function: Definitions.FUNCTION = d /\
+                    function.name? /\
+                    function.body? /\
+                    !function.modifiers.access_modifier? /\
+                    !function.modifiers.storage_class? /\
+                    !function.modifiers.is_abstract /\
+                    !function.modifiers.is_stable
+                then
+                    _file_level_functions.add(function)
+                fi
+            od
+        si
+
+        // Whether the stripper takes this function's whole signature: its
+        // type parameters, its parameters' types and its return type.
+        _strips_signature(function: Definitions.FUNCTION) -> bool is
+            if !stripper? \/ !_file_level_functions.contains(function) then
+                return false
+            fi
+
+            let name = function.name!
+            let end mut = function.arguments.location
+
+            if !isa TypeExpressions.INFER(function.type_expression) /\ function.type_expression.location.end > end.end then
+                end = function.type_expression.location
+            fi
+
+            if !function.modifiers.is_empty /\ function.modifiers.location.end > end.end then
+                end = function.modifiers.location
+            fi
+
+            let s = stripper!
+
+            return s.strip_signature(name.location, end, _stripped_signature(function))
+        si
+
+        // The signature as it reads with its types left out: the name, the
+        // parameter names, and any `memo` or `pure` marker.
+        _stripped_signature(function: Definitions.FUNCTION) -> string is
+            let result = Text.STRING_BUILDER()
+
+            result.append(function.name!.name)
+            result.append("(")
+            let first mut = true
+
+            for a in function.arguments do
+                if !first then
+                    result.append(", ")
+                fi
+
+                result.append(if let n = a.name then n.name else "_" fi)
+                first = false
+            od
+
+            result.append(")")
+
+            if function.modifiers.is_memo then
+                result.append(" memo")
+            fi
+
+            if function.modifiers.is_pure then
+                result.append(" pure")
+            fi
+
+            return result.to_string()
+        si
+
         strip_cast_target(`cast: Trees.Expressions.CAST, type_expression: Trees.TypeExpressions.TypeExpression) -> bool =>
             _strip("cast", `cast.location, "type", type_expression.location, type_expression.location)
 
@@ -75,6 +153,7 @@ namespace Syntax.Process.Printer is
 
             _width = width
             _builder = DOC_BUILDER()
+            _file_level_functions = SET[Definitions.FUNCTION]()
 
             _trivia = LIST[TRIVIA]()
             if trivia? then
