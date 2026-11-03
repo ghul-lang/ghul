@@ -218,6 +218,14 @@ namespace Semantic is
             let taken mut = false
 
             for obligation in standing do
+                if obligation.rule =~ "parameter" then
+                    if _take_argument_type(obligation) then
+                        taken = true
+                    fi
+
+                    continue
+                fi
+
                 if !has_default(obligation.rule) then
                     continue
                 fi
@@ -246,6 +254,39 @@ namespace Semantic is
             od
 
             return taken
+        si
+
+        // A literal's parameter typed by the arguments passed to it, but held
+        // back because a use of it inside the body asks for a type those
+        // arguments are not: `n => n * 2L` called with an int. The arguments
+        // say what the parameter is, so it takes their type, and the next
+        // walk reports the use that does not accept it.
+        _take_argument_type(obligation: OBLIGATION) -> bool static is
+            if let placeholder: Types.INFERRED_VARIABLE_TYPE = obligation.awaiting then
+                let origin = placeholder.origin
+
+                if has_default_for(origin) then
+                    return false
+                fi
+
+                if let type = origin.type /\ type.is_settled then
+                    return false
+                fi
+
+                if let resolved = origin.try_get_inferred_type() /\ resolved.is_settled then
+                    return false
+                fi
+
+                if !origin.lower_bound_type()? then
+                    return false
+                fi
+
+                _defaulted[_defaulted.count - 1].add(origin)
+
+                return true
+            fi
+
+            return false
         si
 
         // Whether the fixing step has taken a default for this origin, so
