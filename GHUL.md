@@ -100,7 +100,7 @@ A whole-file namespace must be the first declaration in the file, after any `@@`
 
 A file with no namespace declaration can contain statements at the top level of the file, and so can a file whose namespace is a whole-file namespace. These top-level statements run in source order as the program's entry point, so a short program needs no `entry` function. Top-level statements can be mixed with global definitions. A global definition is visible everywhere in the file, wherever it appears. A file with top-level statements cannot declare a namespace block.
 
-In a file with top-level statements, a function written with no types anywhere in its signature is compiled as a nested function of the top-level statements. Its argument types come from its calls and its return type from its body, and the top-level `let`s it uses take their types from those uses too:
+In a file with top-level statements, a function written with no types anywhere in its signature, including one with no parameters and no return type, is compiled as a nested function of the top-level statements. Its argument types come from its calls and its return type from its body, and the top-level `let`s it uses take their types from those uses too:
 
 ```ghul
 let seen = SET()
@@ -112,6 +112,8 @@ si
 _visit(3)
 write_line("{seen.count}")
 ```
+
+Anywhere else, such as in a namespace block or a file without top-level statements, a function with no return type returns void, its return type isn't inferred, and every parameter needs its type.
 
 Such a function is private to the file. The editor shows a `file-private-function` hint at its definition. A function with types in its signature that calls such a function is private to the file in the same way, unless a class, a trait or a function that stays global uses it. A class, a trait, a generic function or another file cannot call either kind: a function used from any of them needs its types, and so does everything it calls. The functions are placed before the first statement that uses one of them, so they can be written in any order, and they can call each other. Like a function literal, such a function can be marked `memo` or `pure`: `fib(n) memo => ...`.
 
