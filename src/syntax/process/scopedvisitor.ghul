@@ -72,10 +72,84 @@ namespace Syntax.Process is
                 else
                     _logger.error(identifier.location, "symbol not found: {identifier}")
                 fi
+            elif
+                result? /\
+                !identifier.qualifier? /\
+                !identifier.is_poisoned /\
+                !identifier.location.is_internal
+            then
+                _check_not_shadowed_by_import(identifier, result)
             fi
 
             return result
         si
+
+        // In the namespace a file's top-level code is in, which a build with a
+        // global namespace shares between files, a function that code holds
+        // privately would be found ahead of anything a `use` imports under the
+        // same name, if it had the types in its signature. Without them it is
+        // out of reach from another file, so the name there quietly resolves to
+        // the import instead. That is reported, since the program would run the
+        // wrong function.
+        _check_not_shadowed_by_import(identifier: Identifiers.Identifier, result: Semantic.Symbols.Symbol) is
+            let nesting = SYNTHESISE_TOP_LEVEL_ENTRY.file_nesting(identifier.name)
+
+            if !nesting? \/ nesting =~ identifier.location.file_name then
+                return
+            fi
+
+            let current = _symbol_table.current_namespace_symbol
+
+            // Only where the private function would have been found: in the
+            // namespace its own file's top-level code is in.
+            let entry_scope = SYNTHESISE_TOP_LEVEL_ENTRY.entry_for(nesting)?.scope
+
+            if !current? \/ !isa Semantic.Symbols.Symbol(entry_scope) \/ _namespace_of(cast Semantic.Symbols.Symbol(entry_scope)) != current then
+                return
+            fi
+
+            // Something the namespace itself holds, or a local, shadows the
+            // private function as it would if the function had its types.
+            let candidates =
+                if let group: Semantic.Symbols.FUNCTION_GROUP = result then
+                    Collections.LIST[Semantic.Symbols.Symbol](group.functions)
+                else
+                    Collections.LIST[Semantic.Symbols.Symbol]([result])
+                fi
+
+            for candidate in candidates do
+                if _namespace_of(candidate) == current then
+                    return
+                fi
+            od
+
+            _logger.error(
+                identifier.location,
+                "{identifier} in {IO.Path.get_file_name(nesting)} has no types in its signature, so it is private to that file")
+
+            _logger.hint(
+                identifier.location,
+                "here {identifier} would reach {result} instead; give {identifier} the types in its signature to call it from another file")
+        si
+
+        _namespace_of(symbol: Semantic.Symbols.Symbol) -> Semantic.Symbols.NAMESPACE? is
+            let scope mut = symbol.owner
+
+            while scope? do
+                if let n: Semantic.Symbols.NAMESPACE = scope then
+                    return n
+                fi
+
+                if let s: Semantic.Symbols.Symbol = scope then
+                    scope = s.owner
+                else
+                    return null
+                fi
+            od
+
+            return null
+        si
+
 
         // As find(identifier), but returns null silently instead of
         // logging "symbol not found" — for callers that resolve a name
