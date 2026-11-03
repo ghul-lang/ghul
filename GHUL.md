@@ -113,7 +113,7 @@ _visit(3)
 write_line("{seen.count}")
 ```
 
-Such a function is private to the file. The compiler warns (`file-private-function`) when its name does not start with `_`, which is how the name says so. A class, a trait or a function with types in its signature cannot call it, and neither can another file: a function used from any of them needs its types. The functions are placed before the first statement that uses one of them, so they can be written in any order, and they can call each other.
+Such a function is private to the file. The compiler warns (`file-private-function`) when its name does not start with `_`, which is how the name says so. A class, a trait or a function with types in its signature cannot call it, and neither can another file: a function used from any of them needs its types. The functions are placed before the first statement that uses one of them, so they can be written in any order, and they can call each other. Like a function literal, such a function can be marked `memo` or `pure`: `fib(n) memo => ...`.
 
 A `use` statement brings names into scope, so code can refer to them without qualification. A `use` of a namespace imports every public symbol in it. A `use` of a single symbol imports that symbol:
 
@@ -630,7 +630,7 @@ A nested function refers to itself by its own name, so it needs no `rec`. A lite
     fact(n: int) -> int => if n <= 1 then 1 else n * fact(n - 1) fi;
 ```
 
-A nested function is a local of the body it is written in. One that nothing refers to above its definition is defined from its definition onward. One that a statement or another nested function above it refers to exists from the start of the body, so a body can call a nested function written below the call, and nested functions can call each other in any order. Where such a function uses a local the body declares further down, it exists from just after that local instead, and a call above that point is an error. A named function written among a file's top-level statements with types in its signature is a namespace-scope function, and its argument types are required. One written with no types at all is described under top-level statements.
+A nested function is a local of the body it is written in. One that nothing refers to above its definition is defined from its definition onward. One that a statement or another nested function above it refers to exists from the start of the body, so a body can call a nested function written below the call, and nested functions can call each other in any order. Where such a function uses a local the body declares further down, it exists from just after that local instead, and a call above that point is an error. A named function written among a file's top-level statements with types in its signature is a namespace-scope function, and its argument types are required. One written with no types at all is described with top-level statements, under [namespaces and `use`](#namespaces-and-use).
 
 A call with `*` written for one or more of its arguments is a *partial application*: a function value with one parameter per `*`, in order, that makes the call with its parameters in those positions. The other arguments are evaluated once, where the partial application is written, not on each call:
 

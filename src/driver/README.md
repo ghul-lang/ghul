@@ -66,3 +66,31 @@ error as a process of its own would write them, followed by a line starting
 U+0001 and `build-done` that gives the exit status. A line `quit`, or the end of
 the input, ends the server. It is how an interactive session on the llvm target
 builds each cell.
+
+## Stripping annotations
+
+`--strip-annotations <selection> <files>` parses each file and prints it through
+the formatter with the chosen written annotations left out, for a tool that
+rebuilds a program with less than its author wrote. Under a selection of
+`list` it prints the numbered sites instead, one per line, each with the span
+its annotation occupies, so a tool can edit the source in place rather than
+reprint it. A selection is `all`, `list`, or comma-separated site numbers and
+`a-b` ranges, and by default numbers locals' types, function literals'
+parameter and return types, and calls' type arguments.
+
+Two prefixes number one other kind of site, and only that kind:
+
+- `cast:` numbers the targets of explicit casts: `cast double(n)` as `cast(n)`.
+- `signature:` numbers the signatures of the functions in a file with
+  top-level statements that could be written with no types at all: named,
+  with a body, and with no modifier but `memo` or `pure`. A chosen one is
+  printed with its type parameters, parameter types and return type left out,
+  `step(n: int) -> int` as `step(n)`. A listed site reads
+  `<n> signature <line>,<column> replace <start line>,<start column>,<end line>,<end column> <text>`:
+  the span runs from the start of the name to the end of the last of the
+  return type, the modifiers and the parameters (where it ends at a
+  parameter, the closing `)` after it isn't in the span), and `<text>`, to the
+  end of the line, is what the signature reads as without its types.
+
+The mode is internal: it serves the annotation-stripping tools, and its output
+format can change with them.
