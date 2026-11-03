@@ -23,7 +23,7 @@ Flag:
 - Violations of the contracts below (type-system change protocol, cross-assembly test traps).
 - Deprecated idioms.
 - **Any new use of rendered text as an entity's identity** - see the contract below. This one is a rejection, not a suggestion.
-- **Any new or extended syntax-tree rewriting** - see the contract below. Also a rejection, not a suggestion, even when the change itself is correct.
+- **Syntax-tree rewriting outside the early structural window, and any desugaring** - see the contract below.
 - **Any new or reworded diagnostic message that violates the wording rubric below** - most commonly, a backtick around a literal keyword or an interpolated identifier.
 - Missing tests where CONTRIBUTING.md requires one (any behavioural change wants an integration test; type-system changes additionally want unit tests).
 - `GHUL.md` and `docs/` falling out of step with reality - a PR introduces a feature they don't document, changes documented behaviour without updating it, or otherwise leaves the reference contradicting the code.
@@ -66,13 +66,21 @@ What this does *not* cover: a source-level identifier used as a name is the datu
 
 Existing text-keyed mechanisms (the `MAP[string, Type]` type-argument maps in the specializers and the placeholder registry, the state-machine frame's function-name-keyed class map, the name-keyed symbol and definition maps) are not to be ripped out on sight, and a PR that merely touches one in passing is fine. But a PR that **significantly changes or extends** one - a new consumer, a new key format, a new entity kind flowing through it, a rework of how the keys are built - must say in its description why it is not being migrated to a non-text identity as part of the work. Any concrete reason is acceptable; silence is not. If the statement is missing, request changes and ask for it.
 
-### No syntax-tree rewriting
+### Syntax-tree rewriting
 
-**Reject any diff that introduces a new syntax-tree rewriting mechanism, or extends an existing one.** ghul's syntax trees are not abstract syntax trees: nothing in the compiler is designed to handle them being rewritten and re-writes almost always have unintended consequences, including confusing diagnostics or unexpected effects at a distance like capturing of local variables in a closure, symbols appearing in analysis query results, or properties of the syntax tree nodes not being computed or not being cleared as expected in passes that are unaware of them / run before they exist etc.
+ghul's syntax trees are not abstract syntax trees: nothing in the compiler is designed to handle them being rewritten, and a rewrite can confuse diagnostics or have effects at a distance, such as capturing local variables in a closure, symbols appearing in analysis query results, or properties of syntax tree nodes not being computed or cleared in passes that are unaware of them or run before they exist.
 
-What counts as rewriting: splicing a synthesized node into the tree, replacing one node with another, re-parenting subtrees during resolution or inside a speculative retry. Building the tree in the parser is construction, not rewriting. The sanctioned alternative is a value-level mechanism: `PACK_WRAP_BUILDER` is the model - a synthesized closure symbol with no literal behind it, its body emitted from a recorded description, the wrapped value passed as the thunk's first parameter, tree untouched.
+A rewrite is acceptable only when it is both **early** and **structural**:
+- **Early:** it runs in the rewrite-syntax-trees stage, before declare-members, and finishes before any later pass has recorded anything about the nodes it touches, so every later pass sees its output as if it had been parsed.
+- **Structural:** it adds or moves declarations around code the user wrote, such as a synthesised accessor, backing field, constructor or entry function, or a user-written function moved into a body. The user's own statements and expressions stay as written, with their source locations, and analysis queries on them still answer for the user's source.
 
-Small targeted fixes to existing mechanisms are acceptable, but any feature creep must be rejected - the prefered solution is to rewrite avoiding the rewriting entirely.
+Property accessors, primary constructors and top-level entry synthesis are the existing examples. Extending one of them within both conditions is acceptable.
+
+Reject:
+- **Desugaring**, meaning re-expressing a user construct as a composition of other constructs: `if let` as `if` plus temporaries, async or generators as hand-built trees, a synthesised `=~` as a tree of calls. Each was tried and removed. Diagnostics blamed the wrong construct, temporaries leaked into user scope, inference saw a different shape, and comparisons silently chose the wrong operation. A new construct gets its own node and its own lowering.
+- **Any rewrite during or after declare-members**, during resolution or inside a speculative retry, and any extension of one. `FUNCTION_REFERENCE_ADAPTER`'s eta-expansion is the live case (#3775). The replacement is a value-level mechanism, and `PACK_WRAP_BUILDER` is the model: a synthesized closure symbol with no literal behind it, its body emitted from a recorded description, the wrapped value passed as the thunk's first parameter, tree untouched.
+
+Prefer a non-rewriting mechanism where it is as clean, and require the PR to say why a rewrite was chosen.
 
 ### Reading the environment
 
