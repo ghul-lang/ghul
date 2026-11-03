@@ -100,6 +100,21 @@ A whole-file namespace must be the first declaration in the file, after any `@@`
 
 A file with no namespace declaration can contain statements at the top level of the file, and so can a file whose namespace is a whole-file namespace. These top-level statements run in source order as the program's entry point, so a short program needs no `entry` function. Top-level statements can be mixed with global definitions. A global definition is visible everywhere in the file, wherever it appears. A file with top-level statements cannot declare a namespace block.
 
+In a file with top-level statements, a function written with no types anywhere in its signature is compiled as a nested function of the top-level statements. Its argument types come from its calls and its return type from its body, and the top-level `let`s it uses take their types from those uses too:
+
+```ghul
+let seen = SET()
+
+_visit(n) is
+    seen.add(n)
+si
+
+_visit(3)
+write_line("{seen.count}")
+```
+
+Such a function is private to the file. The compiler warns (`file-private-function`) when its name does not start with `_`, which is how the name says so. A class, a trait or a function with types in its signature cannot call it, and neither can another file: a function used from any of them needs its types. Two such functions that call each other need their types too. The functions are placed before the first statement that uses one of them, in an order where each comes after the functions it calls, so they can be written in any order.
+
 A `use` statement brings names into scope, so code can refer to them without qualification. A `use` of a namespace imports every public symbol in it. A `use` of a single symbol imports that symbol:
 
 ```ghul
@@ -615,7 +630,7 @@ A nested function refers to itself by its own name, so it needs no `rec`. A lite
     fact(n: int) -> int => if n <= 1 then 1 else n * fact(n - 1) fi;
 ```
 
-A nested function is a local, so it is defined from its own definition onward. A reference to it above its definition is an error. Mutual recursion between two nested functions is an error. To get mutual recursion, write one of the pair as a `let mut` literal and assign it after the other is defined. A file's top-level statements are not a body, so a named function among them is a namespace-scope function, and its argument types are required.
+A nested function is a local, so it is defined from its own definition onward. A reference to it above its definition is an error. Mutual recursion between two nested functions is an error. To get mutual recursion, write one of the pair as a `let mut` literal and assign it after the other is defined. A named function written among a file's top-level statements with types in its signature is a namespace-scope function, and its argument types are required. One written with no types at all is described under top-level statements.
 
 A call with `*` written for one or more of its arguments is a *partial application*: a function value with one parameter per `*`, in order, that makes the call with its parameters in those positions. The other arguments are evaluated once, where the partial application is written, not on each call:
 
