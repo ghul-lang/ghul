@@ -46,6 +46,13 @@ namespace Semantic is
         // (no-op). When a constraint is recorded, `mark_consumed_any`
         // is invoked on the logger so the retry loop continues.
         propagate_match(formal: Type?, actual: Type?) is
+            _propagate_match(formal, actual, false)
+        si
+
+        // `exact` is set below a type-argument slot that cannot vary, as
+        // a value-type argument cannot: a placeholder reached there must be
+        // the formal type itself, not just assignable to it.
+        _propagate_match(formal: Type?, actual: Type?, exact: bool) is
             if !formal? \/ !actual? then
                 return
             fi
@@ -61,7 +68,7 @@ namespace Semantic is
                         IoC.CONTAINER.instance.innate_symbol_lookup)
 
                 if shape? then
-                    propagate_match(shape, actual)
+                    _propagate_match(shape, actual, exact)
                 fi
 
                 return
@@ -110,7 +117,7 @@ namespace Semantic is
                 // a supertype of the placeholder's true value type
                 // (eg. `g(v: object)` with `v = false` -> v widened
                 // to object, breaking subsequent `if v`).
-                _logger.mark_consumed_any_if(Semantic.INFERENCE_TRACE.add_upper_bound("match.placeholder_actual", placeholder.origin, formal))
+                _logger.mark_consumed_any_if(Semantic.INFERENCE_TRACE.add_upper_bound("match.placeholder_actual", placeholder.origin, formal, exact))
                 return
             fi
 
@@ -139,7 +146,11 @@ namespace Semantic is
                     formal_generic.arguments.count == actual_generic.arguments.count
                 then
                     for j in 0..formal_generic.arguments.count do
-                        propagate_match(formal_generic.arguments[j], actual_generic.arguments[j])
+                        _propagate_match(
+                            formal_generic.arguments[j],
+                            actual_generic.arguments[j],
+                            formal_generic.effective_argument_variance(actual_generic, j) == Types.TypeVariance.INVARIANT
+                        )
                     od
                 elif formal_symbol? /\ actual_symbol? /\ !(formal_symbol.symbol =~ actual_symbol.symbol) then
                     // Outer heads differ but actual may extend formal's
@@ -154,7 +165,7 @@ namespace Semantic is
                     let ancestor = actual_generic.find_ancestor(formal_generic)
 
                     if ancestor? /\ isa Types.GENERIC(ancestor) then
-                        propagate_match(formal, ancestor)
+                        _propagate_match(formal, ancestor, exact)
                     fi
                 fi
             fi
