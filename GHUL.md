@@ -913,7 +913,7 @@ class TALLY: Counted is
 si
 ```
 
-A trait can require a static member: a `static` method with no body. Each implementing type implements it with a static method of the matching signature. The call is resolved by the type argument, so it can only be made through a type parameter the trait bounds, as `T.member(...)`. It cannot be called on an instance or on the trait itself, and a static a type inherits from a base class is not dispatched again for the derived type. This is how `Ghul.Parsable[T]` works: on .NET it is `System.IParsable<T>`, and `Ghul.FormatProvider` is `System.IFormatProvider`, so BCL types satisfy the bound as they are. On .NET a trait written in ghūl cannot require a static member, because .NET gives a type no way to implement one; the wasm and llvm targets support it.
+A trait can require a static member: a `static` method with no body. Each implementing type implements it with a static method of the matching signature. The call is resolved by the type argument, so it can only be made through a type parameter the trait bounds, as `T.member(...)`. It cannot be called on an instance or on the trait itself, and a static a type inherits from a base class is not dispatched again for the derived type. This is how `Ghul.Parsable[T]` works: on .NET it is `System.IParsable<T>`, and `Ghul.FormatProvider` is `System.IFormatProvider`, so BCL types satisfy the bound as they are.
 
 ```ghul
 trait Named[T] is
