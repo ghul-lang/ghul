@@ -1,0 +1,88 @@
+namespace Semantic.Symbols.UnitTests is
+    use Source.LOCATION
+
+    use TestClass = Microsoft.VisualStudio.TestTools.UnitTesting.TestClassAttribute
+    use Test = Microsoft.VisualStudio.TestTools.UnitTesting.TestMethodAttribute
+    use Assertions
+
+    // Tests for a local read from inside a function literal before the
+    // local is defined. A nested function used that way is reported where
+    // the literal's body names it, so building the closure that captures
+    // it reports nothing more. Any other local is reported there.
+    @TestClass()
+    class NESTED_FUNCTION_LOCAL_TESTS is
+        init() is si
+
+        loc(line: int) -> LOCATION => LOCATION("body.ghul", line, 1, line, 10)
+
+        enter_literal() -> SYMBOL_LOADER is
+            IoC.CONTAINER.instance.want_duplicate_diagnostics()
+
+            let logger = IoC.CONTAINER.instance.logger
+            let symbol_table = SYMBOL_TABLE(logger)
+
+            IoC.CONTAINER.instance.symbol_table = symbol_table
+
+            symbol_table.enter_scope(GLOBAL_FUNCTION(loc(1), loc(1), Semantic.BLOCK_SCOPE(), "body", Semantic.BLOCK_SCOPE()))
+            symbol_table.enter_scope(GLOBAL_CLOSURE(loc(2), Semantic.BLOCK_SCOPE(), "$anon_0", Semantic.BLOCK_SCOPE(), false))
+
+            return SYMBOL_LOADER(
+                logger,
+                symbol_table,
+                FUNCTION_CALLER(symbol_table, IR.VALUE_BOXER(logger)),
+                IR.VALUE_BOXER(logger),
+                Semantic.UnitTests.TEST_INNATE_SYMBOL_LOOKUP())
+        si
+
+        local(name: string) -> LOCAL_VARIABLE is
+            if !IoC.CONTAINER.instance.local_id_generator? then
+                IoC.CONTAINER.instance.local_id_generator = IR.LOCAL_ID_GENERATOR()
+            fi
+
+            IoC.CONTAINER.instance.local_id_generator.enter_function()
+
+            let result = LOCAL_VARIABLE(loc(5), Semantic.BLOCK_SCOPE(), name)
+
+            result.set_type(Types.ERROR())
+
+            return result
+        si
+
+        errors() -> int => IoC.CONTAINER.instance.logger.error_count
+
+        // The closure construction may need more of a real frame than this
+        // fixture has. Only the report made before it is under test.
+        load_outer(variable: LOCAL_VARIABLE, loader: SYMBOL_LOADER) is
+            try
+                variable.load_outer(loc(3), null, loader)
+            catch e: System.Exception
+            yrt
+        si
+
+        @Test()
+        given_a_nested_function_not_yet_defined__capturing_it__should_not_report() is
+            let loader = enter_literal()
+            let variable = local("odd")
+
+            variable.is_nested_function = true
+
+            let before = errors()
+
+            load_outer(variable, loader)
+
+            are_equal(before, errors())
+        si
+
+        @Test()
+        given_a_local_not_yet_defined__capturing_it__should_report() is
+            let loader = enter_literal()
+            let variable = local("count")
+
+            let before = errors()
+
+            load_outer(variable, loader)
+
+            are_equal(before + 1, errors())
+        si
+    si
+si

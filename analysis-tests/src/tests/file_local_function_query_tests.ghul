@@ -1,0 +1,113 @@
+namespace Analysis.Tests is
+    use Analysis.Protocol.ANALYSER_PROCESS
+    use Analysis.Protocol.Response
+    use Ghul.Pipes
+
+    use TestClass = Microsoft.VisualStudio.TestTools.UnitTesting.TestClassAttribute
+    use Test = Microsoft.VisualStudio.TestTools.UnitTesting.TestMethodAttribute
+    use Assertions
+
+    // A function written with no types in a file with top-level statements
+    // is compiled as a nested function of those statements. Queries on it
+    // and on its uses still answer for where the source wrote it.
+    @TestClass()
+    class FILE_LOCAL_FUNCTION_QUERY_TESTS is
+        init() is si
+
+        // Line 3: `_double(x) => x * 2`, the name at columns 1-7.
+        // Line 5: `let four = _double(2)`, the use at columns 12-18.
+        // Line 6: `write_line("{_double(four)}")`, the use at columns 14-20.
+        source() -> string =>
+            "use default\n\n_double(x) => x * 2\n\nlet four = _double(2)\nwrite_line(\"{{_double(four)}}\")\n"
+
+        start_lines(locations: Collections.LIST[Analysis.Protocol.LOCATION_DTO], file_name: string) -> Collections.LIST[int] is
+            let result = Collections.LIST[int]()
+
+            for location in locations do
+                if location.file.ends_with(file_name) then
+                    result.add(location.start_line)
+                fi
+            od
+
+            result
+        si
+
+        prime(analyser: ANALYSER_PROCESS) is
+            analyser.send_edit("local.ghul", source())
+
+            let _ = analyser.read_response()
+        si
+
+        @Test()
+        hover_on_a_use__should_show_the_function_with_its_inferred_types() is
+            let use analyser = ANALYSER_PROCESS()
+
+            prime(analyser)
+
+            analyser.send_hover("local.ghul", 5, 14)
+
+            if let hover: Response.HOVER = analyser.read_query_response() then
+                is_true(
+                    hover.signature? /\ hover.signature.contains("_double") /\ hover.signature.contains("int"),
+                    "hover on the use should show _double with int, got: {hover.signature}"
+                )
+            else
+                fail("expected HOVER response")
+            fi
+        si
+
+        @Test()
+        definition_on_a_use__should_point_at_the_function() is
+            let use analyser = ANALYSER_PROCESS()
+
+            prime(analyser)
+
+            analyser.send_definition("local.ghul", 6, 16)
+
+            if let definition: Response.DEFINITION = analyser.read_query_response() then
+                is_true(definition.locations.count > 0, "definition on the use returned no location")
+                are_equal(3, definition.locations[0].start_line, "definition should be the function's own line")
+            else
+                fail("expected DEFINITION response")
+            fi
+        si
+
+        @Test()
+        references_on_the_function__should_find_both_uses() is
+            let use analyser = ANALYSER_PROCESS()
+
+            prime(analyser)
+
+            analyser.send_references("local.ghul", 3, 3)
+
+            if let references: Response.REFERENCES = analyser.read_query_response() then
+                let lines = start_lines(references.locations, "local.ghul")
+
+                is_true(lines.contains(5) /\ lines.contains(6), "references should include lines 5 and 6, got {lines}")
+            else
+                fail("expected REFERENCES response")
+            fi
+        si
+
+        @Test()
+        symbols_for_the_file__should_list_the_function() is
+            let use analyser = ANALYSER_PROCESS()
+
+            prime(analyser)
+
+            analyser.send_symbols("local.ghul")
+
+            let names = Collections.LIST[string]()
+
+            if let symbols: Response.SYMBOLS = analyser.read_query_response() then
+                for file in symbols.files do
+                    for symbol in file.symbols do
+                        names.add(symbol.search_description)
+                    od
+                od
+            fi
+
+            is_true(names |> any(n => n.starts_with("_double")), "_double missing from {names |> join(", ")}")
+        si
+    si
+si

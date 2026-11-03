@@ -2,6 +2,7 @@ namespace Syntax.Process is
     use Source
     use Logging
     use Trees
+    use Ghul.Pipes
 
     // Synthesises a global entry point from a file's top-level statements.
     //
@@ -36,6 +37,7 @@ namespace Syntax.Process is
             let statements = list.top_level_statements
 
             if !statements? then
+                _report_untyped(list)
                 _descend_into_file_scope_namespaces(list)
 
                 return
@@ -57,6 +59,8 @@ namespace Syntax.Process is
                             statements.location,
                             "top-level statements cannot appear in a file with a namespace"
                         )
+
+                        _report_untyped(list)
 
                         return
                     fi
@@ -80,12 +84,317 @@ namespace Syntax.Process is
                 fi
             od
 
+            // The file's unannotated functions become nested functions of
+            // the entry, so they are typed in the entry's own walk: their
+            // parameters from their calls, and the top-level `let`s they use
+            // from those uses. They go in just before the first statement that
+            // uses one of them, so the `let`s above it are defined when they
+            // are, as they are when a namespace function is first called.
+            let names = Collections.LIST[string]()
+            let nested = _nest_unannotated_functions(list, names)
+
+            if nested.count > 0 then
+                let scanner = NAME_REFERENCE_SCANNER()
+                let all = Collections.LIST[Statements.Statement]()
+                let placed mut = false
+
+                for statement in statements do
+                    if !placed /\ names |> any(name => scanner.node_references(statement, name)) then
+                        all.add_range(nested)
+                        placed = true
+                    fi
+
+                    all.add(statement)
+                od
+
+                if !placed then
+                    all.add_range(nested)
+                fi
+
+                statements.replace_all(all)
+            fi
+
             // Pushed to the front so compile-expressions walks the entry
             // before any other function in the file: the top-level `let`
             // variables it declares settle their inferred types during the
             // entry's own walk, and every sibling function reads them
             // after that.
             list.push(_synthesise_entry(statements, _keeps_both_parameters(list)))
+        si
+
+        // The functions of a file with top-level statements that are
+        // written with no type anywhere in their signature, taken out of
+        // the file's definitions as nested function statements. A function
+        // something outside the statements uses stays where it is: a class,
+        // a trait or an annotated function can't reach a nested function.
+        // Every argument left without a type is then reported.
+        _nest_unannotated_functions(list: Definitions.LIST, names: Collections.LIST[string]) -> Collections.List[Statements.Statement] is
+            let functions = Collections.LIST[Definitions.FUNCTION]()
+
+            for d in list do
+                if let function = cast Definitions.FUNCTION?(d.without_pragmas) then
+                    functions.add(function)
+                fi
+            od
+
+            let candidates = Collections.LIST[Definitions.FUNCTION]()
+
+            for d in list do
+                // A function carrying a pragma is a method the pragma
+                // describes, which a nested function has no way to be.
+                if let function = cast Definitions.FUNCTION?(d) /\ _is_unannotated(function) /\ _count_named(functions, function.name!.name) == 1 then
+                    candidates.add(function)
+                fi
+            od
+
+            let scanner = NAME_REFERENCE_SCANNER()
+
+            // A nested function is defined from its own statement onward, so
+            // two that call each other can't both be nested.
+            _refuse_mutual_recursion(candidates, scanner)
+
+            // A candidate another definition that stays uses has to stay
+            // too, and that can keep a further candidate it uses.
+            let changed mut = true
+
+            while changed do
+                changed = false
+
+                for candidate in Collections.LIST[Definitions.FUNCTION](candidates) do
+                    for d in list do
+                        if
+                            !(isa Definitions.FUNCTION(d) /\ candidates.contains(cast Definitions.FUNCTION(d))) /\
+                            scanner.node_references(d, candidate.name!.name)
+                        then
+                            candidate.not_nested_because = "{candidate.name!.name} is used by {_definition_name(d)}"
+                            candidate.not_nested_hint =
+                                "a function with no types in its signature is nested in the top-level statements, where {_definition_name(d)} cannot call it"
+                            candidates.remove(candidate)
+                            changed = true
+
+                            break
+                        fi
+                    od
+                od
+            od
+
+            for function in functions do
+                if !candidates.contains(function) then
+                    report_untyped_arguments(function, _logger)
+                fi
+            od
+
+            let nested = Collections.LIST[Statements.Statement]()
+
+            let file = list.location.file_name
+
+            for function in _callees_first(candidates, scanner) do
+                list.remove(function)
+
+                if !function.name!.name.starts_with("_") then
+                    _logger.warn(
+                        function.name!.location,
+                        "file-private-function",
+                        "{function.name!.name} is private to this file")
+
+                    _logger.hint(
+                        function.name!.location,
+                        "a function with no types in its signature is private to its file, and a name that starts with '_' says so")
+                fi
+
+                names.add(function.name!.name)
+                nested.add(_as_nested_function(function))
+            od
+
+            _nested_by_file[file] = Collections.LIST[string](names)
+
+            return nested
+        si
+
+        // Which of the candidates each candidate's body names, itself left
+        // out: a function reaches itself through its own name.
+        _callees(function: Definitions.FUNCTION, candidates: Collections.Iterable[Definitions.FUNCTION], scanner: NAME_REFERENCE_SCANNER) -> Collections.List[Definitions.FUNCTION] is
+            let result = Collections.LIST[Definitions.FUNCTION]()
+
+            for other in candidates do
+                if other != function /\ scanner.body_references(function.body, other.name!.name) then
+                    result.add(other)
+                fi
+            od
+
+            result
+        si
+
+        // Every candidate on a cycle of calls stays a namespace function.
+        _refuse_mutual_recursion(candidates: Collections.MutableList[Definitions.FUNCTION], scanner: NAME_REFERENCE_SCANNER) is
+            let refused = Collections.LIST[Definitions.FUNCTION]()
+
+            for function in candidates do
+                let seen = Collections.SET[Definitions.FUNCTION]()
+                let pending = Collections.LIST[Definitions.FUNCTION](_callees(function, candidates, scanner))
+
+                while pending.count > 0 do
+                    let next = pending[pending.count - 1]
+
+                    pending.remove_at(pending.count - 1)
+
+                    if next == function then
+                        refused.add(function)
+                        break
+                    fi
+
+                    if seen.add(next) then
+                        pending.add_range(_callees(next, candidates, scanner))
+                    fi
+                od
+            od
+
+            for function in refused do
+                let partner = _callees(function, refused, scanner)
+                let other = if partner.count > 0 then partner[0].name!.name else "another function" fi
+
+                function.not_nested_because = "{function.name!.name} and {other} call each other"
+                function.not_nested_hint =
+                    "functions with no types in their signatures are nested in the top-level statements, where two cannot call each other"
+
+                candidates.remove(function)
+            od
+        si
+
+        // The candidates in an order where each comes after the functions
+        // it calls, which is the order nested functions need: each is
+        // defined from its own statement onward. There are no cycles left.
+        _callees_first(candidates: Collections.List[Definitions.FUNCTION], scanner: NAME_REFERENCE_SCANNER) -> Collections.List[Definitions.FUNCTION] is
+            let result = Collections.LIST[Definitions.FUNCTION]()
+            let placed = Collections.SET[Definitions.FUNCTION]()
+
+            place(function: Definitions.FUNCTION) is
+                if !placed.add(function) then
+                    return
+                fi
+
+                for callee in _callees(function, candidates, scanner) do
+                    place(callee)
+                od
+
+                result.add(function)
+            si
+
+            for function in candidates do
+                place(function)
+            od
+
+            result
+        si
+
+        // The functions each file made nested functions of its top-level
+        // statements, by name, so a use of one from another file can be told
+        // apart from a name that was never declared.
+        _nested_by_file: Collections.MAP[string, Collections.LIST[string]] static
+
+        init() static is
+            _nested_by_file = Collections.MAP[string, Collections.LIST[string]]()
+        si
+
+        // The file whose top-level statements hold a nested function of
+        // this name, if any file's do.
+        file_nesting(name: string) -> string? static is
+            for pair in _nested_by_file do
+                if pair.value.contains(name) then
+                    return pair.key
+                fi
+            od
+
+            return null
+        si
+
+        _report_untyped(list: Definitions.LIST) is
+            for d in list do
+                if let function = cast Definitions.FUNCTION?(d.without_pragmas) then
+                    report_untyped_arguments(function, _logger)
+                fi
+            od
+        si
+
+        _count_named(functions: Collections.List[Definitions.FUNCTION], name: string) -> int is
+            let result mut = 0
+
+            for f in functions do
+                if f.name? /\ f.name.name =~ name then
+                    result = result + 1
+                fi
+            od
+
+            result
+        si
+
+        _is_unannotated(function: Definitions.FUNCTION) -> bool =>
+            !function.is_poisoned /\
+            function.name? /\
+            !function.is_top_level_entry /\
+            function.name.name !~ _entry_point.name /\
+            function.name.name.length > 0 /\
+            (char.is_letter(function.name.name[0]) \/ function.name.name[0] == '_') /\
+            function.body? /\
+            function.generic_arguments.count == 0 /\
+            function.modifiers.is_empty /\
+            function.type_expression.is_inferred /\
+            function.arguments |> all(a => a.untyped_deferred /\ !a.is_poisoned /\ a.left.is_simple_name /\ a.name? /\ !a.initializer?)
+
+        _as_nested_function(function: Definitions.FUNCTION) -> Statements.Statement is
+            let arguments = Collections.LIST[Expressions.Expression]()
+
+            for a in function.arguments do
+                arguments.add(Expressions.VARIABLE(a.location, a.name!, TypeExpressions.INFER(a.location), null))
+            od
+
+            let literal = Expressions.FUNCTION(
+                function.location,
+                Expressions.LIST(function.arguments.location, arguments),
+                TypeExpressions.INFER(function.type_expression.location),
+                function.body!,
+                false
+            )
+
+            literal.set_nested_name(function.name!)
+
+            return Statements.FUNCTION(function.location, function.name!, literal)
+        si
+
+        _definition_name(definition: Definitions.Definition) -> string =>
+            if let classy = cast Definitions.Classy?(definition.without_pragmas) then
+                classy.name.name
+            elif let function = cast Definitions.FUNCTION?(definition.without_pragmas) then
+                if function.name? then function.name.name else "a function" fi
+            else
+                "a declaration in this file"
+            fi
+
+        // An argument a file-level function was written without a type, in
+        // a file where the function can't be nested: one with no top-level
+        // statements, or one where something outside them uses it.
+        report_untyped_arguments(function: Definitions.FUNCTION, logger: Logger) static is
+            let reported mut = false
+
+            for a in function.arguments do
+                if a.untyped_deferred /\ !a.is_poisoned then
+                    a.untyped_deferred = false
+
+                    if let reason = function.not_nested_because then
+                        logger.error(a.location, "explicit argument type required: {reason}")
+                    else
+                        logger.error(a.location, "explicit argument type required")
+                    fi
+
+                    a.poison(true)
+                    function.poison(true)
+                    reported = true
+                fi
+            od
+
+            if reported /\ function.not_nested_hint? then
+                logger.hint(function.name!.location, function.not_nested_hint)
+            fi
         si
 
         // A whole-file namespace carries the file's top-level statements on
@@ -103,6 +412,8 @@ namespace Syntax.Process is
                         if statements? then
                             body.top_level_statements = null
                             _synthesise(body, statements)
+                        else
+                            _report_untyped(body)
                         fi
 
                         _descend_into_file_scope_namespaces(body)
