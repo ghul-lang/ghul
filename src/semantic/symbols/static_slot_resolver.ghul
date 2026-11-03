@@ -1,0 +1,54 @@
+namespace Semantic.Symbols is
+    use Semantic.Types.Type
+
+    // The static a type supplies for a static member a trait declares
+    // without a body. Inheritance resolution pairs each type's static
+    // with the slot it fills, as it pairs any overrider with what it
+    // overrides, and records the slot's overriders; this reads them.
+    // `T.try_parse(...)` written against a bound `[T: Parsable[T]]`
+    // reaches the trait's slot, and where the generic is instantiated at
+    // `int` the call is to the static `int` recorded for it.
+    class STATIC_SLOT_RESOLVER is
+        init() is si
+
+        // Whether `function` is a static slot a trait declares in source.
+        is_source_slot(function: Function) -> bool static =>
+            if let method: STATIC_METHOD = function then
+                method.is_static_interface_virtual /\ !method.is_reflected
+            else
+                false
+            fi
+
+        // The static recorded as filling `slot` for `receiver`, or null
+        // where `receiver` fills none.
+        resolve(slot: Function, receiver: Type) -> Function? static =>
+            if let owner = _classy(receiver.symbol) then
+                implementation_in(slot, owner)
+            else
+                null
+            fi
+
+        // The static recorded as filling `slot` that `owner` declares, or
+        // null where it declares none.
+        implementation_in(slot: Function, owner: Classy) -> Function? static is
+            let root = owner.root_specialized_from
+
+            if let overriders = slot.root_specialized_from.overriders then
+                for overrider in overriders do
+                    if let function: Function = overrider /\ _classy(cast Symbol?(function.owner))?.root_specialized_from == root then
+                        return function
+                    fi
+                od
+            fi
+
+            return null
+        si
+
+        _classy(symbol: Symbol?) -> Classy? static =>
+            if let generic: GENERIC = symbol then
+                generic.symbol
+            else
+                cast Classy?(symbol)
+            fi
+    si
+si

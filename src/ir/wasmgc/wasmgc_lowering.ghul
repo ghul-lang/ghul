@@ -4576,12 +4576,35 @@ namespace IR.WasmGC is
         /// A static method takes no receiver, so it is called as a
         /// global function is.
         visit(call: Values.Call.STATIC) is
-            if call.constrained_receiver? then
+            let function = _static_callee(call)
+
+            if !function? then
                 _report("a constrained call")
-            else
-                _ensure_initialised(call.function.owner)
-                _call(call.function, call.arguments)
+                return
             fi
+
+            _ensure_initialised(function.owner)
+            _call(function, call.arguments)
+        si
+
+        // The function a static call runs. One dispatched through a type
+        // runs the static that type supplies for the trait's slot: the
+        // type is concrete here, as each instance of a generic is lowered
+        // at its own type arguments.
+        _static_callee(call: Values.Call.STATIC) -> Semantic.Symbols.Function? is
+            if let receiver = call.constrained_receiver then
+                if !Semantic.Symbols.STATIC_SLOT_RESOLVER.is_source_slot(call.function) then
+                    return null
+                fi
+
+                if let concrete = _specialize(receiver) then
+                    return Semantic.Symbols.STATIC_SLOT_RESOLVER.resolve(call.function, concrete)
+                fi
+
+                return null
+            fi
+
+            return call.function
         si
 
         // A type's static constructor runs once, before the type is first
