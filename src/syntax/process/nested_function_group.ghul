@@ -1,0 +1,219 @@
+namespace Syntax.Process is
+    use Trees
+
+    // The nested functions of one statement list that have to exist before
+    // their own statements run, and where in the list they are created.
+    //
+    // A nested function that nothing in the list refers to before its own
+    // definition is left alone: an ordinary local, defined at its statement.
+    // One that an earlier statement or an earlier nested function refers to
+    // is in the group, and so is one that names a local the list declares
+    // after it, and every nested function a group member refers to, since
+    // the member can be called before that one's statement runs.
+    // The members are created together at `position`, before the statement
+    // with that index, each in a shared cell so that members created earlier
+    // reach the ones created later. `position` is the start of the list, or
+    // just after the last `let` in the list that declares a name a member
+    // uses, since the members capture those locals when they are created.
+    //
+    // References are matched by name, as the written identifier, before
+    // scopes are resolved. A name a function declares itself, as a
+    // parameter, a local or a literal's parameter, is not taken as a use of
+    // a later local with the same spelling. Any other shadowing name can
+    // put a function in the group that did not need to be there, which
+    // costs a cell.
+    class NESTED_FUNCTION_GROUP is
+        members: Collections.MutableList[Statements.FUNCTION]
+        position: int
+
+        // A statement before `position` that uses a member, so that the
+        // member would be called before the locals it captures exist.
+        too_early: (statement: Statements.Statement, member: Statements.FUNCTION)?
+
+        is_empty: bool => members.count == 0
+
+        init(members: Collections.MutableList[Statements.FUNCTION], position: int, too_early: (Statements.Statement, Statements.FUNCTION)?) is
+            self.members = members
+            self.position = position
+            self.too_early = too_early
+        si
+
+        // The list's statements in the order they are compiled and emitted:
+        // those before `position`, the members, then the rest.
+        order(list: Statements.LIST) -> Collections.List[Statements.Statement] is
+            let result = Collections.LIST[Statements.Statement]()
+
+            if is_empty then
+                result.add_range(list.statements)
+
+                return result
+            fi
+
+            for (index, statement) in list.statements |> Ghul.Pipes.index() do
+                if index == position then
+                    for member in members do
+                        result.add(member)
+                    od
+                fi
+
+                if !contains(statement) then
+                    result.add(statement)
+                fi
+            od
+
+            if !(result |> Ghul.Pipes.any(s => contains(s))) then
+                result.add_range(members)
+            fi
+
+            return result
+        si
+
+        contains(statement: Statements.Statement) -> bool =>
+            if let function: Statements.FUNCTION = statement then members.contains(function) else false fi
+
+        of(list: Statements.LIST) -> NESTED_FUNCTION_GROUP static is
+            if let cached = list.list_state.nested_function_group then
+                return cached
+            fi
+
+            let result = _build(list)
+
+            list.list_state.nested_function_group = result
+
+            return result
+        si
+
+        _build(list: Statements.LIST) -> NESTED_FUNCTION_GROUP static is
+            let statements = Collections.LIST[Statements.Statement](list.statements)
+            let functions = Collections.LIST[Statements.FUNCTION]()
+
+            for statement in statements do
+                if let function: Statements.FUNCTION = statement then
+                    functions.add(function)
+                fi
+            od
+
+            let members = Collections.LIST[Statements.FUNCTION]()
+
+            if functions.count == 0 then
+                return NESTED_FUNCTION_GROUP(members, 0, null)
+            fi
+
+            let scanner = NAME_REFERENCE_SCANNER()
+            let declared = DECLARED_NAME_SCANNER()
+
+            uses_outer(function: Statements.FUNCTION, name: string) -> bool =>
+                scanner.body_references(function.function.body, name) /\ !declared.declares(function.function, name)
+
+            // Names a local the list declares after the function's own
+            // statement, so it can only be created once that local exists. A
+            // name the function declares itself is its own, not that local.
+            for (index, statement) in statements |> Ghul.Pipes.index() do
+                if let `let: Statements.LET = statement then
+                    for variable in `let.variables do
+                        for name in variable.names do
+                            for function in functions do
+                                if
+                                    statements.index_of(function) < index /\
+                                    !members.contains(function) /\
+                                    uses_outer(function, name.name)
+                                then
+                                    members.add(function)
+                                fi
+                            od
+                        od
+                    od
+                fi
+            od
+
+            // Referred to before its own statement.
+            for (index, statement) in statements |> Ghul.Pipes.index() do
+                for function in functions do
+                    let defined_at = statements.index_of(function)
+
+                    if
+                        defined_at > index /\
+                        !members.contains(function) /\
+                        _references(scanner, statement, function.name.name)
+                    then
+                        members.add(function)
+                    fi
+                od
+            od
+
+            if members.count == 0 then
+                return NESTED_FUNCTION_GROUP(members, 0, null)
+            fi
+
+            // And whatever a member refers to, which it can call before that
+            // one's own statement has run.
+            let changed mut = true
+
+            while changed do
+                changed = false
+
+                for member in Collections.LIST[Statements.FUNCTION](members) do
+                    for function in functions do
+                        if
+                            !members.contains(function) /\
+                            scanner.body_references(member.function.body, function.name.name)
+                        then
+                            members.add(function)
+                            changed = true
+                        fi
+                    od
+                od
+            od
+
+            let ordered = Collections.LIST[Statements.FUNCTION]()
+
+            for function in functions do
+                if members.contains(function) then
+                    ordered.add(function)
+                fi
+            od
+
+            let position mut = 0
+
+            for (index, statement) in statements |> Ghul.Pipes.index() do
+                if let `let: Statements.LET = statement then
+                    for variable in `let.variables do
+                        for name in variable.names do
+                            if ordered |> Ghul.Pipes.any(member => uses_outer(member, name.name)) then
+                                position = index + 1
+                            fi
+                        od
+                    od
+                fi
+            od
+
+            let too_early: (Statements.Statement, Statements.FUNCTION)? mut = null
+
+            for (index, statement) in statements |> Ghul.Pipes.index() do
+                if index >= position \/ too_early? then
+                    break
+                fi
+
+                if isa Statements.FUNCTION(statement) /\ ordered.contains(cast Statements.FUNCTION(statement)) then
+                    continue
+                fi
+
+                for member in ordered do
+                    if _references(scanner, statement, member.name.name) then
+                        too_early = (statement, member)
+                        break
+                    fi
+                od
+            od
+
+            return NESTED_FUNCTION_GROUP(ordered, position, too_early)
+        si
+
+        _references(scanner: NAME_REFERENCE_SCANNER, statement: Statements.Statement, name: string) -> bool static =>
+            if let function: Statements.FUNCTION = statement then
+                scanner.body_references(function.function.body, name)
+            else
+                scanner.node_references(statement, name)
+            fi
+    si
+si
