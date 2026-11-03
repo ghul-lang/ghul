@@ -1791,7 +1791,7 @@ A function literal whose body contains `yield` is also a generator. It captures 
 
 1. its declared return type
 2. the slot it is assigned to, when that slot expects a `Pipe[T]`, `Iterable[T]` or `Iterator[T]`
-3. the join of the types its `yield`s produce, as a function's return type is the join of its `return`s
+3. the join of the types its `yield`s produce, as a function's return type is the join of its `return`s: yields of a `Cat` and a `Dog` give `Animal`, and yields that share no type but `object` give `object`
 
 A generator literal whose element type none of these decides is an error. A nested named function that yields is also a generator literal. It refers to itself by name for `yield in`:
 
