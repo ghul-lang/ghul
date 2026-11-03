@@ -57,6 +57,103 @@ namespace Analysis.Tests is
         si
 
         @Test()
+        hover_on_the_definition__should_show_a_global_function_signature() is
+            let use analyser = ANALYSER_PROCESS()
+
+            prime(analyser)
+
+            analyser.send_hover("local.ghul", 3, 3)
+
+            if let hover: Response.HOVER = analyser.read_query_response() then
+                is_true(
+                    hover.signature.contains("_double(x: int) -> int"),
+                    "hover on the definition should show _double(x: int) -> int, got: {hover.signature}"
+                )
+                is_true(
+                    hover.kind_label? /\ hover.kind_label.contains("global function"),
+                    "hover on the definition should be a global function, got: {hover.kind_label}"
+                )
+            else
+                fail("expected HOVER response")
+            fi
+        si
+
+        @Test()
+        hover_on_a_use__should_show_a_global_function_signature() is
+            let use analyser = ANALYSER_PROCESS()
+
+            prime(analyser)
+
+            analyser.send_hover("local.ghul", 5, 14)
+
+            if let hover: Response.HOVER = analyser.read_query_response() then
+                is_true(
+                    hover.signature.contains("_double(x: int) -> int"),
+                    "hover on the use should show _double(x: int) -> int, got: {hover.signature}"
+                )
+                is_true(
+                    hover.kind_label? /\ hover.kind_label.contains("global function"),
+                    "hover on the use should be a global function, got: {hover.kind_label}"
+                )
+            else
+                fail("expected HOVER response")
+            fi
+        si
+
+        // The same function written with types (a global function) and
+        // without (file-local), each hovered at its name.
+        pair_source() -> string =>
+            "use default\n\ntyped(x: int) -> int => x * 2\n\ninferd(x) => x * 2\n\nwrite_line(\"{{typed(2)}} {{inferd(2)}}\")\n"
+
+        hover_at(analyser: ANALYSER_PROCESS, line: int, column: int) -> Response.HOVER? is
+            analyser.send_hover("pair.ghul", line, column)
+
+            cast Response.HOVER?(analyser.read_query_response())
+        si
+
+        @Test()
+        hover_on_a_file_local_function__should_match_the_same_function_written_with_types() is
+            let use analyser = ANALYSER_PROCESS()
+
+            analyser.send_edit("pair.ghul", pair_source())
+
+            let _ = analyser.read_response()
+
+            let typed = hover_at(analyser, 3, 2)
+            let inferred = hover_at(analyser, 5, 2)
+
+            if !typed? \/ !inferred? then
+                fail("expected HOVER responses")
+                return
+            fi
+
+            are_equal(typed.kind_label, inferred.kind_label, "kind")
+            are_equal(typed.signature.replace("typed", "inferd"), inferred.signature, "signature")
+        si
+
+        // A function the source wrote inside another function's body is a
+        // nested function, whichever file it is in.
+        written_nested_source() -> string =>
+            "use default\n\nouter(n) is\n    helper(k) => k + 1\n    write_line(\"{{helper(n)}}\")\nsi\n\nouter(2)\n"
+
+        @Test()
+        hover_on_a_nested_function_written_in_a_body__should_still_show_a_nested_function() is
+            let use analyser = ANALYSER_PROCESS()
+
+            analyser.send_edit("nested.ghul", written_nested_source())
+
+            let _ = analyser.read_response()
+
+            analyser.send_hover("nested.ghul", 4, 6)
+
+            if let hover: Response.HOVER = analyser.read_query_response() then
+                are_equal("nested function", hover.kind_label, "kind of a written nested function")
+            else
+                fail("expected HOVER response")
+            fi
+        si
+
+        @Test()
         definition_on_a_use__should_point_at_the_function() is
             let use analyser = ANALYSER_PROCESS()
 
