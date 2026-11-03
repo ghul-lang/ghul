@@ -927,6 +927,8 @@ read_or[T: Ghul.Parsable[T]](text: string, fallback: T) -> T is
 si
 ```
 
+The global `parse[T](text) -> T?` is built the same way, and `use default` imports it. It gives the value `text` holds, or null where it holds none, for a value type `T`: `parse[int]("42")` is 42 and `parse[int]("x")` is null. `T` can come from the type expected, as in `let n: int? = parse(line)`. On every target, `int`, `uint`, `long`, `ulong` and `double` are `Parsable`.
+
 *More detail on this section: [language details](docs/details.md#traits).*
 
 ### unions
