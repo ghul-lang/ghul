@@ -113,7 +113,7 @@ _visit(3)
 write_line("{seen.count}")
 ```
 
-Such a function is private to the file. The editor shows a `file-private-function` hint at its definition, except where its name starts with `_`. A class, a trait or a function with types in its signature cannot call it, and neither can another file: a function used from any of them needs its types. The functions are placed before the first statement that uses one of them, so they can be written in any order, and they can call each other. Like a function literal, such a function can be marked `memo` or `pure`: `fib(n) memo => ...`.
+Such a function is private to the file. The editor shows a `file-private-function` hint at its definition. A function with types in its signature that calls such a function is private to the file in the same way, unless a class, a trait or a function that stays global uses it. A class, a trait, a generic function or another file cannot call either kind: a function used from any of them needs its types, and so does everything it calls. The functions are placed before the first statement that uses one of them, so they can be written in any order, and they can call each other. Like a function literal, such a function can be marked `memo` or `pure`: `fib(n) memo => ...`.
 
 A `use` statement brings names into scope, so code can refer to them without qualification. A `use` of a namespace imports every public symbol in it. A `use` of a single symbol imports that symbol:
 
