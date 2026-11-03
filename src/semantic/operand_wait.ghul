@@ -19,12 +19,28 @@ namespace Semantic is
         // one. The left operand is answered first, so a rule reports the
         // side it reads first.
         for_operands(left: Type?, right: Type?) -> Type? static is
-            if is_typed_by_the_call_site(left) then
-                return left
+            if let waiting = _awaited_through(left) then
+                return waiting
             fi
 
-            if is_typed_by_the_call_site(right) then
-                return right
+            if let waiting = _awaited_through(right) then
+                return waiting
+            fi
+
+            null
+        si
+
+        // The placeholder an operand waits on: the operand itself when the
+        // call site types it, or the one a rule's waiting result over such
+        // an operand waits on - `xs[0]` or `xs.count` with `xs` still a
+        // parameter being inferred.
+        _awaited_through(type: Type?) -> Type? static is
+            if is_typed_by_the_call_site(type) then
+                return type
+            fi
+
+            if let join: Types.INFERRED_JOIN_TYPE = type /\ is_typed_by_the_call_site(join.awaiting) then
+                return join.awaiting
             fi
 
             null
@@ -41,13 +57,32 @@ namespace Semantic is
                 // A `*` of a partial application is the thunk's own
                 // parameter, typed by the function type expected of the
                 // application and by the call it stands in.
+                if let origin: Symbols.INFERRED_RESULT_ORIGIN = placeholder.origin /\ origin.is_placeholder_argument then
+                    return true
+                fi
+            fi
+
+            is_result_waiting_on_an_input(type)
+        si
+
+        // Whether a type is the result of a call still waiting on one of
+        // its inputs - a call whose own type parameter is not yet bound,
+        // or a `!` over one - which is typed by whatever types that input.
+        is_result_waiting_on_an_input(type: Type?) -> bool static is
+            if let placeholder: Types.INFERRED_VARIABLE_TYPE = type /\ !placeholder.is_settled then
                 if let origin: Symbols.INFERRED_RESULT_ORIGIN = placeholder.origin then
-                    return origin.is_placeholder_argument
+                    return origin.is_reported_by_its_input
                 fi
             fi
 
             false
         si
+
+        // Whether a type is, or holds, a result some rule has not yet
+        // answered: a rule's waiting join, or a call's result waiting on
+        // an input. A consumer that would commit on it waits instead.
+        is_waiting(type: Type) -> bool static =>
+            is_held_by(type) \/ is_result_waiting_on_an_input(type)
 
         // Whether a type holds a rule's waiting result, however deeply -
         // a tuple element, say. A variable's own placeholder is not one:

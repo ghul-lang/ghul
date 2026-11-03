@@ -1161,9 +1161,13 @@ namespace Syntax.Process is
                         false
                     fi
 
-                if let tail_type = tail_value?.type /\ Semantic.OPERAND_WAIT.is_held_by(tail_type) then
+                if
+                    let tail_type = tail_value?.type /\
+                    (Semantic.OPERAND_WAIT.is_waiting(tail_type) \/ _is_other_unsettled_result(function, tail_type))
+                then
                     // The tail is a rule waiting for an operand the call
-                    // site types. Void is the answer for a body that
+                    // site types, or the result of one still waiting on
+                    // an input. Void is the answer for a body that
                     // produced nothing, and this one has not answered yet:
                     // the return stays inferred for the walk that settles
                     // the operand to pin.
@@ -1315,6 +1319,18 @@ namespace Syntax.Process is
 
             return origin
         si
+
+        // Whether a type is the unsettled result of another expression a
+        // later walk settles, such as another literal's return or a `*`.
+        // A recursive literal's self-call reads the literal's own return,
+        // which is what this body is deciding, so that one is excluded.
+        _is_other_unsettled_result(function: Trees.Expressions.FUNCTION, type: Type) -> bool =>
+            if let placeholder: Semantic.Types.INFERRED_VARIABLE_TYPE = type /\ !placeholder.is_settled then
+                isa Semantic.Symbols.INFERRED_RESULT_ORIGIN(placeholder.origin) /\
+                placeholder.origin != _return_origin(function)
+            else
+                false
+            fi
 
         // The type an earlier walk's waiting return has settled to since.
         _settled_return(function: Trees.Expressions.FUNCTION) -> Type? is

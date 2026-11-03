@@ -832,6 +832,47 @@ namespace Syntax.Process is
             return origin
         si
 
+        // The type of a `!` over the result of a rule still waiting, such
+        // as a call whose own type parameter is not yet bound: a named
+        // unknown that waits with the operand, rather than an unwrap
+        // reported as impossible on a type a later walk replaces. Null
+        // when the operand's type is anything else.
+        _awaited_unwrap(unwrap: Trees.Expressions.UNWRAP, operand_type: Type) -> Type? is
+            let function = _symbol_table.current_function
+
+            if
+                !function? \/
+                !isa Semantic.Types.INFERRED_VARIABLE_TYPE(operand_type) \/
+                operand_type.is_settled
+            then
+                return null
+            fi
+
+            let placeholder = cast Semantic.Types.INFERRED_VARIABLE_TYPE(operand_type)
+
+            if !isa Semantic.Symbols.INFERRED_RESULT_ORIGIN(placeholder.origin) then
+                return null
+            fi
+
+            let origin =
+                Semantic.RESULT_ORIGINS.origin_for(
+                    unwrap,
+                    unwrap.location,
+                    cast Semantic.Scope(function),
+                    "$!@{unwrap.location.start_line}:{unwrap.location.start_column}")
+
+            if !origin? then
+                return null
+            fi
+
+            origin.description = "the value this '!' unwraps"
+            origin.is_reported_by_its_input = true
+
+            Semantic.OBLIGATIONS.defer(Semantic.OBLIGATIONS.WAITING_UNWRAP, placeholder, unwrap.location)
+
+            return Semantic.Types.INFERRED_VARIABLE_TYPE(origin)
+        si
+
         // The first inference placeholder inside `type`, or null when it
         // carries none.
         _unsettled_placeholder_in(type: Type) -> Semantic.Types.INFERRED_VARIABLE_TYPE? is
@@ -1368,6 +1409,11 @@ namespace Syntax.Process is
             then
                 _logger.error(unwrap.left.location, "cannot use this here")
                 unwrap.compile_expressions_state.value = DUMMY(Semantic.Types.ERROR(), unwrap.location)
+                return
+            fi
+
+            if let waiting = _awaited_unwrap(unwrap, unwrap_left_value.type!) then
+                unwrap.compile_expressions_state.value = DUMMY(waiting, unwrap.location)
                 return
             fi
 

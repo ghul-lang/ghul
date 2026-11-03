@@ -7,6 +7,7 @@ namespace Semantic.UnitTests is
 
     use Semantic.OPERAND_WAIT
     use Semantic.Symbols.CLASS
+    use Semantic.Symbols.INFERRED_RESULT_ORIGIN
     use Semantic.Symbols.INFERRED_TYPE_ARG_ORIGIN
     use Semantic.Symbols.LOCAL_ARGUMENT
     use Semantic.Types.INFERRED_JOIN_TYPE
@@ -52,6 +53,28 @@ namespace Semantic.UnitTests is
             is_false(OPERAND_WAIT.is_typed_by_the_call_site(a_local()))
         si
 
+        // A call's result waiting on one of its arguments: whatever
+        // types the argument types the result.
+        a_result_waiting_on_an_input() -> INFERRED_VARIABLE_TYPE is
+            let origin = INFERRED_RESULT_ORIGIN(loc(), Semantic.BLOCK_SCOPE(), "$call")
+
+            origin.is_reported_by_its_input = true
+
+            return INFERRED_VARIABLE_TYPE(origin)
+        si
+
+        @Test()
+        Calling__is_typed_by_the_call_site__on_a_result_waiting_on_an_input__should_return_true() is
+            is_true(OPERAND_WAIT.is_typed_by_the_call_site(a_result_waiting_on_an_input()))
+        si
+
+        @Test()
+        Calling__is_typed_by_the_call_site__on_a_result_the_body_settles__should_return_false() is
+            let origin = INFERRED_RESULT_ORIGIN(loc(), Semantic.BLOCK_SCOPE(), "$return")
+
+            is_false(OPERAND_WAIT.is_typed_by_the_call_site(INFERRED_VARIABLE_TYPE(origin)))
+        si
+
         @Test()
         Calling__is_typed_by_the_call_site__on_a_settled_type__should_return_false() is
             is_false(OPERAND_WAIT.is_typed_by_the_call_site(a_class("cat").type))
@@ -72,6 +95,20 @@ namespace Semantic.UnitTests is
         si
 
         @Test()
+        Calling__for_operands__with_a_waiting_read_of_an_argument__should_return_the_argument() is
+            // `xs[0] - 1` with `xs` a parameter still being inferred: the
+            // index waits on `xs`, and so does the operator over it.
+            let argument = an_argument()
+
+            are_same(cast Semantic.Types.Type?(argument), OPERAND_WAIT.for_operands(INFERRED_JOIN_TYPE(argument), a_class("cat").type))
+        si
+
+        @Test()
+        Calling__for_operands__with_a_waiting_read_of_a_local__should_return_null() is
+            is_null(OPERAND_WAIT.for_operands(INFERRED_JOIN_TYPE(a_local()), a_class("cat").type))
+        si
+
+        @Test()
         Calling__for_operands__with_two_local_placeholders__should_return_null() is
             is_null(OPERAND_WAIT.for_operands(a_local(), a_local()))
         si
@@ -89,6 +126,34 @@ namespace Semantic.UnitTests is
         @Test()
         Calling__is_held_by__on_a_variables_own_placeholder__should_return_false() is
             is_false(OPERAND_WAIT.is_held_by(a_local()))
+        si
+
+        @Test()
+        Calling__is_waiting__on_a_result_waiting_on_an_input__should_return_true() is
+            is_true(OPERAND_WAIT.is_waiting(a_result_waiting_on_an_input()))
+        si
+
+        @Test()
+        Calling__is_waiting__on_a_waiting_join__should_return_true() is
+            is_true(OPERAND_WAIT.is_waiting(INFERRED_JOIN_TYPE(an_argument())))
+        si
+
+        @Test()
+        Calling__is_waiting__on_a_literal_return_still_being_inferred__should_return_false() is
+            // `is_waiting` answers only for a rule's join and a call's
+            // result waiting on an input. A literal's return is settled
+            // by that literal's own body, and a consumer that has to wait
+            // on one checks for it itself.
+            let origin = INFERRED_RESULT_ORIGIN(loc(), Semantic.BLOCK_SCOPE(), "$return")
+
+            origin.is_literal_return = true
+
+            is_false(OPERAND_WAIT.is_waiting(INFERRED_VARIABLE_TYPE(origin)))
+        si
+
+        @Test()
+        Calling__is_waiting__on_a_local_placeholder__should_return_false() is
+            is_false(OPERAND_WAIT.is_waiting(a_local()))
         si
 
         @Test()

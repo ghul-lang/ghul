@@ -1331,6 +1331,65 @@ namespace Syntax.Process is
         feed_pack_from_expected(function: Semantic.Symbols.Function, expected: Semantic.Types.Type?) =>
             _feed_pack_from_expected(function, expected)
 
+        // A generic callee whose return still carries its own type
+        // parameter, called with an argument whose type is still being
+        // inferred: nothing has bound the parameter yet, and the
+        // argument is what would. The call's result is a named unknown
+        // that waits on the argument rather than the callee's bare type
+        // parameter, which would otherwise become the type of whatever
+        // the call is written in. Null when the call can be typed now.
+        _awaited_by_unbound_return(
+            call: Trees.Expressions.CALL,
+            function: Semantic.Symbols.Function,
+            argument_types: Collections.LIST[Semantic.Types.Type]
+        ) -> Semantic.Types.Type? is
+            let caller = _symbol_table.current_function
+
+            if
+                !caller? \/
+                !function.is_generic \/
+                !function.return_type? \/
+                !function.return_type.has_function_generic_argument_foreign_to(caller)
+            then
+                return null
+            fi
+
+            let awaited: Semantic.Types.INFERRED_VARIABLE_TYPE? mut = null
+
+            for argument_type in argument_types do
+                if !awaited? /\ argument_type.contains_inferred then
+                    argument_type.walk(
+                        t => if !awaited? then
+                            if let placeholder: Semantic.Types.INFERRED_VARIABLE_TYPE = t /\ !placeholder.is_settled then
+                                awaited = placeholder
+                            fi
+                        fi)
+                fi
+            od
+
+            if !awaited? then
+                return null
+            fi
+
+            let origin =
+                Semantic.RESULT_ORIGINS.origin_for(
+                    call,
+                    call.location,
+                    cast Semantic.Scope(caller),
+                    "$call@{call.location.start_line}:{call.location.start_column}")
+
+            if !origin? then
+                return null
+            fi
+
+            origin.description = "the result of this call"
+            origin.is_reported_by_its_input = true
+
+            Semantic.OBLIGATIONS.defer(Semantic.OBLIGATIONS.UNBOUND_RETURN, awaited, call.location)
+
+            return Semantic.Types.INFERRED_VARIABLE_TYPE(origin)
+        si
+
         _feed_pack_from_expected(function: Semantic.Symbols.Function, expected: Semantic.Types.Type?) is
             if !expected? \/ !expected.is_function \/ expected.is_action then
                 return
@@ -3091,6 +3150,11 @@ namespace Syntax.Process is
                     _feed_pack_from_expected(function, call.expected_type)
                     _bound_awaiting_sequence_elements(function, slots.expressions)
                     _type_sequence_arguments_from_formals(function, slots.expressions, argument_types)
+
+                    if let waiting = _awaited_by_unbound_return(call, function, argument_types) then
+                        call.compile_expressions_state.value = DUMMY(waiting, call.location)
+                        return
+                    fi
 
                     if function.is_unsafe_constraints then
                         _logger.warn(call.location, "unchecked-constraints", "call to {function} has unchecked constraints")
