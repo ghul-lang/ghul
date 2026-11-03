@@ -174,6 +174,12 @@ namespace Semantic.Symbols is
         // a linear contains-check is cheap.
         _upper_bounds: Collections.LIST[Type]?
 
+        // The upper bounds recorded through an invariant type-argument
+        // slot, such as a value-type element: the placeholder must be
+        // exactly that type, not just assignable to it. Each is also in
+        // `_upper_bounds`.
+        _exact_upper_bounds: Collections.LIST[Type]?
+
         // Stored as a SET to deduplicate constraints emitted
         // from multiple equivalent operation sites (e.g. two
         // `.foo` accesses on the same placeholder collapse to a
@@ -321,6 +327,20 @@ namespace Semantic.Symbols is
                 fi
             fi
 
+            // A bound recorded through an invariant slot names the one type
+            // the placeholder can be: a `LIST[int]` is not an `int?[]`, so
+            // a list returned as one must be built as `LIST[int?]`. Where
+            // the lower bounds convert to that type, it is the type.
+            if let exact_bounds = _exact_upper_bounds then
+                if exact_bounds.count == 1 then
+                    let exact = exact_bounds[0]
+
+                    if !exact.contains_function_generic_argument /\ exact.is_assignable_from(candidate) then
+                        candidate = exact
+                    fi
+                fi
+            fi
+
             // Upper-bound validation: the chosen candidate must
             // be assignable to every recorded upper bound. If
             // not, the placeholder is being asked to be both
@@ -382,7 +402,12 @@ namespace Semantic.Symbols is
         // resolved type (constraints accumulate only while
         // unresolved) and when the bound is itself a sentinel
         // or type variable (no information).
-        add_upper_bound(bound: Type?) -> bool is
+        add_upper_bound(bound: Type?) -> bool => add_upper_bound(bound, false)
+
+        // As `add_upper_bound(bound)`; an `exact` bound came through an
+        // invariant slot, so the placeholder settles to it when its
+        // lower-bound candidate converts to it.
+        add_upper_bound(bound: Type?, exact: bool) -> bool is
             if type? /\ !type.is_sentinel then
                 return false
             fi
@@ -390,6 +415,8 @@ namespace Semantic.Symbols is
             if !bound? \/ bound.is_sentinel \/ bound.is_type_variable then
                 return false
             fi
+
+            let added_exact = exact /\ _add_exact_upper_bound(bound)
 
             let upper_bounds mut = _upper_bounds
 
@@ -399,12 +426,30 @@ namespace Semantic.Symbols is
             else
                 for existing in upper_bounds do
                     if existing.matches(bound) then
-                        return false
+                        return added_exact
                     fi
                 od
             fi
 
             upper_bounds.add(bound)
+            return true
+        si
+
+        _add_exact_upper_bound(bound: Type) -> bool is
+            let exact_bounds mut = _exact_upper_bounds
+
+            if !exact_bounds? then
+                exact_bounds = Collections.LIST[Type]()
+                _exact_upper_bounds = exact_bounds
+            else
+                for existing in exact_bounds do
+                    if existing.matches(bound) then
+                        return false
+                    fi
+                od
+            fi
+
+            exact_bounds.add(bound)
             return true
         si
 
