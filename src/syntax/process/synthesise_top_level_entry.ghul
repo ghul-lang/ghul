@@ -147,24 +147,60 @@ namespace Syntax.Process is
                 fi
             od
 
+            // An annotated function that can be nested joins them when it calls
+            // one of them, since it can then only run where they exist.
+            let annotated = Collections.LIST[Definitions.FUNCTION]()
+
+            for d in list do
+                if let function = cast Definitions.FUNCTION?(d) /\ !candidates.contains(function) /\ _can_nest_annotated(function) /\ _count_named(functions, function.name!.name) == 1 then
+                    annotated.add(function)
+                fi
+            od
+
             let scanner = NAME_REFERENCE_SCANNER()
 
-            // A candidate another definition that stays uses has to stay
-            // too, and that can keep a further candidate it uses.
+            // A candidate kept out of the statements, and what outside them
+            // calls it there, directly or through other kept candidates.
+            let kept = Collections.MAP[Definitions.FUNCTION, string]()
+
             let changed mut = true
 
             while changed do
                 changed = false
 
+                for function in annotated do
+                    if
+                        !candidates.contains(function) /\
+                        !kept.contains_key(function) /\
+                        candidates |> any(c => scanner.body_references(function.body, c.name!.name))
+                    then
+                        candidates.add(function)
+                        changed = true
+                    fi
+                od
+
+                // A candidate another definition that stays uses has to stay
+                // too, and that can keep a further candidate it uses.
                 for candidate in Collections.LIST[Definitions.FUNCTION](candidates) do
                     for d in list do
                         if
                             !(isa Definitions.FUNCTION(d) /\ candidates.contains(cast Definitions.FUNCTION(d))) /\
                             scanner.node_references(d, candidate.name!.name)
                         then
-                            candidate.not_nested_because = "{candidate.name!.name} is used by {_definition_name(d)}"
-                            candidate.not_nested_hint =
-                                "a function with no types in its signature is nested in the top-level statements, where {_definition_name(d)} cannot call it"
+                            let user = _definition_name(d)
+                            let name = candidate.name!.name
+
+                            if let through = cast Definitions.FUNCTION?(d) /\ kept.contains_key(through) then
+                                let root = kept[through]
+
+                                candidate.not_nested_because = "{name} is called by {user}, which {root} calls from outside the top-level code"
+                                kept[candidate] = root
+                            else
+                                candidate.not_nested_because = "{user} calls {name} from outside the top-level code"
+                                kept[candidate] = user
+                            fi
+
+                            candidate.not_nested_hint = "a function used outside the top-level code needs the types in its signature"
                             candidates.remove(candidate)
                             changed = true
 
@@ -183,19 +219,20 @@ namespace Syntax.Process is
             let nested = Collections.LIST[Statements.Statement]()
 
             let file = list.location.file_name
+            let annotated_names = Collections.LIST[string]()
 
             for function in _callees_first(candidates, scanner) do
                 list.remove(function)
 
-                if !function.name!.name.starts_with("_") then
-                    _logger.warn(
-                        function.name!.location,
-                        "file-private-function",
-                        "{function.name!.name} is private to this file")
-
+                if _is_unannotated(function) then
                     _logger.hint(
                         function.name!.location,
-                        "a function with no types in its signature is private to its file, and a name that starts with '_' says so")
+                        "file-private-function",
+                        "{function.name!.name} is private to this file",
+                        function.name!.location,
+                        "a function with no types in its signature is private to its file")
+                else
+                    annotated_names.add(function.name!.name)
                 fi
 
                 names.add(function.name!.name)
@@ -203,6 +240,7 @@ namespace Syntax.Process is
             od
 
             _nested_by_file[file] = Collections.LIST[string](names)
+            _annotated_nested_by_file[file] = annotated_names
 
             return nested
         si
@@ -253,9 +291,19 @@ namespace Syntax.Process is
         // apart from a name that was never declared.
         _nested_by_file: Collections.MAP[string, Collections.LIST[string]] static
 
+        // Those of them written with types, nested because they call
+        // functions that are.
+        _annotated_nested_by_file: Collections.MAP[string, Collections.LIST[string]] static
+
         init() static is
             _nested_by_file = Collections.MAP[string, Collections.LIST[string]]()
+            _annotated_nested_by_file = Collections.MAP[string, Collections.LIST[string]]()
         si
+
+        // Whether the nested function of this name in `file` was written
+        // with types.
+        is_annotated_nesting(file: string, name: string) -> bool static =>
+            _annotated_nested_by_file.contains_key(file) /\ _annotated_nested_by_file[file].contains(name)
 
         // The file whose top-level statements hold a nested function of
         // this name, if any file's do.
@@ -302,6 +350,21 @@ namespace Syntax.Process is
             function.type_expression.is_inferred /\
             function.arguments |> all(a => a.untyped_deferred /\ !a.is_poisoned /\ a.left.is_simple_name /\ a.name? /\ !a.initializer?)
 
+        // Whether a function written with types has a shape a nested function
+        // can have: no type parameters, modifiers or pragmas, and plain
+        // parameters with no defaults and none passed by reference.
+        _can_nest_annotated(function: Definitions.FUNCTION) -> bool =>
+            !function.is_poisoned /\
+            function.name? /\
+            !function.is_top_level_entry /\
+            function.name.name !~ _entry_point.name /\
+            function.body? /\
+            function.generic_arguments.count == 0 /\
+            _has_only_literal_markers(function.modifiers) /\
+            function.arguments |> all(a =>
+                !a.is_poisoned /\ !a.untyped_deferred /\ a.left.is_simple_name /\ a.name? /\ !a.initializer? /\
+                !isa TypeExpressions.REFERENCE(a.type_expression))
+
         // Whether a function's modifiers are only the `memo` and `pure`
         // markers a function literal can carry as well.
         _has_only_literal_markers(modifiers: Trees.Modifiers.LIST) -> bool =>
@@ -314,13 +377,15 @@ namespace Syntax.Process is
             let arguments = Collections.LIST[Expressions.Expression]()
 
             for a in function.arguments do
-                arguments.add(Expressions.VARIABLE(a.location, a.name!, TypeExpressions.INFER(a.location), null))
+                let type_expression = if a.untyped_deferred then TypeExpressions.INFER(a.location) else a.type_expression fi
+
+                arguments.add(Expressions.VARIABLE(a.location, a.name!, type_expression, null))
             od
 
             let literal = Expressions.FUNCTION(
                 function.location,
                 Expressions.LIST(function.arguments.location, arguments),
-                TypeExpressions.INFER(function.type_expression.location),
+                if function.type_expression.is_inferred then TypeExpressions.INFER(function.type_expression.location) else function.type_expression fi,
                 function.body!,
                 false
             )
@@ -362,6 +427,17 @@ namespace Syntax.Process is
                     reported = true
                 fi
             od
+
+            // With no parameter to blame, a function kept out of the
+            // statements is missing its return type.
+            if !reported /\ function.arguments.count == 0 /\ function.type_expression.is_inferred then
+                if let reason = function.not_nested_because then
+                    logger.error(function.name!.location, "explicit return type required: {reason}")
+
+                    function.poison(true)
+                    reported = true
+                fi
+            fi
 
             if reported /\ function.not_nested_hint? then
                 logger.hint(function.name!.location, function.not_nested_hint)
