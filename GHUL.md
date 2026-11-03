@@ -139,7 +139,7 @@ use MaybeName = string?;
 use Numbers = Collections.LIST[int];
 ```
 
-`use default` imports a fixed set of names that most files want. By default the set is `IO.Std.write_line`, `Ghul.Pipes`, `Collections`, `Ghul.Math`, `Ghul.NumberTheory` and `Ghul.Functional`. A name in the default set that the runtime doesn't define is skipped. The set is a fallback: a name that an explicit `use` in the same block imports, before or after the `use default`, means what that import says, and the default set's import of it is not a duplicate. A function the default set imports is another overload of its name, unless an explicit import or the program's own declaration takes the same parameters, which wins. In every other way `use default` is an ordinary `use`: it applies to the namespace block that contains it. Unless the project asks for an implicit import with `--implicit-default-use`, a file that does not write `use default` gets none of these names.
+`use default` imports a fixed set of names that most files want. By default the set is `IO.Std.write_line`, `Ghul.parse`, `Ghul.Pipes`, `Collections`, `Ghul.Math`, `Ghul.NumberTheory` and `Ghul.Functional`. A name in the default set that the runtime doesn't define is skipped. The set is a fallback: a name that an explicit `use` in the same block imports, before or after the `use default`, means what that import says, and the default set's import of it is not a duplicate. A function the default set imports is another overload of its name, unless an explicit import or the program's own declaration takes the same parameters, which wins. In every other way `use default` is an ordinary `use`: it applies to the namespace block that contains it. Unless the project asks for an implicit import with `--implicit-default-use`, a file that does not write `use default` gets none of these names.
 
 ```ghul
 use default
@@ -910,6 +910,20 @@ si
 class TALLY: Counted is
     count: int public;
     init() is count = 0; si
+si
+```
+
+`Ghul.Parsable[T]` is the trait of a type whose values can be read from text. On .NET it is `System.IParsable<T>`, and `Ghul.FormatProvider` is `System.IFormatProvider`, so the BCL's types satisfy it as they are. Used as a bound, it lets generic code call the type's static `try_parse` through the type parameter. The call is resolved by the type argument, so it is made only as `T.try_parse(...)` on a type parameter the trait bounds, not on an instance or on the trait itself:
+
+```ghul
+read_or[T: Ghul.Parsable[T]](text: string, fallback: T) -> T is
+    let value: T mut = _
+
+    if T.try_parse(text, null, value ref) then
+        return value
+    fi
+
+    return fallback
 si
 ```
 

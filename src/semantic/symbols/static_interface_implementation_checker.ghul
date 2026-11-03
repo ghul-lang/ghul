@@ -4,9 +4,12 @@ namespace Semantic.Symbols is
     // .NET lets an interface declare a static member that an
     // implementing type must supply, which is how the generic-math
     // interfaces work. Calling one through a bounded type parameter is
-    // supported; supplying one is not, because nothing binds the
+    // supported; on .NET supplying one is not, because nothing binds the
     // implementing type's static to the interface's slot, and the CLR
-    // refuses to load a type that leaves one unfilled.
+    // refuses to load a type that leaves one unfilled. Where the core
+    // library is built from source, a trait's static slot is bound when
+    // a generic is instantiated, and the type has only to declare a
+    // static that takes exactly the slot's parameters.
     //
     // The assembly compiles either way, so without this the failure is a
     // TypeLoadException at run time naming a member the source declared.
@@ -40,7 +43,23 @@ namespace Semantic.Symbols is
                 // a GENERIC is not a Classy.
                 if ancestor.is_trait then
                     for member in _members(ancestor.symbol) do
-                        if is_static_slot(member) then
+                        // Where the core library is built from source, a
+                        // trait's static slot is bound when a generic is
+                        // instantiated, so the type has only to supply it.
+                        if
+                            IoC.CONTAINER.instance.target_profile.has_source_core_library /\
+                            _is_source_slot_member(member)
+                        then
+                            if !_supplies(type, member) then
+                                _logger.error(
+                                    type.location,
+                                    "{type.name} must implement the static member {member.name} that {ancestor} requires",
+                                    member.location,
+                                    "member declared here")
+
+                                return true
+                            fi
+                        elif is_static_slot(member) then
                             _logger.error(
                                 type.location,
                                 "cannot implement static member {member.name} of {ancestor}",
@@ -87,6 +106,28 @@ namespace Semantic.Symbols is
             fi
 
             return Collections.LIST[Symbol]()
+        si
+
+        _is_source_slot_member(member: Symbol) -> bool is
+            for function in _functions(member) do
+                if STATIC_SLOT_RESOLVER.is_source_slot(function) then
+                    return true
+                fi
+            od
+
+            return false
+        si
+
+        // Whether `type` declares a static for each source slot `member`
+        // carries.
+        _supplies(type: Classy, member: Symbol) -> bool is
+            for function in _functions(member) do
+                if STATIC_SLOT_RESOLVER.is_source_slot(function) /\ !STATIC_SLOT_RESOLVER.implementation_in(function, type)? then
+                    return false
+                fi
+            od
+
+            return true
         si
 
         // True where the member is, or carries, a slot an implementing
