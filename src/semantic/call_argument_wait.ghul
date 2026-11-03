@@ -1,0 +1,76 @@
+namespace Semantic is
+    use Types.Type
+
+    // Whether a call or a construction has to wait on one of its arguments
+    // before it can be typed, and which placeholder it waits on.
+    //
+    // A generic callee is typed by binding its type parameters from its
+    // arguments. While an argument's type is still being inferred the
+    // binding has nothing to go on, and whatever it settled at would be
+    // the callee's own unbound parameters - a type that means nothing
+    // where the call is written. The call waits on the argument instead.
+    class CALL_ARGUMENT_WAIT is
+        // The placeholder the first waiting argument waits on: one inside
+        // its type that is still being inferred, or, for a rule's waiting
+        // result over such a placeholder, the placeholder that result
+        // waits on. Null when every argument is typed.
+        awaited(argument_types: Collections.Iterable[Type]) -> Type? static is
+            for argument_type in argument_types do
+                if let join: Types.INFERRED_JOIN_TYPE = argument_type then
+                    return join.awaiting
+                fi
+
+                if argument_type.contains_inferred then
+                    let awaited: Types.INFERRED_VARIABLE_TYPE? mut = null
+
+                    argument_type.walk(
+                        t => if !awaited? then
+                            if let placeholder: Types.INFERRED_VARIABLE_TYPE = t /\ !placeholder.is_settled then
+                                awaited = placeholder
+                            fi
+                        fi)
+
+                    if awaited? then
+                        return awaited
+                    fi
+                fi
+            od
+
+            return null
+        si
+
+        // The placeholder an argument with no type at all yet stands for:
+        // an argument that is itself a placeholder still being inferred,
+        // or a rule's waiting result over one. Null when every argument
+        // has at least a partial type. Overload resolution against such
+        // an argument matches it to anything, and can only record bounds
+        // over the callee's own unbound type parameters.
+        untyped(argument_types: Collections.Iterable[Type]) -> Type? static is
+            for argument_type in argument_types do
+                if let join: Types.INFERRED_JOIN_TYPE = argument_type then
+                    return join.awaiting
+                fi
+
+                if let placeholder: Types.INFERRED_VARIABLE_TYPE = argument_type /\ !placeholder.is_settled then
+                    return placeholder
+                fi
+            od
+
+            return null
+        si
+
+        // Whether `type` is the callee of a construction whose type
+        // arguments the construction itself has to infer: a generic class
+        // named without them, `LIST(...)` rather than `LIST[int](...)`. Its
+        // type is the class's unspecialised one, carrying the class's own
+        // type parameters.
+        is_inferred_construction(type: Type) -> bool static =>
+            if isa Types.GENERIC(type) then
+                false
+            elif let classy: Symbols.Classy = type.symbol then
+                classy.is_generic
+            else
+                false
+            fi
+    si
+si

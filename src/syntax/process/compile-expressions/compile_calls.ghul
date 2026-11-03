@@ -815,13 +815,23 @@ namespace Syntax.Process is
                 return (cast Value(DUMMY(type, location)), cast Value(DUMMY(type, location)))
             fi
 
+            // A construction that has to infer its type arguments from an
+            // argument with no type yet waits for it rather than resolving
+            // against nothing.
+            if
+                Semantic.CALL_ARGUMENT_WAIT.is_inferred_construction(type) /\
+                Semantic.CALL_ARGUMENT_WAIT.untyped(argument_types)?
+            then
+                return (cast Value(Load.SYMBOL(null, function_group)), _unresolved_construction(cache_key, location, type, argument_types))
+            fi
+
             let named_restrict: Semantic.Symbols.Function[]? mut = null
 
             if argument_names? then
                 let binding = _named_argument_binder.bind(location, function_group, argument_names, true)
 
                 if !binding? then
-                    return (cast Value(Load.SYMBOL(null, function_group)), cast Value(DUMMY(type, location)))
+                    return (cast Value(Load.SYMBOL(null, function_group)), _unresolved_construction(cache_key, location, type, argument_types))
                 fi
 
                 _apply_named_permutation(argument_expressions, arguments, argument_types, binding.permutation, binding.targets[0])
@@ -836,7 +846,7 @@ namespace Syntax.Process is
                     let candidate = _try_find_single_arity_candidate(function_group, argument_types.count, true) /\
                     _type_sequence_arguments_from_formals(candidate, argument_expressions.expressions, argument_types)
                 then
-                    return (cast Value(Load.SYMBOL(null, function_group)), cast Value(DUMMY(type, location)))
+                    return (cast Value(Load.SYMBOL(null, function_group)), _unresolved_construction(cache_key, location, type, argument_types))
                 fi
             fi
 
@@ -918,7 +928,7 @@ namespace Syntax.Process is
             fi
 
             if overload_result == null then
-                return (cast Value(Load.SYMBOL(null, function_group)), cast Value(DUMMY(type, location)))
+                return (cast Value(Load.SYMBOL(null, function_group)), _unresolved_construction(cache_key, location, type, argument_types))
             fi
 
             if overload_result.needs_retry then
@@ -950,14 +960,16 @@ namespace Syntax.Process is
                 overload_result = _overload_resolver.resolve(location, function_group, argument_types, false, true, true, named_restrict)
 
                 if !overload_result? then
-                    return (cast Value(Load.SYMBOL(null, function_group)), cast Value(DUMMY(type, location)))
+                    return (cast Value(Load.SYMBOL(null, function_group)), _unresolved_construction(cache_key, location, type, argument_types))
                 fi
             fi
 
             let function mut = overload_result.function
 
+
             function = _owner_constraint_specializer.specialize_from_constraint(location, function, constraint)
             function = _type_arg_placeholder_registry.specialize_with_placeholders(location, function, cache_key)
+
 
             for (formal, actual) in function.arguments |> zip(argument_types) do
                 Semantic.RESULT_ORIGIN_OFFER.offer(formal, actual)
@@ -1354,18 +1366,7 @@ namespace Syntax.Process is
                 return null
             fi
 
-            let awaited: Semantic.Types.INFERRED_VARIABLE_TYPE? mut = null
-
-            for argument_type in argument_types do
-                if !awaited? /\ argument_type.contains_inferred then
-                    argument_type.walk(
-                        t => if !awaited? then
-                            if let placeholder: Semantic.Types.INFERRED_VARIABLE_TYPE = t /\ !placeholder.is_settled then
-                                awaited = placeholder
-                            fi
-                        fi)
-                fi
-            od
+            let awaited = Semantic.CALL_ARGUMENT_WAIT.awaited(argument_types)
 
             if !awaited? then
                 return null
@@ -1388,6 +1389,41 @@ namespace Syntax.Process is
             Semantic.OBLIGATIONS.defer(Semantic.OBLIGATIONS.UNBOUND_RETURN, awaited, call.location)
 
             return Semantic.Types.INFERRED_VARIABLE_TYPE(origin)
+        si
+
+        // The value of a construction of a generic class `Foo(...)` that
+        // could not be resolved. While an argument is still being inferred
+        // it is a named unknown that waits on that argument: the class's
+        // unspecialised type carries its own type parameters, which mean
+        // nothing where the construction is written, and a consumer that
+        // took them for a type - a fused loop's local, a closure frame -
+        // would carry them into the emitted code. Otherwise it is the
+        // callee's type, as before.
+        _unresolved_construction(
+            cache_key: Trees.Node,
+            location: LOCATION,
+            type: Semantic.Types.Type,
+            argument_types: Collections.LIST[Semantic.Types.Type]
+        ) -> Value is
+            if
+                let caller = _symbol_table.current_function /\
+                Semantic.CALL_ARGUMENT_WAIT.is_inferred_construction(type),
+                awaited = Semantic.CALL_ARGUMENT_WAIT.awaited(argument_types),
+                origin = Semantic.RESULT_ORIGINS.origin_for(
+                    cache_key,
+                    location,
+                    cast Semantic.Scope(caller),
+                    "$construct@{location.start_line}:{location.start_column}")
+            then
+                origin.description = "the result of this construction"
+                origin.is_reported_by_its_input = true
+
+                Semantic.OBLIGATIONS.defer(Semantic.OBLIGATIONS.UNBOUND_RETURN, awaited, location)
+
+                return DUMMY(Semantic.Types.INFERRED_VARIABLE_TYPE(origin), location)
+            fi
+
+            return DUMMY(type, location)
         si
 
         _feed_pack_from_expected(function: Semantic.Symbols.Function, expected: Semantic.Types.Type?) is
