@@ -348,10 +348,12 @@ let padded = "[{value,12:F3}]";     // [    1500.000]
 
 The static type of an interpolated value decides how it is written:
 
-- A string, a number, an enum, and any type that declares its own `to_string` are written with that `to_string`. So is any value with an alignment.
+- A string, a number, an enum, and any type that declares its own `to_string` are written with that `to_string`.
 - A `bool` is written `true` or `false`, the ghūl spelling.
 - An optional is written as the value it holds, by these same rules, or as `null` when it holds no value.
 - Every other value is written by the runtime's `$`. This covers an array, a list, a tuple, a struct or class that declares no `to_string`, a value held as `object`, a trait and a type parameter. `$` writes a sequence as its elements in brackets, a tuple as its elements in parentheses, and a record as its type and members. Without `$`, these values would be written as their .NET type name.
+
+An alignment pads the text these rules give, and a format applies wherever they reach a number or a `System.IFormattable` value, including the value an optional holds. So `{xs,-12}` pads `[1, 2, 3]`, `{flag,6}` pads `true`, and an absent `{opt:F2}` is `null`.
 
 ```ghul
 struct POINT(x: int public, y: int public);
