@@ -1921,7 +1921,7 @@ let c = 5 |> double() |> add(1); // add(double(5), 1) is 11
 
 A prefix operator applies to its operand before the chain. So `!xs |> any(p)` negates `xs`, not the result of `any`, and `await t |> f()` is `f(await t)`. `use` works in the same way. `use open(p) |> first()` disposes the value that `open(p)` returns. `use open(p).iterator` disposes the iterator, because member access has higher precedence than any prefix operator. To negate the result of the chain, put the chain in parentheses: `!(xs |> any(p))`.
 
-The left value goes into the last call on the right-hand side. So `x |> box.combine(a)` is `box.combine(x, a)`, and `x |> BOX(1).combine(a)` is `BOX(1).combine(x, a)`. Member access, indexing, `!` and `?` after that call apply to the call's result, as after any call. So `xs |> collect_mutable()[0]` is the first element, and `xs |> collect_mutable().count` is the count. An operator after the call applies to the result of the whole chain, so `xs |> count() % 2` is `count(xs) % 2`.
+The left value goes into the last call on the right-hand side. So `x |> box.combine(a)` is `box.combine(x, a)`, and `x |> BOX(1).combine(a)` is `BOX(1).combine(x, a)`. Member access, indexing, `!` and `?` after that call apply to the call's result, as after any call. So `xs |> LIST()[0]` is the first element, and `xs |> LIST().count` is the count. An operator after the call applies to the result of the whole chain, so `xs |> count() % 2` is `count(xs) % 2`.
 
 The right-hand side can omit the argument list only when it is a function whose name is an operator, because the bare name has no other meaning. The left value is then the only argument. An argument list is also valid:
 
