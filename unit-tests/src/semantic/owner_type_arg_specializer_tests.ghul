@@ -367,5 +367,65 @@ namespace Semantic.UnitTests is
 
             are_same(m.method, result)
         si
+
+        // `run[R](seed: R, f: (R) -> R)` on a plain owner, the shape of
+        // `reduce`: the seed binds `R`, and so does what `f` returns.
+        build_seeded_method() -> (method: INSTANCE_METHOD, function_symbol: CLASS) is
+            let owner = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Plain", empty_names(), Semantic.BLOCK_SCOPE())
+            let method = INSTANCE_METHOD(loc(), loc(), owner, "run", Semantic.BLOCK_SCOPE())
+            let r = FUNCTION_GENERIC_ARGUMENT(loc(), method, "R", 0)
+            let function_symbol = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Fn", names_for(["T", "U"]), Semantic.BLOCK_SCOPE())
+
+            method.generic_argument_names = names_for(["R"])
+            method.generic_arguments = types([r.type!])
+            method.is_generic = true
+            method.arguments = types([r.type!, Semantic.Types.FUNCTION(loc(), function_symbol, types([r.type!, r.type!]))])
+
+            return (method, function_symbol)
+        si
+
+        // While the literal's return is still being inferred, the seed
+        // alone doesn't decide `R`: it stands as a phantom the seed's
+        // type bounds, so the literal's return can still widen it.
+        @Test()
+        Calling__specialize_own_args__with_a_seed_and_a_literal_whose_return_is_pending__binds_a_phantom_the_seed_bounds() is
+            let m = build_seeded_method()
+            let int = int_type()
+            let pending = Semantic.Types.FUNCTION(loc(), m.function_symbol, types([int, Semantic.Types.INFERRED_RETURN_TYPE()]))
+
+            let origin = phantom()
+            let phantoms = LIST[Variable]()
+            phantoms.add(origin)
+
+            let result =
+                OWNER_TYPE_ARG_SPECIALIZER().specialize_function_own_args_from_concrete_siblings(
+                    m.method, types([int, pending]), phantoms, loc()
+                )
+
+            is_true(isa INFERRED_VARIABLE_TYPE(result.arguments[0]))
+
+            let bound = origin.lower_bound_type()
+
+            is_true(bound? /\ bound.is_equivalent_to(int))
+        si
+
+        // Once the literal's return has settled, the seed binds `R`
+        // directly.
+        @Test()
+        Calling__specialize_own_args__with_a_seed_and_a_settled_literal__binds_the_seed_type() is
+            let m = build_seeded_method()
+            let int = int_type()
+            let settled = Semantic.Types.FUNCTION(loc(), m.function_symbol, types([int, int]))
+
+            let phantoms = LIST[Variable]()
+            phantoms.add(phantom())
+
+            let result =
+                OWNER_TYPE_ARG_SPECIALIZER().specialize_function_own_args_from_concrete_siblings(
+                    m.method, types([int, settled]), phantoms, loc()
+                )
+
+            is_true(result.arguments[0].is_equivalent_to(int))
+        si
     si
 si
