@@ -896,5 +896,87 @@ namespace Semantic.UnitTests is
             are_equal(2, h.described.depth)
             are_equal(3, h.animal.depth)
         si
+
+        // An operand over a function type parameter that nothing has bound,
+        // such as `T[]` from an unapplied `list()`, is left out of a join
+        // while some other operand is not. A parameter of the function
+        // being compiled is a type, and stays in.
+        list_over(t: Type) -> Type => list_over(t, null)
+
+        list_over(t: Type, ancestor: Type?) -> Type is
+            let list_class = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "LIST", ["T"], Semantic.BLOCK_SCOPE())
+
+            if ancestor? then
+                list_class.add_ancestor(ancestor)
+            fi
+
+            return GENERIC(loc(), list_class, LIST[Type]([t]))
+        si
+
+        compiling(method: Semantic.Symbols.Function?) is
+            IoC.CONTAINER.instance.symbol_table = Semantic.SYMBOL_TABLE(Logging.DIAGNOSTICS_STORE())
+
+            if method? then
+                IoC.CONTAINER.instance.symbol_table.enter_scope(method)
+            fi
+        si
+
+        foreign_list() -> Type =>
+            list_over(Semantic.Symbols.FUNCTION_GENERIC_ARGUMENT(loc(), Semantic.BLOCK_SCOPE(), "T", 0).type!)
+
+        @Test()
+        Calling__get_result__with_an_operand_over_an_unbound_function_type_parameter__leaves_it_out() is
+            compiling(null)
+            let h = build_hierarchy()
+            let lub = LEAST_UPPER_BOUND_MAP()
+
+            lub.add(foreign_list())
+            lub.add(h.cat.type!)
+            lub.add(h.dog.type!)
+
+            are_same(h.animal.type!, lub.get_result())
+        si
+
+        @Test()
+        Calling__get_result__with_only_operands_over_an_unbound_function_type_parameter__keeps_them() is
+            compiling(null)
+            let lub = LEAST_UPPER_BOUND_MAP()
+            let only = foreign_list()
+
+            lub.add(only)
+
+            are_same(only, lub.get_result())
+        si
+
+        @Test()
+        Calling__get_result__with_an_optional_operand_left_out__is_optional() is
+            compiling(null)
+            let h = build_hierarchy()
+            let lub = LEAST_UPPER_BOUND_MAP()
+
+            lub.add(foreign_list().as_optional())
+            lub.add(h.cat.type!)
+
+            let result = lub.get_result()
+
+            is_true(result? /\ result.is_optional)
+            is_true(result? /\ result.as_non_optional().is_equivalent_to(h.cat.type!))
+        si
+
+        @Test()
+        Calling__get_result__with_an_operand_over_the_compiling_function_s_own_type_parameter__keeps_it() is
+            let h = build_hierarchy()
+            let method = Semantic.Symbols.INSTANCE_METHOD(loc(), loc(), h.object_class, "m", Semantic.BLOCK_SCOPE())
+            compiling(method)
+
+            let lub = LEAST_UPPER_BOUND_MAP()
+
+            lub.add(list_over(Semantic.Symbols.FUNCTION_GENERIC_ARGUMENT(loc(), method, "T", 0).type!, h.object_class.type!))
+            lub.add(h.cat.type!)
+
+            let result = lub.get_result()
+
+            is_true(result? /\ result.is_equivalent_to(h.object_class.type!))
+        si
     si
 si
