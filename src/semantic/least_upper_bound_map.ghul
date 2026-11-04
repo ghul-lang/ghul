@@ -662,12 +662,70 @@ namespace Semantic is
                 // there will only ever be a single type in the list
                 let new_result_list = result_list |> filter(t => current_list |> any(u => t.matches(u))) |> collect_mutable()
 
+                if new_result_list.count == 0 then
+                    for t in result_list do
+                        for u in current_list do
+                            if let joined = _join_covariant_arguments(t, u) then
+                                new_result_list.add(joined)
+                            fi
+                        od
+                    od
+                fi
+
                 if new_result_list.count > 0 then
                     new_result.add(rsf, new_result_list)
                 fi
             od
 
             self.result = new_result
+        si
+
+        // Two instantiations of one generic type join to that type over the
+        // join of their type arguments where every position that differs is
+        // covariant and holds a reference type on both sides, as
+        // `Iterable[PIN]` and `Iterable[Component]` join to
+        // `Iterable[Component]`.
+        _join_covariant_arguments(a: Type, b: Type) -> Type? is
+            let generic_a = cast Types.GENERIC?(a)
+            let generic_b = cast Types.GENERIC?(b)
+
+            if
+                !generic_a? \/ !generic_b? \/
+                !generic_a.is_same_symbol(generic_b) \/
+                generic_a.is_optional != generic_b.is_optional \/
+                generic_a.arguments.count != generic_b.arguments.count
+            then
+                return null
+            fi
+
+            let arguments = LIST[Type]()
+
+            for i in 0..generic_a.arguments.count do
+                let argument_a = generic_a.arguments[i]
+                let argument_b = generic_b.arguments[i]
+
+                if argument_a.is_equivalent_to(argument_b) then
+                    arguments.add(argument_a)
+                elif generic_a.effective_argument_variance(generic_b, i) == Types.TypeVariance.COVARIANT then
+                    let elements = LEAST_UPPER_BOUND_MAP()
+
+                    elements.add(argument_a)
+                    elements.add(argument_b)
+
+                    if let joined = elements.get_result() /\ joined.is_settled /\ !joined.is_value_type then
+                        arguments.add(joined)
+                    else
+                        return null
+                    fi
+                else
+                    return null
+                fi
+            od
+
+            let generic_symbol = cast Symbols.GENERIC?(generic_a.symbol)!
+            let result = generic_a.create(generic_symbol.location, generic_symbol.symbol, arguments)
+
+            return if generic_a.is_optional then result.as_optional() else result fi
         si
 
         // Yield ancestors of `type` for the LUB walk, specialised via
