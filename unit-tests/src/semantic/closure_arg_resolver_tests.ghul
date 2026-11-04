@@ -390,5 +390,54 @@ namespace Semantic.UnitTests is
 
             is_false(resolver._is_implied_type_usable(mixed, closure))
         si
+
+        // A parameter that settled from its first call's argument, and has
+        // since taken a wider argument as another bound, is retyped to the
+        // join of the two when it joins assignments; without that, it keeps
+        // the type it settled to first.
+        _resolve_settled_parameter_given_a_wider_bound(joins: bool) -> (type: Type, animal: Type) is
+            let object_class = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "object", LIST[string](), Semantic.BLOCK_SCOPE())
+            object_class.mark_is_object()
+            let animal = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "animal", LIST[string](), Semantic.BLOCK_SCOPE())
+            animal.add_ancestor(object_class.type!)
+            let cat = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "cat", LIST[string](), Semantic.BLOCK_SCOPE())
+            cat.add_ancestor(animal.type!)
+
+            let (host, _) = build_host_with_T()
+            let closure = closure_in(host)
+
+            let symbol = cast Semantic.Symbols.Variable(closure.declare_variable(loc(), "pet", false, null))
+
+            symbol.add_lower_bound(cat.type!)
+            symbol.add_lower_bound(animal.type!)
+            symbol.set_type(cat.type!)
+            symbol.joins_assignments = joins
+
+            let argument =
+                Syntax.Trees.Expressions.VARIABLE(
+                    loc(),
+                    Syntax.Trees.Identifiers.Identifier(loc(), "pet"),
+                    Syntax.Trees.TypeExpressions.INFER(loc()),
+                    null
+                )
+
+            let type = CLOSURE_ARG_RESOLVER(DIAGNOSTICS_STORE())._resolve_one(argument, argument, symbol, 0, null, false, closure)
+
+            return (type, animal.type!)
+        si
+
+        @Test()
+        Calling__resolve_one__on_a_settled_parameter_that_joins_assignments__takes_the_join_of_its_bounds() is
+            let (type, animal) = _resolve_settled_parameter_given_a_wider_bound(true)
+
+            is_true(type.is_equivalent_to(animal))
+        si
+
+        @Test()
+        Calling__resolve_one__on_a_settled_parameter_that_does_not_join_assignments__keeps_its_type() is
+            let (type, animal) = _resolve_settled_parameter_given_a_wider_bound(false)
+
+            is_false(type.is_equivalent_to(animal))
+        si
     si
 si
