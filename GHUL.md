@@ -501,7 +501,7 @@ multiply(a: int, b: int) -> int is
 si
 ```
 
-A named function's signature is fully explicit. Every argument has a written type. The return type is written after `->`; a function with no `->` returns `void`. The compiler infers no part of the signature of a named function or method.
+Outside a file with top-level statements, a named function's signature is fully explicit. Every argument has a written type. The return type is written after `->`; a function with no `->` returns `void`. The compiler infers no part of the signature of a named function or method there. In a file with top-level statements, a function written with no types has its signature inferred (see [namespaces and `use`](#namespaces-and-use)).
 
 A block body returns its value with an explicit `return`, or by ending with an expression. In a non-void body, the final statement is the function's return value on the fall-through path when its type is assignable to the declared return type. This holds with or without a `;` after the statement. An expression, an `if` or `case` expression, and a parenthesised block can each be this final value, the *tail*.
 
@@ -555,7 +555,7 @@ add_pair((a, b): (int, int)) -> int => a + b;
 add_pair((3, 4));    // 7
 ```
 
-Patterns can nest, and can be mixed with ordinary parameters: `f(x: int, (a, b): (int, int), y: int)`. A namespace-scope function's signature is always fully explicit, so the type of the whole pattern is required; there is no context to infer it from. The element types come from the type of the whole pattern, so write the elements as plain names. The type of the whole pattern can be any type that can be destructured positionally: a tuple, or a type with a matching `deconstruct(...)` method. A formal argument list does not support the by-name group form (`(x = field, ...)`).
+Patterns can nest, and can be mixed with ordinary parameters: `f(x: int, (a, b): (int, int), y: int)`. Outside a file with top-level statements, a namespace-scope function's signature is fully explicit, so the type of the whole pattern is required; there is no context to infer it from. The element types come from the type of the whole pattern, so write the elements as plain names. The type of the whole pattern can be any type that can be destructured positionally: a tuple, or a type with a matching `deconstruct(...)` method. A formal argument list does not support the by-name group form (`(x = field, ...)`).
 
 Functions are first-class values. A function literal has the same form as a function, without a name. The compiler usually *infers* its argument types and return type from the body and from the context of the literal, so they are usually written without annotations. Either can be written explicitly. A literal with one argument needs no parentheses around it. `A -> B` is the type of a function from `A` to `B`.
 
@@ -2084,7 +2084,7 @@ When neither the arguments nor any later use decides a type argument, the constr
 
 See <https://ghul.dev/type-inference.html>.
 
-ghūl infers types widely, but inference is **function-local**. A namespace-scope function's signature (its parameter types and return type) is always written out, and the compiler infers types only inside bodies. Inside a body, the compiler infers the types of local variables, loop variables, destructured variables, the parameters and return types of function literals and nested named functions, and the type arguments of generic calls.
+ghūl infers types widely, but inference is **function-local**. Outside a file with top-level statements, a namespace-scope function's signature (its parameter types and return type) is always written out, and the compiler infers types only inside bodies. A file with top-level statements is the exception (see [namespaces and `use`](#namespaces-and-use)): a function written there with no types has its signature inferred. Inside a body, the compiler infers the types of local variables, loop variables, destructured variables, the parameters and return types of function literals and nested named functions, and the type arguments of generic calls.
 
 Inference also uses later code. A variable with no type information at its declaration takes its type from how the same body uses it later. This includes the operations the body performs on the variable and, for a function, its own recursive calls. The compiler narrows local variables, fields and store-free properties (see [narrowing](docs/narrowing.md#type-narrowing) for how long each kind of fact lasts). The inferred type of a `let` variable is never visible outside the function that declares it.
 
