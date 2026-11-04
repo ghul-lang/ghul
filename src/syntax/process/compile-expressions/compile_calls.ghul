@@ -2931,6 +2931,45 @@ namespace Syntax.Process is
                 push_function)
         si
 
+        // The parameter at `index` of the nested function `callee` names,
+        // where its type is inferred from the function's calls rather than
+        // written: a written type collects no bounds. The function is named
+        // by its local from outside, and by its frame's recurse field from
+        // inside its own body.
+        _inferred_parameter(callee: Semantic.Symbols.Symbol?, index: int) -> Semantic.Symbols.Variable? is
+            let closure = _called_closure(callee)
+
+            if closure? /\ index < closure.argument_names.count then
+                if let parameter: Semantic.Symbols.Variable = closure.find_direct(closure.argument_names[index]) /\ parameter.try_get_inferred_type()? then
+                    return parameter
+                fi
+            fi
+
+            return null
+        si
+
+        _called_closure(callee: Semantic.Symbols.Symbol?) -> Semantic.Symbols.Closure? is
+            if let local: Semantic.Symbols.LOCAL_VARIABLE = callee then
+                return local.nested_closure
+            fi
+
+            if let `field: Semantic.Symbols.Field = callee then
+                // Read from inside another function literal, the local is one
+                // of its captures.
+                if let captured: Semantic.Symbols.LOCAL_VARIABLE = `field.captured_symbol then
+                    return captured.nested_closure
+                fi
+
+                for scope in _symbol_table.stack do
+                    if let closure: Semantic.Symbols.Closure = scope /\ closure.frame?.find_member("$recurse") == `field then
+                        return closure
+                    fi
+                od
+            fi
+
+            return null
+        si
+
         visit_call(call: Trees.Expressions.CALL) is
             // The stand-in call a `|>` leaves behind when its right side is
             // not a call: the parser has already reported that, and there
@@ -3421,6 +3460,23 @@ namespace Syntax.Process is
                 if cast int(function_generic_type.arguments[i].compare(argument_types[i])) > cast int(Semantic.Types.MATCH.CONVERTABLE)
                 then
                     ok = false
+
+                    // A parameter whose type the function's calls infer takes this
+                    // argument as one more of them, as a `mut` local takes a later
+                    // assignment: the next walk types it as their join, and this
+                    // walk's report goes with the walk.
+                    if let parameter = _inferred_parameter(load_symbol, i) then
+                        parameter.joins_assignments = true
+                    fi
+
+                    if
+                        let parameter = _inferred_parameter(load_symbol, i) /\
+                        Semantic.INFERENCE_TRACE.add_lower_bound("call.another_argument", parameter, argument_types[i])
+                    then
+                        _logger.mark_consumed_any()
+                        continue
+                    fi
+
                     _logger.error(call.arguments.expressions[i].location, "expected argument of type {function_type_arguments[i]} but {argument_types[i]} supplied")
                 fi
             od
