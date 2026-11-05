@@ -150,6 +150,16 @@ namespace Syntax.Process is
         source_read_iterator: Semantic.Symbols.Function? public
         source_move_next: Semantic.Symbols.Function? public
         source_read_current: Semantic.Symbols.Function? public
+
+        // Whether the chain's innermost stage is `reverse`: the loop
+        // reads the source backwards through `reversed_iterator_function`
+        // (a `Ghul.Pipes.reverse_iterator` overload) instead of forwards
+        // through source_read_iterator. Filled by compile-expressions
+        // after recognition; null where the source's static type does
+        // not prove it indexable or a range, in which case the chain
+        // does not fuse at all.
+        reversed_source: bool public
+        reversed_iterator_function: Semantic.Symbols.Function? public
     si
 
     // Decides whether a `for x in <chain>` loop's expression is a
@@ -236,26 +246,76 @@ namespace Syntax.Process is
             let current mut = expression
             let calls mut = 0
 
+            // `reverse` is not a stage: it reads the whole source before
+            // emitting anything, which a per-element stage cannot do. An
+            // innermost `reverse` is a source change instead - the loop
+            // reads the source backwards - so it is peeled into
+            // `reversed` and never added to `stages`. A `reverse` with a
+            // stage between it and the source would need a fill/drain
+            // loop the fuser has no shape for, and declines the chain.
+            // Two adjacent `reverse`s cancel.
+            let reversed mut = false
+            let reverse_seen mut = false
+            let stages_at_reverse mut = 0
+
             while isa Trees.Expressions.CALL(current) do
                 let call = cast Trees.Expressions.CALL(current)
 
-                let stage = _classify_free_function_stage(call)
+                if _role_of(call) =~ "reverse" then
+                    if call.arguments.expressions.count != 1 then
+                        decline_reason = "reverse-arity"
 
-                if !stage? then
-                    break
+                        return null
+                    fi
+
+                    calls = calls + 1
+                    roles.add("reverse")
+
+                    if reverse_seen then
+                        // A stage peeled since the last `reverse` sits
+                        // between the two, so they do not cancel.
+                        if stages.count != stages_at_reverse then
+                            decline_reason = "reverse-mid-chain"
+
+                            return null
+                        fi
+
+                        reversed = false
+                        reverse_seen = false
+                    else
+                        reversed = true
+                        reverse_seen = true
+                        stages_at_reverse = stages.count
+                    fi
+
+                    current = call.arguments.expressions[0]
+                else
+                    let stage = _classify_free_function_stage(call)
+
+                    if !stage? then
+                        break
+                    fi
+
+                    calls = calls + 1
+                    roles.add(_last_role ?? "?")
+
+                    // A memo stage is elided rather than fused: the chain
+                    // fuses as though it were absent (see PIPE_FUSION_STAGE).
+                    if !stage.is_noop then
+                        stages.add(stage)
+                    fi
+
+                    current = call.arguments.expressions[0]
                 fi
-
-                calls = calls + 1
-                roles.add(_last_role ?? "?")
-
-                // A memo stage is elided rather than fused: the chain
-                // fuses as though it were absent (see PIPE_FUSION_STAGE).
-                if !stage.is_noop then
-                    stages.add(stage)
-                fi
-
-                current = call.arguments.expressions[0]
             od
+
+            // A stage peeled after the `reverse` sits between it and the
+            // source, which is the mid-chain case above.
+            if reversed /\ (stages.count != stages_at_reverse) then
+                decline_reason = "reverse-mid-chain"
+
+                return null
+            fi
 
             // An expression that peeled no stage is still a chain of no
             // stages, which a consumer fuses over directly: the loop reads
@@ -292,7 +352,32 @@ namespace Syntax.Process is
                 return null
             fi
 
-            return PIPE_FUSION(source, stages)
+            let fusion = PIPE_FUSION(source, stages)
+
+            fusion.reversed_source = reversed
+
+            return fusion
+        si
+
+        // The fusion role of `call`'s resolved target, or null for any
+        // other function. Split out of `_classify_free_function_stage`
+        // so the peel loop can see a `reverse` before it is classified
+        // as a stage, which it never is.
+        _role_of(call: Trees.Expressions.CALL) -> string? is
+            let value = call.value
+
+            if !isa IR.Values.Call.GLOBAL(value) then
+                return null
+            fi
+
+            let global_call = cast IR.Values.Call.GLOBAL(value)
+            let role: string mut
+
+            if !fusion_functions.try_get_value(global_call.function.root_specialized_from, role ref) then
+                return null
+            fi
+
+            return role
         si
 
         // Classify `call` as a fusible `Ghul.Pipes` free-function stage -
