@@ -23,6 +23,11 @@ namespace Syntax.Process is
     // then never constructed; wherever the chain does not fuse, the memo
     // is built and behaves exactly as written.
     //
+    // A `reverse` is peeled as a NOOP stage too, but it is not
+    // transparent: the peel loop reads the `reverse` role the classifier
+    // sets and turns the chain's source backwards instead of adding a
+    // stage. See `_classify_free_function_stage`.
+    //
     // For a map/filter stage whose `argument` is an inlinable literal
     // lambda, compile-expressions fills `param_local` (a synthetic
     // enclosing-method local the loop assigns the incoming element to) and
@@ -261,16 +266,19 @@ namespace Syntax.Process is
             while isa Trees.Expressions.CALL(current) do
                 let call = cast Trees.Expressions.CALL(current)
 
-                if _role_of(call) =~ "reverse" then
-                    if call.arguments.expressions.count != 1 then
-                        decline_reason = "reverse-arity"
+                let stage = _classify_free_function_stage(call)
 
-                        return null
-                    fi
+                if !stage? then
+                    break
+                fi
 
-                    calls = calls + 1
-                    roles.add("reverse")
+                calls = calls + 1
+                roles.add(_last_role ?? "?")
 
+                // A `reverse` the classifier peeled as a no-op (it is not
+                // a stage) updates the reversed-source bookkeeping rather
+                // than the stage list.
+                if _last_role =~ "reverse" then
                     if reverse_seen then
                         // A stage peeled since the last `reverse` sits
                         // between the two, so they do not cancel.
@@ -287,26 +295,13 @@ namespace Syntax.Process is
                         reverse_seen = true
                         stages_at_reverse = stages.count
                     fi
-
-                    current = call.arguments.expressions[0]
-                else
-                    let stage = _classify_free_function_stage(call)
-
-                    if !stage? then
-                        break
-                    fi
-
-                    calls = calls + 1
-                    roles.add(_last_role ?? "?")
-
-                    // A memo stage is elided rather than fused: the chain
-                    // fuses as though it were absent (see PIPE_FUSION_STAGE).
-                    if !stage.is_noop then
-                        stages.add(stage)
-                    fi
-
-                    current = call.arguments.expressions[0]
+                // A memo stage is elided rather than fused: the chain
+                // fuses as though it were absent (see PIPE_FUSION_STAGE).
+                elif !stage.is_noop then
+                    stages.add(stage)
                 fi
+
+                current = call.arguments.expressions[0]
             od
 
             // A stage peeled after the `reverse` sits between it and the
@@ -359,26 +354,6 @@ namespace Syntax.Process is
             return fusion
         si
 
-        // The fusion role of `call`'s resolved target, or null for any
-        // other function. Split out of `_classify_free_function_stage`
-        // so the peel loop can see a `reverse` before it is classified
-        // as a stage, which it never is.
-        _role_of(call: Trees.Expressions.CALL) -> string? is
-            let value = call.value
-
-            if !isa IR.Values.Call.GLOBAL(value) then
-                return null
-            fi
-
-            let global_call = cast IR.Values.Call.GLOBAL(value)
-            let role: string mut
-
-            if !fusion_functions.try_get_value(global_call.function.root_specialized_from, role ref) then
-                return null
-            fi
-
-            return role
-        si
 
         // Classify `call` as a fusible `Ghul.Pipes` free-function stage -
         // map, filter, take, skip or index, or a `memo` stage that is
@@ -434,6 +409,18 @@ namespace Syntax.Process is
 
 
                 return null
+            fi
+
+            // `reverse` is peeled as a no-op like `memo`, but unlike
+            // `memo` it is not transparent: the peel loop reads the
+            // `reverse` role it sets and turns the chain's source
+            // backwards. It takes no function argument.
+            if role =~ "reverse" then
+                if arguments.count != 1 then
+                    return null
+                fi
+
+                return PIPE_FUSION_STAGE()
             fi
 
             if arguments.count != 2 then
