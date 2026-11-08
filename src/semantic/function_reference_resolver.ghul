@@ -127,7 +127,38 @@ namespace Semantic is
                 return _build_innate_value(location, single, expected_type)
             fi
 
+            if single.is_inferred_signature then
+                _offer_slot_to_inferred_signature(single, get_target_call_shape(expected_type))
+            fi
+
             return _build_value(location, single, from, expected_type)
+        si
+
+        // A function whose signature is inferred, passed where a function of
+        // a known shape is expected, is called with what that shape passes,
+        // as a call passes its arguments: the slot's parameter types bound
+        // the function's parameters, and its return bounds the slot's.
+        _offer_slot_to_inferred_signature(function: Symbols.Function, target_shape: Type?) is
+            if !target_shape? \/ !target_shape.is_function then
+                return
+            fi
+
+            let shape = target_shape.arguments
+            let parameter_count = if target_shape.is_action then shape.count else shape.count - 1 fi
+
+            if parameter_count != function.arguments.count then
+                return
+            fi
+
+            let propagator = MATCH_PROPAGATOR(_logger)
+
+            for i in 0..parameter_count do
+                propagator.propagate_match(function.arguments[i], shape[i])
+            od
+
+            if !target_shape.is_action then
+                propagator.propagate_match(shape[shape.count - 1], function.return_type)
+            fi
         si
 
         // A type named in value position where a function is expected is

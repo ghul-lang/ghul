@@ -57,20 +57,12 @@ namespace Syntax.Process is
                 !identifier.is_poisoned /\
                 !identifier.location.is_internal
             then
-                if let nesting = SYNTHESISE_TOP_LEVEL_ENTRY.file_nesting(identifier.name) /\ nesting !~ identifier.location.file_name then
-                    _logger.error(identifier.location, "symbol not found: {identifier}")
+                _logger.error(identifier.location, "symbol not found: {identifier}")
 
-                    if SYNTHESISE_TOP_LEVEL_ENTRY.is_annotated_nesting(nesting, identifier.name) then
-                        _logger.hint(
-                            identifier.location,
-                            "{identifier} in {IO.Path.get_file_name(nesting)} calls functions local to that file's top-level code, so it is local to it too")
-                    else
-                        _logger.hint(
-                            identifier.location,
-                            "{identifier} in {IO.Path.get_file_name(nesting)} has no types in its signature, so it is private to that file")
-                    fi
-                else
-                    _logger.error(identifier.location, "symbol not found: {identifier}")
+                if let file = SYNTHESISE_TOP_LEVEL_ENTRY.file_inferring(identifier.name) /\ file !~ identifier.location.file_name then
+                    _logger.hint(
+                        identifier.location,
+                        "{identifier} in {IO.Path.get_file_name(file)} has no types in its signature, so it is private to that file; {_export_advice(identifier, file)}")
                 fi
             elif
                 result? /\
@@ -78,88 +70,124 @@ namespace Syntax.Process is
                 !identifier.is_poisoned /\
                 !identifier.location.is_internal
             then
-                _check_not_shadowed_by_import(identifier, result)
+                // Where another file's private function shares the name with
+                // something this file can reach, the name reaches that instead,
+                // which is reported: the program would run a function its
+                // author may not mean.
+                if let visible = _without_other_files_private(identifier, result) then
+                    let declared_in = _first_private_file(identifier, result)
+
+                    _logger.error(
+                        identifier.location,
+                        "{identifier} in {IO.Path.get_file_name(declared_in ?? "")} has no types in its signature, so it is private to that file",
+                        identifier.location,
+                        "help: {_export_advice(identifier, declared_in ?? "")}")
+
+                    return visible
+                fi
+
+                if let declared_in = _private_to_another_file(identifier, result) then
+                    let file = IO.Path.get_file_name(declared_in)
+
+                    _logger.error(
+                        identifier.location,
+                        "{identifier} in {file} has no types in its signature, so it is private to that file",
+                        identifier.location,
+                        "help: {_export_advice(identifier, declared_in)}")
+
+                    return null
+                fi
             fi
 
             return result
         si
 
-        // In the namespace a file's top-level code is in, which a build with a
-        // global namespace shares between files, a function that code holds
-        // privately would be found ahead of anything a `use` imports under the
-        // same name, if it had the types in its signature. Without them it is
-        // out of reach from another file, so the name there quietly resolves to
-        // the import instead. That is reported, since the program would run the
-        // wrong function.
-        _check_not_shadowed_by_import(identifier: Identifiers.Identifier, result: Semantic.Symbols.Symbol) is
-            let nesting = SYNTHESISE_TOP_LEVEL_ENTRY.file_nesting(identifier.name)
+        // A function whose signature is inferred is private to the file that
+        // declares it, which matters where namespace-less files share one
+        // namespace, or files share a whole-file namespace: the namespace
+        // holds it, and only its own file may name it.
+        // A group some of whose functions are private to another file, and
+        // some not, without the private ones: the name reaches only those.
+        // Null where the group has no private function to leave out, or
+        // has nothing else.
+        _without_other_files_private(identifier: Identifiers.Identifier, result: Semantic.Symbols.Symbol) -> Semantic.Symbols.Symbol? is
+            let group = cast Semantic.Symbols.FUNCTION_GROUP?(result)
 
-            if !nesting? \/ nesting =~ identifier.location.file_name then
-                return
+            if !group? then
+                return null
             fi
 
-            let current = _symbol_table.current_namespace_symbol
+            let file = identifier.location.file_name
+            let kept = Collections.LIST[Semantic.Symbols.Function]()
+            let left_out mut = false
 
-            // Only where the private function would have been found: in the
-            // namespace its own file's top-level code is in.
-            let entry_scope = SYNTHESISE_TOP_LEVEL_ENTRY.entry_for(nesting)?.scope
-
-            if !current? \/ !isa Semantic.Symbols.Symbol(entry_scope) \/ _namespace_of(cast Semantic.Symbols.Symbol(entry_scope)) != current then
-                return
-            fi
-
-            // Something the namespace itself holds, or a local, shadows the
-            // private function as it would if the function had its types.
-            let candidates =
-                if let group: Semantic.Symbols.FUNCTION_GROUP = result then
-                    Collections.LIST[Semantic.Symbols.Symbol](group.functions)
+            for f in group.functions do
+                if f.is_inferred_signature /\ f.location.file_name !~ file then
+                    left_out = true
                 else
-                    Collections.LIST[Semantic.Symbols.Symbol]([result])
-                fi
-
-            for candidate in candidates do
-                if _namespace_of(candidate) == current then
-                    return
+                    kept.add(f)
                 fi
             od
 
-            let file = IO.Path.get_file_name(nesting)
-
-            if SYNTHESISE_TOP_LEVEL_ENTRY.is_annotated_nesting(nesting, identifier.name) then
-                _logger.error(
-                    identifier.location,
-                    "{identifier} in {file} calls functions local to that file's top-level code, so it is local to it too")
-            else
-                _logger.error(
-                    identifier.location,
-                    "{identifier} in {file} has no types in its signature, so it is private to that file",
-                    identifier.location,
-                    "help: write the types in the signature of {identifier} to call it from another file")
+            if !left_out \/ kept.count == 0 then
+                return null
             fi
 
-            _logger.hint(
-                identifier.location,
-                "here {identifier} would reach {result} instead")
+            let filtered = Semantic.Symbols.FUNCTION_GROUP(group.location, group.owner!, group.name)
+
+            for f in kept do
+                filtered.add(f)
+            od
+
+            return filtered
         si
 
-        _namespace_of(symbol: Semantic.Symbols.Symbol) -> Semantic.Symbols.NAMESPACE? is
-            let scope mut = symbol.owner
+        // What to write to call such a function from another file: a return
+        // type, for one with no parameters, and otherwise its types.
+        _export_advice(identifier: Identifiers.Identifier, file: string) -> string =>
+            if SYNTHESISE_TOP_LEVEL_ENTRY.is_parameterless_inferred(file, identifier.name) then
+                "give {identifier} a return type, such as -> void, to call it from another file"
+            else
+                "write the types in the signature of {identifier} to call it from another file"
+            fi
 
-            while scope? do
-                if let n: Semantic.Symbols.NAMESPACE = scope then
-                    return n
-                fi
-
-                if let s: Semantic.Symbols.Symbol = scope then
-                    scope = s.owner
-                else
-                    return null
-                fi
-            od
+        _first_private_file(identifier: Identifiers.Identifier, result: Semantic.Symbols.Symbol) -> string? is
+            if let group: Semantic.Symbols.FUNCTION_GROUP = result then
+                for f in group.functions do
+                    if f.is_inferred_signature /\ f.location.file_name !~ identifier.location.file_name then
+                        return f.location.file_name
+                    fi
+                od
+            fi
 
             return null
         si
 
+        // The file declaring it, when every function the name reaches is one.
+        _private_to_another_file(identifier: Identifiers.Identifier, result: Semantic.Symbols.Symbol) -> string? is
+            let file = identifier.location.file_name
+
+            let is_other = (f: Semantic.Symbols.Function) -> bool =>
+                f.is_inferred_signature /\ f.location.file_name !~ file
+
+            if let group: Semantic.Symbols.FUNCTION_GROUP = result then
+                let first: string? mut = null
+
+                for f in group.functions do
+                    if !is_other(f) then
+                        return null
+                    fi
+
+                    first = first ?? f.location.file_name
+                od
+
+                return first
+            elif let function: Semantic.Symbols.Function = result /\ is_other(function) then
+                return function.location.file_name
+            fi
+
+            return null
+        si
 
         // As find(identifier), but returns null silently instead of
         // logging "symbol not found" — for callers that resolve a name

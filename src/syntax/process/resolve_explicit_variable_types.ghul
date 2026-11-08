@@ -148,7 +148,14 @@ namespace Syntax.Process is
                     continue
                 fi
 
-                let type = if argument.type_ran_on \/ (argument.is_poisoned /\ argument.type_expression.is_inferred) then null else argument.type_expression.type fi
+                let type =
+                    if function.is_inferred_signature /\ argument.untyped_deferred then
+                        _inferred_argument_type(symbol, argument.name!.name)
+                    elif argument.type_ran_on \/ (argument.is_poisoned /\ argument.type_expression.is_inferred) then
+                        null
+                    else
+                        argument.type_expression.type
+                    fi
 
                 types.add(if type? then type else Semantic.Types.ERROR() fi)
 
@@ -187,6 +194,15 @@ namespace Syntax.Process is
                 // An auto-property with no written type is reported with
                 // the property.
                 symbol.return_type = Semantic.Types.ERROR()
+            elif function.is_inferred_signature then
+                // Settled by the walks of the file's inference unit; until
+                // then callers read the origin's placeholder.
+                let origin = Semantic.Symbols.INFERRED_RESULT_ORIGIN(function.name!.location, symbol, "$return")
+
+                origin.description = "the return type of {function.name!.name}"
+
+                symbol.inferred_return_origin = origin
+                symbol.return_type = Semantic.Types.INFERRED_VARIABLE_TYPE(origin)
             elif isa Trees.TypeExpressions.INFER(function.type_expression) /\ function.is_missing_types_reported then
                 // A function already reported for its missing types is not held
                 // to void as well, which its callers would report again.
@@ -224,6 +240,20 @@ namespace Syntax.Process is
             od
 
             super.visit(function)
+        si
+
+        // A parameter of a function whose signature is inferred stands as
+        // its own placeholder until the file's inference unit settles it.
+        _inferred_argument_type(function: Semantic.Symbols.Function, name: string) -> Type? is
+            if let argument: Semantic.Symbols.Variable = function.find_direct(name) then
+                let placeholder = Semantic.Types.INFERRED_VARIABLE_TYPE(argument)
+
+                argument.set_type(placeholder)
+
+                return placeholder
+            fi
+
+            return null
         si
 
         pre(property: Trees.Definitions.PROPERTY) -> bool => true

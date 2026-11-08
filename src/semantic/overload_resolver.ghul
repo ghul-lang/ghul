@@ -761,6 +761,10 @@ namespace Semantic is
                 fi
             od
 
+            if !is_ambiguous /\ _widen_inferred_parameters(tried, arguments) then
+                return null
+            fi
+
             let maybe_static mut = ""
 
             if !want_instance then
@@ -794,6 +798,61 @@ namespace Semantic is
             fi
 
             return null
+        si
+
+        // A function whose signature is inferred takes an argument that
+        // widens a parameter, such as `int[]` where the parameter settled as
+        // `ARRAY[int]`, as one more of the arguments it is called with: the
+        // next walk types the parameter as their join, and this walk's
+        // failure goes with the walk. True when the only candidate is such
+        // a function and every argument it doesn't accept widens it.
+        _widen_inferred_parameters(tried: Collections.List[Symbols.Function], arguments: Type[]) -> bool is
+            if tried.count != 1 \/ !tried[0].is_inferred_signature then
+                return false
+            fi
+
+            let function = tried[0]
+
+            if function.arguments.count != arguments.count then
+                return false
+            fi
+
+            let widened = Collections.LIST[(Symbols.Variable, Type)]()
+
+            for i in 0..arguments.count do
+                let formal = function.arguments[i]
+                let actual = arguments[i]
+
+                if cast int(formal.compare(actual)) <= cast int(Types.MATCH.CONVERTABLE) then
+                    continue
+                fi
+
+                if
+                    let parameter: Symbols.Variable = function.find_direct(function.argument_names[i]) /\
+                    actual.is_settled /\
+                    actual.is_assignable_from(formal)
+                then
+                    widened.add((parameter, actual))
+                else
+                    return false
+                fi
+            od
+
+            let learned mut = false
+
+            for (parameter, actual) in widened do
+                parameter.joins_assignments = true
+
+                if INFERENCE_TRACE.add_lower_bound("call.another_argument", parameter, actual) then
+                    learned = true
+                fi
+            od
+
+            if learned then
+                _logger.mark_consumed_any()
+            fi
+
+            return learned
         si
 
         _qualifying_alike(

@@ -495,5 +495,103 @@ namespace Semantic.UnitTests is
             are_equal(1, owner.arguments.count)
             is_true(owner.arguments[0].matches(t), "construction is not of NODE[T]")
         si
+
+        // A function with an inferred signature, holding a parameter that
+        // settled to `cat`, called once more with the given argument. The
+        // parameter is declared in the function so the resolver finds it
+        // by name, as declare-members leaves it.
+        _inferred_callee(is_inferred: bool) -> (function: GLOBAL_FUNCTION, parameter: Semantic.Symbols.Variable, animal: Type, cat: Type, rock: Type) is
+            let object_class = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "object", names_for([]), Semantic.BLOCK_SCOPE())
+            object_class.mark_is_object()
+            let animal = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "animal", names_for([]), Semantic.BLOCK_SCOPE())
+            animal.add_ancestor(object_class.type!)
+            let cat = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "cat", names_for([]), Semantic.BLOCK_SCOPE())
+            cat.add_ancestor(animal.type!)
+            let rock = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "rock", names_for([]), Semantic.BLOCK_SCOPE())
+            rock.add_ancestor(object_class.type!)
+
+            let function = GLOBAL_FUNCTION(loc(), loc(), Semantic.BLOCK_SCOPE(), "feed", Semantic.BLOCK_SCOPE())
+            function.is_inferred_signature = is_inferred
+            function.arguments = LIST[Type]([cat.type!])
+            function.argument_names = names_for(["pet"])
+
+            let parameter = cast Semantic.Symbols.Variable(function.declare_variable(loc(), "pet", false, null))
+            parameter.add_lower_bound(cat.type!)
+            parameter.set_type(cat.type!)
+
+            return (function, parameter, animal.type!, cat.type!, rock.type!)
+        si
+
+        _widen(function: GLOBAL_FUNCTION, arguments: LIST[Type]) -> bool =>
+            OVERLOAD_RESOLVER(DIAGNOSTICS_STORE())._widen_inferred_parameters(LIST[Semantic.Symbols.Function]([function]), arguments)
+
+        // A call passing a wider argument than the parameter settled to
+        // takes it as another argument the parameter is called with: the
+        // parameter joins its arguments, and has the wider one as a bound.
+        @Test()
+        Calling__widen_inferred_parameters__with_a_wider_settled_argument__adds_it_as_a_bound() is
+            let c = _inferred_callee(true)
+
+            is_true(_widen(c.function, LIST[Type]([c.animal])))
+            is_true(c.parameter.joins_assignments, "the parameter does not join its arguments")
+            is_true(c.parameter.lower_bounds |> any(b => b == c.animal), "the wider argument is not a bound")
+        si
+
+        // A function written with its types is reported as any other call
+        // that fits no overload.
+        @Test()
+        Calling__widen_inferred_parameters__on_a_function_written_with_types__does_nothing() is
+            let c = _inferred_callee(false)
+
+            is_false(_widen(c.function, LIST[Type]([c.animal])))
+            is_false(c.parameter.joins_assignments)
+        si
+
+        // An argument that can't hold the parameter's type is an error in
+        // the call, not a wider argument.
+        @Test()
+        Calling__widen_inferred_parameters__with_an_unrelated_argument__does_nothing() is
+            let c = _inferred_callee(true)
+
+            is_false(_widen(c.function, LIST[Type]([c.rock])))
+            is_false(c.parameter.joins_assignments)
+        si
+
+        // A call with the wrong number of arguments is reported, whatever
+        // the arguments' types.
+        @Test()
+        Calling__widen_inferred_parameters__with_another_argument_count__does_nothing() is
+            let c = _inferred_callee(true)
+
+            is_false(_widen(c.function, LIST[Type]([c.animal, c.animal])))
+            is_false(c.parameter.joins_assignments)
+        si
+
+        // An argument whose own type is still being inferred bounds
+        // nothing yet.
+        @Test()
+        Calling__widen_inferred_parameters__with_an_unsettled_argument__does_nothing() is
+            let c = _inferred_callee(true)
+            let pending = cast Type(INFERRED_VARIABLE_TYPE(INFERRED_TYPE_ARG_ORIGIN(loc(), Semantic.BLOCK_SCOPE(), "pending")))
+
+            is_false(_widen(c.function, LIST[Type]([pending])))
+            is_false(c.parameter.joins_assignments)
+        si
+
+        // With more than one candidate, which one a wider argument widens
+        // is not decided here.
+        @Test()
+        Calling__widen_inferred_parameters__with_two_candidates__does_nothing() is
+            let c = _inferred_callee(true)
+            let other = _inferred_callee(true)
+
+            let widened =
+                OVERLOAD_RESOLVER(DIAGNOSTICS_STORE())._widen_inferred_parameters(
+                    LIST[Semantic.Symbols.Function]([c.function, other.function]),
+                    LIST[Type]([c.animal]))
+
+            is_false(widened)
+            is_false(c.parameter.joins_assignments)
+        si
     si
 si

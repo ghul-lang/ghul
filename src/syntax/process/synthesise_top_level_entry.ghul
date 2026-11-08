@@ -27,6 +27,13 @@ namespace Syntax.Process is
     // Main-compatible `_entry` wrapper is synthesised beside it to carry
     // both in. Under `--target wasm`, which starts a program with no
     // arguments, each is declared only where the statements name it.
+    //
+    // It also marks the functions of a file without a namespace block that
+    // are written with no types in their signatures, whose signatures are
+    // then inferred, and forms the file's inference unit: those functions,
+    // the entry, and the file's functions that call them or read a
+    // top-level `let`, which compile-expressions walks as one body. No
+    // function is moved.
     class SYNTHESISE_TOP_LEVEL_ENTRY(_entry_point: Compiler.ENTRY_POINT, _logger: Logger) is
         apply(node: Node) is
             if !isa Definitions.LIST(node) then
@@ -37,7 +44,12 @@ namespace Syntax.Process is
             let statements = list.top_level_statements
 
             if !statements? then
-                _report_untyped(list)
+                if _has_block_namespace(list) then
+                    _report_untyped(list)
+                else
+                    _form_unit(list, null, Collections.LIST[string]())
+                fi
+
                 _descend_into_file_scope_namespaces(list)
 
                 return
@@ -71,10 +83,16 @@ namespace Syntax.Process is
         si
 
         _synthesise(list: Definitions.LIST, statements: Statements.LIST) is
+            let let_names = Collections.LIST[string]()
+
             for statement in statements do
                 if isa Statements.LET(statement) then
                     for variable in statement.variables do
                         variable.is_top_level = true
+
+                        if variable.name? then
+                            let_names.add(variable.name.name)
+                        fi
 
                         if _reject_entry_parameter_collision(variable) then
                             statement.poison()
@@ -84,36 +102,6 @@ namespace Syntax.Process is
                 fi
             od
 
-            // The file's unannotated functions become nested functions of
-            // the entry, so they are typed in the entry's own walk: their
-            // parameters from their calls, and the top-level `let`s they use
-            // from those uses. They go in just before the first statement that
-            // uses one of them, so the `let`s above it are defined when they
-            // are, as they are when a namespace function is first called.
-            let names = Collections.LIST[string]()
-            let nested = _nest_unannotated_functions(list, names)
-
-            if nested.count > 0 then
-                let scanner = NAME_REFERENCE_SCANNER()
-                let all = Collections.LIST[Statements.Statement]()
-                let placed mut = false
-
-                for statement in statements do
-                    if !placed /\ names |> any(name => scanner.node_references(statement, name)) then
-                        all.add_range(nested)
-                        placed = true
-                    fi
-
-                    all.add(statement)
-                od
-
-                if !placed then
-                    all.add_range(nested)
-                fi
-
-                statements.replace_all(all)
-            fi
-
             // Pushed to the front so compile-expressions walks the entry
             // before any other function in the file: the top-level `let`
             // variables it declares settle their inferred types during the
@@ -121,18 +109,114 @@ namespace Syntax.Process is
             // after that.
             let entry = _synthesise_entry(statements, _keeps_both_parameters(list))
 
-            _entry_by_file[list.location.file_name] = entry
-
             list.push(entry)
+
+            _form_unit(list, entry, let_names)
+
+            _check_used_before_lets(statements, entry)
         si
 
-        // The functions of a file with top-level statements that are
-        // written with no type anywhere in their signature, taken out of
-        // the file's definitions as nested function statements. A function
-        // something outside the statements uses stays where it is: a class,
-        // a trait or an annotated function can't reach a nested function.
-        // Every argument left without a type is then reported.
-        _nest_unannotated_functions(list: Definitions.LIST, names: Collections.LIST[string]) -> Collections.List[Statements.Statement] is
+        // A top-level `let` is initialised when its statement runs, so a
+        // statement above it that calls a function of the file reading it,
+        // directly or through the functions that one calls, would read it
+        // before it holds its value. The functions are those of the file's
+        // inference unit; a name a function declares itself is its own.
+        _check_used_before_lets(statements: Statements.LIST, entry: Definitions.FUNCTION) is
+            if !entry.inference_unit? then
+                return
+            fi
+
+            let functions = Collections.LIST[Definitions.FUNCTION]()
+
+            for member in entry.inference_unit.members do
+                if member != entry /\ member.name? /\ member.body? then
+                    functions.add(member)
+                fi
+            od
+
+            if functions.count == 0 then
+                return
+            fi
+
+            let scanner = NAME_REFERENCE_SCANNER()
+            let declared = DECLARED_NAME_SCANNER()
+
+            let all = Collections.LIST[Statements.Statement](statements)
+
+            // Where each top-level `let` name is declared.
+            let declared_at = Collections.MAP[string, int]()
+
+            for (index, statement) in all |> index() do
+                if let `let: Statements.LET = statement then
+                    for variable in `let.variables do
+                        for name in variable.names do
+                            if !declared_at.contains_key(name.name) then
+                                declared_at[name.name] = index
+                            fi
+                        od
+                    od
+                fi
+            od
+
+            if declared_at.count == 0 then
+                return
+            fi
+
+            reads(function: Definitions.FUNCTION, name: string) -> bool =>
+                scanner.body_references(function.body, name) /\ !declared.declares(function, name)
+
+            // The latest top-level `let` the function reads, directly or
+            // through the file's functions it calls, and its name.
+            latest_read(start: Definitions.FUNCTION) -> (int, string)? is
+                let seen = Collections.SET[Definitions.FUNCTION]()
+                let pending = Collections.LIST[Definitions.FUNCTION]([start])
+                let latest: (int, string)? mut = null
+
+                while pending.count > 0 do
+                    let next = pending[pending.count - 1]
+                    pending.remove_at(pending.count - 1)
+
+                    if seen.add(next) then
+                        for pair in declared_at do
+                            if (!latest? \/ pair.value > latest.`0) /\ reads(next, pair.key) then
+                                latest = (pair.value, pair.key)
+                            fi
+                        od
+
+                        for other in functions do
+                            if scanner.body_references(next.body, other.name!.name) then
+                                pending.add(other)
+                            fi
+                        od
+                    fi
+                od
+
+                latest
+            si
+
+            for (index, statement) in all |> index() do
+                for function in functions do
+                    if scanner.node_references(statement, function.name!.name) then
+                        if let (at, name) = latest_read(function) /\ at >= index then
+                            _logger.error(
+                                statement.location,
+                                "{function.name!.name} is used before the top-level let it reads, {name}, is declared")
+
+                            return
+                        fi
+                    fi
+                od
+            od
+        si
+
+        // The file's functions written with no type anywhere in their
+        // signature have their signatures inferred from the file's own uses
+        // of them. They, the entry and the file's other functions that call
+        // them or read its top-level `let`s are walked together as one
+        // inference body, so a call in any of them bounds a parameter of
+        // another and the `let`s are typed from every use. Every other
+        // argument left without a type is reported.
+        _form_unit(list: Definitions.LIST, entry: Definitions.FUNCTION?, let_names: Collections.List[string]) is
             let functions = Collections.LIST[Definitions.FUNCTION]()
 
             for d in list do
@@ -141,180 +225,186 @@ namespace Syntax.Process is
                 fi
             od
 
-            let candidates = Collections.LIST[Definitions.FUNCTION]()
+            let inferred = Collections.LIST[Definitions.FUNCTION]()
 
-            for d in list do
-                // A function carrying a pragma is a method the pragma
-                // describes, which a nested function has no way to be.
-                if let function = cast Definitions.FUNCTION?(d) /\ _is_unannotated(function) /\ _count_named(functions, function.name!.name) == 1 then
-                    candidates.add(function)
-                fi
-            od
-
-            // An annotated function that can be nested joins them when it calls
-            // one of them, since it can then only run where they exist.
-            let annotated = Collections.LIST[Definitions.FUNCTION]()
-
-            for d in list do
-                if let function = cast Definitions.FUNCTION?(d) /\ !candidates.contains(function) /\ _can_nest_annotated(function) /\ _count_named(functions, function.name!.name) == 1 then
-                    annotated.add(function)
-                fi
-            od
-
-            let scanner = NAME_REFERENCE_SCANNER()
-
-            // A candidate kept out of the statements, and what outside them
-            // calls it there, directly or through other kept candidates.
-            let kept = Collections.MAP[Definitions.FUNCTION, string]()
-
-            let changed mut = true
-
-            while changed do
-                changed = false
-
-                for function in annotated do
-                    if
-                        !candidates.contains(function) /\
-                        !kept.contains_key(function) /\
-                        candidates |> any(c => scanner.body_references(function.body, c.name!.name))
-                    then
-                        candidates.add(function)
-                        changed = true
+            if !IoC.CONTAINER.instance.build_flags.no_whole_file_inference then
+                for d in list do
+                    // A function carrying a pragma is a method the pragma
+                    // describes, whose signature is written out.
+                    if let function = cast Definitions.FUNCTION?(d) /\ _is_unannotated(function) /\ _count_named(functions, function.name!.name) == 1 then
+                        inferred.add(function)
                     fi
                 od
-
-                // A candidate another definition that stays uses has to stay
-                // too, and that can keep a further candidate it uses.
-                for candidate in Collections.LIST[Definitions.FUNCTION](candidates) do
-                    for d in list do
-                        if
-                            !(isa Definitions.FUNCTION(d) /\ candidates.contains(cast Definitions.FUNCTION(d))) /\
-                            scanner.node_references(d, candidate.name!.name)
-                        then
-                            let user = _definition_name(d)
-                            let name = candidate.name!.name
-
-                            if let through = cast Definitions.FUNCTION?(d) /\ kept.contains_key(through) then
-                                let root = kept[through]
-
-                                candidate.not_nested_because = "{name} is called by {user}, which {root} calls from outside the top-level code"
-                                kept[candidate] = root
-                            else
-                                candidate.not_nested_because = "{user} calls {name} from outside the top-level code"
-                                kept[candidate] = user
-                            fi
-
-                            candidate.not_nested_hint = "a function used outside the top-level code needs the types in its signature"
-                            candidates.remove(candidate)
-                            changed = true
-
-                            break
-                        fi
-                    od
-                od
-            od
+            fi
 
             for function in functions do
-                if !candidates.contains(function) then
+                if inferred.contains(function) then
+                    function.is_inferred_signature = true
+                else
                     report_untyped_arguments(function, _logger)
                 fi
             od
 
-            let nested = Collections.LIST[Statements.Statement]()
-
+            let names = Collections.LIST[string](let_names)
             let file = list.location.file_name
-            let annotated_names = Collections.LIST[string]()
 
-            for function in _callees_first(candidates, scanner) do
-                list.remove(function)
-
-                if !_is_unannotated(function) then
-                    annotated_names.add(function.name!.name)
-                fi
-
+            for function in inferred do
                 names.add(function.name!.name)
-                nested.add(_as_nested_function(function))
-            od
 
-            _nested_by_file[file] = Collections.LIST[string](names)
-            _annotated_nested_by_file[file] = annotated_names
+                if !_inferred_by_file.contains_key(file) then
+                    _inferred_by_file[file] = Collections.LIST[string]()
+                fi
 
-            return nested
-        si
+                _inferred_by_file[file].add(function.name!.name)
 
-        // Which of the candidates each candidate's body names, itself left
-        // out: a function reaches itself through its own name.
-        _callees(function: Definitions.FUNCTION, candidates: Collections.Iterable[Definitions.FUNCTION], scanner: NAME_REFERENCE_SCANNER) -> Collections.List[Definitions.FUNCTION] is
-            let result = Collections.LIST[Definitions.FUNCTION]()
+                if function.arguments.count == 0 then
+                    if !_parameterless_by_file.contains_key(file) then
+                        _parameterless_by_file[file] = Collections.LIST[string]()
+                    fi
 
-            for other in candidates do
-                if other != function /\ scanner.body_references(function.body, other.name!.name) then
-                    result.add(other)
+                    _parameterless_by_file[file].add(function.name!.name)
                 fi
             od
 
-            result
+            if inferred.count == 0 /\ (!entry? \/ let_names.count == 0) then
+                return
+            fi
+
+            let scanner = NAME_REFERENCE_SCANNER()
+
+            let joining = Collections.LIST[Definitions.FUNCTION](inferred)
+
+            for function in functions do
+                if
+                    !inferred.contains(function) /\
+                    _can_join_unit(function) /\
+                    names |> any(name => scanner.body_references(function.body, name))
+                then
+                    joining.add(function)
+                fi
+            od
+
+            if let e = entry then
+                joining.add(e)
+            fi
+
+            let unit = INFERENCE_UNIT()
+
+            for function in _callees_first(joining, let_names, scanner) do
+                unit.add(function)
+            od
+
+            // A member walked before the entry that reads a top-level `let`
+            // reads it before the entry's walk has typed it.
+            for member in unit.members do
+                if member.is_top_level_entry then
+                    break
+                fi
+
+                if let_names |> any(name => scanner.body_references(member.body, name)) then
+                    unit.reads_lets_before_entry = true
+                    break
+                fi
+            od
+
+            // Whether anything walked before a member, or the member itself,
+            // names it, and so reads its return before the walk has settled it.
+            for (index, member) in unit.members |> index() do
+                if let name = member.name /\ !member.is_top_level_entry then
+                    for earlier in 0::index do
+                        if scanner.body_references(unit.members[earlier].body, name.name) then
+                            unit.read_early.add(member)
+                            break
+                        fi
+                    od
+                fi
+            od
+
+            // An entry with nothing walked beside it needs no unit.
+            if inferred.count == 0 /\ unit.members.count < 2 then
+                for function in unit.members do
+                    function.inference_unit = null
+                od
+            fi
         si
 
-        // The candidates in an order where each comes after the functions
-        // it calls where it can. Functions that call each other are created
-        // together ahead of their statements (NESTED_FUNCTION_GROUP), so a
-        // cycle can be in any order.
-        _callees_first(candidates: Collections.List[Definitions.FUNCTION], scanner: NAME_REFERENCE_SCANNER) -> Collections.List[Definitions.FUNCTION] is
+        // The functions in an order where each comes after the functions it
+        // calls where it can, so a walk reaches a callee's return before
+        // its callers read it. Functions that call each other keep the
+        // order they are written in.
+        _callees_first(functions: Collections.List[Definitions.FUNCTION], let_names: Collections.List[string], scanner: NAME_REFERENCE_SCANNER) -> Collections.List[Definitions.FUNCTION] is
             let result = Collections.LIST[Definitions.FUNCTION]()
             let placed = Collections.SET[Definitions.FUNCTION]()
+
+            // A function written with its types that reads a top-level
+            // `let` goes after the entry, whose walk types the `let`: what
+            // it returns doesn't depend on where it is walked, so nothing
+            // is gained by walking it before the entry, and its reads would
+            // see the `let` untyped.
+            let after_entry = Collections.SET[Definitions.FUNCTION]()
+
+            for function in functions do
+                if
+                    !function.is_inferred_signature /\
+                    !function.is_top_level_entry /\
+                    let_names |> any(name => scanner.body_references(function.body, name))
+                then
+                    after_entry.add(function)
+                fi
+            od
 
             place(function: Definitions.FUNCTION) is
                 if !placed.add(function) then
                     return
                 fi
 
-                for callee in _callees(function, candidates, scanner) do
-                    place(callee)
+                for other in functions do
+                    if
+                        other != function /\ other.name? /\ !other.is_top_level_entry /\ !after_entry.contains(other) /\
+                        scanner.body_references(function.body, other.name.name)
+                    then
+                        place(other)
+                    fi
                 od
 
                 result.add(function)
             si
 
-            for function in candidates do
+            for function in functions do
+                if !after_entry.contains(function) then
+                    place(function)
+                fi
+            od
+
+            for function in functions do
                 place(function)
             od
 
             result
         si
 
-        // The functions each file made nested functions of its top-level
-        // statements, by name, so a use of one from another file can be told
-        // apart from a name that was never declared.
-        _nested_by_file: Collections.MAP[string, Collections.LIST[string]] static
+        // The functions each file had its signatures inferred for, by
+        // name, so a use of one from another file can be told apart from a
+        // name that was never declared.
+        _inferred_by_file: Collections.MAP[string, Collections.LIST[string]] static
 
-        // Those of them written with types, nested because they call
-        // functions that are.
-        _annotated_nested_by_file: Collections.MAP[string, Collections.LIST[string]] static
-
-        // The entry each file's top-level statements became, whose symbol says
-        // which namespace that file's nested functions belong to.
-        _entry_by_file: Collections.MAP[string, Definitions.FUNCTION] static
+        // Those of them with no parameters.
+        _parameterless_by_file: Collections.MAP[string, Collections.LIST[string]] static
 
         init() static is
-            _nested_by_file = Collections.MAP[string, Collections.LIST[string]]()
-            _annotated_nested_by_file = Collections.MAP[string, Collections.LIST[string]]()
-            _entry_by_file = Collections.MAP[string, Definitions.FUNCTION]()
+            _inferred_by_file = Collections.MAP[string, Collections.LIST[string]]()
+            _parameterless_by_file = Collections.MAP[string, Collections.LIST[string]]()
         si
 
-        // Whether the nested function of this name in `file` was written
-        // with types.
-        is_annotated_nesting(file: string, name: string) -> bool static =>
-            _annotated_nested_by_file.contains_key(file) /\ _annotated_nested_by_file[file].contains(name)
+        // Whether `file` infers the signature of a function of this name
+        // that has no parameters.
+        is_parameterless_inferred(file: string, name: string) -> bool static =>
+            _parameterless_by_file.contains_key(file) /\ _parameterless_by_file[file].contains(name)
 
-        // The entry synthesised for a file's top-level statements, if it has any.
-        entry_for(file: string) -> Definitions.FUNCTION? static =>
-            if _entry_by_file.contains_key(file) then _entry_by_file[file] else null fi
-
-        // The file whose top-level statements hold a nested function of
-        // this name, if any file's do.
-        file_nesting(name: string) -> string? static is
-            for pair in _nested_by_file do
+        // The file whose functions include one of this name with an inferred
+        // signature, if any file's do.
+        file_inferring(name: string) -> string? static is
+            for pair in _inferred_by_file do
                 if pair.value.contains(name) then
                     return pair.key
                 fi
@@ -356,23 +446,15 @@ namespace Syntax.Process is
             function.type_expression.is_inferred /\
             function.arguments |> all(a => a.untyped_deferred /\ !a.is_poisoned /\ a.left.is_simple_name /\ a.name? /\ !a.initializer?)
 
-        // Whether a function written with types has a shape a nested function
-        // can have: a plain name rather than an operator, no type parameters,
-        // modifiers or pragmas, and plain parameters with no defaults and none
-        // passed by reference.
-        _can_nest_annotated(function: Definitions.FUNCTION) -> bool =>
+        // Whether a function written with types can be walked with the
+        // file's inference unit: one with a body and no type parameters of
+        // its own.
+        _can_join_unit(function: Definitions.FUNCTION) -> bool =>
             !function.is_poisoned /\
             function.name? /\
             !function.is_top_level_entry /\
-            function.name.name !~ _entry_point.name /\
-            function.name.name.length > 0 /\
-            (char.is_letter(function.name.name[0]) \/ function.name.name[0] == '_') /\
             function.body? /\
-            function.generic_arguments.count == 0 /\
-            _has_only_literal_markers(function.modifiers) /\
-            function.arguments |> all(a =>
-                !a.is_poisoned /\ !a.untyped_deferred /\ a.left.is_simple_name /\ a.name? /\ !a.initializer? /\
-                !isa TypeExpressions.REFERENCE(a.type_expression))
+            function.generic_arguments.count == 0
 
         // Whether a function's modifiers are only the `memo` and `pure`
         // markers a function literal can carry as well.
@@ -382,43 +464,20 @@ namespace Syntax.Process is
             !modifiers.is_abstract /\
             !modifiers.is_stable
 
-        _as_nested_function(function: Definitions.FUNCTION) -> Statements.Statement is
-            let arguments = Collections.LIST[Expressions.Expression]()
-
-            for a in function.arguments do
-                let type_expression = if a.untyped_deferred then TypeExpressions.INFER(a.location) else a.type_expression fi
-
-                arguments.add(Expressions.VARIABLE(a.location, a.name!, type_expression, null))
+        _has_block_namespace(list: Definitions.LIST) -> bool is
+            for definition in list do
+                if let `namespace = cast Definitions.NAMESPACE?(definition.without_pragmas) /\ !`namespace.is_file_scope then
+                    return true
+                fi
             od
 
-            let literal = Expressions.FUNCTION(
-                function.location,
-                Expressions.LIST(function.arguments.location, arguments),
-                if function.type_expression.is_inferred then TypeExpressions.INFER(function.type_expression.location) else function.type_expression fi,
-                function.body!,
-                false
-            )
-
-            literal.set_nested_name(function.name!)
-            literal.is_file_local = true
-            literal.memo_location = function.modifiers.memo_location
-            literal.is_pure = function.modifiers.is_pure
-
-            return Statements.FUNCTION(function.location, function.name!, literal)
+            return false
         si
 
-        _definition_name(definition: Definitions.Definition) -> string =>
-            if let classy = cast Definitions.Classy?(definition.without_pragmas) then
-                classy.name.name
-            elif let function = cast Definitions.FUNCTION?(definition.without_pragmas) then
-                if function.name? then function.name.name else "a function" fi
-            else
-                "a declaration in this file"
-            fi
-
-        // An argument a file-level function was written without a type, in
-        // a file where the function can't be nested: one with no top-level
-        // statements, or one where something outside them uses it.
+        // An argument a file-level function was written without a type
+        // where its signature can't be inferred: a file that opens a block
+        // namespace, a function whose signature names some types but not
+        // others, or a build with whole-file inference turned off.
         report_untyped_arguments(function: Definitions.FUNCTION, logger: Logger) static is
             let reported mut = false
 
@@ -426,11 +485,7 @@ namespace Syntax.Process is
                 if a.untyped_deferred /\ !a.is_poisoned then
                     a.untyped_deferred = false
 
-                    if let reason = function.not_nested_because then
-                        logger.error(a.location, "explicit argument type required: {reason}")
-                    else
-                        logger.error(a.location, "explicit argument type required")
-                    fi
+                    logger.error(a.location, "explicit argument type required")
 
                     a.poison(true)
                     function.poison(true)
@@ -440,22 +495,6 @@ namespace Syntax.Process is
 
             if reported then
                 function.is_missing_types_reported = true
-            fi
-
-            // With no parameter to blame, a function kept out of the
-            // statements is missing its return type.
-            if !reported /\ function.arguments.count == 0 /\ function.type_expression.is_inferred then
-                if let reason = function.not_nested_because then
-                    logger.error(function.name!.location, "explicit return type required: {reason}")
-
-                    function.poison(true)
-                    function.is_missing_types_reported = true
-                    reported = true
-                fi
-            fi
-
-            if reported /\ function.not_nested_hint? then
-                logger.hint(function.name!.location, function.not_nested_hint)
             fi
         si
 
@@ -474,8 +513,10 @@ namespace Syntax.Process is
                         if statements? then
                             body.top_level_statements = null
                             _synthesise(body, statements)
-                        else
+                        elif _has_block_namespace(body) then
                             _report_untyped(body)
+                        else
+                            _form_unit(body, null, Collections.LIST[string]())
                         fi
 
                         _descend_into_file_scope_namespaces(body)
@@ -503,6 +544,47 @@ namespace Syntax.Process is
                         // into a file-private namespace, so the entry sits
                         // one list down once that pass has run.
                         if has_top_level_entry(`namespace.body) then
+                            return true
+                        fi
+                    fi
+                od
+            fi
+
+            return false
+        si
+
+        // Marks every inference unit in a file's definitions as still to be
+        // walked, for a re-walk of the file's bodies.
+        reset_units(definition: Node?) static is
+            if let list = cast Definitions.LIST?(definition) then
+                for d in list do
+                    let unwrapped = d.without_pragmas
+
+                    if let function = cast Definitions.FUNCTION?(unwrapped) then
+                        if let unit = function.inference_unit then
+                            unit.is_compiled = false
+                        fi
+                    elif let `namespace = cast Definitions.NAMESPACE?(unwrapped) then
+                        reset_units(`namespace.body)
+                    fi
+                od
+            fi
+        si
+
+        // Whether a file's definitions include a function whose signature is
+        // inferred, at the root or inside the namespace a whole-file
+        // namespace or expand-namespaces wrapped them in.
+        has_inferred_signatures(definition: Node?) -> bool static is
+            if let list = cast Definitions.LIST?(definition) then
+                for d in list do
+                    let unwrapped = d.without_pragmas
+
+                    if let function = cast Definitions.FUNCTION?(unwrapped) then
+                        if function.is_inferred_signature then
+                            return true
+                        fi
+                    elif let `namespace = cast Definitions.NAMESPACE?(unwrapped) then
+                        if has_inferred_signatures(`namespace.body) then
                             return true
                         fi
                     fi

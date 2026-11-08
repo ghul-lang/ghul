@@ -100,7 +100,7 @@ A whole-file namespace must be the first declaration in the file, after any `@@`
 
 A file with no namespace declaration can contain statements at the top level of the file, and so can a file whose namespace is a whole-file namespace. These top-level statements run in source order as the program's entry point, so a short program needs no `entry` function. Top-level statements can be mixed with global definitions. A global definition is visible everywhere in the file, wherever it appears. A file with top-level statements cannot declare a namespace block.
 
-In a file with top-level statements, a function written with no types anywhere in its signature, including one with no parameters and no return type, is compiled as a nested function of the top-level statements. Its argument types come from its calls and its return type from its body, and the top-level `let`s it uses take their types from those uses too:
+In a file with no namespace declaration, or whose namespace is a whole-file namespace, a function written with no types anywhere in its signature, including one with no parameters and no return type, has its signature inferred from the file. Its argument types come from its calls in the file and its return type from its body. The file's functions can call each other in any order, including recursively, whether their signatures are inferred or written. The top-level `let`s a function uses take their types from those uses too:
 
 ```ghul
 let seen = SET()
@@ -113,9 +113,9 @@ _visit(3)
 write_line("{seen.count}")
 ```
 
-Anywhere else, such as in a namespace block or a file without top-level statements, a function with no return type returns void, its return type isn't inferred, and every parameter needs its type.
+In a file with a namespace block, a function with no return type returns void, its return type isn't inferred, and every parameter needs its type. So does every function in a build with whole-file inference turned off (`--no-whole-file-inference`).
 
-Such a function is private to the file. A function with types in its signature that calls such a function is private to the file in the same way, unless a class, a trait or a function that stays global uses it. A class, a trait, a generic function, an operator or another file cannot call either kind: a function used from any of them needs its types, and so does everything it calls. An operator is never private to the file, so a function with no types that it calls needs its types. The functions are placed before the first statement that uses one of them, so they can be written in any order, and they can call each other. Like a function literal, such a function can be marked `memo` or `pure`: `fib(n) memo => ...`.
+A function whose signature is inferred is private to its file. That includes a function with no parameters and no return type, whose return is inferred. Where files share a namespace (under `--global-namespace`, or in a whole-file namespace several files declare), another file can call such a function only once its signature names its types; for a function with no parameters, a return type is enough, such as `-> void`. Anything in its own file can call it, including a class, a trait, an operator or a generic function. A function called with arguments of more than one type takes their join, such as `int[]` for an `ARRAY[int]` and an `int[]`. A function can only read a top-level `let` written above it, and a top-level statement can't call a function that reads a top-level `let` declared below that statement, directly or through the functions it calls. Like a function literal, such a function can be marked `memo` or `pure`: `fib(n) memo => ...`.
 
 A `use` statement brings names into scope, so code can refer to them without qualification. A `use` of a namespace imports every public symbol in it. A `use` of a single symbol imports that symbol:
 
@@ -501,7 +501,7 @@ multiply(a: int, b: int) -> int is
 si
 ```
 
-Outside a file with top-level statements, a named function's signature is fully explicit. Every argument has a written type. The return type is written after `->`; a function with no `->` returns `void`. The compiler infers no part of the signature of a named function or method there. In a file with top-level statements, a function written with no types has its signature inferred (see [namespaces and `use`](#namespaces-and-use)).
+A method's signature is fully explicit, and so is a named function's in a file with a namespace block. Every argument has a written type. The return type is written after `->`; a function with no `->` returns `void`. In a file with no namespace declaration, or with a whole-file namespace, a function written with no types has its signature inferred (see [namespaces and `use`](#namespaces-and-use)).
 
 A block body returns its value with an explicit `return`, or by ending with an expression. In a non-void body, the final statement is the function's return value on the fall-through path when its type is assignable to the declared return type. This holds with or without a `;` after the statement. An expression, an `if` or `case` expression, and a parenthesised block can each be this final value, the *tail*.
 
@@ -555,7 +555,7 @@ add_pair((a, b): (int, int)) -> int => a + b;
 add_pair((3, 4));    // 7
 ```
 
-Patterns can nest, and can be mixed with ordinary parameters: `f(x: int, (a, b): (int, int), y: int)`. Outside a file with top-level statements, a namespace-scope function's signature is fully explicit, so the type of the whole pattern is required; there is no context to infer it from. The element types come from the type of the whole pattern, so write the elements as plain names. The type of the whole pattern can be any type that can be destructured positionally: a tuple, or a type with a matching `deconstruct(...)` method. A formal argument list does not support the by-name group form (`(x = field, ...)`).
+Patterns can nest, and can be mixed with ordinary parameters: `f(x: int, (a, b): (int, int), y: int)`. A namespace-scope function written with a pattern has types in its signature, so the type of the whole pattern is required. The element types come from the type of the whole pattern, so write the elements as plain names. The type of the whole pattern can be any type that can be destructured positionally: a tuple, or a type with a matching `deconstruct(...)` method. A formal argument list does not support the by-name group form (`(x = field, ...)`).
 
 Functions are first-class values. A function literal has the same form as a function, without a name. The compiler usually *infers* its argument types and return type from the body and from the context of the literal, so they are usually written without annotations. Either can be written explicitly. A literal with one argument needs no parentheses around it. `A -> B` is the type of a function from `A` to `B`.
 
@@ -634,7 +634,7 @@ A nested function refers to itself by its own name, so it needs no `rec`. A lite
     fact(n: int) -> int => if n <= 1 then 1 else n * fact(n - 1) fi;
 ```
 
-A nested function is a local of the body it is written in. One that nothing refers to above its definition is defined from its definition onward. One that a statement or another nested function above it refers to exists from the start of the body, so a body can call a nested function written below the call, and nested functions can call each other in any order. Where such a function uses a local the body declares further down, it exists from just after that local instead, and a call above that point is an error. A named function written among a file's top-level statements with types in its signature is a namespace-scope function, and its argument types are required. One written with no types at all is described with top-level statements, under [namespaces and `use`](#namespaces-and-use).
+A nested function is a local of the body it is written in. One that nothing refers to above its definition is defined from its definition onward. One that a statement or another nested function above it refers to exists from the start of the body, so a body can call a nested function written below the call, and nested functions can call each other in any order. Where such a function uses a local the body declares further down, it exists from just after that local instead, and a call above that point is an error. A named function written among a file's top-level statements is a namespace-scope function, not a nested one. One written with no types at all has its signature inferred, as described under [namespaces and `use`](#namespaces-and-use).
 
 A call with `*` written for one or more of its arguments is a *partial application*: a function value with one parameter per `*`, in order, that makes the call with its parameters in those positions. The other arguments are evaluated once, where the partial application is written, not on each call:
 
@@ -2084,7 +2084,7 @@ When neither the arguments nor any later use decides a type argument, the constr
 
 See <https://ghul.dev/type-inference.html>.
 
-ghūl infers types widely, but inference is **function-local**. Outside a file with top-level statements, a namespace-scope function's signature (its parameter types and return type) is always written out, and the compiler infers types only inside bodies. A file with top-level statements is the exception (see [namespaces and `use`](#namespaces-and-use)): a function written there with no types has its signature inferred. Inside a body, the compiler infers the types of local variables, loop variables, destructured variables, the parameters and return types of function literals and nested named functions, and the type arguments of generic calls.
+ghūl infers types widely, but inference is **function-local**, with one wider scope. A method's signature, and a namespace-scope function's in a file with a namespace block, is always written out, and the compiler infers types only inside bodies. In a file with no namespace declaration, or with a whole-file namespace, a function written with no types has its signature inferred from the whole file (see [namespaces and `use`](#namespaces-and-use)). Inside a body, the compiler infers the types of local variables, loop variables, destructured variables, the parameters and return types of function literals and nested named functions, and the type arguments of generic calls.
 
 Inference also uses later code. A variable with no type information at its declaration takes its type from how the same body uses it later. This includes the operations the body performs on the variable and, for a function, its own recursive calls. The compiler narrows local variables, fields and store-free properties (see [narrowing](docs/narrowing.md#type-narrowing) for how long each kind of fact lasts). The inferred type of a `let` variable is never visible outside the function that declares it.
 
