@@ -214,14 +214,28 @@ namespace Semantic is
                 // sibling alone: a `reduce` seed binds the accumulator, and
                 // the literal's return can widen it. It stands as a phantom
                 // the sibling's type bounds, which the literal's return
-                // joins once it settles.
-                if type_map.contains_key(parameter) /\ pending.contains(parameter) /\ i < phantom_origins.count then
-                    let phantom = phantom_origins[i]
+                // joins once it settles. A sibling whose own type is still
+                // being inferred gives no bound to widen from, and a phantom
+                // an earlier walk left resolving to an unsettled type
+                // (joined while a recursive call's return was still
+                // unknown) has nothing left to widen with; either way the
+                // sibling binds the parameter alone.
+                let phantom = if i < phantom_origins.count then phantom_origins[i] else null fi
+                let joined = phantom?.try_get_inferred_type()
 
-                    phantom.joins_assignments = true
-                    phantom.add_lower_bound(type_map[parameter])
+                if
+                    phantom? /\ type_map.contains_key(parameter) /\ pending.contains(parameter) /\
+                    type_map[parameter].is_settled /\ (!joined? \/ joined.is_settled)
+                then
+                    if joined? then
+                        type_map[parameter] = joined
+                    else
+                        phantom.joins_assignments = true
+                        phantom.add_lower_bound(type_map[parameter])
 
-                    type_map[parameter] = Types.INFERRED_VARIABLE_TYPE(phantom)
+                        type_map[parameter] = Types.INFERRED_VARIABLE_TYPE(phantom)
+                    fi
+
                     bound_any = true
                 elif type_map.contains_key(parameter) then
                     bound_any = true
