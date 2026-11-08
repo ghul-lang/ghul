@@ -191,6 +191,8 @@ namespace Semantic is
             let bound_any mut = false
             let has_pack_slot mut = false
 
+            let pending = _parameters_a_pending_function_returns(candidate, argument_types)
+
             for i in 0..candidate.generic_argument_names.count do
                 if i >= candidate.generic_arguments.count then
                     return candidate
@@ -207,7 +209,35 @@ namespace Semantic is
                     has_pack_slot = true
                 fi
 
-                if type_map.contains_key(parameter) then
+                // A parameter a sibling binds that is also the return of a
+                // literal still being inferred is not yet decided by the
+                // sibling alone: a `reduce` seed binds the accumulator, and
+                // the literal's return can widen it. It stands as a phantom
+                // the sibling's type bounds, which the literal's return
+                // joins once it settles. A sibling whose own type is still
+                // being inferred gives no bound to widen from, and a phantom
+                // an earlier walk left resolving to an unsettled type
+                // (joined while a recursive call's return was still
+                // unknown) has nothing left to widen with; either way the
+                // sibling binds the parameter alone.
+                let phantom = if i < phantom_origins.count then phantom_origins[i] else null fi
+                let joined = phantom?.try_get_inferred_type()
+
+                if
+                    phantom? /\ type_map.contains_key(parameter) /\ pending.contains(parameter) /\
+                    type_map[parameter].is_settled /\ (!joined? \/ joined.is_settled)
+                then
+                    if joined? then
+                        type_map[parameter] = joined
+                    else
+                        phantom.joins_assignments = true
+                        phantom.add_lower_bound(type_map[parameter])
+
+                        type_map[parameter] = Types.INFERRED_VARIABLE_TYPE(phantom)
+                    fi
+
+                    bound_any = true
+                elif type_map.contains_key(parameter) then
                     bound_any = true
                 else
                     if i >= phantom_origins.count then
@@ -299,6 +329,53 @@ namespace Semantic is
             od
 
             return type_map
+        si
+
+        // The type parameters in the return of each function-typed formal
+        // whose argument is still being inferred, as a literal whose body
+        // waits on another function's return is. An action has no return.
+        _parameters_a_pending_function_returns(candidate: Symbols.Function, argument_types: Type[]) -> Collections.LIST[Symbols.Symbol] is
+            let result = Collections.LIST[Symbols.Symbol]()
+            let spread = Collections.LIST[Symbols.Symbol]()
+
+            for i in 0..candidate.arguments.count do
+                if i >= argument_types.count then
+                    break
+                fi
+
+                let formal = candidate.arguments[i]
+
+                if !formal.is_function \/ formal.is_action \/ argument_types[i].is_settled \/ formal.arguments.count == 0 then
+                    continue
+                fi
+
+                for a in formal.arguments[formal.arguments.count - 1].get_type_arguments() do
+                    result.add(a.symbol)
+                od
+
+                // A pack spread into the literal's parameters needs its
+                // tuple settled before the literal can be walked, so it is
+                // left to the pack's own binding.
+                if i < candidate.argument_is_pack.count /\ candidate.argument_is_pack[i] then
+                    let depth = if i < candidate.argument_pack_depth.count then candidate.argument_pack_depth[i] else 0 fi
+
+                    if let slot = ARGUMENT_PACK.marked_slot(formal, depth) then
+                        for a in slot.arguments[ARGUMENT_PACK.parameter_count(slot) - 1].get_type_arguments() do
+                            spread.add(a.symbol)
+                        od
+                    fi
+                fi
+            od
+
+            let open = Collections.LIST[Symbols.Symbol]()
+
+            for s in result do
+                if !spread.contains(s) then
+                    open.add(s)
+                fi
+            od
+
+            return open
         si
     si
 si
