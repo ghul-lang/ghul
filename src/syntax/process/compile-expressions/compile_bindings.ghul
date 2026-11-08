@@ -849,6 +849,12 @@ namespace Syntax.Process is
                 return false
             fi
 
+            // A function whose signature is inferred returns the join of what
+            // its returns produce, so no return is held to another's type.
+            if function.inferred_return_origin? then
+                return false
+            fi
+
             if
                 !function.return_type? \/
                 function.return_type.is_sentinel \/
@@ -860,6 +866,36 @@ namespace Syntax.Process is
             r.expression!.set_expected_type(function.return_type!, "cannot return value of type {{0}} where {{1}} expected")
 
             return false
+        si
+
+        // A return from a function whose signature is inferred adds what it
+        // produces to the function's return, which is their join: a null
+        // makes the join optional. A value whose type is still being
+        // inferred adds nothing yet, and the walks wait for it.
+        _join_inferred_return(r: Trees.Statements.RETURN, function: Semantic.Symbols.Function, origin: Semantic.Symbols.Variable) is
+            if !r.expression? then
+                return
+            fi
+
+            let value = r.expression.value
+
+            if !value? \/ !value.type? \/ !value.check_is_consumable(_logger, r.expression.location) then
+                return
+            fi
+
+            let value_type = value.type!
+
+            if Semantic.ARM_NULL_JOIN().is_genuine_null(value_type) then
+                function.returned_genuine_null = true
+            elif value_type.is_settled /\ !value_type.is_error /\ !value_type.has_function_generic_argument_foreign_to(function) then
+                Semantic.INFERENCE_TRACE.add_lower_bound("unit.return", origin, value_type)
+            else
+                return
+            fi
+
+            if let joined = origin.try_get_inferred_type() /\ joined.is_settled then
+                function.set_return_type(Semantic.NULL_RETURN_JOIN.of(joined, function.returned_genuine_null, _innate_symbol_lookup))
+            fi
         si
 
         visit_return(r: Trees.Statements.RETURN) is
@@ -942,6 +978,11 @@ namespace Syntax.Process is
             let async_sm = Semantic.Symbols.async_state_machine_for(function)
             if async_sm? /\ async_sm.frame? then
                 _visit_return_state_machine_async(r, function, async_sm)
+                return
+            fi
+
+            if let origin = function.inferred_return_origin then
+                _join_inferred_return(r, function, origin)
                 return
             fi
 
