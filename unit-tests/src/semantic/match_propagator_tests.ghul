@@ -473,5 +473,68 @@ namespace Semantic.UnitTests is
 
             is_false(logger.has_consumed_any)
         si
+
+        // A function type whose first argument is a parameter, and so varies
+        // contravariantly, and whose second is its result.
+        function_class() -> CLASS is
+            let names = LIST[string]()
+            names.add("P")
+            names.add("R")
+
+            let result = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Fn", names, Semantic.BLOCK_SCOPE())
+            result.argument_variances = [Semantic.Types.TypeVariance.CONTRAVARIANT, Semantic.Types.TypeVariance.COVARIANT]
+
+            return result
+        si
+
+        // A function passed into a `string -> int` slot is called with
+        // strings, so its parameter still being inferred takes string as a
+        // value it receives, as from a call.
+        @Test()
+        Calling__propagate_match__with_a_parameter_placeholder_at_a_slot_parameter__bounds_it_from_below() is
+            let propagator = MATCH_PROPAGATOR(DIAGNOSTICS_STORE())
+            let fn = function_class()
+            let string_t = string_class().type!
+            let int_t = int_class().type!
+
+            let parameter = Semantic.Symbols.LOCAL_ARGUMENT(loc(), Semantic.BLOCK_SCOPE(), "text")
+
+            propagator.propagate_match(
+                GENERIC(loc(), fn, types(string_t, int_t)),
+                GENERIC(loc(), fn, types(INFERRED_VARIABLE_TYPE(parameter), int_t)))
+
+            are_equal(1, parameter.lower_bounds.count)
+            are_same(string_t, parameter.lower_bounds[0])
+        si
+
+        // A placeholder that is not a parameter receives nothing it is
+        // called with.
+        @Test()
+        Calling__propagate_match__with_a_non_parameter_placeholder_at_a_slot_parameter__does_not_bound_it_from_below() is
+            let propagator = MATCH_PROPAGATOR(DIAGNOSTICS_STORE())
+            let fn = function_class()
+            let origin = phantom("T_phantom")
+
+            propagator.propagate_match(
+                GENERIC(loc(), fn, types(string_class().type!, int_class().type!)),
+                GENERIC(loc(), fn, types(INFERRED_VARIABLE_TYPE(origin), int_class().type!)))
+
+            are_equal(0, origin.lower_bounds.count)
+        si
+
+        // A covariant position is what the function produces, not what it
+        // receives.
+        @Test()
+        Calling__propagate_match__with_a_parameter_placeholder_at_a_result_position__does_not_bound_it_from_below() is
+            let propagator = MATCH_PROPAGATOR(DIAGNOSTICS_STORE())
+            let fn = function_class()
+            let parameter = Semantic.Symbols.LOCAL_ARGUMENT(loc(), Semantic.BLOCK_SCOPE(), "result")
+
+            propagator.propagate_match(
+                GENERIC(loc(), fn, types(string_class().type!, int_class().type!)),
+                GENERIC(loc(), fn, types(string_class().type!, INFERRED_VARIABLE_TYPE(parameter))))
+
+            are_equal(0, parameter.lower_bounds.count)
+        si
     si
 si
