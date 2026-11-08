@@ -1,0 +1,68 @@
+namespace Syntax.Process.UnitTests is
+    use Collections.LIST
+
+    use Source.LOCATION
+    use TestClass = Microsoft.VisualStudio.TestTools.UnitTesting.TestClassAttribute
+    use Test = Microsoft.VisualStudio.TestTools.UnitTesting.TestMethodAttribute
+    use Assertions
+
+    // Tests for VALUE_RETURN_SCANNER - whether a function body has a
+    // `return` with a value that leaves the function. A `return` in a `val`
+    // block leaves the block, and one in a function literal, nested named
+    // functions included, leaves the literal. Builds plain statement trees;
+    // no semantic resolution required.
+    @TestClass()
+    class VALUE_RETURN_SCANNER_TESTS is
+        init() is si
+
+        loc() -> LOCATION => LOCATION("test.ghul", 1, 1, 1, 1)
+
+        value() -> Trees.Expressions.Expression =>
+            Trees.Expressions.IDENTIFIER(loc(), Trees.Identifiers.Identifier(loc(), "result"))
+
+        statements(items: Trees.Statements.Statement[]) -> Trees.Statements.LIST =>
+            Trees.Statements.LIST(loc(), items)
+
+        block(items: Trees.Statements.Statement[]) -> Trees.Bodies.BLOCK =>
+            Trees.Bodies.BLOCK(loc(), statements(items))
+
+        returning(expression: Trees.Expressions.Expression?) -> Trees.Statements.Statement =>
+            Trees.Statements.RETURN(loc(), expression)
+
+        scanned(body: Trees.Bodies.Body) -> bool => VALUE_RETURN_SCANNER().returns_a_value(body)
+
+        @Test()
+        Body_with_a_return_of_a_value__should_return_a_value() is
+            is_true(scanned(block([returning(value())])))
+        si
+
+        @Test()
+        Body_with_only_a_bare_return__should_not_return_a_value() is
+            is_false(scanned(block([returning(null)])))
+        si
+
+        // `val ... lav` takes the value its own `return` gives it.
+        @Test()
+        Body_whose_only_return_is_in_a_val_block__should_not_return_a_value() is
+            let inner = Trees.Expressions.VAL_BLOCK(loc(), statements([returning(value())]))
+
+            is_false(scanned(block([Trees.Statements.EXPRESSION(loc(), inner)])))
+        si
+
+        // A literal's `return` leaves the literal, as a nested named
+        // function's does, since that is a literal too.
+        @Test()
+        Body_whose_only_return_is_in_a_function_literal__should_not_return_a_value() is
+            let literal =
+                Trees.Expressions.FUNCTION(
+                    loc(),
+                    Trees.Expressions.LIST(loc(), LIST[Trees.Expressions.Expression]()),
+                    Trees.TypeExpressions.INFER(loc()),
+                    block([returning(value())]),
+                    false
+                )
+
+            is_false(scanned(block([Trees.Statements.EXPRESSION(loc(), literal)])))
+        si
+    si
+si
