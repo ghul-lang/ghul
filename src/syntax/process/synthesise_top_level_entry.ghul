@@ -294,6 +294,19 @@ namespace Syntax.Process is
                 unit.add(function)
             od
 
+            // A member walked before the entry that reads a top-level `let`
+            // reads it before the entry's walk has typed it.
+            for member in unit.members do
+                if member.is_top_level_entry then
+                    break
+                fi
+
+                if let_names |> any(name => scanner.body_references(member.body, name)) then
+                    unit.reads_lets_before_entry = true
+                    break
+                fi
+            od
+
             // Whether anything walked before a member, or the member itself,
             // names it, and so reads its return before the walk has settled it.
             for (index, member) in unit.members |> index() do
@@ -317,9 +330,8 @@ namespace Syntax.Process is
 
         // The functions in an order where each comes after the functions it
         // calls where it can, so a walk reaches a callee's return before
-        // its callers read it, and a function that reads a top-level `let`
-        // comes after the entry, whose walk types the `let`. Functions that
-        // call each other keep the order they are written in.
+        // its callers read it. Functions that call each other keep the
+        // order they are written in.
         _callees_first(functions: Collections.List[Definitions.FUNCTION], let_names: Collections.List[string], scanner: NAME_REFERENCE_SCANNER) -> Collections.List[Definitions.FUNCTION] is
             let result = Collections.LIST[Definitions.FUNCTION]()
             let placed = Collections.SET[Definitions.FUNCTION]()
@@ -329,18 +341,8 @@ namespace Syntax.Process is
                     return
                 fi
 
-                let reads_lets = !function.is_top_level_entry /\ let_names |> any(name => scanner.body_references(function.body, name))
-
                 for other in functions do
-                    if other == function then
-                        continue
-                    fi
-
-                    if other.is_top_level_entry then
-                        if reads_lets then
-                            place(other)
-                        fi
-                    elif other.name? /\ scanner.body_references(function.body, other.name.name) then
+                    if other != function /\ other.name? /\ !other.is_top_level_entry /\ scanner.body_references(function.body, other.name.name) then
                         place(other)
                     fi
                 od
