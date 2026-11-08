@@ -21,6 +21,14 @@ namespace Syntax.Process is
     class UNIT_MEMBER(function: Trees.Definitions.FUNCTION, symbol: Semantic.Symbols.Function) is
         tail_demand: bool public
         falls_off_end: bool public
+
+        // Whether the body has a `return` with a value that leaves the
+        // function.
+        returns_a_value: bool
+
+        init(..) is
+            returns_a_value = if let body = function.body then VALUE_RETURN_SCANNER().returns_a_value(body) else false fi
+        si
     si
 
     class COMPILE_LAMBDAS is
@@ -310,7 +318,7 @@ namespace Syntax.Process is
 
             if let origin = symbol.inferred_return_origin then
                 if let settled = origin.try_get_inferred_type() /\ settled.is_settled then
-                    symbol.set_return_type(settled)
+                    symbol.set_return_type(Semantic.NULL_RETURN_JOIN.of(settled, symbol.returned_genuine_null, _innate_symbol_lookup))
                 else
                     symbol.set_return_type(Semantic.Types.INFERRED_VARIABLE_TYPE(origin))
                 fi
@@ -369,6 +377,22 @@ namespace Syntax.Process is
             // A generator's return is its yields' to settle.
             let is_generator = Semantic.Symbols.state_machine_for(symbol)?
 
+            // What the body ended on joins its returns, whatever an earlier
+            // walk settled.
+            if
+                let tail_type = _walked_tail_type(member) /\
+                tail_type.is_settled /\
+                !tail_type.is_error /\
+                !tail_type.is_void /\
+                !tail_type.has_function_generic_argument_foreign_to(symbol)
+            then
+                Semantic.INFERENCE_TRACE.add_lower_bound("unit.tail", origin, tail_type)
+
+                if let joined = origin.try_get_inferred_type() /\ joined.is_settled then
+                    symbol.set_return_type(Semantic.NULL_RETURN_JOIN.of(joined, symbol.returned_genuine_null, _innate_symbol_lookup))
+                fi
+            fi
+
             if let returned = symbol.return_type /\ returned.is_inferred /\ !is_generator then
                 if
                     let tail_type = _walked_tail_type(member) /\
@@ -379,6 +403,12 @@ namespace Syntax.Process is
                 elif symbol.returned_genuine_null then
                     // Only null was returned: nothing says what it is
                     // optional of.
+                elif
+                    member.returns_a_value \/
+                    (isa Trees.Bodies.EXPRESSION(function.body) /\ !(_walked_tail_type(member)?.is_void ?? false))
+                then
+                    // A return with a value, or an expression body, whose
+                    // type is still being inferred: the walks wait for it.
                 else
                     symbol.set_return_type(_innate_symbol_lookup.get_void_type())
                 fi
@@ -683,6 +713,7 @@ namespace Syntax.Process is
 
                 if
                     !machine_completed /\
+                    !fs.inferred_return_origin? /\
                     !rt.is_sentinel /\
                     !rt.is_inferred /\
                     !Semantic.Symbols.state_machine_for(fs)? /\
@@ -744,9 +775,8 @@ namespace Syntax.Process is
             // is demanded with nothing to judge it against, and settles the
             // return from its own type.
             if
-                let bb = body_block, fs = function_symbol, rt = fs.return_type /\
-                fs.is_inferred_signature /\
-                rt.is_inferred
+                let bb = body_block, fs = function_symbol /\
+                fs.inferred_return_origin?
             then
                 bb.statements.function_tail = false
                 bb.statements.compile_expressions_state.want_value = false
