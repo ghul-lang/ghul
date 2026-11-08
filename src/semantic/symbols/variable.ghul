@@ -595,27 +595,14 @@ namespace Semantic.Symbols is
         literal_slot: Types.Type? public
         literal_owner: Function? public
 
-        // A function the file wrote with no types among its top-level
-        // statements, held in this local, and the closure compiled for it.
-        // It is described as the function it was written as.
-        is_file_local: bool public
+        // The closure compiled for the nested function this local holds.
         nested_closure: Closure? public
 
         describe(context: DESCRIBE_CONTEXT) -> SignaturePart =>
-            if let closure = file_local_closure then
-                closure.describe_as(name, context)
-            else
-                _describe_typed(context, PARTS.literal(name), type)
-            fi
+            _describe_typed(context, PARTS.literal(name), type)
 
         describe_kind(context: DESCRIBE_CONTEXT) -> string? =>
-            if let closure = file_local_closure then
-                "{closure.pure_prefix}global function"
-            else
-                _local_kind()
-            fi
-
-        file_local_closure: Closure? => if is_file_local then nested_closure else null fi
+            _local_kind()
 
         _local_kind() -> string =>
             if is_nested_function then "nested function"
@@ -997,6 +984,19 @@ namespace Semantic.Symbols is
         // was for. A namespace-scope declaration - `count: int;` - is
         // the way to ask for state the whole file sees regardless of
         // order.
+        // A function whose signature is inferred may be written above a
+        // `let` it reads: its file's top-level statements are checked
+        // instead, so none calls it before the `let` is declared.
+        _is_within_inferred_signature() -> bool is
+            for scope in IoC.CONTAINER.instance.symbol_table.stack do
+                if let function: Function = scope /\ function.is_inferred_signature then
+                    return true
+                fi
+            od
+
+            return false
+        si
+
         _check_textual_order(use_location: LOCATION) -> bool is
             if use_location.file_name !~ location.file_name then
                 // Another file's use is not ordered against this
@@ -1005,7 +1005,7 @@ namespace Semantic.Symbols is
                 return false
             fi
 
-            if use_location.start < location.start then
+            if use_location.start < location.start /\ !_is_within_inferred_signature() then
                 IoC.CONTAINER.instance.logger.error(
                     use_location,
                     "global variable {name} is used before its declaration",

@@ -60,8 +60,33 @@ namespace Syntax.Process is
         // convergence is _logger.is_clean (no errors and no flagged
         // wild/inferred type consumption).
         pre(function: Trees.Definitions.FUNCTION) -> bool is
+            // A walk that reaches the function without its definition list,
+            // as a body re-walk does, compiles its unit here, before the
+            // function's own scope is entered.
+            if let unit = function.inference_unit /\ !unit.is_compiled then
+                _lambdas.compile_unit(unit)
+            fi
+
             super.pre(function)
             return true
+        si
+
+        // A file's inference unit is compiled before anything else in the
+        // definition list that holds it, so a class or a function outside
+        // the unit that calls one of its functions reads the signature the
+        // unit settled, wherever the call is written in the file.
+        pre(list: Trees.Definitions.LIST) -> bool is
+            for definition in list do
+                if
+                    let function = cast Trees.Definitions.FUNCTION?(definition.without_pragmas),
+                    unit = function.inference_unit /\
+                    !unit.is_compiled
+                then
+                    _lambdas.compile_unit(unit)
+                fi
+            od
+
+            return super.pre(list)
         si
 
         visit(function: Trees.Definitions.FUNCTION) is
@@ -74,6 +99,16 @@ namespace Syntax.Process is
             // an enclosing function. The rejection has already been
             // reported.
             if !isa Semantic.Symbols.Function(symbol) then
+                super.visit(function)
+
+                return
+            fi
+
+            // A member of an inference unit had its body walked with the
+            // rest of its unit.
+            if function.inference_unit? then
+                _after_function_body(function, symbol)
+
                 super.visit(function)
 
                 return
@@ -131,6 +166,16 @@ namespace Syntax.Process is
                 async_state_machine.uninstall_body_emission_overrides()
             fi
 
+            _after_function_body(function, symbol)
+
+            super.visit(function)
+        si
+
+        // The checks that follow a function body's walk.
+        _after_function_body(function: Trees.Definitions.FUNCTION, symbol: Semantic.Symbols.Symbol?) is
+            let state_machine = if let fs: Semantic.Symbols.Function = symbol then Semantic.Symbols.state_machine_for(fs) else null fi
+            let async_state_machine = if let fs: Semantic.Symbols.Function = symbol then Semantic.Symbols.async_state_machine_for(fs) else null fi
+
             // Yield inside try/catch/finally needs the fault-block /
             // state-machine-finalisation dance C# uses and isn't
             // implemented in v1. The "yield + await in same body"
@@ -147,8 +192,6 @@ namespace Syntax.Process is
             if let function_symbol: Semantic.Symbols.Function = symbol /\ function_symbol.memo_cache? then
                 _settle_memo_cache(function, function_symbol, function_symbol.memo_cache)
             fi
-
-            super.visit(function)
         si
 
         // A `memo` function's cache maps its arguments to its result.

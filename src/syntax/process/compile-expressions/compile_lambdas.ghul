@@ -16,6 +16,13 @@ namespace Syntax.Process is
     // the exception / environment-save wrapper of visit(function
     // literal) stay in the visitor; the methods here are the enclosed
     // logic.
+    // A function of an inference unit, with what its walks record for the
+    // checks made once the unit's walks have stopped.
+    class UNIT_MEMBER(function: Trees.Definitions.FUNCTION, symbol: Semantic.Symbols.Function) is
+        tail_demand: bool public
+        falls_off_end: bool public
+    si
+
     class COMPILE_LAMBDAS is
         _logger: Logger
         _symbol_table: Semantic.SYMBOL_TABLE
@@ -72,6 +79,384 @@ namespace Syntax.Process is
             _pack_wrap_builder = PACK_WRAP_BUILDER(symbol_table, symbol_loader, innate_symbol_lookup)
         si
 
+        // Compiles the bodies of a file's inference unit as one inference
+        // body: every walk visits every member in turn, inside its own
+        // scope, so a call in one member bounds the inferred parameter
+        // types of another, and the members share one obligation queue,
+        // one set of result origins and one placeholder registry. A
+        // member whose signature is inferred reads its parameter and
+        // return types from what the previous walks settled, at the start
+        // of each walk, so a caller walked before it reads the same
+        // signature as a caller walked after.
+        compile_unit(unit: INFERENCE_UNIT) is
+            unit.is_compiled = true
+
+            let members = Collections.LIST[UNIT_MEMBER]()
+
+            for function in unit.members do
+                if !function.body? then
+                    continue
+                fi
+
+                _visitor.enter_scope(function)
+
+                if let symbol = _symbol_table.current_function then
+                    KILL_LEDGER.current_function = function
+                    KILL_LEDGER.current_file = function.location.file_name
+
+                    if function.name? then
+                        function.name.walk(_visitor)
+                    fi
+
+                    function.type_expression.walk(_visitor)
+                    function.arguments.walk(_visitor)
+
+                    for argument_name in symbol.argument_names do
+                        if let argument: Semantic.Symbols.LOCAL_ARGUMENT = symbol.find_direct(argument_name) then
+                            argument.is_captured = false
+                        fi
+                    od
+
+                    if let machine = Semantic.Symbols.state_machine_for(symbol) /\ machine.frame? then
+                        machine.frame!.declare()
+                    elif let machine = Semantic.Symbols.async_state_machine_for(symbol) /\ machine.frame? then
+                        machine.frame!.declare()
+                    fi
+
+                    members.add(UNIT_MEMBER(function, symbol))
+                fi
+
+                _visitor.leave_scope(function)
+            od
+
+            if members.count == 0 then
+                return
+            fi
+
+            let first = members[0]
+
+            _type_arg_placeholder_registry.begin_body()
+            Semantic.OBLIGATIONS.begin_body()
+            if let compiler: COMPILE_EXPRESSIONS = _visitor then
+                compiler.begin_chain_roots()
+            fi
+            Semantic.RESULT_ORIGINS.begin_body()
+
+            let retry_body = RETRY_SITE_STATS.begin_body()
+            let trace_body = Semantic.INFERENCE_TRACE.begin_body(first.symbol, first.function.location)
+
+            _logger.speculate()
+            _symbol_use_locations.speculate()
+
+            let retries = 20
+            let walks mut = 0
+            let final_walk mut = 0
+
+            while walks < retries do
+                walks = walks + 1
+                final_walk = _type_arg_placeholder_registry.begin_walk()
+                RETRY_SITE_STATS.begin_walk()
+                Semantic.OBLIGATIONS.begin_walk()
+                Semantic.INFERENCE_TRACE.begin_walk(walks)
+                if let compiler: COMPILE_EXPRESSIONS = _visitor then
+                    compiler.begin_chain_roots_walk()
+                fi
+
+                for member in members do
+                    _refresh_inferred_signature(member)
+                od
+
+                for member in members do
+                    _walk_unit_member(member)
+                od
+
+                Semantic.INFERENCE_TRACE.end_walk(_logger.is_clean, _logger.has_consumed_any)
+
+                // As visit_function_definition's loop.
+                let waiting = Semantic.OBLIGATIONS.standing.count > 0
+
+                let converged =
+                    (_logger.is_clean /\ !waiting) \/
+                    (waiting /\ Semantic.OBLIGATIONS.is_stuck) \/
+                    (!_logger.has_consumed_any /\ !waiting) \/
+                    (!waiting /\ walks > 1 /\ Semantic.OBLIGATIONS.learned_nothing)
+
+                if converged /\ !Semantic.OBLIGATIONS.take_defaults() then
+                    break
+                fi
+
+                if walks < retries then
+                    _logger.roll_back()
+                    _logger.speculate()
+
+                    _symbol_use_locations.roll_back()
+                    _symbol_use_locations.speculate()
+
+                    if RETRY_STATS.iteration_clear then
+                        for member in members do
+                            CLEAR_STATE_VISITOR(true, true).apply(member.function.body!)
+                        od
+                    fi
+                fi
+            od
+
+            RETRY_STATS.note(walks, first.symbol, first.function.location)
+            RETRY_SITE_STATS.end_body(retry_body, walks, first.symbol, first.function.location)
+            Semantic.INFERENCE_TRACE.end_body(trace_body, walks, retries, _logger.is_clean, _logger.has_consumed_any)
+
+            if _logger.has_consumed_any /\ !_logger.is_clean then
+                _type_arg_placeholder_registry.report_unresolved(_logger, final_walk)
+            fi
+
+            if !_logger.is_clean then
+                Semantic.OBLIGATIONS.fix(_logger)
+            fi
+
+            if let compiler: COMPILE_EXPRESSIONS = _visitor then
+                compiler.end_chain_roots(_logger.is_clean)
+            fi
+
+            Semantic.OBLIGATIONS.end_body()
+            Semantic.RESULT_ORIGINS.end_body()
+
+            for member in members do
+                _settle_inferred_signature(member)
+
+                _check_definite_return(member.function, member.symbol, cast Trees.Bodies.BLOCK?(member.function.body), member.tail_demand, member.falls_off_end)
+            od
+
+            _logger.commit()
+            _symbol_use_locations.commit()
+
+            KILL_LEDGER.current_function = null
+        si
+
+        // One member's body, walked inside its own scope as part of a walk
+        // of its inference unit.
+        _walk_unit_member(member: UNIT_MEMBER) is
+            let function = member.function
+            let symbol = member.symbol
+
+            _visitor.enter_scope(function)
+
+            KILL_LEDGER.current_function = function
+            KILL_LEDGER.current_file = function.location.file_name
+
+            let machine = Semantic.Symbols.state_machine_for(symbol)
+            let async_machine = Semantic.Symbols.async_state_machine_for(symbol)
+
+            // A generator whose element type an earlier walk settled declares
+            // the rest of its frame now.
+            if machine? /\ machine.frame? then
+                machine.frame!.declare()
+                machine.install_body_emission_overrides()
+            elif async_machine? /\ async_machine.frame? then
+                async_machine.install_body_emission_overrides()
+            fi
+
+            member.tail_demand = _set_up_tail(function, symbol)
+
+            // Narrowing is method-local.
+            _flow.reset()
+
+            let started_at = symbol.return_type
+
+            function.body!.walk(_visitor)
+
+            if symbol.is_inferred_signature then
+                _settle_walked_return(member, started_at)
+            fi
+
+            member.falls_off_end = !_flow.is_unreachable
+
+            if machine? /\ machine.frame? then
+                machine.uninstall_body_emission_overrides()
+            elif async_machine? /\ async_machine.frame? then
+                async_machine.uninstall_body_emission_overrides()
+            fi
+
+            _visitor.leave_scope(function)
+        si
+
+        // A member whose signature is inferred starts each walk with the
+        // types the walks before settled: a parameter at its inferred type,
+        // or its own placeholder while nothing has bounded it, and the
+        // return at what its origin settled to, or the origin's
+        // placeholder.
+        _refresh_inferred_signature(member: UNIT_MEMBER) is
+            let symbol = member.symbol
+
+            if !symbol.is_inferred_signature then
+                return
+            fi
+
+            let types = Collections.LIST[Type]()
+
+            for i in 0..symbol.argument_names.count do
+                let existing = symbol.arguments[i]
+
+                if let argument: Semantic.Symbols.LOCAL_ARGUMENT = symbol.find_direct(symbol.argument_names[i]) /\ _is_inferred_parameter(member, i) then
+                    types.add(_inferred_parameter_type(argument))
+                else
+                    types.add(existing)
+                fi
+            od
+
+            symbol.arguments = types
+
+            if let origin = symbol.inferred_return_origin then
+                if let settled = origin.try_get_inferred_type() /\ settled.is_settled then
+                    symbol.set_return_type(settled)
+                else
+                    symbol.set_return_type(Semantic.Types.INFERRED_VARIABLE_TYPE(origin))
+                fi
+            fi
+        si
+
+        _is_inferred_parameter(member: UNIT_MEMBER, index: int) -> bool =>
+            index < member.function.arguments.count /\
+            member.function.arguments.variables[index].untyped_deferred
+
+        _inferred_parameter_type(argument: Semantic.Symbols.LOCAL_ARGUMENT) -> Type is
+            if Semantic.OBLIGATIONS.has_default_for(argument) then
+                if let lower = argument.lower_bound_type() then
+                    argument.set_type(lower)
+                    return lower
+                fi
+            fi
+
+            let inferred = argument.try_get_inferred_type()
+
+            if inferred? /\ !inferred.is_sentinel then
+                argument.set_type(inferred)
+
+                if !inferred.is_settled then
+                    Semantic.OBLIGATIONS.defer("parameter", Semantic.Types.INFERRED_VARIABLE_TYPE(argument), null)
+                fi
+
+                return inferred
+            fi
+
+            let placeholder = Semantic.Types.INFERRED_VARIABLE_TYPE(argument)
+
+            argument.set_type(placeholder)
+
+            Semantic.OBLIGATIONS.defer("parameter", placeholder, null)
+
+            return placeholder
+        si
+
+        // What a member whose signature is inferred returned on this walk
+        // bounds its return origin. A return still inferred once the body
+        // has been walked had no value to settle it, so it is void, unless
+        // the tail is waiting on something a later walk settles. Callers
+        // walked before this member read the return this walk started at,
+        // so a walk that ends on a different return walks again.
+        _settle_walked_return(member: UNIT_MEMBER, started_at: Type?) is
+            let function = member.function
+            let symbol = member.symbol
+
+            let origin = symbol.inferred_return_origin
+
+            if !origin? then
+                return
+            fi
+
+            // A generator's return is its yields' to settle.
+            let is_generator = Semantic.Symbols.state_machine_for(symbol)?
+
+            if let returned = symbol.return_type /\ returned.is_inferred /\ !is_generator then
+                if
+                    let tail_type = _walked_tail_type(member) /\
+                    (Semantic.OPERAND_WAIT.is_waiting(tail_type) \/ tail_type.is_inferred \/ tail_type.is_error)
+                then
+                    // Waiting, or failed with a diagnostic of its own.
+                elif symbol.returned_genuine_null then
+                    // Only null was returned: nothing says what it is
+                    // optional of.
+                else
+                    symbol.set_return_type(_innate_symbol_lookup.get_void_type())
+                fi
+            fi
+
+            // A return still naming another function's unbound type
+            // parameter is a binding a later walk makes, not a type.
+            let arrived =
+                if let r = symbol.return_type /\ r.is_settled /\ !r.has_function_generic_argument_foreign_to(symbol) then
+                    r
+                else
+                    null
+                fi
+
+            if arrived? then
+                Semantic.INFERENCE_TRACE.add_lower_bound("unit.return", origin, arrived)
+            fi
+
+            let started_settled = started_at? /\ started_at.is_settled
+
+            let read_early = if let unit = function.inference_unit then unit.read_early.contains(function) else false fi
+
+            if
+                let tail_type = _walked_tail_type(member) /\ tail_type.is_error
+            then
+                // The tail's own diagnostic is the report.
+                symbol.set_return_type(Semantic.Types.ERROR())
+            elif !arrived? then
+                // A return that waits on a parameter nothing typed is
+                // reported with the parameter.
+                origin.is_reported_by_its_input = symbol.arguments |> any(a => !a.is_settled)
+
+                Semantic.OBLIGATIONS.defer(Semantic.OBLIGATIONS.INFERRED_RETURN, Semantic.Types.INFERRED_VARIABLE_TYPE(origin), function.name?.location)
+            elif read_early /\ (!started_settled \/ !arrived.matches(started_at!) \/ !started_at!.matches(arrived)) then
+                Semantic.OBLIGATIONS.defer(Semantic.OBLIGATIONS.INFERRED_RETURN, Semantic.Types.INFERRED_VARIABLE_TYPE(origin), function.name?.location)
+            fi
+        si
+
+        // The type of the value a member's body ended on this walk, when the
+        // body ends on one.
+        _walked_tail_type(member: UNIT_MEMBER) -> Type? =>
+            if let block: Trees.Bodies.BLOCK = member.function.body then
+                if member.tail_demand then block.statements.last?.value?.type else null fi
+            elif let expression: Trees.Bodies.EXPRESSION = member.function.body then
+                expression.expression.value?.type
+            else
+                null
+            fi
+
+        // Once the unit's walks have stopped, a parameter or return nothing
+        // settled stands as an error type: the fixing step has reported it.
+        _settle_inferred_signature(member: UNIT_MEMBER) is
+            let symbol = member.symbol
+
+            if !symbol.is_inferred_signature then
+                return
+            fi
+
+            let types = Collections.LIST[Type]()
+
+            for t in symbol.arguments do
+                types.add(if t.is_settled then t else Semantic.Types.ERROR() fi)
+            od
+
+            symbol.arguments = types
+
+            for i in 0..symbol.argument_names.count do
+                if let argument: Semantic.Symbols.LOCAL_ARGUMENT = symbol.find_direct(symbol.argument_names[i]) then
+                    if !argument.type? \/ !argument.type.is_settled then
+                        argument.set_type(Semantic.Types.ERROR())
+                    fi
+                fi
+            od
+
+            if !symbol.return_type? \/ !symbol.return_type.is_settled then
+                symbol.set_return_type(Semantic.Types.ERROR())
+            fi
+
+            if let machine = Semantic.Symbols.state_machine_for(symbol) /\ machine.frame? then
+                machine.frame!.declare()
+            fi
+        si
+
         visit_function_definition(function: Trees.Definitions.FUNCTION) is
             KILL_LEDGER.current_function = function
             KILL_LEDGER.current_file = function.location.file_name
@@ -85,93 +470,11 @@ namespace Syntax.Process is
             function.arguments.walk(_visitor)
 
             if function.body? then
-                // Implicit tail return: a body's final statement is a
-                // tail candidate, terminated or not - the tail is judged
-                // by its type, never by its terminator. Under a declared
-                // non-void return type - generators exempted - the body
-                // list is compiled as value-demanding but void-tolerant,
-                // so a tail assignable to the return type flows to the
-                // function's return while a void one stays the statement
-                // it is. Void-returning bodies tolerate any tail and are
-                // left untouched here.
                 let body_block = cast Trees.Bodies.BLOCK?(function.body)
                 let function_symbol = _symbol_table.current_function
 
-                let tail_demand mut = false
+                let tail_demand = _set_up_tail(function, function_symbol)
 
-                // `try` has no expression form yet, labelled loops are
-                // statement-only, and a trailing `return`/`throw` already
-                // diverges on its own - none of them can stand as a value
-                // tail.
-                if let bb = body_block, fs = function_symbol, rt = fs.return_type then
-                    // A body lowered through an async state machine and
-                    // returning a result-less task-like completes via its
-                    // builder at fall-through: no tail can deliver
-                    // anything the return wants, so no demand is set and
-                    // the tail stays the statement it is.
-                    let machine_completed =
-                        Semantic.Symbols.async_state_machine_for(fs)? /\
-                        _returns_result_less_task_like(fs)
-
-                    let tail = bb.statements.last
-
-                    if
-                        !machine_completed /\
-                        !rt.is_sentinel /\
-                        !rt.is_inferred /\
-                        !Semantic.Symbols.state_machine_for(fs)? /\
-                        !rt.matches(_innate_symbol_lookup.get_void_type())
-                    then
-                        // A machine-less return of a result-less task
-                        // return type completes at fall-through: the body
-                        // is marked a function tail whatever shape its
-                        // tail is, so the statement-list visitor appends
-                        // the completing return when the tail delivers
-                        // nothing - a value tail may still deliver a
-                        // handle to return directly, and an empty body, a
-                        // `try` or a labelled loop complete like any other
-                        // fall-through. A `return` tail settles itself and
-                        // a `throw` tail diverges, so neither wants the
-                        // append.
-                        let completes_at_fall_through =
-                            _task_conversion.completes_without_machine(rt)
-
-                        let tail_settles_itself =
-                            if let t = tail then
-                                isa Trees.Statements.RETURN(t) \/ isa Trees.Statements.THROW(t)
-                            else
-                                false
-                            fi
-
-                        if completes_at_fall_through /\ !tail_settles_itself then
-                            bb.statements.function_tail = true
-                        fi
-
-                        let tail_is_value =
-                            if let t = tail then
-                                t.provides_value /\
-                                !isa Trees.Statements.TRY(t) /\
-                                !isa Trees.Statements.LABELLED(t) /\
-                                !isa Trees.Statements.THROW(t) /\
-                                !isa Trees.Statements.RETURN(t)
-                            else
-                                false
-                            fi
-
-                        if tail_is_value then
-                            bb.statements.function_tail = true
-                            bb.statements.compile_expressions_state.want_value = true
-                            bb.statements.compile_expressions_state.void_tolerated = true
-
-                            bb.statements.set_expected_type(
-                                rt,
-                                "cannot return value of type {{0}} where {{1}} expected"
-                            )
-
-                            tail_demand = true
-                        fi
-                    fi
-                fi
                 _type_arg_placeholder_registry.begin_body()
                 Semantic.OBLIGATIONS.begin_body()
                 if let compiler: COMPILE_EXPRESSIONS = _visitor then
@@ -330,37 +633,7 @@ namespace Syntax.Process is
                 // a value assignable to the declared return type consumes
                 // the obligation, and an incompatible non-void value is
                 // an error at the tail with no warning doubled on top.
-                let is_generator = Semantic.Symbols.state_machine_for(function_symbol)?
-
-                // A demanded tail is judged during the walk, by the
-                // function-tail branch of the statement-list visitor,
-                // which records whether the tail delivered. A void or
-                // valueless tail delivers nothing and is compiled as the
-                // statement it is - so a demand left standing undelivered
-                // is exactly the fall-through case, and the
-                // definite-return warning judges it.
-                let tail_delivered =
-                    tail_demand /\
-                    body_block? /\
-                    body_block.statements.compile_expressions_state.function_tail_delivered
-
-                if
-                    !tail_delivered /\
-                    !_build_flags.no_warn_definite_return /\
-                    !is_generator /\
-                    function.body!.is_block /\
-                    !_flow.is_unreachable /\
-                    function_symbol? /\
-                    function_symbol.return_type? /\
-                    !function_symbol.return_type.is_sentinel /\
-                    !function_symbol.return_type.is_inferred /\
-                    !function_symbol.return_type.matches(_innate_symbol_lookup.get_void_type()) /\
-                    !_completes_at_fall_through(function_symbol) /\
-                    !(function_symbol.is_top_level_entry /\ _build_flags.is_session_step)
-                then
-                    let header = function.location.start_position :: function.type_expression.location
-                    _logger.warn(header, "definite-return", "function may not return a value on all paths")
-                fi
+                _check_definite_return(function, function_symbol, body_block, tail_demand, !_flow.is_unreachable)
 
                 _record_field_assignment_summary(function, function_symbol)
 
@@ -369,6 +642,171 @@ namespace Syntax.Process is
             fi
 
             KILL_LEDGER.current_function = null
+        si
+
+        // Sets up a function body's implicit tail return before a walk, and
+        // says whether the tail is demanded as the function's value.
+        _set_up_tail(function: Trees.Definitions.FUNCTION, function_symbol: Semantic.Symbols.Function?) -> bool is
+            // Implicit tail return: a body's final statement is a
+            // tail candidate, terminated or not - the tail is judged
+            // by its type, never by its terminator. Under a declared
+            // non-void return type - generators exempted - the body
+            // list is compiled as value-demanding but void-tolerant,
+            // so a tail assignable to the return type flows to the
+            // function's return while a void one stays the statement
+            // it is. Void-returning bodies tolerate any tail and are
+            // left untouched here.
+            let body_block = cast Trees.Bodies.BLOCK?(function.body)
+
+            let tail_demand mut = false
+
+            // `try` has no expression form yet, labelled loops are
+            // statement-only, and a trailing `return`/`throw` already
+            // diverges on its own - none of them can stand as a value
+            // tail.
+            if let bb = body_block, fs = function_symbol, rt = fs.return_type then
+                // A body lowered through an async state machine and
+                // returning a result-less task-like completes via its
+                // builder at fall-through: no tail can deliver
+                // anything the return wants, so no demand is set and
+                // the tail stays the statement it is.
+                let machine_completed =
+                    Semantic.Symbols.async_state_machine_for(fs)? /\
+                    _returns_result_less_task_like(fs)
+
+                let tail = bb.statements.last
+
+                if
+                    !machine_completed /\
+                    !rt.is_sentinel /\
+                    !rt.is_inferred /\
+                    !Semantic.Symbols.state_machine_for(fs)? /\
+                    !rt.matches(_innate_symbol_lookup.get_void_type())
+                then
+                    // A machine-less return of a result-less task
+                    // return type completes at fall-through: the body
+                    // is marked a function tail whatever shape its
+                    // tail is, so the statement-list visitor appends
+                    // the completing return when the tail delivers
+                    // nothing - a value tail may still deliver a
+                    // handle to return directly, and an empty body, a
+                    // `try` or a labelled loop complete like any other
+                    // fall-through. A `return` tail settles itself and
+                    // a `throw` tail diverges, so neither wants the
+                    // append.
+                    let completes_at_fall_through =
+                        _task_conversion.completes_without_machine(rt)
+
+                    let tail_settles_itself =
+                        if let t = tail then
+                            isa Trees.Statements.RETURN(t) \/ isa Trees.Statements.THROW(t)
+                        else
+                            false
+                        fi
+
+                    if completes_at_fall_through /\ !tail_settles_itself then
+                        bb.statements.function_tail = true
+                    fi
+
+                    let tail_is_value =
+                        if let t = tail then
+                            t.provides_value /\
+                            !isa Trees.Statements.TRY(t) /\
+                            !isa Trees.Statements.LABELLED(t) /\
+                            !isa Trees.Statements.THROW(t) /\
+                            !isa Trees.Statements.RETURN(t)
+                        else
+                            false
+                        fi
+
+                    if tail_is_value then
+                        bb.statements.function_tail = true
+                        bb.statements.compile_expressions_state.want_value = true
+                        bb.statements.compile_expressions_state.void_tolerated = true
+
+                        bb.statements.set_expected_type(
+                            rt,
+                            "cannot return value of type {{0}} where {{1}} expected"
+                        )
+
+                        tail_demand = true
+                    fi
+                fi
+            fi
+
+            // A function whose signature is inferred takes its return from
+            // its tail as a literal whose return is inferred does: the tail
+            // is demanded with nothing to judge it against, and settles the
+            // return from its own type.
+            if
+                let bb = body_block, fs = function_symbol, rt = fs.return_type /\
+                fs.is_inferred_signature /\
+                rt.is_inferred
+            then
+                bb.statements.function_tail = false
+                bb.statements.compile_expressions_state.want_value = false
+                bb.statements.compile_expressions_state.void_tolerated = false
+
+                if
+                    let t = bb.statements.last /\
+                    t.provides_value /\
+                    !isa Trees.Statements.TRY(t) /\
+                    !isa Trees.Statements.LABELLED(t) /\
+                    !isa Trees.Statements.THROW(t) /\
+                    !isa Trees.Statements.RETURN(t) /\
+                    !Semantic.Symbols.state_machine_for(fs)?
+                then
+                    bb.statements.function_tail = true
+                    bb.statements.compile_expressions_state.want_value = true
+                    bb.statements.compile_expressions_state.void_tolerated = true
+
+                    tail_demand = true
+                fi
+            fi
+
+            return tail_demand
+        si
+
+        // Warns where control can reach the end of a non-void, block-bodied
+        // function without a value having been returned.
+        _check_definite_return(
+            function: Trees.Definitions.FUNCTION,
+            function_symbol: Semantic.Symbols.Function?,
+            body_block: Trees.Bodies.BLOCK?,
+            tail_demand: bool,
+            falls_off_end: bool
+        ) is
+            let is_generator = Semantic.Symbols.state_machine_for(function_symbol)?
+
+            // A demanded tail is judged during the walk, by the
+            // function-tail branch of the statement-list visitor,
+            // which records whether the tail delivered. A void or
+            // valueless tail delivers nothing and is compiled as the
+            // statement it is - so a demand left standing undelivered
+            // is exactly the fall-through case, and the
+            // definite-return warning judges it.
+            let tail_delivered =
+                tail_demand /\
+                body_block? /\
+                body_block.statements.compile_expressions_state.function_tail_delivered
+
+            if
+                !tail_delivered /\
+                !_build_flags.no_warn_definite_return /\
+                !is_generator /\
+                function.body!.is_block /\
+                falls_off_end /\
+                function_symbol? /\
+                function_symbol.return_type? /\
+                !function_symbol.return_type.is_sentinel /\
+                !function_symbol.return_type.is_inferred /\
+                !function_symbol.return_type.matches(_innate_symbol_lookup.get_void_type()) /\
+                !_completes_at_fall_through(function_symbol) /\
+                !(function_symbol.is_top_level_entry /\ _build_flags.is_session_step)
+            then
+                let header = function.location.start_position :: function.type_expression.location
+                _logger.warn(header, "definite-return", "function may not return a value on all paths")
+            fi
         si
 
         // Called once every method has been walked - see
