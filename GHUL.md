@@ -2014,17 +2014,6 @@ Only `inspect` quotes a string or character, and only inside another value. A st
 
 A sequence is written up to 100 elements, followed by `, ...]`. So an unbounded pipe can be written. Stopping at 100 elements has no effect on the next read of the value. A value that contains itself is written `<cycle>` where it recurs. The same value in two places is written in full both times.
 
-`$$` writes a value and a line break to standard output, doing what `IO.Std.write_line` does. Like `$` it needs no `use`, and it answers `unit`, so it can stand wherever a value is expected, including as the body of a lambda passed to `each`:
-
-```ghul
-$$ "ready"                 // the prefix form
-$$(42)                     // the call form
-42 |> $$                   // the pipe form
-[1, 2, 3] |> each(x => $$ x)
-```
-
-The prefix form's operand is the next expression only, so a computed argument is parenthesised: `$$ (rows |> map(f) |> join(""))`. As a function value it is passed with a placeholder, `each($$ *)` or ``each(`$$(*))``; the bare `` `$$ `` names no function.
-
 *More detail on this section: [language details](docs/details.md#displaying-values).*
 
 ## generics
