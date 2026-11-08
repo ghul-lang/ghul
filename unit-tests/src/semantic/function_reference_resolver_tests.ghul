@@ -989,5 +989,76 @@ namespace Semantic.UnitTests is
             is_true(result?, "expected a poison value, not null")
             is_true(logger.error_count > 0, "expected a diagnostic")
         si
+
+        // A function with an inferred signature whose parameters are still
+        // placeholders, and whose return is `Int`.
+        _inferred_function(parameter_names: LIST[string], lookup: Lookups.InnateSymbolLookup) -> (function: Semantic.Symbols.GLOBAL_FUNCTION, parameters: LIST[Semantic.Symbols.Variable]) is
+            let function = Semantic.Symbols.GLOBAL_FUNCTION(loc(), loc(), Semantic.BLOCK_SCOPE(), "measure", Semantic.BLOCK_SCOPE())
+            function.is_inferred_signature = true
+            function.argument_names = parameter_names
+            function.return_type = lookup.get_int_type()
+
+            let parameters = LIST[Semantic.Symbols.Variable]()
+            let types = LIST[Type]()
+
+            for name in parameter_names do
+                let parameter = cast Semantic.Symbols.Variable(function.declare_variable(loc(), name, false, null))
+                parameters.add(parameter)
+                types.add(Semantic.Types.INFERRED_VARIABLE_TYPE(parameter))
+            od
+
+            function.arguments = types
+
+            return (function, parameters)
+        si
+
+        _phantom(name: string) -> Semantic.Symbols.Variable =>
+            Semantic.Symbols.INFERRED_TYPE_ARG_ORIGIN(loc(), Semantic.BLOCK_SCOPE(), name)
+
+        // Passed where a `(String) -> R` is expected, the function is typed
+        // as if called with a `String`, and its `Int` return bounds `R`.
+        @Test()
+        Calling__offer_slot_to_inferred_signature__with_a_matching_shape__bounds_parameters_and_the_slot_return() is
+            let (resolver, _, lookup) = build_resolver()
+            let f = _inferred_function(LIST[string](["text"]), lookup)
+            let slot_return = _phantom("R")
+
+            let shape = lookup.get_function_type(LIST[Type]([lookup.get_string_type(), Semantic.Types.INFERRED_VARIABLE_TYPE(slot_return)]))
+
+            resolver._offer_slot_to_inferred_signature(f.function, shape)
+
+            are_same(lookup.get_string_type(), f.parameters[0].try_get_inferred_type())
+            are_same(lookup.get_int_type(), slot_return.try_get_inferred_type())
+        si
+
+        // A slot taking another number of parameters says nothing about
+        // this function's.
+        @Test()
+        Calling__offer_slot_to_inferred_signature__with_another_parameter_count__bounds_nothing() is
+            let (resolver, _, lookup) = build_resolver()
+            let f = _inferred_function(LIST[string](["a", "b"]), lookup)
+            let slot_return = _phantom("R")
+
+            let shape = lookup.get_function_type(LIST[Type]([lookup.get_string_type(), Semantic.Types.INFERRED_VARIABLE_TYPE(slot_return)]))
+
+            resolver._offer_slot_to_inferred_signature(f.function, shape)
+
+            is_null(f.parameters[0].try_get_inferred_type())
+            is_null(f.parameters[1].try_get_inferred_type())
+            is_null(slot_return.try_get_inferred_type())
+        si
+
+        // A slot that is not a function type, or no slot at all, bounds
+        // nothing.
+        @Test()
+        Calling__offer_slot_to_inferred_signature__with_no_function_slot__bounds_nothing() is
+            let (resolver, _, lookup) = build_resolver()
+            let f = _inferred_function(LIST[string](["text"]), lookup)
+
+            resolver._offer_slot_to_inferred_signature(f.function, lookup.get_string_type())
+            resolver._offer_slot_to_inferred_signature(f.function, null)
+
+            is_null(f.parameters[0].try_get_inferred_type())
+        si
     si
 si

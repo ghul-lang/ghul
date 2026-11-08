@@ -200,7 +200,7 @@ namespace Syntax.Process is
                         if let (at, name) = latest_read(function) /\ at >= index then
                             _logger.error(
                                 statement.location,
-                                "{function.name!.name} is used before the top-level `let` it reads, {name}, is declared")
+                                "{function.name!.name} is used before the top-level let it reads, {name}, is declared")
 
                             return
                         fi
@@ -336,19 +336,45 @@ namespace Syntax.Process is
             let result = Collections.LIST[Definitions.FUNCTION]()
             let placed = Collections.SET[Definitions.FUNCTION]()
 
+            // A function written with its types that reads a top-level
+            // `let` goes after the entry, whose walk types the `let`: what
+            // it returns doesn't depend on where it is walked, so nothing
+            // is gained by walking it before the entry, and its reads would
+            // see the `let` untyped.
+            let after_entry = Collections.SET[Definitions.FUNCTION]()
+
+            for function in functions do
+                if
+                    !function.is_inferred_signature /\
+                    !function.is_top_level_entry /\
+                    let_names |> any(name => scanner.body_references(function.body, name))
+                then
+                    after_entry.add(function)
+                fi
+            od
+
             place(function: Definitions.FUNCTION) is
                 if !placed.add(function) then
                     return
                 fi
 
                 for other in functions do
-                    if other != function /\ other.name? /\ !other.is_top_level_entry /\ scanner.body_references(function.body, other.name.name) then
+                    if
+                        other != function /\ other.name? /\ !other.is_top_level_entry /\ !after_entry.contains(other) /\
+                        scanner.body_references(function.body, other.name.name)
+                    then
                         place(other)
                     fi
                 od
 
                 result.add(function)
             si
+
+            for function in functions do
+                if !after_entry.contains(function) then
+                    place(function)
+                fi
+            od
 
             for function in functions do
                 place(function)
