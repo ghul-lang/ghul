@@ -193,7 +193,9 @@ namespace Syntax.Process is
             fi
 
             let iterator_type =
-                if let read_iterator = fusion.source_read_iterator then
+                if let reversed_fn = fusion.reversed_iterator_function then
+                    reversed_fn.return_type!
+                elif let read_iterator = fusion.source_read_iterator then
                     read_iterator.return_type!
                 else
                     fusion.source.value!.type!
@@ -402,6 +404,10 @@ namespace Syntax.Process is
                 return false
             fi
 
+            if !_resolve_reversed_source(fusion) then
+                return false
+            fi
+
             let to_inline = Collections.LIST[PIPE_FUSION_STAGE]()
 
             for stage in fusion.stages_outermost_first do
@@ -461,6 +467,67 @@ namespace Syntax.Process is
             for stage in to_inline do
                 _try_inline_stage(stage)
             od
+
+            return true
+        si
+
+        // Where the chain's innermost stage is `reverse`, resolve the
+        // `Ghul.Internal.REVERSE_ITERATORS.reverse_iterator` overload the source's static type
+        // proves indexable - a list shape (`T[]`, `LIST[T]`, `ARRAY[T]`,
+        // a slice: anything assignable to `List[T]`) or an `INT_RANGE` /
+        // `INT_RANGE_INCLUSIVE` - and rebind the plan's move_next /
+        // read_current to that iterator's. Overload resolution is the
+        // shape check: a source typed only `Iterable[T]` matches no
+        // overload and the chain does not fuse, however list-backed it is
+        // at run time; the unfused `reverse` still avoids collecting it
+        // then. Sets `_chain_resolve_reason` and returns false on decline.
+        _resolve_reversed_source(fusion: PIPE_FUSION) -> bool is
+            if !fusion.reversed_source then
+                return true
+            fi
+
+            let group = _innate_symbol_lookup.get_reverse_iterator_functions()
+
+            if !group? then
+                _chain_resolve_reason = "reverse-iterator-unresolved"
+
+                return false
+            fi
+
+            let types = Collections.LIST[Type]([fusion.source.value!.type!])
+
+            let use logger_snapshot = _logger.speculate_then_backtrack()
+
+            let resolved = _overload_resolver.resolve(fusion.source.location, group, types, false, false, false)
+
+            logger_snapshot.backtrack()
+
+            if !resolved? then
+                _chain_resolve_reason = "reverse-iterator-unresolved"
+
+                return false
+            fi
+
+            fusion.reversed_iterator_function = resolved.function
+
+            let iterator_type = resolved.function.return_type!
+
+            let move_next = get_zero_argument_function(iterator_type, "move_next")
+
+            let read_current mut = get_zero_argument_function(iterator_type, "$get_current")
+
+            if !read_current? then
+                read_current = get_zero_argument_function(iterator_type, "$get_Current")
+            fi
+
+            if !move_next? \/ !read_current? then
+                _chain_resolve_reason = "reverse-iterator-unresolved"
+
+                return false
+            fi
+
+            fusion.source_move_next = move_next
+            fusion.source_read_current = read_current
 
             return true
         si
@@ -560,14 +627,18 @@ namespace Syntax.Process is
             let source_read_iterator = plan.source_read_iterator
 
             let iterator_type =
-                if source_read_iterator? then
+                if let reversed_fn = plan.reversed_iterator_function then
+                    reversed_fn.return_type!
+                elif source_read_iterator? then
                     source_read_iterator.return_type!
                 else
                     plan.source.value!.type!
                 fi
 
             let iterator_init =
-                if source_read_iterator? then
+                if let reversed_fn = plan.reversed_iterator_function then
+                    reversed_fn.call(plan.source.location, null, Collections.LIST[IR.Values.Value]([plan.source.value!]), null, _function_caller)
+                elif source_read_iterator? then
                     source_read_iterator.call(plan.source.location, plan.source.value!, Collections.LIST[IR.Values.Value](0), null, _function_caller)
                 else
                     plan.source.value!
@@ -590,7 +661,7 @@ namespace Syntax.Process is
             let fused = IR.Values.FUSED_CONSUMER(
                 call.value!.type!,
                 iterator_init,
-                source_read_iterator?,
+                source_read_iterator? \/ plan.reversed_iterator_function?,
                 iterator,
                 move_next,
                 read_current,
@@ -907,7 +978,7 @@ namespace Syntax.Process is
                 fi
             fi
 
-            _note_fused_iteration(fused, plan.source.value!)
+            _note_fused_iteration(fused, plan.source.value!, plan.reversed_iterator_function?)
 
             if consumer_kind =~ "collect" \/ consumer_kind =~ "collect_array" then
                 _try_presize(fused, plan, call, consumer_kind, built.final.type)
@@ -933,9 +1004,12 @@ namespace Syntax.Process is
         // Say what the fused loop's iterator local iterates and the calls
         // it makes on it, so a target that can walk the source's storage
         // directly does so rather than making the iterator. Nothing where
-        // the source is itself an iterator.
-        _note_fused_iteration(fused: IR.Values.FUSED_CONSUMER, receiver: IR.Values.Value) is
-            if !fused.has_iterator then
+        // the source is itself an iterator, and nothing for a reversed
+        // source.
+        _note_fused_iteration(fused: IR.Values.FUSED_CONSUMER, receiver: IR.Values.Value, reversed: bool) is
+            // A reversed source's iterator walks the receiver backwards,
+            // which the hint cannot say, so it is never noted there.
+            if !fused.has_iterator \/ reversed then
                 return
             fi
 
@@ -982,13 +1056,15 @@ namespace Syntax.Process is
             fused.source_init = source_value
 
             fused.iterator_init =
-                if let read_iterator = plan.source_read_iterator then
+                if let reversed_fn = plan.reversed_iterator_function then
+                    reversed_fn.call(plan.source.location, null, Collections.LIST[IR.Values.Value]([source_load]), null, _function_caller)
+                elif let read_iterator = plan.source_read_iterator then
                     read_iterator.call(plan.source.location, source_load, Collections.LIST[IR.Values.Value](0), null, _function_caller)
                 else
                     source_load
                 fi
 
-            _note_fused_iteration(fused, source_load)
+            _note_fused_iteration(fused, source_load, plan.reversed_iterator_function?)
 
             if consumer_kind =~ "collect_array" then
                 fused.presize_array = true

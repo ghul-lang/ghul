@@ -23,6 +23,11 @@ namespace Syntax.Process is
     // then never constructed; wherever the chain does not fuse, the memo
     // is built and behaves exactly as written.
     //
+    // A `reverse` is peeled as a NOOP stage too, but it is not
+    // transparent: the peel loop reads the `reverse` role the classifier
+    // sets and turns the chain's source backwards instead of adding a
+    // stage. See `_classify_free_function_stage`.
+    //
     // For a map/filter stage whose `argument` is an inlinable literal
     // lambda, compile-expressions fills `param_local` (a synthetic
     // enclosing-method local the loop assigns the incoming element to) and
@@ -150,6 +155,16 @@ namespace Syntax.Process is
         source_read_iterator: Semantic.Symbols.Function? public
         source_move_next: Semantic.Symbols.Function? public
         source_read_current: Semantic.Symbols.Function? public
+
+        // Whether the chain's innermost stage is `reverse`: the loop
+        // reads the source backwards through `reversed_iterator_function`
+        // (a `Ghul.Internal.REVERSE_ITERATORS.reverse_iterator` overload) instead of forwards
+        // through source_read_iterator. Filled by compile-expressions
+        // after recognition; null where the source's static type does
+        // not prove it indexable or a range, in which case the chain
+        // does not fuse at all.
+        reversed_source: bool public
+        reversed_iterator_function: Semantic.Symbols.Function? public
     si
 
     // Decides whether a `for x in <chain>` loop's expression is a
@@ -236,6 +251,18 @@ namespace Syntax.Process is
             let current mut = expression
             let calls mut = 0
 
+            // `reverse` is not a stage: it reads the whole source before
+            // emitting anything, which a per-element stage cannot do. An
+            // innermost `reverse` is a source change instead - the loop
+            // reads the source backwards - so it is peeled into
+            // `reversed` and never added to `stages`. A `reverse` with a
+            // stage between it and the source would need a fill/drain
+            // loop the fuser has no shape for, and declines the chain.
+            // Two adjacent `reverse`s cancel.
+            let reversed mut = false
+            let reverse_seen mut = false
+            let stages_at_reverse mut = 0
+
             while isa Trees.Expressions.CALL(current) do
                 let call = cast Trees.Expressions.CALL(current)
 
@@ -248,14 +275,42 @@ namespace Syntax.Process is
                 calls = calls + 1
                 roles.add(_last_role ?? "?")
 
+                // A `reverse` the classifier peeled as a no-op (it is not
+                // a stage) updates the reversed-source bookkeeping rather
+                // than the stage list.
+                if _last_role =~ "reverse" then
+                    if reverse_seen then
+                        // A stage peeled since the last `reverse` sits
+                        // between the two, so they do not cancel.
+                        if stages.count != stages_at_reverse then
+                            decline_reason = "reverse-mid-chain"
+
+                            return null
+                        fi
+
+                        reversed = false
+                        reverse_seen = false
+                    else
+                        reversed = true
+                        reverse_seen = true
+                        stages_at_reverse = stages.count
+                    fi
                 // A memo stage is elided rather than fused: the chain
                 // fuses as though it were absent (see PIPE_FUSION_STAGE).
-                if !stage.is_noop then
+                elif !stage.is_noop then
                     stages.add(stage)
                 fi
 
                 current = call.arguments.expressions[0]
             od
+
+            // A stage peeled after the `reverse` sits between it and the
+            // source, which is the mid-chain case above.
+            if reversed /\ (stages.count != stages_at_reverse) then
+                decline_reason = "reverse-mid-chain"
+
+                return null
+            fi
 
             // An expression that peeled no stage is still a chain of no
             // stages, which a consumer fuses over directly: the loop reads
@@ -292,8 +347,13 @@ namespace Syntax.Process is
                 return null
             fi
 
-            return PIPE_FUSION(source, stages)
+            let fusion = PIPE_FUSION(source, stages)
+
+            fusion.reversed_source = reversed
+
+            return fusion
         si
+
 
         // Classify `call` as a fusible `Ghul.Pipes` free-function stage -
         // map, filter, take, skip or index, or a `memo` stage that is
@@ -349,6 +409,18 @@ namespace Syntax.Process is
 
 
                 return null
+            fi
+
+            // `reverse` is peeled as a no-op like `memo`, but unlike
+            // `memo` it is not transparent: the peel loop reads the
+            // `reverse` role it sets and turns the chain's source
+            // backwards. It takes no function argument.
+            if role =~ "reverse" then
+                if arguments.count != 1 then
+                    return null
+                fi
+
+                return PIPE_FUSION_STAGE()
             fi
 
             if arguments.count != 2 then
