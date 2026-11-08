@@ -141,7 +141,7 @@ use MaybeName = string?;
 use Numbers = Collections.LIST[int];
 ```
 
-`use default` imports a fixed set of names that most files want. By default the set is `IO.Std.write_line`, `Ghul.parse`, `Ghul.Pipes`, `Collections`, `Ghul.Math`, `Ghul.NumberTheory` and `Ghul.Functional`. A name in the default set that the runtime doesn't define is skipped. The set is a fallback: a name that an explicit `use` in the same block imports, before or after the `use default`, means what that import says, and the default set's import of it is not a duplicate. A function the default set imports is another overload of its name, unless an explicit import or the program's own declaration takes the same parameters, which wins. In every other way `use default` is an ordinary `use`: it applies to the namespace block that contains it. Unless the project asks for an implicit import with `--implicit-default-use`, a file that does not write `use default` gets none of these names.
+`use default` imports a fixed set of names that most files want. By default the set is `IO.Std.write_line`, `Ghul.parse`, `Ghul.Pipes`, `Collections`, `Ghul.Math`, `Ghul.NumberTheory` and `Ghul.Functional`. A project replaces the set with `--default-use`, one name per comma-separated entry; an entry may be `alias=name`, importing the name under a different name, as `dbl=double` imports `double` as `dbl`. The alias stands in the same default tier as a plain name, so an explicit `use` of the alias wins the same way. A name in the default set that the runtime doesn't define is skipped. The set is a fallback: a name that an explicit `use` in the same block imports, before or after the `use default`, means what that import says, and the default set's import of it is not a duplicate. A function the default set imports is another overload of its name, unless an explicit import or the program's own declaration takes the same parameters, which wins. In every other way `use default` is an ordinary `use`: it applies to the namespace block that contains it. Unless the project asks for an implicit import with `--implicit-default-use`, a file that does not write `use default` gets none of these names.
 
 ```ghul
 use default
@@ -2013,6 +2013,17 @@ Only `inspect` quotes a string or character, and only inside another value. A st
 7. A value of a type from another language, with no `to_string` of its own, is written as its .NET type name. Its members are not read, because a property getter can do anything. For example, reading a task's result waits for the task.
 
 A sequence is written up to 100 elements, followed by `, ...]`. So an unbounded pipe can be written. Stopping at 100 elements has no effect on the next read of the value. A value that contains itself is written `<cycle>` where it recurs. The same value in two places is written in full both times.
+
+`$$` writes a value and a line break to standard output, doing what `IO.Std.write_line` does. Like `$` it needs no `use`, and it answers `unit`, so it can stand wherever a value is expected, including as the body of a lambda passed to `each`:
+
+```ghul
+$$ "ready"                 // the prefix form
+$$(42)                     // the call form
+42 |> $$                   // the pipe form
+[1, 2, 3] |> each(x => $$ x)
+```
+
+The prefix form's operand is the next expression only, so a computed argument is parenthesised: `$$ (rows |> map(f) |> join(""))`. As a function value it is passed with a placeholder, `each($$ *)` or ``each(`$$(*))``; the bare `` `$$ `` names no function.
 
 *More detail on this section: [language details](docs/details.md#displaying-values).*
 
