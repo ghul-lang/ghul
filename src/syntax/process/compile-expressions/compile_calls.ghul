@@ -1391,6 +1391,42 @@ namespace Syntax.Process is
             return Semantic.Types.INFERRED_VARIABLE_TYPE(origin)
         si
 
+        // A generic callee whose return still carries its own type
+        // parameter, because the argument that would have bound it failed
+        // to compile. That argument has been reported where it was
+        // written, and it matched the parameter without saying what it
+        // is: the bare parameter would otherwise become the type of
+        // whatever the call is written in, and be taken there for a type.
+        // An argument waiting for the callee to give it a type has not
+        // failed.
+        _is_unbound_by_a_failed_argument(
+            function: Semantic.Symbols.Function,
+            slots: ARGUMENT_SLOTS
+        ) -> bool is
+            let caller = _symbol_table.current_function
+
+            if
+                !caller? \/
+                !function.is_generic \/
+                !function.return_type? \/
+                !function.return_type.has_function_generic_argument_foreign_to(caller)
+            then
+                return false
+            fi
+
+            for index in 0..slots.count do
+                if
+                    let expression = slots.expression(index) /\
+                    (expression.value?.type?.is_error ?? false) /\
+                    !expression.awaits_context_type
+                then
+                    return true
+                fi
+            od
+
+            return false
+        si
+
         // The value of a construction of a generic class `Foo(...)` that
         // could not be resolved. While an argument is still being inferred
         // it is a named unknown that waits on that argument: the class's
@@ -3228,6 +3264,11 @@ namespace Syntax.Process is
 
                     if let waiting = _awaited_by_unbound_return(call, function, argument_types) then
                         call.compile_expressions_state.value = DUMMY(waiting, call.location)
+                        return
+                    fi
+
+                    if _is_unbound_by_a_failed_argument(function, slots) then
+                        call.compile_expressions_state.value = DUMMY(Semantic.Types.ERROR(), call.location)
                         return
                     fi
 
