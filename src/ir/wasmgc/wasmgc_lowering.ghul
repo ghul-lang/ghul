@@ -474,6 +474,12 @@ namespace IR.WasmGC is
 
                 return _held_type(box.value)
             elif let load: Values.Load.TEMP = value then
+                if _cell_index(load.local)? then
+                    return _value_type(load.local.type)
+                elif let held = _reference_cell_of(load.local) then
+                    return held
+                fi
+
                 return _local_type(_local(load.local))
             elif let local: WASMGC_LOCAL_VALUE = value then
                 return _local_type(local.index)
@@ -502,7 +508,14 @@ namespace IR.WasmGC is
                 return _local_type(0)
             elif let load: Values.Load.INSTANCE_FIELD = value then
                 if let owner = _owner_class(load.symbol.owner) then
-                    return _registry.field_of(load.symbol, owner)?.value_type
+                    if let `field = _registry.field_of(load.symbol, owner) then
+                        // A field held in a cell is read out of it, as its value.
+                        if let (_, _, held) = _registry.field_cell_of(`field.type_index, `field.field_index) then
+                            return held ?? _value_type(load.type)
+                        fi
+
+                        return `field.value_type
+                    fi
                 fi
             elif let load: Values.Load.STATIC_FIELD = value then
                 return _global_of(load.symbol)?.type
@@ -945,6 +958,18 @@ namespace IR.WasmGC is
                 fi
 
                 _emit(TYPE_FIELD_INSTRUCTION(Opcode.STRUCT_GET, `field.type_index, `field.field_index))
+
+                if let (cell_type, value_field, held) = _registry.field_cell_of(`field.type_index, `field.field_index) then
+                    if held? then
+                        _emit(HEAP_TYPE_INSTRUCTION(Opcode.REF_CAST_NULL, HEAP_TYPE.of_type_index(cell_type)))
+                    fi
+
+                    _emit(TYPE_FIELD_INSTRUCTION(Opcode.STRUCT_GET, cell_type, value_field))
+
+                    if let h = held then
+                        _emit(HEAP_TYPE_INSTRUCTION(Opcode.REF_CAST_NULL, h.heap_type()!))
+                    fi
+                fi
             fi
         si
 
@@ -989,15 +1014,62 @@ namespace IR.WasmGC is
         visit(load: Values.Load.INSTANCE_ANONYMOUS_FUNCTION) is _report("a function value") si
 
         visit(load: Values.Load.TEMP) is
-            _emit(INDEX_INSTRUCTION(Opcode.LOCAL_GET, _local(load.local)))
+            _local_get(load.local)
             _copy_if_mutable(load.type)
         si
 
+        // The address of a scalar or reference-typed temporary is the cell
+        // it lives in, as for a local variable: a deconstruct writes its
+        // results through references to temporaries.
         visit_address(load: Values.Load.TEMP) is
             if _struct_of(load.type)? then
                 _emit(INDEX_INSTRUCTION(Opcode.LOCAL_GET, _local(load.local)))
+            elif _has_cell(load.type) then
+                _registry.mark_cell(load.local)
+                _emit(INDEX_INSTRUCTION(Opcode.LOCAL_GET, _local(load.local)))
             else
                 _report("the address of a local")
+            fi
+        si
+
+        // Reads `local`, through the cell it lives in where its address is
+        // taken.
+        _local_get(local: LOCAL) is
+            _emit(INDEX_INSTRUCTION(Opcode.LOCAL_GET, _local(local)))
+
+            if let cell = _cell_index(local) then
+                _emit(TYPE_FIELD_INSTRUCTION(Opcode.STRUCT_GET, cell, WASMGC_TYPE_REGISTRY.BOX_VALUE))
+            elif let held = _reference_cell_of(local) then
+                _reference_cell_get(held)
+            fi
+        si
+
+        // Writes the value on the stack to `local`, through the cell it
+        // lives in where its address is taken.
+        _local_set(local: LOCAL) is
+            if let cell = _cell_index(local) then
+                _normalise_for(local.type)
+                _cell_set(local, cell, WASMGC_TYPE_REGISTRY.BOX_VALUE)
+            elif _reference_cell_of(local)? then
+                _cell_set(local, _registry.reference_cell_type_index, WASMGC_TYPE_REGISTRY.REFERENCE_CELL_VALUE)
+            else
+                _normalise_for(local.type)
+                _emit(INDEX_INSTRUCTION(Opcode.LOCAL_SET, _local(local)))
+            fi
+        si
+
+        // Stores the value on the stack in the field `value_field` of the
+        // cell `local` holds, a struct of type `cell_type`.
+        _cell_set(local: LOCAL, cell_type: int, value_field: int) is
+            if let value_type = _value_type(local.type) then
+                let stashed = _temp(value_type)
+
+                _emit(INDEX_INSTRUCTION(Opcode.LOCAL_SET, stashed))
+                _emit(INDEX_INSTRUCTION(Opcode.LOCAL_GET, _local(local)))
+                _emit(INDEX_INSTRUCTION(Opcode.LOCAL_GET, stashed))
+                _emit(TYPE_FIELD_INSTRUCTION(Opcode.STRUCT_SET, cell_type, value_field))
+            else
+                _report("a store to a local of type {local.type}")
             fi
         si
         visit(load: Values.Load.STATIC_FIELD) is
@@ -1005,10 +1077,20 @@ namespace IR.WasmGC is
             _copy_if_mutable(load.type)
         si
 
+        // Reads a static field or namespace-level variable, through the
+        // cell its global holds where its address is taken.
         _global_get(symbol: Semantic.Symbols.Symbol) is
             if let (index, _) = _global_of(symbol) then
                 _ensure_initialised(symbol.owner)
                 _emit(INDEX_INSTRUCTION(Opcode.GLOBAL_GET, index))
+
+                if let (cell_type, value_field, held) = _registry.global_cell_of(index) then
+                    _emit(TYPE_FIELD_INSTRUCTION(Opcode.STRUCT_GET, cell_type, value_field))
+
+                    if let h = held then
+                        _emit(HEAP_TYPE_INSTRUCTION(Opcode.REF_CAST_NULL, h.heap_type()!))
+                    fi
+                fi
             else
                 _report("a static field of {symbol.owner}")
             fi
@@ -1017,6 +1099,19 @@ namespace IR.WasmGC is
         _global_set(symbol: Semantic.Symbols.Symbol, value: Value) is
             if let (index, _) = _global_of(symbol) then
                 _ensure_initialised(symbol.owner)
+
+                if let (cell_type, value_field, held) = _registry.global_cell_of(index) then
+                    _emit(INDEX_INSTRUCTION(Opcode.GLOBAL_GET, index))
+                    gen(value)
+
+                    if !held? then
+                        _normalise_for(cast Semantic.Types.Typed?(symbol)?.type)
+                    fi
+
+                    _emit(TYPE_FIELD_INSTRUCTION(Opcode.STRUCT_SET, cell_type, value_field))
+                    return
+                fi
+
                 gen(value)
 
                 _normalise_for(cast Semantic.Types.Typed?(symbol)?.type)
@@ -1025,11 +1120,36 @@ namespace IR.WasmGC is
                 _report("a static field of {symbol.owner}")
             fi
         si
+
+        // The address of a static field or namespace-level variable of a
+        // scalar or reference type is the cell its global holds.
+        _global_address(load: Value, symbol: Semantic.Symbols.Symbol, construct: string) is
+            if _registry.discovering then
+                if _has_cell(load.type) then
+                    _registry.mark_cell_field(symbol)
+
+                    if !_registry.box_index(_specialize(load.type))? then
+                        let _ = _registry.reference_cell_type_index
+                    fi
+                else
+                    _report(construct)
+                fi
+
+                return
+            fi
+
+            if let (index, _) = _global_of(symbol) /\ _registry.global_cell_of(index)? then
+                _ensure_initialised(symbol.owner)
+                _emit(INDEX_INSTRUCTION(Opcode.GLOBAL_GET, index))
+            else
+                _report(construct)
+            fi
+        si
         visit_address(load: Values.Load.STATIC_FIELD) is
             if _struct_of(load.type)? then
                 _global_get(load.symbol)
             else
-                _report("the address of a static field")
+                _global_address(load, load.symbol, "the address of a static field")
             fi
         si
         visit(load: Values.Load.GLOBAL_FIELD) is
@@ -1040,7 +1160,7 @@ namespace IR.WasmGC is
             if _struct_of(load.type)? then
                 _global_get(load.symbol)
             else
-                _report("the address of a global variable")
+                _global_address(load, load.symbol, "the address of a global variable")
             fi
         si
 
@@ -1079,6 +1199,38 @@ namespace IR.WasmGC is
         _frame_field_store(`field: Semantic.Symbols.Field, value: Value) -> Value =>
             Values.Store.INSTANCE_FIELD(Values.Load.REFERENCE_SELF(cast Semantic.Symbols.Classy(`field.owner)), `field, value)
 
+        // The address of a generator or asynchronous function's scalar or
+        // reference-typed local is the cell the frame's field for it holds.
+        _frame_field_address(`field: Semantic.Symbols.Field, type: Type?) is
+            if _registry.discovering then
+                if _has_cell(type) then
+                    _registry.mark_cell_field(`field)
+
+                    if !_registry.box_index(_specialize(type))? then
+                        let _ = _registry.reference_cell_type_index
+                    fi
+                else
+                    _report("a generator or asynchronous function's local")
+                fi
+
+                return
+            fi
+
+            let frame = Values.Load.REFERENCE_SELF(cast Semantic.Symbols.Classy(`field.owner))
+
+            if let wasm_field = _instance_field(frame, `field), (cell_type, _, held) = _registry.field_cell_of(wasm_field.type_index, wasm_field.field_index) then
+                _reading_receiver(frame)
+                _coerce_top(VALUE_TYPE.of_type_index(wasm_field.type_index, true))
+                _emit(TYPE_FIELD_INSTRUCTION(Opcode.STRUCT_GET, wasm_field.type_index, wasm_field.field_index))
+
+                if held? then
+                    _emit(HEAP_TYPE_INSTRUCTION(Opcode.REF_CAST_NULL, HEAP_TYPE.of_type_index(cell_type)))
+                fi
+            else
+                _report("a generator or asynchronous function's local")
+            fi
+        si
+
         visit(load: Values.Load.LOCAL_VARIABLE) is
             _variable_get(load)
             _copy_if_mutable(load.type)
@@ -1116,8 +1268,8 @@ namespace IR.WasmGC is
                         _emit(INDEX_INSTRUCTION(Opcode.LOCAL_TEE, _local(variable.ir_local)))
                     fi
                 fi
-            elif Values.state_machine_field_for(load.symbol)? then
-                _report("a generator or asynchronous function's local")
+            elif let state_machine_field = Values.state_machine_field_for(load.symbol) then
+                _frame_field_address(state_machine_field, load.type)
             elif let variable = cast Semantic.Symbols.Variable?(load.symbol) /\ _has_cell(load.type) then
                 _registry.mark_cell(variable.ir_local)
                 _emit(INDEX_INSTRUCTION(Opcode.LOCAL_GET, _local(variable.ir_local)))
@@ -2646,15 +2798,19 @@ namespace IR.WasmGC is
         si
 
         visit(store: Values.STORE_TEMP) is
-            _normalise_for(store.local.type)
-            _emit(INDEX_INSTRUCTION(Opcode.LOCAL_SET, _local(store.local)))
+            _local_set(store.local)
         si
 
         visit(tee: Values.TEE_TEMP) is
             gen(tee.value)
 
-            _normalise_for(tee.local.type)
-            _emit(INDEX_INSTRUCTION(Opcode.LOCAL_TEE, _local(tee.local)))
+            if _cell_index(tee.local)? \/ _reference_cell_of(tee.local)? then
+                _local_set(tee.local)
+                _local_get(tee.local)
+            else
+                _normalise_for(tee.local.type)
+                _emit(INDEX_INSTRUCTION(Opcode.LOCAL_TEE, _local(tee.local)))
+            fi
         si
 
         visit(discard: Values.DISCARD) is
@@ -2727,9 +2883,17 @@ namespace IR.WasmGC is
         // reads it,
         // which for a mutable struct is a copy.
         visit(deref: Values.DEREF) is
-            if _struct_of(deref.type)? then
+            if let held = _struct_of(deref.type) then
                 gen(deref.value)
-                _copy_if_mutable(deref.type)
+
+                // A read-only struct's box is otherwise shared rather than
+                // copied, but a write through the reference changes the box
+                // the reference is, so what was read from it is copied out.
+                if _registry.is_read_only(held) /\ !_registry.discovering then
+                    _copy_struct(held)
+                else
+                    _copy_if_mutable(deref.type)
+                fi
             elif let cell = _registry.box_index(_specialize(deref.type)) then
                 gen(deref.value)
                 _emit(TYPE_FIELD_INSTRUCTION(Opcode.STRUCT_GET, cell, WASMGC_TYPE_REGISTRY.BOX_VALUE))
@@ -5414,6 +5578,29 @@ namespace IR.WasmGC is
 
                 if checked then
                     _emit(INDEX_INSTRUCTION(Opcode.LOCAL_TEE, receiver))
+                fi
+
+                // A field whose address is taken is written through the cell
+                // it holds, which stays in place.
+                if let (cell_type, value_field, held) = _registry.field_cell_of(`field.type_index, `field.field_index) then
+                    if checked then
+                        _throw_if_null(receiver)
+                    fi
+
+                    _emit(TYPE_FIELD_INSTRUCTION(Opcode.STRUCT_GET, `field.type_index, `field.field_index))
+
+                    if held? then
+                        _emit(HEAP_TYPE_INSTRUCTION(Opcode.REF_CAST_NULL, HEAP_TYPE.of_type_index(cell_type)))
+                    fi
+
+                    gen(store.value)
+
+                    if !held? then
+                        _normalise_for(store.type)
+                    fi
+
+                    _emit(TYPE_FIELD_INSTRUCTION(Opcode.STRUCT_SET, cell_type, value_field))
+                    return
                 fi
 
                 gen(store.value)

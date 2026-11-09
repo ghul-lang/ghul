@@ -174,6 +174,9 @@ namespace IR.WasmGC is
         // Whether each struct is read-only, inferred once.
         _read_only: MAP[CLASS_INSTANCE, bool]
         _cells: Collections.SET[IR.LOCAL]
+        _cell_fields: Collections.SET[Symbol]
+        _cell_globals: MAP[int, (cell_type: int, value_field: int, held: VALUE_TYPE?)]
+        _cell_slots: MAP[(type_index: int, position: int), (cell_type: int, value_field: int, held: VALUE_TYPE?, box: CLASS_INSTANCE?)]
         _descriptor_globals: MAP[CLASS_INSTANCE, int]
         _unit_variant_globals: MAP[CLASS_INSTANCE, int]
         _shared_defaults: MAP[CLASS_INSTANCE, int]
@@ -296,6 +299,9 @@ namespace IR.WasmGC is
             _descriptor_only_set = Collections.SET[CLASS_INSTANCE]()
             _boxes_made = Collections.SET[CLASS_INSTANCE]()
             _cells = Collections.SET[IR.LOCAL]()
+            _cell_fields = Collections.SET[Symbol]()
+            _cell_globals = MAP[int, (cell_type: int, value_field: int, held: VALUE_TYPE?)]()
+            _cell_slots = MAP[(type_index: int, position: int), (cell_type: int, value_field: int, held: VALUE_TYPE?, box: CLASS_INSTANCE?)]()
             _static_constructors = MAP[CLASS_INSTANCE, (constructor: FUNCTION_INSTANCE, initialised: int)]()
 
             _array_storages = Collections.SET[int]()
@@ -1346,7 +1352,16 @@ namespace IR.WasmGC is
             let parent = _class_set.superclass_of(type) ?? _object!
             let layout_types = LIST[Type?]()
 
+            let type_index = _type_indices[type]
+            let parent_index = _type_indices[parent]
+
             for inherited in _layouts[parent] do
+                let cell: (cell_type: int, value_field: int, held: VALUE_TYPE?, box: CLASS_INSTANCE?) mut
+
+                if _cell_slots.try_get_value((parent_index, layout.count), cell ref) then
+                    _cell_slots[(type_index, layout.count)] = cell
+                fi
+
                 layout.add(inherited)
             od
 
@@ -1358,8 +1373,24 @@ namespace IR.WasmGC is
                 if `field.is_instance then
                     _field_positions[`field] = layout.count
 
-                    layout.add(_field_value_type(`field, type))
-                    layout_types.add(type.specialize(`field.type))
+                    let field_type = type.specialize(`field.type)
+
+                    // The reference cell type is numbered after the classes, so
+                    // a field holding one is declared as a struct reference
+                    // and cast to the cell where it is read.
+                    if let cell = if _cell_fields.contains(`field) then _field_cell_for(field_type) else null fi then
+                        _cell_slots[(type_index, layout.count)] = cell
+
+                        if let box = cell.box then
+                            layout.add(VALUE_TYPE.of_type_index(_type_indices[box], true))
+                        else
+                            layout.add(VALUE_TYPE.of_abstract(AbstractHeapType.STRUCT))
+                        fi
+                    else
+                        layout.add(_field_value_type(`field, type))
+                    fi
+
+                    layout_types.add(field_type)
                 fi
             od
 
@@ -1466,9 +1497,63 @@ namespace IR.WasmGC is
 
                 let value_type = _field_value_type(`field, type)
 
-                _statics[(`field, type)] =
-                    (_module.add_global(GLOBAL(value_type, true, [default_value(value_type)])), value_type)
+                _statics[(`field, type)] = (_add_field_global(`field, type.specialize(`field.type), value_type), value_type)
             od
+        si
+
+        // The global holding a static field or namespace-level variable of
+        // ghūl type `type`, held as `value_type`: the value itself, starting
+        // at its default, or, where the field's address is taken, a cell
+        // the global holds for the program's whole life.
+        _add_field_global(`field: Field, type: Type?, value_type: VALUE_TYPE) -> int is
+            if let cell = if _cell_fields.contains(`field) then _cell_for(type) else null fi then
+                let index = _module.add_global(GLOBAL(VALUE_TYPE.of_type_index(cell.cell_type, false), false, _new_cell(cell)))
+
+                _cell_globals[index] = (cell.cell_type, cell.value_field, cell.held)
+
+                return index
+            fi
+
+            return _module.add_global(GLOBAL(value_type, true, [default_value(value_type)]))
+        si
+
+        // The cell a value of `type` whose address is taken lives in: a
+        // box for a scalar, a reference cell for a value of reference type,
+        // with the field of it that holds the value and, for a reference
+        // cell, the type the value is held as. Null where `type` has none.
+        _cell_for(type: Type?) -> (cell_type: int, value_field: int, held: VALUE_TYPE?, box: CLASS_INSTANCE?)? is
+            if let box = box_type(type) then
+                return (_type_indices[box], BOX_VALUE, null, box)
+            elif let held = reference_cell_value_type(type) then
+                return (reference_cell_type_index, REFERENCE_CELL_VALUE, held, null)
+            fi
+
+            return null
+        si
+
+        // The cell a field of `type` whose address is taken holds, as
+        // `_cell_for`, but numbered once the reference cell type is.
+        _field_cell_for(type: Type?) -> (cell_type: int, value_field: int, held: VALUE_TYPE?, box: CLASS_INSTANCE?)? is
+            if let box = box_type(type) then
+                return (_type_indices[box], BOX_VALUE, null, box)
+            elif let held = reference_cell_value_type(type) then
+                return (-1, REFERENCE_CELL_VALUE, held, null)
+            fi
+
+            return null
+        si
+
+        // The constant expression that builds a new, empty `cell`.
+        _new_cell(cell: (cell_type: int, value_field: int, held: VALUE_TYPE?, box: CLASS_INSTANCE?)) -> LIST[INSTRUCTION] is
+            if let box = cell.box then
+                return new_instance(box)
+            fi
+
+            return
+                LIST[INSTRUCTION]([
+                    HEAP_TYPE_INSTRUCTION(Opcode.REF_NULL, HEAP_TYPE.of_abstract(AbstractHeapType.NONE)),
+                    TYPE_INSTRUCTION(Opcode.STRUCT_NEW, reference_cell_type_index)
+                ])
         si
 
         // Namespace-level variables are globals, each starting at its
@@ -1486,8 +1571,7 @@ namespace IR.WasmGC is
 
                         let value_type = _field_value_type(`field, null)
 
-                        _namespace_globals[`field] =
-                            (_module.add_global(GLOBAL(value_type, true, [default_value(value_type)])), value_type)
+                        _namespace_globals[`field] = (_add_field_global(`field, `field.type, value_type), value_type)
                     od
                 elif let declared = type.declared /\ !_class_set.is_object_type(declared) then
                     for method in SRM_MEMBER_ORDER.methods(type) do
@@ -1546,10 +1630,17 @@ namespace IR.WasmGC is
             let layout = _layouts[type]
             let layout_types = _layout_types_of(type)
 
+            let type_index = _type_indices[type]
+
             for i in 1..layout.count do
-                // A struct-typed field holds a box from the start, so it is
+                let cell: (cell_type: int, value_field: int, held: VALUE_TYPE?, box: CLASS_INSTANCE?) mut
+
+                // A field whose address is taken holds its cell from the
+                // start, as a struct-typed field holds its box, so it is
                 // never null where a value of its type is expected.
-                if let held = if i < layout_types.count then struct_of(layout_types[i]) else null fi then
+                if _cell_slots.try_get_value((type_index, i), cell ref) then
+                    result.add_range(_new_cell(cell))
+                elif let held = if i < layout_types.count then struct_of(layout_types[i]) else null fi then
                     result.add_range(new_instance(held))
                 else
                     result.add(default_value(layout[i]))
@@ -1923,6 +2014,54 @@ namespace IR.WasmGC is
         /// - local: the local whose address is taken
         mark_cell(local: IR.LOCAL) is
             _cells.add(local)
+        si
+
+        /// Records that the static field or namespace-level variable
+        /// `field` has its address taken, so its global holds a cell.
+        ///
+        /// - field: the field whose address is taken
+        mark_cell_field(`field: Symbol) is
+            _cell_fields.add(`field.root_specialized_from)
+        si
+
+        /// The cell the global `index` holds, where its field's address is
+        /// taken: the cell's struct type, the field of it holding the
+        /// value, and, for a reference cell, the type the value is held
+        /// as. Null where the global holds its value directly.
+        ///
+        /// - index: the global to ask about
+        global_cell_of(index: int) -> (cell_type: int, value_field: int, held: VALUE_TYPE?)? is
+            let result: (cell_type: int, value_field: int, held: VALUE_TYPE?) mut
+
+            if !discovering /\ _cell_globals.try_get_value(index, result ref) then
+                return result
+            fi
+
+            return null
+        si
+
+        /// The cell the field at `position` of the struct type
+        /// `type_index` holds, where its address is taken: the cell's
+        /// struct type, the field of it holding the value, and, for a
+        /// reference cell, the type the value is held as. A reference
+        /// cell's field is declared as a struct reference, so what it
+        /// holds is cast to the cell type before use. Null where the field
+        /// holds its value directly.
+        ///
+        /// - type_index: the struct type the field belongs to
+        /// - position: the field's position in the struct
+        field_cell_of(type_index: int, position: int) -> (cell_type: int, value_field: int, held: VALUE_TYPE?)? is
+            let result: (cell_type: int, value_field: int, held: VALUE_TYPE?, box: CLASS_INSTANCE?) mut
+
+            if !discovering /\ _cell_slots.try_get_value((type_index, position), result ref) then
+                if result.box? then
+                    return (result.cell_type, result.value_field, null)
+                fi
+
+                return (reference_cell_type_index, result.value_field, result.held)
+            fi
+
+            return null
         si
 
         /// Whether `local` lives in a cell.
