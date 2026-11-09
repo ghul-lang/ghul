@@ -63,6 +63,10 @@ namespace Syntax.Process is
                 return
             fi
 
+            if _check_unsupported_member(expression, value) then
+                return
+            fi
+
             // A call that left a type parameter open makes the value's
             // own type carry it too, so the call is judged first and
             // what it reports stands for both.
@@ -112,6 +116,42 @@ namespace Syntax.Process is
             od
 
             false
+        si
+
+        // A reflected member whose signature has a .NET multidimensional
+        // array can't be used from ghūl: the value would be emitted against
+        // a signature the member doesn't have, and fail when it runs.
+        _check_unsupported_member(node: Node, value: IR.Values.Value) -> bool is
+            let symbol: Semantic.Symbols.Symbol? =
+                if let global_call: IR.Values.Call.GLOBAL = value then
+                    global_call.function
+                elif let static_call: IR.Values.Call.STATIC = value then
+                    static_call.function
+                elif let instance_call: IR.Values.Call.INSTANCE = value then
+                    instance_call.function
+                elif let struct_call: IR.Values.Call.STRUCT = value then
+                    struct_call.function
+                elif let load: IR.Values.Load.SYMBOL = value then
+                    load.symbol
+                elif let closure: IR.Values.MAKE_CLOSURE = value then
+                    closure.function
+                elif let construction: IR.Values.NEW = value then
+                    construction.constructor
+                else
+                    null
+                fi
+
+            let unsupported = symbol?.unsupported_dotnet_type
+
+            if !unsupported? then
+                return false
+            fi
+
+            _violations = _violations + 1
+
+            _logger.error(node.location, "{symbol!.name} can't be used from ghūl: its signature has the .NET multidimensional array {unsupported}")
+
+            return true
         si
 
         _report_uninferred_type_argument(node: Node, argument: Semantic.Types.Type, called: Semantic.Symbols.Function) is

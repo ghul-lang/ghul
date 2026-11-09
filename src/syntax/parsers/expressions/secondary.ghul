@@ -492,11 +492,25 @@ namespace Syntax.Parsers.Expressions is
                         if type_arguments? /\ !type_arguments.is_poisoned /\ context.next_token(Lexical.TOKEN.SQUARE_CLOSE) then
                             let index_expression: Trees.Expressions.Expression? mut = _
 
-                            if type_arguments.count == 1 then
-                                let index = type_arguments.elements[0].try_copy_as_value_expression()
-                                if index? then
-                                    index_expression = Trees.Expressions.INDEX(start::context.location, result, index)
+                            // `x[a]` and `x[a, b]` read as a type application
+                            // as well as an index when each argument does,
+                            // and the walk that resolves `x` decides which.
+                            // With several arguments, only names are read
+                            // both ways: a tuple, function or generic type
+                            // among them, `M[(int, int), V]`, says this is a
+                            // type application.
+                            let indexes = Collections.LIST[Trees.Expressions.Expression]()
+
+                            for element in type_arguments.elements do
+                                if type_arguments.count == 1 \/ isa Trees.TypeExpressions.NAMED(element) then
+                                    if let index = element.try_copy_as_value_expression() then
+                                        indexes.add(index)
+                                    fi
                                 fi
+                            od
+
+                            if indexes.count == type_arguments.count then
+                                index_expression = Trees.Expressions.INDEX(start::context.location, result, indexes)
                             fi
 
                             done = true
@@ -530,9 +544,17 @@ namespace Syntax.Parsers.Expressions is
                     fi
 
                     if !done then
-                        let index = expression_parser.parse(context)!
+                        let indexes = Collections.LIST[Trees.Expressions.Expression]()
 
-                        result = Trees.Expressions.INDEX(start::context.location, result, index)
+                        indexes.add(expression_parser.parse(context)!)
+
+                        while context.current.token == Lexical.TOKEN.COMMA do
+                            context.next_token()
+
+                            indexes.add(expression_parser.parse(context)!)
+                        od
+
+                        result = Trees.Expressions.INDEX(start::context.location, result, indexes)
 
                         context.next_token(Lexical.TOKEN.SQUARE_CLOSE, syntax_error_message)
                     fi

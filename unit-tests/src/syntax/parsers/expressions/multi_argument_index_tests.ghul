@@ -1,0 +1,81 @@
+namespace Syntax.Parsers.Expressions.UnitTests is
+    use Syntax.Parsers.CONTEXT
+
+    use Syntax.Trees.Expressions.AMBIGUOUS_EXPRESSION
+    use Syntax.Trees.Expressions.GENERIC_APPLICATION
+    use Syntax.Trees.Expressions.INDEX
+
+    use TestClass = Microsoft.VisualStudio.TestTools.UnitTesting.TestClassAttribute
+    use Test = Microsoft.VisualStudio.TestTools.UnitTesting.TestMethodAttribute
+    use Assertions
+
+    // Pins how bracketed arguments after a name parse. Arguments that all
+    // read as both types and values are left for the walk that resolves the
+    // name to decide; with several arguments, only names are read both
+    // ways, so a tuple, function or generic type among them makes a type
+    // application.
+    @TestClass()
+    class MULTI_ARGUMENT_INDEX_TESTS is
+        init() is si
+
+        context_over(source: string) -> CONTEXT is
+            let logger = Logging.DIAGNOSTICS_STORE()
+
+            return CONTEXT(
+                Lexical.TOKEN_LOOKAHEAD(
+                    Lexical.TOKEN_QUEUE(64),
+                    Lexical.TOKENIZER(logger, "test.ghul", IO.StringReader(source), false)),
+                logger)
+        si
+
+        parse_expression(source: string) -> Syntax.Trees.Expressions.Expression? is
+            let context = context_over(source)
+
+            return IoC.CONTAINER.instance.expression_parser.parse(context)
+        si
+
+        @Test()
+        Names_in_brackets_after_a_name_read_both_ways() is
+            let result = parse_expression("grid[row, column]\n")
+
+            is_true(isa AMBIGUOUS_EXPRESSION(result), "expected an ambiguous expression, got {result}")
+
+            let index = cast INDEX((cast AMBIGUOUS_EXPRESSION(result)).index)
+
+            are_equal(2, index.indexes.count)
+        si
+
+        @Test()
+        Values_in_brackets_are_an_index() is
+            let result = parse_expression("grid[1, 2]\n")
+
+            is_true(isa INDEX(result), "expected an index, got {result}")
+            are_equal(2, (cast INDEX(result)).indexes.count)
+        si
+
+        @Test()
+        A_tuple_type_among_several_arguments_is_a_type_application() is
+            let result = parse_expression("COMBINATORS[(int, int), int]\n")
+
+            is_true(isa GENERIC_APPLICATION(result), "expected a type application, got {result}")
+        si
+
+        @Test()
+        One_name_in_brackets_still_reads_both_ways() is
+            let result = parse_expression("values[index]\n")
+
+            is_true(isa AMBIGUOUS_EXPRESSION(result), "expected an ambiguous expression, got {result}")
+            are_equal(1, (cast INDEX((cast AMBIGUOUS_EXPRESSION(result)).index)).indexes.count)
+        si
+
+        @Test()
+        An_indexer_declares_each_of_its_arguments() is
+            let context = context_over("[row: int, column: int]: int => row * column;\n")
+
+            let indexer = IoC.CONTAINER.instance.definition_indexer_parser.parse(context)
+
+            is_true(indexer?, "expected an indexer")
+            are_equal(2, indexer.index_arguments.count)
+        si
+    si
+si
