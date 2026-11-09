@@ -1648,10 +1648,37 @@ namespace Syntax.Process is
             let candidate =
                 _try_find_single_arity_candidate(function_group, argument_types.count, want_instance) ??
                 _async_literal_candidates.find(function_group, argument_expressions, want_instance)
-            let effective_candidate =
+            let earlier_candidate =
                 candidate ??
-                _delegate_push_candidates.find_single_pushable_candidate(function_group, argument_types, want_instance) ??
-                _pack_push_candidates.find_single(function_group, want_instance, f => _has_pack_mismatch_argument(f, argument_types, argument_expressions))
+                _delegate_push_candidates.find_single_pushable_candidate(function_group, argument_types, want_instance)
+
+            let pack_push =
+                if !earlier_candidate? then
+                    _pack_push_candidates.find(function_group, want_instance, f => _has_pack_mismatch_argument(f, argument_types, argument_expressions))
+                else
+                    null
+                fi
+
+            // A reference to an overloaded function or to a type picks its
+            // member by the parameters of the function the slot expects, so
+            // overloads that agree on those can push them although they
+            // differ in what the function returns.
+            let agreeing_push =
+                if !earlier_candidate? /\ !pack_push? /\ COMPILE_CALLS.has_unresolved_group_argument(argument_expressions) then
+                    _pack_push_candidates.find(function_group, want_instance, f => f.arguments.count == argument_types.count)
+                else
+                    null
+                fi
+
+            let push = pack_push ?? agreeing_push
+
+            let effective_candidate = earlier_candidate ?? push?.function
+
+            // Where the overloads the push agrees on differ in what a
+            // function formal returns, that argument is given the formal's
+            // parameters alone, so it is typed or picked by them, and what
+            // it then returns chooses between the overloads.
+            let open_results = if let p = push then p.open_results else Collections.SET[int]() fi
 
             // Trigger the retry when at least one actual
             // is a FUNCTION literal even if its first-walk
@@ -1724,7 +1751,12 @@ namespace Syntax.Process is
                 // replaced in place below, and the list being walked is
                 // the call's own.
                 for index in 0..slots.count do
-                    let f = push_candidate!.arguments[index]
+                    let f =
+                        if open_results.contains(index) then
+                            _parameters_only(push_candidate!.arguments[index])
+                        else
+                            push_candidate!.arguments[index]
+                        fi
 
                     if slots.is_spread(index) then
                         _fill_spread_slot(slots, index, f, arguments, argument_types)
@@ -2207,6 +2239,21 @@ namespace Syntax.Process is
 
         // Whether this argument is a literal written with the pack spread
         // out that is compiled taking the pack's tuple directly.
+        // A function type with `formal`'s parameters and an error type in
+        // place of its result, which pushes nothing onto the body of a
+        // literal typed against it.
+        _parameters_only(formal: Semantic.Types.Type) -> Semantic.Types.Type is
+            let types = Collections.LIST[Semantic.Types.Type]()
+
+            for p in 0..formal.arguments.count - 1 do
+                types.add(formal.arguments[p])
+            od
+
+            types.add(Semantic.Types.ERROR())
+
+            return _innate_symbol_lookup.get_function_type(types, formal.is_pure_function)
+        si
+
         _is_packable_literal(
             candidate: Semantic.Symbols.Function,
             index: int,

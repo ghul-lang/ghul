@@ -1,9 +1,10 @@
 namespace Semantic is
     // Chooses whose formals to push onto the arguments of a call whose
     // first resolve failed, when more than one overload takes the call's
-    // number of arguments and so none is the lone candidate. Whether an
-    // overload's argument-pack adaptation applies to the call depends on
-    // the argument expressions, so the caller answers that.
+    // number of arguments and so none is the lone candidate. Which
+    // overloads are in question - those an argument-pack adaptation applies
+    // to, or every one taking the call's arguments - depends on the
+    // argument expressions, so the caller answers that.
     //
     // The push only re-types the arguments; overload resolution then runs
     // over the whole group again. So the overloads the adaptation applies
@@ -21,7 +22,22 @@ namespace Semantic is
             want_instance: bool,
             adapts: Symbols.Function -> bool
         ) -> Symbols.Function? is
+            let found = find(group, want_instance, adapts)
+
+            return if found? /\ found.open_results.count == 0 then found.function else null fi
+        si
+
+        // As find_single, but accepted overloads whose formals differ only
+        // in what a function formal returns also agree: those positions are
+        // pushed as the parameters alone, with the result left to the
+        // argument, and resolution then chooses by what it returns.
+        find(
+            group: Symbols.FUNCTION_GROUP,
+            want_instance: bool,
+            adapts: Symbols.Function -> bool
+        ) -> PACK_PUSH? is
             let result: Symbols.Function? mut = null
+            let open_results = Collections.SET[int]()
 
             for f in group.functions do
                 if !want_instance /\ f.is_instance then
@@ -36,12 +52,32 @@ namespace Semantic is
                     if !result? then
                         result = f
                     elif !(f.override_class =~ result.override_class) then
-                        return null
+                        let differing = result.override_class.function_results_differing_from(f.override_class)
+
+                        if !differing? then
+                            return null
+                        fi
+
+                        for i in differing do
+                            open_results.add(i)
+                        od
                     fi
                 fi
             od
 
-            return result
+            if let r = result then
+                return PACK_PUSH(r, open_results)
+            fi
+
+            return null
         si
+    si
+
+    // The overload whose formals a pack retry pushes, and the positions at
+    // which only the parameters of its function formal are pushed.
+    class PACK_PUSH(
+        function: Symbols.Function public,
+        open_results: Collections.SET[int] public
+    ) is
     si
 si
