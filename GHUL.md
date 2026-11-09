@@ -1070,6 +1070,27 @@ class COUNTER is
 si
 ```
 
+An indexer is a property reached with `[` and `]`. It takes one or more arguments, declared between the brackets, and is read as `x[i]` or `x[i, j]` and assigned as `x[i, j] = v`. Overloads of an indexer are chosen over all its arguments:
+
+```ghul
+class GRID is
+    _cells: Collections.LIST[int];
+    _columns: int;
+
+    init(rows: int, columns: int) is
+        _columns = columns;
+        _cells = Collections.LIST[int]();
+
+        for i in 0..rows * columns do
+            _cells.add(0);
+        od
+    si
+
+    [row: int, column: int]: int => _cells[row * _columns + column],
+        = value is _cells[row * _columns + column] = value; si
+si
+```
+
 A method is a function declared in a class, struct or trait. A method has an implicit `self`. A constructor is a method named `init`. A method is public unless its name starts with `_`. A method whose name starts with `_` is non-public under the `--underscore-access` policy. By default, only the declaring class can see it. The compiler enforces this.
 
 ## operators
@@ -2156,7 +2177,7 @@ An **indexer** is the one member that code reaches only through its own syntax. 
 let initial = name[0];
 ```
 
-The accessors of an indexer are not members of their own, so naming one directly is an error.
+The accessors of an indexer are not members of their own, so naming one directly is an error. A .NET indexer that takes several arguments is reached the same way, as `board[1, 2]`. ghūl has no type yet for a .NET multidimensional array (`int[,]`), so a .NET member whose signature has one is reported where it is used.
 
 Code does not reach a **nested** .NET type through its enclosing type. The nested type is in the enclosing type's namespace, with a name that joins the type names with `_`. So `System.Environment.SpecialFolder` is written:
 
