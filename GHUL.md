@@ -2177,7 +2177,7 @@ An **indexer** is the one member that code reaches only through its own syntax. 
 let initial = name[0];
 ```
 
-The accessors of an indexer are not members of their own, so naming one directly is an error. A .NET indexer that takes several arguments is reached the same way, as `board[1, 2]`. ghūl has no type yet for a .NET multidimensional array (`int[,]`), so a .NET member whose signature has one is reported where it is used.
+The accessors of an indexer are not members of their own, so naming one directly is an error. A .NET indexer that takes several arguments is reached the same way, as `board[1, 2]`. A .NET member whose signature has a multidimensional array (`int[,]`) can't be used from ghūl, and a use of one is an error.
 
 Code does not reach a **nested** .NET type through its enclosing type. The nested type is in the enclosing type's namespace, with a name that joins the type names with `_`. So `System.Environment.SpecialFolder` is written:
 
