@@ -1,0 +1,382 @@
+namespace Semantic is
+    use Ghul.Pipes
+
+    use Collections.MAP
+
+    use Types.Type
+    use Symbols.Function
+    use Symbols.Symbol
+
+    // Ranks candidates that the actuals scored alike by what each
+    // candidate's formals accept. At one position a candidate is more
+    // specific than another when its formal accepts no more: its
+    // specialized formal is assignable to the other's, or, where the
+    // specialized formals are alike or unrelated, its declared formal
+    // is an instance of the other's - obtainable by substituting the
+    // other's type parameters, with `object` the most general type of
+    // all.
+    //
+    // A candidate at least as specific at every position and more
+    // specific at one dominates the other. Candidates that trade off
+    // against each other, more specific in one position and less in
+    // another, are incomparable, and neither dominates. Candidates
+    // whose formals accept exactly the same are ranked by whether
+    // they take type parameters of their own.
+    class FORMAL_SPECIFICITY is
+        // The candidates no other candidate dominates.
+        undominated(candidates: Function[], arguments: Type[]) -> Function[] static =>
+            candidates |>
+                filter(c => !(candidates |> any(o => o != c /\ compare(o, c, arguments) > 0))) |>
+                collect()
+
+        // Positive when `a` dominates `b`, negative when `b` dominates
+        // `a`, zero when neither does, for a call with no actuals to
+        // consult.
+        compare(a: Function, b: Function) -> int static =>
+            compare(a, b, null)
+
+        // Positive when `a` dominates `b` in a call with `arguments` as
+        // its actuals, negative when `b` dominates `a`, zero when
+        // neither does.
+        compare(a: Function, b: Function, arguments: Type[]?) -> int static is
+            let a_formals = a.arguments
+            let b_formals = b.arguments
+
+            if a_formals.count != b_formals.count \/ a_formals.count == 0 then
+                return 0
+            fi
+
+            let a_declared = a.unspecialized_arguments ?? a_formals
+            let b_declared = b.unspecialized_arguments ?? b_formals
+
+            if a_declared.count != a_formals.count \/ b_declared.count != b_formals.count then
+                return 0
+            fi
+
+            let saw_more mut = false
+            let saw_less mut = false
+            let alike = Collections.LIST[int]()
+            let unrelated mut = Collections.LIST[int]()
+
+            for i in 0..a_formals.count do
+                let ranked = compare_specialized(a_formals[i], b_formals[i])
+
+                if ranked == INCOMPARABLE then
+                    unrelated.add(i)
+                elif ranked > 0 then
+                    saw_more = true
+                elif ranked < 0 then
+                    saw_less = true
+                else
+                    alike.add(i)
+                fi
+            od
+
+            // Where the specialized formals are unrelated, a generic formal
+            // that binds the actual's type arguments as they are is more
+            // specific than a fixed formal the actual reaches only by
+            // converting its type arguments: `Iterable[T]` keeps a string
+            // list's elements typed, where `List[object]` erases them.
+            if arguments? /\ arguments.count == a_formals.count then
+                let still_unrelated = Collections.LIST[int]()
+
+                for i in unrelated do
+                    let a_keeps = keeps_type_arguments(a_declared[i], a_formals[i], b_declared[i], b_formals[i], arguments[i])
+                    let b_keeps = keeps_type_arguments(b_declared[i], b_formals[i], a_declared[i], a_formals[i], arguments[i])
+
+                    if a_keeps then
+                        saw_more = true
+                    elif b_keeps then
+                        saw_less = true
+                    else
+                        still_unrelated.add(i)
+                    fi
+                od
+
+                unrelated = still_unrelated
+            fi
+
+            // Otherwise unrelated specialized formals - an `ARRAY[char]?`
+            // and a `char{}`, say - are decided by the declarations alone,
+            // which have to agree on a direction.
+            if unrelated.count > 0 then
+                let a_is_instance = is_instance_at(a_declared, b_declared, unrelated)
+                let b_is_instance = is_instance_at(b_declared, a_declared, unrelated)
+
+                if a_is_instance /\ !b_is_instance then
+                    saw_more = true
+                elif b_is_instance /\ !a_is_instance then
+                    saw_less = true
+                else
+                    return 0
+                fi
+            fi
+
+            if alike.count > 0 then
+                let a_is_instance = is_instance_at(a_declared, b_declared, alike)
+                let b_is_instance = is_instance_at(b_declared, a_declared, alike)
+
+                if a_is_instance /\ !b_is_instance then
+                    saw_more = true
+                elif b_is_instance /\ !a_is_instance then
+                    saw_less = true
+                elif !a_is_instance /\ !b_is_instance then
+                    return 0
+                fi
+            fi
+
+            // Formals that accept exactly the same: one taking no type
+            // parameters of its own is more specific than one that does,
+            // so `int.parse(string)` beats `parse[T](string) -> T?`.
+            if !saw_more /\ !saw_less then
+                let a_is_generic = is_generic(a)
+                let b_is_generic = is_generic(b)
+
+                if b_is_generic /\ !a_is_generic then
+                    return 1
+                elif a_is_generic /\ !b_is_generic then
+                    return -1
+                fi
+
+                return 0
+            fi
+
+            if saw_more /\ !saw_less then
+                return 1
+            elif saw_less /\ !saw_more then
+                return -1
+            fi
+
+            return 0
+        si
+
+        INCOMPARABLE: int static => 2
+
+        // How two specialized formals rank: positive when `a` is the
+        // narrower, negative when `b` is, zero when they accept the same
+        // values or either is not yet settled enough to say, and
+        // INCOMPARABLE when neither is assignable to the other.
+        compare_specialized(a: Type, b: Type) -> int static is
+            @suppress("presence-test-non-optional")
+            if !a? \/ !b? then
+                return INCOMPARABLE
+            fi
+
+            let b_accepts_a = b.is_assignable_from(a)
+            let a_accepts_b = a.is_assignable_from(b)
+
+            if b_accepts_a /\ a_accepts_b then
+                return 0
+            elif b_accepts_a then
+                return 1
+            elif a_accepts_b then
+                return -1
+            elif a.is_wild \/ b.is_wild then
+                return 0
+            fi
+
+            return INCOMPARABLE
+        si
+
+        // Whether, at each of `positions`, `specific` is an instance of
+        // `general`, under one substitution for `general`'s type
+        // parameters across all of them. The type parameters in
+        // `specific` stay as they are: each matches only itself, or
+        // `object`.
+        is_instance_at(specific: Type[], general: Type[], positions: Collections.List[int]) -> bool static is
+            let substitution = MAP[Symbol,Type]()
+
+            for i in positions do
+                if is_unsettled(specific[i]) \/ is_unsettled(general[i]) then
+                    continue
+                fi
+
+                if !is_instance(specific[i], general[i], substitution) then
+                    return false
+                fi
+            od
+
+            return true
+        si
+
+        is_instance(specific: Type, general: Type, substitution: MAP[Symbol,Type]) -> bool static is
+            @suppress("presence-test-non-optional")
+            if !specific? \/ !general? then
+                return false
+            fi
+
+            if let parameter: Types.GenericArgument = general then
+                let candidate =
+                    if parameter.is_optional /\ specific.is_optional then
+                        specific.as_non_optional()
+                    else
+                        specific
+                    fi
+
+                let existing: Type mut
+
+                if substitution.try_get_value(parameter.symbol, existing ref) then
+                    return is_same(existing, candidate)
+                fi
+
+                substitution[parameter.symbol] = candidate
+
+                return true
+            fi
+
+            if general.is_object then
+                return true
+            fi
+
+            if isa Types.GenericArgument(specific) then
+                return false
+            fi
+
+            if let general_generic: Types.GENERIC = general then
+                if let specific_generic: Types.GENERIC = specific then
+                    let general_arguments = general_generic.arguments
+                    let specific_arguments = specific_generic.arguments
+
+                    if
+                        specific_generic.symbol.root_unspecialized_symbol == general_generic.symbol.root_unspecialized_symbol /\
+                        specific_arguments.count == general_arguments.count /\
+                        specific.is_optional == general.is_optional
+                    then
+                        for i in 0..general_arguments.count do
+                            if !is_instance(specific_arguments[i], general_arguments[i], substitution) then
+                                return false
+                            fi
+                        od
+
+                        return true
+                    fi
+                fi
+
+                if !general.is_wild then
+                    return general.is_assignable_from(specific)
+                fi
+
+                // An ancestor of `specific` may be the instance: `LIST[U]`
+                // is one of `Iterable[T]` through `Iterable[U]`.
+                for ancestor in ancestors_of(specific) do
+                    let attempt = MAP[Symbol,Type](substitution)
+
+                    if is_instance(ancestor, general, attempt) then
+                        for p in attempt do
+                            substitution[p.key] = p.value
+                        od
+
+                        return true
+                    fi
+                od
+
+                return false
+            fi
+
+            if specific.is_wild then
+                return false
+            fi
+
+            return general.is_assignable_from(specific)
+        si
+
+        // Whether a generic formal, declared as `declared` and
+        // specialized as `specialized`, takes `actual`'s type arguments as
+        // they are, where the other candidate's fixed formal, declared as
+        // `other_declared` and specialized as `other_specialized`, takes
+        // them only by converting one.
+        keeps_type_arguments(
+            declared: Type,
+            specialized: Type,
+            other_declared: Type,
+            other_specialized: Type,
+            actual: Type
+        ) -> bool static =>
+            declared.is_wild /\ !other_declared.is_wild /\
+            takes_type_arguments_as_they_are(specialized, actual) /\
+            !takes_type_arguments_as_they_are(other_specialized, actual)
+
+        // Whether `actual`, or the ancestor of it that instantiates the
+        // same type as `formal`, has the same type arguments as `formal`.
+        // An optional argument and its non-optional form count as the
+        // same: they are one type at run time. A formal with no type
+        // arguments takes none to convert.
+        takes_type_arguments_as_they_are(formal: Type, actual: Type) -> bool static is
+            @suppress("presence-test-non-optional")
+            if !formal? \/ !actual? \/ is_unsettled(actual) then
+                return false
+            fi
+
+            let formal_arguments = formal.arguments
+
+            if formal_arguments.count == 0 then
+                return true
+            fi
+
+            let instantiation = find_instantiation(actual.as_non_optional(), formal.symbol.root_unspecialized_symbol, 0)
+
+            if !instantiation? then
+                return false
+            fi
+
+            let actual_arguments = instantiation.arguments
+
+            if actual_arguments.count != formal_arguments.count then
+                return false
+            fi
+
+            for i in 0..formal_arguments.count do
+                if !is_same(formal_arguments[i].as_non_optional(), actual_arguments[i].as_non_optional()) then
+                    return false
+                fi
+            od
+
+            return true
+        si
+
+        // `type`, or the nearest of its ancestors, that instantiates
+        // `root`.
+        find_instantiation(type: Type, root: Symbol, depth: int) -> Type? static is
+            if type.symbol.root_unspecialized_symbol == root then
+                return type
+            fi
+
+            if depth > 32 then
+                return null
+            fi
+
+            for ancestor in ancestors_of(type) do
+                if let found = find_instantiation(ancestor, root, depth + 1) then
+                    return found
+                fi
+            od
+
+            return null
+        si
+
+        // The ancestors of `type`, instantiated as `type` instantiates
+        // them: `Iterable[string]` for `ARRAY[string]`, not `Iterable[T]`.
+        ancestors_of(type: Type) -> Type[] static is
+            let result = Collections.LIST[Type]()
+            let symbol = type.symbol
+
+            for i in 0..symbol.ancestors.count do
+                result.add(symbol.get_ancestor(i))
+            od
+
+            return result
+        si
+
+        // A formal whose type is still being inferred, or failed to be,
+        // says nothing about what the candidate accepts.
+        @suppress("presence-test-non-optional")
+        is_unsettled(formal: Type) -> bool static =>
+            !formal? \/ formal.is_sentinel \/ formal.is_error \/ formal.contains_inferred
+
+        is_generic(f: Function) -> bool static =>
+            f.specialized_from? \/ f.generic_arguments.count != 0
+
+        is_same(a: Type, b: Type) -> bool static =>
+            a.compare(b) == Types.MATCH.SAME /\ b.compare(a) == Types.MATCH.SAME
+    si
+si

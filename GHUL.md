@@ -522,7 +522,14 @@ gcd(a: int, b: int) -> int =>
     esac
 ```
 
-A function declared at namespace scope can be overloaded on its argument types. When a generic overload and a non-generic overload fit a call equally well, the compiler chooses the non-generic overload if each of its parameters is at least as specific as the generic overload's parameter, after the generic overload's type arguments are bound. For a `string[]` argument, `f(items: List[string])` is chosen over `f[T](items: Iterable[T])`, and `f[T](items: Iterable[T])` is chosen over `f(items: List[object])` or `f(items: object)`. ghūl has no default argument values.
+A function declared at namespace scope can be overloaded on its argument types. When several overloads fit a call equally well, the compiler compares their parameters position by position, and an overload wins if it is at least as specific at every position and more specific at one. Overloads that are each more specific at a different position stay ambiguous, and the call is an error.
+
+- After type arguments are bound, a parameter is more specific than another it is assignable to: `string` is more specific than `object`, and a derived class is more specific than its base.
+- Where the bound parameters are the same type, the declared parameters decide. A parameter is more specific when substituting the other's type parameters gives it: `int` is more specific than `T`, `(int, int) -> T` than `T`, and `T[][][]` than `T[][]`.
+- Where the bound parameters are unrelated types, a generic parameter that takes the argument's type arguments unchanged is more specific than a fixed one that accepts them only converted. Otherwise the declared parameters decide, as above.
+- When the parameters accept exactly the same values, an overload with no type parameters of its own is more specific than a generic one.
+
+For a `string[]` argument, `f(items: List[string])` is chosen over `f[T](items: Iterable[T])`, and `f[T](items: Iterable[T])` is chosen over `f(items: List[object])` or `f(items: object)`. ghūl has no default argument values.
 
 A program starts at a function named `entry`. In a file with no namespace, the program can instead start at the top-level statements, which the compiler collects in source order into the entry point.
 

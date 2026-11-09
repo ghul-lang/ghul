@@ -17,10 +17,8 @@ namespace Semantic.UnitTests is
     use Test = Microsoft.VisualStudio.TestTools.UnitTesting.TestMethodAttribute
     use Assertions
 
-    // How the last tie-break ranks candidates the earlier filters
-    // left tied. `dominates` is deliberately partial: it answers only
-    // where one candidate is at least as deep everywhere, so the
-    // cases it declines are the ones that stay ambiguous.
+    // When a tie is worth breaking by comparing formals: only when
+    // every actual carries a type the call itself decides.
     @TestClass()
     class CANDIDATE_SPECIFICITY_TESTS is
         init() is si
@@ -32,43 +30,7 @@ namespace Semantic.UnitTests is
         a_class(name: string) -> CLASS =>
             CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), name, empty_names(), Semantic.BLOCK_SCOPE())
 
-        // Depth counts ancestors, so a fixture needs a hierarchy to
-        // sit in. Read `depth` only after the ancestors are pushed:
-        // the symbol memoises the first answer it gives.
         a_root(name: string) -> Type => a_class(name).type!
-
-        a_generic_class(name: string) -> CLASS is
-            let result =
-                CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), name, LIST[string](["T"]), Semantic.BLOCK_SCOPE())
-
-            result.declare_type(loc(), "T", 0, null)
-
-            return result
-        si
-
-        a_generic_class_of_two(name: string) -> CLASS is
-            let result =
-                CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), name, LIST[string](["T", "U"]), Semantic.BLOCK_SCOPE())
-
-            result.declare_type(loc(), "T", 0, null)
-            result.declare_type(loc(), "U", 1, null)
-
-            return result
-        si
-
-        generic_over(container: CLASS, argument: Type) -> Type =>
-            Semantic.Types.GENERIC(loc(), container, LIST[Type]([argument]))
-
-        generic_over_two(container: CLASS, first: Type, second: Type) -> Type =>
-            Semantic.Types.GENERIC(loc(), container, LIST[Type]([first, second]))
-
-        a_child(name: string, parent: Type) -> Type is
-            let c = a_class(name)
-
-            c.push_ancestor(parent)
-
-            return c.type!
-        si
 
         list_of(types: ARRAY[Type]) -> Type[] is
             let result = LIST[Type]()
@@ -78,115 +40,6 @@ namespace Semantic.UnitTests is
             od
 
             return result
-        si
-
-        @Test()
-        given_a_deeper_formal__dominates() is
-            let parent = a_root("PARENT")
-            let child = a_child("CHILD", parent)
-
-            is_true(CANDIDATE_SPECIFICITY.dominates(list_of([child]), list_of([parent])))
-            is_false(CANDIDATE_SPECIFICITY.dominates(list_of([parent]), list_of([child])))
-        si
-
-        @Test()
-        given_formals_of_equal_depth__dominates_neither_way() is
-            let one = a_root("ONE")
-            let other = a_root("OTHER")
-
-            is_false(CANDIDATE_SPECIFICITY.dominates(list_of([one]), list_of([other])))
-            is_false(CANDIDATE_SPECIFICITY.dominates(list_of([other]), list_of([one])))
-        si
-
-        // The reason for dominance rather than a summed score: nearer
-        // in one argument must not pay for further away in another.
-        @Test()
-        given_candidates_that_trade_off__dominates_neither_way() is
-            let parent = a_root("PARENT")
-            let child = a_child("CHILD", parent)
-
-            let deep_then_shallow = list_of([child, parent])
-            let shallow_then_deep = list_of([parent, child])
-
-            is_false(CANDIDATE_SPECIFICITY.dominates(deep_then_shallow, shallow_then_deep))
-            is_false(CANDIDATE_SPECIFICITY.dominates(shallow_then_deep, deep_then_shallow))
-        si
-
-        @Test()
-        given_deeper_in_one_position_and_equal_in_another__dominates() is
-            let parent = a_root("PARENT")
-            let child = a_child("CHILD", parent)
-            let shared = a_root("SHARED")
-
-            is_true(
-                CANDIDATE_SPECIFICITY.dominates(
-                    list_of([child, shared]),
-                    list_of([parent, shared])))
-        si
-
-        @Test()
-        given_differing_arities__dominates_neither_way() is
-            let parent = a_root("PARENT")
-            let child = a_child("CHILD", parent)
-
-            is_false(CANDIDATE_SPECIFICITY.dominates(list_of([child, child]), list_of([parent])))
-        si
-
-        @Test()
-        given_no_arguments__dominates_neither_way() is
-            is_false(CANDIDATE_SPECIFICITY.dominates(list_of([]), list_of([])))
-        si
-
-        // Two instantiations of one generic have the same depth - the
-        // depth of the type they instantiate - so a formal is ranked on
-        // its type arguments when the heads agree. A function type is
-        // the case this matters most for: every one of them
-        // instantiates the same type, so nothing else separates
-        // `TASK[int] -> X` from `TASK -> X`.
-        @Test()
-        given_generics_over_a_deeper_argument__dominates() is
-            let parent = a_root("PARENT")
-            let child = a_child("CHILD", parent)
-            let box = a_generic_class("BOX")
-
-            is_true(
-                CANDIDATE_SPECIFICITY.dominates(
-                    list_of([generic_over(box, child)]),
-                    list_of([generic_over(box, parent)])))
-
-            is_false(
-                CANDIDATE_SPECIFICITY.dominates(
-                    list_of([generic_over(box, parent)]),
-                    list_of([generic_over(box, child)])))
-        si
-
-        // Different heads are not ranked against each other, however
-        // their arguments compare.
-        @Test()
-        given_generics_over_different_types__dominates_neither_way() is
-            let parent = a_root("PARENT")
-            let child = a_child("CHILD", parent)
-            let box = a_generic_class("BOX")
-            let crate = a_generic_class("CRATE")
-
-            is_false(
-                CANDIDATE_SPECIFICITY.dominates(
-                    list_of([generic_over(box, child)]),
-                    list_of([generic_over(crate, parent)])))
-        si
-
-        // Arguments that disagree on a direction leave the pair
-        // unranked, for the same reason formals that do are.
-        @Test()
-        given_generic_arguments_that_trade_off__dominates_neither_way() is
-            let parent = a_root("PARENT")
-            let child = a_child("CHILD", parent)
-            let pair = a_generic_class_of_two("PAIR")
-
-            is_false(
-                CANDIDATE_SPECIFICITY.dominates(
-                    list_of([generic_over_two(pair, child, parent)]),
-                    list_of([generic_over_two(pair, parent, child)])))
         si
 
         @Test()
