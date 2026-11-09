@@ -1,0 +1,283 @@
+namespace Semantic.UnitTests is
+    use Collections.LIST
+    use Collections.MAP
+
+    use Microsoft.VisualStudio.TestTools.UnitTesting.Assert
+
+    use Source.LOCATION
+
+    use Semantic.FORMAL_SPECIFICITY
+    use Semantic.Symbols.CLASS
+    use Semantic.Symbols.Function
+    use Semantic.Symbols.GLOBAL_FUNCTION
+    use Semantic.Symbols.Symbol
+    use Semantic.Types.Type
+    use TestClass = Microsoft.VisualStudio.TestTools.UnitTesting.TestClassAttribute
+    use Test = Microsoft.VisualStudio.TestTools.UnitTesting.TestMethodAttribute
+    use Assertions
+
+    // How tied candidates rank by their formals. `compare` is
+    // deliberately partial: a candidate dominates another only when it
+    // is at least as specific at every position and more specific at
+    // one, so candidates that trade off stay tied.
+    @TestClass()
+    class FORMAL_SPECIFICITY_TESTS is
+        _object: Type
+
+        init() is
+            let o = a_class("object")
+            o.mark_is_object()
+            _object = o.type!
+        si
+
+        loc() -> LOCATION => LOCATION("test.ghul", 1, 1, 1, 1)
+
+        a_class(name: string) -> CLASS =>
+            CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), name, LIST[string](), Semantic.BLOCK_SCOPE())
+
+        a_root(name: string) -> Type is
+            let c = a_class(name)
+            c.push_ancestor(_object)
+            return c.type!
+        si
+
+        a_child(name: string, parent: Type) -> Type is
+            let c = a_class(name)
+            c.push_ancestor(parent)
+            return c.type!
+        si
+
+        a_generic_class(name: string) -> CLASS is
+            let result =
+                CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), name, LIST[string](["T"]), Semantic.BLOCK_SCOPE())
+
+            result.declare_type(loc(), "T", 0, null)
+            result.push_ancestor(_object)
+
+            return result
+        si
+
+        generic_over(container: CLASS, argument: Type) -> Type =>
+            Semantic.Types.GENERIC(loc(), container, LIST[Type]([argument]))
+
+        // A non-generic candidate taking `formals`.
+        a_candidate(formals: Type[]) -> Function is
+            let result = GLOBAL_FUNCTION(loc(), loc(), Semantic.BLOCK_SCOPE(), "f", Semantic.BLOCK_SCOPE())
+            result.arguments = LIST[Type](formals)
+            result.return_type = _object
+            return result
+        si
+
+        // A candidate generic in one type parameter T, declared with the
+        // formals `declare` builds over T, and specialized with T as
+        // `actual`: what the resolver ties.
+        a_generic_candidate(declare: (Type) -> Type[], actual: Type) -> Function is
+            let result = GLOBAL_FUNCTION(loc(), loc(), Semantic.BLOCK_SCOPE(), "f", Semantic.BLOCK_SCOPE())
+            let t = Semantic.Symbols.FUNCTION_GENERIC_ARGUMENT(loc(), result, "T", 0)
+
+            result.is_generic = true
+            result.generic_argument_names = LIST[string](["T"])
+            result.generic_arguments = LIST[Type]([t.type!])
+            result.arguments = LIST[Type](declare(t.type!))
+            result.return_type = _object
+
+            let map = MAP[Symbol,Type]()
+            map[t] = actual
+
+            return result.specialize_function(map, null)
+        si
+
+        @Test()
+        A_derived_formal_dominates_its_base() is
+            let parent = a_root("PARENT")
+            let child = a_child("CHILD", parent)
+
+            are_equal(1, FORMAL_SPECIFICITY.compare(a_candidate([child]), a_candidate([parent])))
+            are_equal(-1, FORMAL_SPECIFICITY.compare(a_candidate([parent]), a_candidate([child])))
+        si
+
+        @Test()
+        Any_formal_dominates_object() is
+            let thing = a_root("THING")
+
+            are_equal(1, FORMAL_SPECIFICITY.compare(a_candidate([thing]), a_candidate([_object])))
+        si
+
+        @Test()
+        Unrelated_formals_dominate_neither_way() is
+            let one = a_root("ONE")
+            let other = a_root("OTHER")
+
+            are_equal(0, FORMAL_SPECIFICITY.compare(a_candidate([one]), a_candidate([other])))
+        si
+
+        // Being more specific in one position does not pay for being
+        // less specific in another.
+        @Test()
+        Candidates_that_trade_off_dominate_neither_way() is
+            let thing = a_root("THING")
+
+            let thing_then_object = a_candidate([thing, _object])
+            let object_then_thing = a_candidate([_object, thing])
+
+            are_equal(0, FORMAL_SPECIFICITY.compare(thing_then_object, object_then_thing))
+            are_equal(0, FORMAL_SPECIFICITY.compare(object_then_thing, thing_then_object))
+        si
+
+        @Test()
+        More_specific_in_one_position_and_alike_in_another_dominates() is
+            let parent = a_root("PARENT")
+            let child = a_child("CHILD", parent)
+            let shared = a_root("SHARED")
+
+            are_equal(1, FORMAL_SPECIFICITY.compare(a_candidate([child, shared]), a_candidate([parent, shared])))
+        si
+
+        @Test()
+        Candidates_of_different_arity_dominate_neither_way() is
+            let thing = a_root("THING")
+
+            are_equal(0, FORMAL_SPECIFICITY.compare(a_candidate([thing, thing]), a_candidate([_object])))
+        si
+
+        @Test()
+        Candidates_with_no_formals_dominate_neither_way() is
+            are_equal(0, FORMAL_SPECIFICITY.compare(a_candidate([]), a_candidate([])))
+        si
+
+        // Both specialize to `(int)`, so the declarations decide: `int`
+        // is an instance of `T` and `T` is not one of `int`.
+        @Test()
+        A_concrete_formal_dominates_a_type_parameter_it_instantiates() is
+            let int_type = a_root("int")
+
+            let concrete = a_candidate([int_type])
+            let generic = a_generic_candidate(t => [t], int_type)
+
+            are_equal(1, FORMAL_SPECIFICITY.compare(concrete, generic))
+            are_equal(-1, FORMAL_SPECIFICITY.compare(generic, concrete))
+        si
+
+        // The MATRIX(planes) case: with an actual of `int[][][]`, both
+        // specialize to it, and `T[][][]` is `T[][]` with `T[]` for T.
+        @Test()
+        A_deeper_nesting_of_one_generic_dominates_a_shallower_one() is
+            let list = a_generic_class("LIST")
+            let int_type = a_root("int")
+
+            let planes = a_generic_candidate(t => [generic_over(list, generic_over(list, generic_over(list, t)))], int_type)
+            let rows = a_generic_candidate(t => [generic_over(list, generic_over(list, t))], generic_over(list, int_type))
+
+            are_equal(1, FORMAL_SPECIFICITY.compare(planes, rows))
+            are_equal(-1, FORMAL_SPECIFICITY.compare(rows, planes))
+        si
+
+        // `(int, int) -> T` against a bare `T`: the function type is an
+        // instance of T, and T is not an instance of a function type.
+        @Test()
+        A_function_type_formal_dominates_a_bare_type_parameter() is
+            let int_type = a_root("int")
+            let result_type = a_root("RESULT")
+            let fn_class = a_generic_class("FN")
+
+            let shaped = a_generic_candidate(t => [generic_over(fn_class, t)], result_type)
+            let bare = a_generic_candidate(t => [t], generic_over(fn_class, result_type))
+
+            are_equal(1, FORMAL_SPECIFICITY.compare(shaped, bare))
+            are_equal(-1, FORMAL_SPECIFICITY.compare(bare, shaped))
+        si
+
+        // One substitution has to serve every position. Both specialize
+        // to `(LIST[THING], LIST[THING])`, but `(LIST[T], LIST[T])`
+        // isn't an instance of `(LIST[U], LIST[THING])` - U can't be
+        // both T and THING - nor is the reverse one of it.
+        @Test()
+        A_type_parameter_substitutes_one_type_across_positions() is
+            let thing = a_root("THING")
+            let list = a_generic_class("LIST")
+
+            let same_twice = a_generic_candidate(t => [generic_over(list, t), generic_over(list, t)], thing)
+            let fixed_second = a_generic_candidate(t => [generic_over(list, t), generic_over(list, thing)], thing)
+
+            are_equal(0, FORMAL_SPECIFICITY.compare(same_twice, fixed_second))
+            are_equal(0, FORMAL_SPECIFICITY.compare(fixed_second, same_twice))
+        si
+
+        // Formals that accept exactly the same, where only the return
+        // type mentions the type parameter: the candidate with no type
+        // parameters of its own wins, as `int.parse(string)` beats
+        // `parse[T](string) -> T?`.
+        @Test()
+        Of_formals_accepting_the_same_the_non_generic_candidate_dominates() is
+            let text = a_root("string")
+
+            let concrete = a_candidate([text])
+            let generic = a_generic_candidate(t => [text], a_root("int"))
+
+            are_equal(1, FORMAL_SPECIFICITY.compare(concrete, generic))
+            are_equal(-1, FORMAL_SPECIFICITY.compare(generic, concrete))
+        si
+
+        // `LIST[object]` and `SEQUENCE[THING]` are unrelated types, so
+        // the declarations decide: `LIST[object]` is an instance of
+        // `SEQUENCE[T]` through its ancestor `SEQUENCE[object]`.
+        @Test()
+        Where_the_specialized_formals_are_unrelated_the_declarations_decide() is
+            let sequence = a_generic_class("SEQUENCE")
+            let list = a_class("LIST_OF_OBJECT")
+            list.push_ancestor(generic_over(sequence, _object))
+
+            let thing = a_root("THING")
+
+            let concrete = a_candidate([list.type!])
+            let generic = a_generic_candidate(t => [generic_over(sequence, t)], thing)
+
+            are_equal(1, FORMAL_SPECIFICITY.compare(concrete, generic))
+            are_equal(-1, FORMAL_SPECIFICITY.compare(generic, concrete))
+        si
+
+        // Unrelated formals that no substitution relates leave the pair
+        // tied.
+        @Test()
+        Unrelated_declarations_dominate_neither_way() is
+            let box = a_generic_class("BOX")
+            let thing = a_root("THING")
+
+            let generic = a_generic_candidate(t => [generic_over(box, t)], thing)
+            let other = a_candidate([a_root("OTHER")])
+
+            are_equal(0, FORMAL_SPECIFICITY.compare(generic, other))
+            are_equal(0, FORMAL_SPECIFICITY.compare(other, generic))
+        si
+
+        // An unsettled formal tells nothing apart, so it leaves the
+        // decision to the other positions and then to genericity.
+        @Test()
+        An_unsettled_formal_leaves_the_decision_to_genericity() is
+            let box = a_generic_class("BOX")
+            let thing = a_root("THING")
+
+            let unsettled = a_candidate([Semantic.Types.ERROR()])
+            let generic = a_generic_candidate(t => [generic_over(box, t)], thing)
+
+            are_equal(1, FORMAL_SPECIFICITY.compare(unsettled, generic))
+        si
+
+        @Test()
+        Undominated_keeps_only_the_candidates_no_other_dominates() is
+            let parent = a_root("PARENT")
+            let child = a_child("CHILD", parent)
+            let other = a_root("OTHER")
+
+            let winner = a_candidate([child])
+            let beaten = a_candidate([parent])
+            let incomparable = a_candidate([other])
+
+            let kept = FORMAL_SPECIFICITY.undominated(LIST[Function]([beaten, winner, incomparable]))
+
+            are_equal(2, kept.count)
+            is_true(kept[0] == winner)
+            is_true(kept[1] == incomparable)
+        si
+    si
+si

@@ -498,8 +498,8 @@ namespace Semantic is
             // an arbitrary type as a constraint on the placeholder's
             // origin, which can permanently block a later, correct
             // constraint from ever being accepted. `can_rank` is the
-            // same guard FORMAL_FIT_FILTER and CANDIDATE_SPECIFICITY
-            // already apply below; reusing it here keeps every
+            // same guard FORMAL_FIT_FILTER applies below; reusing it
+            // here keeps every
             // tie-break in this chain agreeing on when a tie is worth
             // breaking at all.
             //
@@ -514,21 +514,6 @@ namespace Semantic is
                 CANDIDATE_SPECIFICITY.can_rank(arguments) \/
                 (want_infer /\ !CANDIDATE_SPECIFICITY.has_actual_settled_elsewhere(arguments))
 
-            if is_ambiguous /\ safe_to_narrow_tie then
-                let non_object_matches =
-                    ambiguous_matches! |>
-                        filter(f => !(f.arguments |> any(a => a.is_object)))
-
-                let count = non_object_matches |> count()
-
-                if count == 1 then
-                    result = non_object_matches |> only()!
-                    is_ambiguous = false
-                elif count > 1 then
-                    ambiguous_matches = Collections.LIST(non_object_matches)
-                fi
-            fi
-
             // Return-type-context filter: when the caller supplied a
             // return-type constraint (e.g. a return statement whose
             // function returns `Tasks.TASK[int]`, or an assignment-
@@ -538,8 +523,8 @@ namespace Semantic is
             // `from_exception[T](ex) -> Tasks.TASK[T]` where T can
             // bind from the constraint — the latter is the
             // user's intent and the former would fail the return-
-            // statement's own assignability check. Runs BEFORE the
-            // non-generic filter so a generic candidate matching the
+            // statement's own assignability check. Runs before the
+            // specificity ranking so a generic candidate matching the
             // constraint wins over a non-generic one that doesn't.
             //
             // For a generic candidate whose return type carries type
@@ -570,45 +555,20 @@ namespace Semantic is
                 fi
             fi
 
-            // A non-generic candidate whose formals don't convert to a tied
-            // generic's specialized formals is less specific than the generic,
-            // so it leaves the tie rather than reaching the specificity ranking
-            // below, which compares inheritance depth and would prefer
-            // `object[]` to `Iterable[string]`.
+            // Prefer the candidate whose formals accept least: at least
+            // as specific at every position and more specific at one,
+            // by FORMAL_SPECIFICITY. A derived formal beats its base,
+            // `string` beats `object`, a concrete formal beats a type
+            // parameter it instantiates, and `T[][][]` beats `T[][]`.
+            // Candidates that trade off against each other stay tied.
             if is_ambiguous /\ safe_to_narrow_tie then
-                let kept =
-                    ambiguous_matches! |>
-                        filter(f => f.specialized_from? \/ f.generic_arguments.count != 0 \/ !NON_GENERIC_PREFERENCE.is_less_specific_than_a_generic(f, ambiguous_matches)) |>
-                        collect_mutable()
+                let kept = FORMAL_SPECIFICITY.undominated(ambiguous_matches!)
 
                 if kept.count == 1 then
                     result = kept[0]
                     is_ambiguous = false
                 elif kept.count > 1 then
-                    ambiguous_matches = kept
-                fi
-            fi
-
-            if is_ambiguous /\ safe_to_narrow_tie then
-                // Prefer non-generic candidates over function-generic
-                // ones (concrete `<>(int, int)` beats specialized
-                // `<>[T: struct](T, T)` for `int <> int`). A concrete
-                // candidate has no `specialized_from` link AND no
-                // function-level type-arguments; a specialized form
-                // of a function-generic has `specialized_from` set.
-                let non_generic_matches =
-                    ambiguous_matches! |>
-                        filter(f =>
-                            !f.specialized_from? /\
-                            f.generic_arguments.count == 0)
-
-                let count = non_generic_matches |> count()
-
-                if count == 1 then
-                    result = non_generic_matches |> only()!
-                    is_ambiguous = false
-                elif count > 1 then
-                    ambiguous_matches = Collections.LIST(non_generic_matches)
+                    ambiguous_matches = Collections.LIST(kept)
                 fi
             fi
 
@@ -632,20 +592,6 @@ namespace Semantic is
                     else
                         ambiguous_matches = Collections.LIST(closest_matches)
                     fi
-                fi
-            fi
-
-            // Last: prefer the candidate whose formals sit furthest
-            // down the inheritance graph, which is the one that
-            // widened the actuals least. Runs after every filter
-            // above, so it only ever sees ambiguities they left
-            // unsettled - which are reported as errors otherwise.
-            if is_ambiguous then
-                let most_specific = CANDIDATE_SPECIFICITY.pick(ambiguous_matches!, arguments)
-
-                if most_specific? then
-                    result = most_specific
-                    is_ambiguous = false
                 fi
             fi
 

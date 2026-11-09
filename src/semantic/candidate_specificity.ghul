@@ -3,37 +3,9 @@ namespace Semantic is
 
     use Types.Type
 
-    // Last-resort tie-break for candidates the earlier filters left
-    // tied: prefer the one whose formals sit furthest down the
-    // inheritance graph, which is the one that widened the actual
-    // least. `Type.depth` is the same metric the least-upper-bound
-    // map ranks by, memoised per symbol.
+    // When a tie between candidates is worth breaking by comparing
+    // their formals with each other rather than with the actuals.
     class CANDIDATE_SPECIFICITY is
-        pick(
-            candidates: Symbols.Function[],
-            arguments: Type[]
-        ) -> Symbols.Function? static is
-            if candidates.count < 2 \/ !can_rank(arguments) then
-                return null
-            fi
-
-            let best mut = candidates[0]
-
-            for i in 1..candidates.count do
-                if dominates(candidates[i].arguments, best.arguments) then
-                    best = candidates[i]
-                fi
-            od
-
-            for c in candidates do
-                if c !~ best /\ !dominates(best.arguments, c.arguments) then
-                    return null
-                fi
-            od
-
-            return best
-        si
-
         // An ambiguity whose cause is an actual with no type yet - a
         // bare `_`, an untargeted `cast(..)`, an inference placeholder
         // - is not one specificity can settle: every candidate matched
@@ -56,102 +28,5 @@ namespace Semantic is
                     else
                         false
                     fi)
-
-        // Dominance rather than a summed score: `a` has to be at least
-        // as deep in every position and strictly deeper in one, so
-        // being nearer in one argument never pays for being further
-        // away in another. Candidates that trade off against each
-        // other stay ambiguous, as they were before this step existed.
-        dominates(a: Type[], b: Type[]) -> bool static is
-            if a.count != b.count \/ a.count == 0 then
-                return false
-            fi
-
-            let saw_deeper mut = false
-
-            for i in 0..a.count do
-                let a_arg = a[i]
-                let b_arg = b[i]
-
-                @suppress("presence-test-non-optional")
-                if !a_arg? \/ !b_arg? \/ a_arg.is_wild \/ b_arg.is_wild then
-                    return false
-                fi
-
-                let ranked = rank(a_arg, b_arg)
-
-                if ranked < 0 then
-                    return false
-                elif ranked > 0 then
-                    saw_deeper = true
-                fi
-            od
-
-            return saw_deeper
-        si
-
-        // How `a` ranks against `b`: positive when `a` sits further
-        // down, negative when `b` does, zero when neither does or the
-        // two cannot be ranked against each other.
-        //
-        // Two instantiations of one generic have the same depth - the
-        // depth of the type they instantiate - so a formal taking
-        // `Iterable[CAT]` ranks level with one taking `Iterable[Animal]`
-        // until their arguments are compared. Comparing them is what
-        // lets a candidate whose formals differ only inside a generic
-        // be picked, and a function type is the case that reaches this
-        // most often, since every one of them is an instantiation of
-        // the same type.
-        rank(a: Type, b: Type) -> int static is
-            if a.depth != b.depth then
-                return if a.depth > b.depth then 1 else -1 fi
-            fi
-
-            // The instantiations are distinct symbols, so what has to
-            // agree is the type they instantiate.
-            if a.symbol.root_unspecialized_symbol != b.symbol.root_unspecialized_symbol then
-                return 0
-            fi
-
-            let a_arguments = a.arguments
-            let b_arguments = b.arguments
-
-            if
-                a_arguments.count == 0 \/
-                a_arguments.count != b_arguments.count
-            then
-                return 0
-            fi
-
-            // The arguments have to agree on a direction, for the same
-            // reason the formals do: an argument that ranks deeper does
-            // not pay for a sibling that ranks shallower.
-            let result mut = 0
-
-            for i in 0..a_arguments.count do
-                let a_argument = a_arguments[i]
-                let b_argument = b_arguments[i]
-
-                @suppress("presence-test-non-optional")
-                if
-                    !a_argument? \/ !b_argument? \/
-                    a_argument.is_wild \/ b_argument.is_wild
-                then
-                    return 0
-                fi
-
-                let ranked = rank(a_argument, b_argument)
-
-                if ranked != 0 then
-                    if result != 0 /\ result != ranked then
-                        return 0
-                    fi
-
-                    result = ranked
-                fi
-            od
-
-            return result
-        si
     si
 si
