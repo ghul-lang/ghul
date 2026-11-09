@@ -152,8 +152,6 @@ namespace Syntax.Process is
         // `init(e0: T, ..., source: Iterable[T], skip: int, live: Iterator[T]?)`.
         _rest_stage_parameters(probe: LAZY_SEQUENCE_PROBE, prefix: int) -> Type?[] is
             let element = probe.element_type
-            let iterable = cast Semantic.Symbols.Classy(_innate_symbol_lookup.get_unspecialized_iterable_type().symbol)
-            let iterator = cast Semantic.Symbols.Classy(_innate_symbol_lookup.get_unspecialized_iterator_type().symbol)
 
             let result = Collections.LIST[Type?]()
 
@@ -161,11 +159,26 @@ namespace Syntax.Process is
                 result.add(element)
             od
 
-            result.add(Semantic.Types.GENERIC(probe.location, iterable, Collections.LIST[Type]([element])))
+            result.add(_over(_innate_symbol_lookup.get_unspecialized_iterable_type(), element))
             result.add(_innate_symbol_lookup.get_int_type())
-            result.add(Semantic.Types.GENERIC(probe.location, iterator, Collections.LIST[Type]([element])).as_optional())
+            result.add(_over(_innate_symbol_lookup.get_unspecialized_iterator_type(), element)?.as_optional())
 
             return result
+        si
+
+        // The generic `unspecialized`, such as `Iterable[T]`, made over
+        // `element`, or null where it is not generic in one type.
+        _over(unspecialized: Type, element: Type) -> Type? is
+            if let generic: Semantic.Types.GENERIC = unspecialized /\ generic.arguments.count == 1, parameter = generic.arguments[0].symbol then
+                let map = Collections.MAP[Semantic.Symbols.Symbol, Type]()
+                map[parameter] = element
+
+                return generic.specialize(map)
+            elif let classy: Semantic.Symbols.Classy = unspecialized.symbol then
+                return Semantic.Types.GENERIC(Source.LOCATION.internal, classy, Collections.LIST[Type]([element]))
+            fi
+
+            return null
         si
 
         _resolve_lazy_rest_calls(probe: LAZY_SEQUENCE_PROBE) is

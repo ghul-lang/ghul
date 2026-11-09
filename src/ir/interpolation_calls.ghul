@@ -188,9 +188,11 @@ namespace IR is
             return value
         si
 
-        /// The builder's `append` taking a string, which may be null, as
-        /// both the core library's and .NET's declare it.
-        string_append(type: Type?) -> Function? => method(type, "append", [_string_type.as_optional()])
+        /// The builder's `append` taking a string: one that may be null, as
+        /// both the core library's and .NET's declare it, or else one that
+        /// may not, as a builder written in ghūl can.
+        string_append(type: Type?) -> Function? =>
+            method(type, "append", [_string_type.as_optional()]) ?? method(type, "append", [_string_type])
 
         // `value` written in `format` by its `to_string(format, provider)`,
         // where its type implements the core library's `System.IFormattable`,
@@ -202,7 +204,22 @@ namespace IR is
                 return null
             fi
 
-            if let declared: Function = Semantic.Types.NAMED(formattable).find_member("to_string"), to_string = method(type, "to_string", declared.arguments) then
+            // The `to_string` the trait itself declares, beside those it
+            // inherits from `object`; the type's implementation of it is the
+            // one taking exactly its parameters.
+            let declared: Function? mut = null
+
+            if let group: Semantic.Symbols.FUNCTION_GROUP = Semantic.Types.NAMED(formattable).find_member("to_string") then
+                for f in group.functions do
+                    if f.owner?.unspecialized_symbol == formattable.unspecialized_symbol then
+                        declared = f
+                    fi
+                od
+            elif let f: Function = Semantic.Types.NAMED(formattable).find_member("to_string") then
+                declared = f
+            fi
+
+            if let d = declared, to_string = method(type, "to_string", d.arguments) then
                 return Values.Call.INSTANCE(value, to_string, LIST[Value]([format, Values.NULL(to_string.arguments[1])]), null)
             fi
 
