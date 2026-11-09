@@ -1,0 +1,191 @@
+namespace Syntax.Process is
+    use Logging
+
+    use Semantic.Types.Type
+
+    use IR.Values
+    use IR.VALUE_BOXER
+
+    use Ghul.Pipes
+
+    // An array literal of rows, or of planes, where a `T[,]` or `T[,,]`
+    // is expected: the rows the literal builds are passed to the
+    // read-only `ARRAY_2` or `ARRAY_3` constructor that takes them, so
+    // the literal is a two- or three-dimensional array. Rows written as
+    // literals have a known length, so where they disagree the literal
+    // is rejected here rather than by the constructor at run time.
+    class MATRIX_LITERAL is
+        _logger: Logger
+        _innate_symbol_lookup: Semantic.Lookups.InnateSymbolLookup
+        _value_boxer: VALUE_BOXER
+
+        init(
+            logger: Logger,
+            innate_symbol_lookup: Semantic.Lookups.InnateSymbolLookup,
+            value_boxer: VALUE_BOXER
+        ) is
+            _logger = logger
+            _innate_symbol_lookup = innate_symbol_lookup
+            _value_boxer = value_boxer
+        si
+
+        // The rank of the multidimensional array trait `type` is an
+        // instance of, or 0 where it is not one.
+        rank_of(type: Type?) -> int is
+            let unwrapped = type?.optional_inner_type ?? type
+
+            if let generic: Semantic.Types.GENERIC = unwrapped /\ generic.arguments.count == 1 then
+                for rank in [2, 3] do
+                    if
+                        let matrix = _innate_symbol_lookup.find_unspecialized_matrix_type(rank),
+                        matrix_trait = matrix.symbol?.root_unspecialized_symbol
+                    then
+                        if matrix_trait == generic.symbol.root_unspecialized_symbol then
+                            return rank
+                        fi
+                    fi
+                od
+            fi
+
+            return 0
+        si
+
+        // The two- or three-dimensional array `sequence` builds where its
+        // expected type is a multidimensional array trait, from `rows`,
+        // the array of rows or planes it builds otherwise; null where the
+        // expected type is not one.
+        try_build(sequence: Trees.Expressions.SEQUENCE, rows: Value) -> Value? is
+            let expected = sequence.expected_type
+            let rank = rank_of(expected)
+
+            if rank == 0 then
+                return null
+            fi
+
+            let unwrapped = expected!.optional_inner_type ?? expected
+            let element = unwrapped.arguments[0]
+
+            if !_is_rectangular(sequence, rank) then
+                return DUMMY(Semantic.Types.ERROR(), sequence.location)
+            fi
+
+            let array_class =
+                if let array_type = _innate_symbol_lookup.find_unspecialized_matrix_array_type(rank) then
+                    cast Semantic.Symbols.Classy?(array_type.symbol?.root_unspecialized_symbol)
+                else
+                    null
+                fi
+
+            let list_trait = cast Semantic.Symbols.Classy?(_innate_symbol_lookup.get_unspecialized_list_type().symbol?.root_unspecialized_symbol)
+
+            if !array_class? \/ !list_trait? then
+                _logger.environment_error(
+                    sequence.location,
+                    "the runtime library does not declare Collections.ARRAY_{rank}, which builds a {if rank == 2 then "T[,]" else "T[,,]" fi} literal")
+
+                return DUMMY(Semantic.Types.ERROR(), sequence.location)
+            fi
+
+            // ARRAY_2[T] takes its rows as `T[][]`, ARRAY_3[T] its planes as
+            // `T[][][]`.
+            let parameter: Type mut = element
+
+            for _ in 0..rank do
+                parameter = Semantic.Types.GENERIC(sequence.location, list_trait, Collections.LIST[Type]([parameter]))
+            od
+
+            let array_type = Semantic.Types.GENERIC(sequence.location, array_class, Collections.LIST[Type]([element]))
+
+            if let constructor = Semantic.KNOWN_MEMBERS.find(array_type, "init", Semantic.KNOWN_SIGNATURE(Collections.LIST[Type?]([parameter]), true)) then
+                let arguments = Collections.LIST[Value]([rows])
+
+                return NEW(array_type, constructor, _value_boxer.box_arguments(arguments, constructor.arguments))
+            fi
+
+            _logger.environment_error(
+                sequence.location,
+                "the runtime library's Collections.ARRAY_{rank} has no constructor taking {parameter}")
+
+            return DUMMY(Semantic.Types.ERROR(), sequence.location)
+        si
+
+        // Whether the rows `sequence` holds, as far as they are written as
+        // literals, are all one length, and at rank 3 its planes are all
+        // one shape; reporting the first that isn't.
+        _is_rectangular(sequence: Trees.Expressions.SEQUENCE, rank: int) -> bool is
+            let shape = _shape(sequence, rank, true)
+
+            return shape?
+        si
+
+        // The extents of `literal`, `rank` deep, or null where a row or
+        // plane disagrees with the first, which is reported where
+        // `report` is set. An extent a non-literal element hides is -1,
+        // and agrees with anything. A plane is a literal checked as a
+        // `T[,]` of its own, which reports its own rows.
+        _shape(literal: Trees.Expressions.SEQUENCE, rank: int, report: bool) -> int[]? is
+            let result = Collections.LIST[int]([literal.elements.expressions.count])
+
+            if rank == 1 then
+                return result
+            fi
+
+            let inner_shape: int[]? mut = null
+
+            for (index, element) in literal.elements.expressions |> index() do
+                let shape =
+                    if let inner: Trees.Expressions.SEQUENCE = element then
+                        _shape(inner, rank - 1, rank - 1 < 2)
+                    else
+                        _unknown_shape(rank - 1)
+                    fi
+
+                if !shape? then
+                    return null
+                fi
+
+                if let first = inner_shape then
+                    if _first_mismatch(first, shape)? then
+                        if !report then
+                            return null
+                        fi
+
+                        _logger.error(
+                            element.location,
+                            "{if rank == 2 then "row" else "plane" fi} {index + 1} {_describe(shape, rank - 1)}, where {if rank == 2 then "row" else "plane" fi} 1 {_describe(first, rank - 1)}")
+
+                        return null
+                    fi
+
+                    inner_shape = _merge(first, shape)
+                else
+                    inner_shape = shape
+                fi
+            od
+
+            for extent in inner_shape ?? _unknown_shape(rank - 1) do
+                result.add(extent)
+            od
+
+            return result
+        si
+
+        _unknown_shape(rank: int) -> int[] =>
+            Collections.LIST[int](repeat(-1, rank))
+
+        _first_mismatch(a: int[], b: int[]) -> int? =>
+            0..a.count |> find(i => a[i] >= 0 /\ b[i] >= 0 /\ a[i] != b[i])
+
+        _merge(a: int[], b: int[]) -> int[] =>
+            Collections.LIST[int](0..a.count |> map(i => if a[i] >= 0 then a[i] else b[i] fi))
+
+        _describe(shape: int[], rank: int) -> string =>
+            if rank == 1 then
+                "has {shape[0]} {if shape[0] == 1 then "element" else "elements" fi}"
+            elif shape[1] < 0 then
+                "has {shape[0]} {if shape[0] == 1 then "row" else "rows" fi}"
+            else
+                "has {shape[0]} {if shape[0] == 1 then "row" else "rows" fi} of {shape[1]}"
+            fi
+    si
+si

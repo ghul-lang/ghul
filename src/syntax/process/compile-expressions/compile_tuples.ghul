@@ -23,6 +23,7 @@ namespace Syntax.Process is
         _visitor: COMPILE_EXPRESSIONS
         _placeholder_resolver: Semantic.SETTLED_PLACEHOLDER_RESOLVER
         _match_propagator: Semantic.MATCH_PROPAGATOR
+        _matrix_literal: MATRIX_LITERAL
 
         init(
             logger: Logger,
@@ -38,6 +39,7 @@ namespace Syntax.Process is
             _visitor = visitor
             _placeholder_resolver = Semantic.SETTLED_PLACEHOLDER_RESOLVER()
             _match_propagator = Semantic.MATCH_PROPAGATOR(logger)
+            _matrix_literal = MATRIX_LITERAL(logger, innate_symbol_lookup, value_boxer)
         si
 
         pre_tuple(tuple: Trees.Expressions.TUPLE) -> bool is
@@ -344,6 +346,10 @@ namespace Syntax.Process is
             return placeholder
         si
 
+        // The type an element of a list literal is expected to have where
+        // the literal is expected to be `expected`.
+        element_constraint(expected: Type) -> Type? => Semantic.SEQUENCE_ELEMENT.of(expected, _innate_symbol_lookup)
+
         visit_sequence(sequence: Trees.Expressions.SEQUENCE) is
             let type: Type? mut = _
             let have_explicit_type: bool mut = _
@@ -352,7 +358,7 @@ namespace Syntax.Process is
 
             let constraint_type: Type? mut = _
             if let sequence.expected_type? then
-                constraint_type = expected_type.get_element_type()
+                constraint_type = element_constraint(expected_type)
             fi
 
             if !isa Trees.TypeExpressions.INFER(sequence.type_expression) then
@@ -581,8 +587,19 @@ namespace Syntax.Process is
                 fi
             od
 
-            sequence.compile_expressions_state.value =
-                SEQUENCE(_innate_symbol_lookup.get_array_type(type), type, values)
+            let rows = SEQUENCE(_innate_symbol_lookup.get_array_type(type), type, values)
+
+            // Where a `T[,]` or `T[,,]` is expected, and the literal doesn't
+            // name its own element type, its rows or planes build one.
+            if isa Trees.TypeExpressions.INFER(sequence.type_expression) then
+                if let matrix = _matrix_literal.try_build(sequence, rows) then
+                    sequence.compile_expressions_state.value = matrix
+
+                    return
+                fi
+            fi
+
+            sequence.compile_expressions_state.value = rows
         si
     si
 si
