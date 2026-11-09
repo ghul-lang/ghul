@@ -22,48 +22,20 @@ namespace Semantic is
 
         is_void_like: bool => !result_type?
 
-        // The one home for locating a builder member: the member of the
-        // async method builder pattern named `name` taking `arity`
-        // arguments, found by the exact parameters the pattern gives it.
-        // Both the completeness check above and the emission-time member
-        // resolution route through here, so the contract they enforce is
-        // the same one.
-        builder_member(type: Type, name: string, arity: int) -> Symbols.Function? static =>
-            if let signature = _builder_signature(type, name, arity) then
-                KNOWN_MEMBERS.find(type, name, signature)
-            else
-                null
+        // The one home for locating a builder member: an overload of the
+        // name taking exactly `arity` arguments. Both the completeness
+        // check above and the emission-time member resolution route
+        // through here, so the contract they enforce is the same one.
+        member_of_arity(type: Type, name: string, arity: int) -> Symbols.Function? static is
+            if let group: Symbols.FUNCTION_GROUP = type.find_member(name) then
+                for f in group.functions do
+                    if f.arguments.count == arity then
+                        return f
+                    fi
+                od
             fi
 
-        // The parameters the async method builder pattern gives the member
-        // `name` taking `arity` arguments, a type parameter of the member
-        // itself as null (`own`), or null where the pattern has no such
-        // member.
-        _builder_signature(type: Type, name: string, arity: int) -> KNOWN_SIGNATURE? static is
-            let lookup = IoC.CONTAINER.instance.innate_symbol_lookup
-            let own: Type? = null
-
-            let parameters: Type?[]? =
-                case name
-                when "create" then if arity == 0 then Collections.LIST[Type?]() else null fi
-                when "start" then if arity == 1 then Collections.LIST[Type?]([own]) else null fi
-                when "set_state_machine" then
-                    if arity == 1 then Collections.LIST[Type?]([lookup.get_async_state_machine_interface_type()]) else null fi
-                when "set_exception" then if arity == 1 then Collections.LIST[Type?]([lookup.get_exception_type()]) else null fi
-                when "set_result" then
-                    if arity == 0 then
-                        Collections.LIST[Type?]()
-                    elif let generic: Types.GENERIC = type /\ arity == 1 /\ generic.arguments.count == 1 then
-                        Collections.LIST[Type?]([generic.arguments[0]])
-                    else
-                        null
-                    fi
-                when "await_on_completed", "await_unsafe_on_completed" then
-                    if arity == 2 then Collections.LIST[Type?]([own, own]) else null fi
-                else null
-                esac
-
-            return if let p = parameters then KNOWN_SIGNATURE(p) else null fi
+            return null
         si
 
         init(task_type: Type, result_type: Type?, builder_type: Type) is
@@ -163,7 +135,7 @@ namespace Semantic is
             fi
 
             for (name, arity) in required do
-                let member = TASK_LIKE.builder_member(builder_type, name, arity)
+                let member = TASK_LIKE.member_of_arity(builder_type, name, arity)
 
                 if !member? then
                     _logger.error(
