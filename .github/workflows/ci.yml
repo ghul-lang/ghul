@@ -154,22 +154,44 @@ jobs:
       run: |
         set -euo pipefail
 
+        # nuget.org's answers are retried where it errors or times out, and
+        # each is read whole before jq sees it, so an outage fails this step
+        # rather than reading as an empty or unlisted version list.
+        fetch() {
+          curl -fsSL --retry 5 --retry-all-errors --retry-delay 5 --connect-timeout 30 --max-time 120 "$@"
+        }
+
+        # The status of a package download, retried on server errors and
+        # timeouts but not on 404, which is the answer a version that can't
+        # be downloaded gives.
+        package_status() {
+          curl -sI -o /dev/null -w '%{http_code}' --retry 5 --retry-delay 5 --connect-timeout 30 --max-time 120 "$1"
+        }
+
         resolve_latest() {
-          local versions v
-          versions=$(curl -fsSL https://api.nuget.org/v3-flatcontainer/ghul.compiler/index.json \
-            | jq -r '.versions | reverse | .[]')
+          local index versions v registration status
+          index=$(fetch https://api.nuget.org/v3-flatcontainer/ghul.compiler/index.json)
+          versions=$(jq -r '.versions | reverse | .[]' <<<"${index}")
           for v in ${versions}; do
             case "${v}" in *-*) continue ;; esac
             # Skip versions unlisted on nuget.org (e.g. a withdrawn or
             # mis-numbered release). Unlisted versions remain in the
             # flat-container index and stay downloadable, so without this check
             # the resolver would keep selecting the highest such version forever.
-            curl -fsSL --compressed "https://api.nuget.org/v3/registration5-gz-semver2/ghul.compiler/${v}.json" \
-              | jq -e '.listed' >/dev/null || continue
-            if curl -fsI "https://api.nuget.org/v3-flatcontainer/ghul.compiler/${v}/ghul.compiler.${v}.nupkg" >/dev/null 2>&1; then
-              printf '%s' "${v}"
-              return 0
-            fi
+            registration=$(fetch --compressed "https://api.nuget.org/v3/registration5-gz-semver2/ghul.compiler/${v}.json")
+            jq -e '.listed' >/dev/null <<<"${registration}" || continue
+            status=$(package_status "https://api.nuget.org/v3-flatcontainer/ghul.compiler/${v}/ghul.compiler.${v}.nupkg")
+            case "${status}" in
+              200)
+                printf '%s' "${v}"
+                return 0
+                ;;
+              404) ;;
+              *)
+                echo "nuget.org answered ${status} for ghul.compiler ${v}" >&2
+                return 1
+                ;;
+            esac
           done
           echo "no downloadable ghul.compiler version found" >&2
           return 1
@@ -349,11 +371,16 @@ jobs:
     # when it finds none.
     - name: Install the LLVM tools
       run: |
-        curl -fsSL https://apt.llvm.org/llvm-snapshot.gpg.key | sudo gpg --dearmor -o /usr/share/keyrings/apt.llvm.org.gpg
+        set -euo pipefail
+        # The key is downloaded whole, with retries, before gpg reads it, and
+        # apt retries its own fetches, so an apt.llvm.org that is briefly
+        # unavailable doesn't fail the job.
+        curl -fsSL --retry 5 --retry-all-errors --retry-delay 5 --connect-timeout 30 -o "$RUNNER_TEMP/apt.llvm.org.key" https://apt.llvm.org/llvm-snapshot.gpg.key
+        sudo gpg --dearmor -o /usr/share/keyrings/apt.llvm.org.gpg "$RUNNER_TEMP/apt.llvm.org.key"
         codename=$(lsb_release -cs)
         echo "deb [signed-by=/usr/share/keyrings/apt.llvm.org.gpg] https://apt.llvm.org/${codename}/ llvm-toolchain-${codename}-23 main" | sudo tee /etc/apt/sources.list.d/llvm-23.list
-        sudo apt-get update -qq
-        sudo apt-get install -y -qq llvm-23
+        sudo apt-get -o Acquire::Retries=5 update -qq
+        sudo apt-get -o Acquire::Retries=5 install -y -qq llvm-23
 
     - name: Check the LLVM module matrix with LLVM's own tools
       run: llvm/tests/llvm-check.sh

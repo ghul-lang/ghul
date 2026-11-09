@@ -76,17 +76,26 @@ jobs:
       run: |
         set -euo pipefail
 
-        versions=$(curl -fsSL https://api.nuget.org/v3-flatcontainer/ghul.compiler/index.json \
-          | jq -r '.versions | reverse | .[]')
+        # As the CI's resolver: retried, read whole, and a status other than
+        # 200 or 404 for a package fails the run.
+        fetch() {
+          curl -fsSL --retry 5 --retry-all-errors --retry-delay 5 --connect-timeout 30 --max-time 120 "$@"
+        }
+
+        index=$(fetch https://api.nuget.org/v3-flatcontainer/ghul.compiler/index.json)
+        versions=$(jq -r '.versions | reverse | .[]' <<<"${index}")
         compiler=""
         for v in ${versions}; do
           case "${v}" in *-*) continue ;; esac
-          curl -fsSL --compressed "https://api.nuget.org/v3/registration5-gz-semver2/ghul.compiler/${v}.json" \
-            | jq -e '.listed' >/dev/null || continue
-          if curl -fsI "https://api.nuget.org/v3-flatcontainer/ghul.compiler/${v}/ghul.compiler.${v}.nupkg" >/dev/null 2>&1; then
-            compiler=${v}
-            break
-          fi
+          registration=$(fetch --compressed "https://api.nuget.org/v3/registration5-gz-semver2/ghul.compiler/${v}.json")
+          jq -e '.listed' >/dev/null <<<"${registration}" || continue
+          status=$(curl -sI -o /dev/null -w '%{http_code}' --retry 5 --retry-delay 5 --connect-timeout 30 --max-time 120 \
+            "https://api.nuget.org/v3-flatcontainer/ghul.compiler/${v}/ghul.compiler.${v}.nupkg")
+          case "${status}" in
+            200) compiler=${v}; break ;;
+            404) ;;
+            *) echo "nuget.org answered ${status} for ghul.compiler ${v}" >&2; exit 1 ;;
+          esac
         done
         [ -n "${compiler}" ] || { echo "no downloadable ghul.compiler version found" >&2; exit 1; }
 
