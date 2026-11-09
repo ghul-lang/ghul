@@ -1229,6 +1229,34 @@ function node_files() {
 
         file_last_error: () => last_error,
 
+        // A descriptor reading the file at `path` as it is asked for, or -1
+        // with the reason in file_last_error.
+        file_open_read(path) {
+            try {
+                return node_fs.openSync(String(path), "r");
+            } catch (error) {
+                last_error = code_for(error, String(path));
+                return -1;
+            }
+        },
+
+        // At most `count` bytes of the file `descriptor`, one code unit for
+        // each byte, empty at its end, or null with the reason in
+        // file_last_error.
+        file_read_chunk(descriptor, count) {
+            try {
+                const buffer = Buffer.alloc(Math.max(0, count));
+                const got = node_fs.readSync(descriptor, buffer, 0, buffer.length, null);
+
+                return buffer.toString("latin1", 0, got);
+            } catch (error) {
+                last_error = code_for(error, "");
+                return null;
+            }
+        },
+
+        file_close: (descriptor) => attempt("", () => node_fs.closeSync(descriptor)),
+
         file_write_text(path, content, append) {
             const bytes = Buffer.from(String(content), "latin1");
 
@@ -1380,6 +1408,9 @@ const no_files = {
     file_kind: () => 0,
     file_read_text: () => null,
     file_last_error: () => 4,
+    file_open_read: () => -1,
+    file_read_chunk: () => null,
+    file_close: () => 4,
     file_write_text: () => 4,
     file_delete: () => 4,
     file_rename: () => 4,

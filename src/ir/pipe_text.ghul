@@ -1,0 +1,39 @@
+namespace IR is
+    use Collections.LIST
+
+    use Semantic.Symbols.Function
+    use Semantic.Types.Type
+
+    // The library function a generator frame's text comes from, as
+    // `RuntimeOperation.JOIN_PIPE` calls it on every target.
+    class PIPE_TEXT is
+        // `Ghul.Pipes.render_elements[T](source: Iterable[T])` made over
+        // `element_type`, or `Ghul.Pipes.join` of the same signature from a
+        // runtime too old to have it; null where the runtime has neither.
+        render_function(element_type: Type) -> Function? static is
+            let lookup = IoC.CONTAINER.instance.innate_symbol_lookup
+
+            let functions = lookup.get_render_elements_functions() ?? lookup.get_join_functions()
+            let iterable = cast Semantic.Symbols.Classy?(lookup.get_unspecialized_iterable_type().symbol?.unspecialized_symbol)
+
+            if !functions? \/ !iterable? then
+                return null
+            fi
+
+            let source_type: Type = Semantic.Types.GENERIC(Source.LOCATION.internal, iterable, [element_type])
+            let signature = Semantic.KNOWN_SIGNATURE(LIST[Type?]([source_type]))
+
+            // Each candidate is made over the element type, which takes one
+            // type argument, and then chosen by its exact parameters.
+            for f in functions.functions do
+                if f.is_generic /\ f.generic_arguments.count == 1 then
+                    if let made = cast Function?(f.specialize(LIST[Type]([element_type]))) /\ signature.matches(made) then
+                        return made
+                    fi
+                fi
+            od
+
+            return null
+        si
+    si
+si
