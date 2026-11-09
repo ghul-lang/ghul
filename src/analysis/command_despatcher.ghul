@@ -33,6 +33,15 @@ namespace Analysis is
 
         _listening: bool
 
+        // Whether the client has asked for REBUILDING and WORKING frames,
+        // and when the last progress frame or request began, so WORKING is
+        // written at most once a second.
+        _is_reporting_progress: bool
+        _last_progress_time: System.DateTime
+
+        // The least time between WORKING frames.
+        PROGRESS_INTERVAL_MILLISECONDS: double static => 1000.0
+
         // Guards against re-entering the interleave: a query served from
         // inside a compile can reach a handler that compiles in turn,
         // and its file boundaries would otherwise start another round.
@@ -40,6 +49,7 @@ namespace Analysis is
 
         init(..) is
             _last_report_time = System.DateTime.now
+            _last_progress_time = System.DateTime.now
             _command_map = Collections.MAP[System.Type,CommandHandler]()
             _interleavable = Collections.SET[System.Type]()
 
@@ -186,6 +196,13 @@ namespace Analysis is
                 // must not send it.
                 listen_capabilities.add("memory-usage")
 
+                // A client that sends `report_progress` is told when an edit
+                // falls back to a whole-project rebuild, and hears from the
+                // analyser at least once a second while a build runs. Until
+                // it asks, neither frame is written: a client that does not
+                // know them would read them as a protocol error.
+                listen_capabilities.add("progress-frames")
+
                 // A client adding references to a running analyser: an
                 // analyser without it fails the request as unknown. Only a
                 // build that reads assemblies can add them.
@@ -271,9 +288,44 @@ namespace Analysis is
 
             let handler = _command_map[request_variant]
 
+            _last_progress_time = System.DateTime.now
+
             _timers.start(command_name)
             handler.handle(request, _writer)
             _timers.finish(command_name)
+        si
+
+        enable_progress() is
+            _is_reporting_progress = true
+        si
+
+        // An edit is about to be answered by a whole-project rebuild.
+        announce_rebuild(reason: string) is
+            if !_is_reporting_progress then
+                return
+            fi
+
+            Protocol.JSON_PROTOCOL.write_response(_writer, Protocol.Response.REBUILDING(reason))
+
+            _last_progress_time = System.DateTime.now
+        si
+
+        // Called between the files of each build pass: tells the client
+        // the build is still moving, no more often than the interval.
+        report_progress() is
+            if !_is_reporting_progress then
+                return
+            fi
+
+            let now = System.DateTime.now
+
+            if now.subtract(_last_progress_time).total_milliseconds < PROGRESS_INTERVAL_MILLISECONDS then
+                return
+            fi
+
+            Protocol.JSON_PROTOCOL.write_response(_writer, Protocol.Response.WORKING())
+
+            _last_progress_time = now
         si
 
         // Whether an edit is waiting on the pipe, superseding whatever is

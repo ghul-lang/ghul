@@ -1,0 +1,155 @@
+namespace Analysis.Tests is
+    use Collections.LIST;
+
+    use Ghul.Pipes;
+
+    use Analysis.Protocol.ANALYSER_PROCESS;
+    use Analysis.Protocol.EDIT_FILE;
+    use Analysis.Protocol.Response;
+
+    use Microsoft.VisualStudio.TestTools.UnitTesting.Assert;
+    use TestClass = Microsoft.VisualStudio.TestTools.UnitTesting.TestClassAttribute;
+    use Test = Microsoft.VisualStudio.TestTools.UnitTesting.TestMethodAttribute;
+    use Assertions;
+
+    // A client that sends `report_progress` hears when an edit falls back
+    // to a whole-project rebuild, and at most once a second while a build
+    // runs. One that doesn't sees no frame it didn't ask for.
+    @TestClass()
+    class PROGRESS_FRAME_TESTS is
+        init() is si
+
+        first() -> string => "first() -> int => 1\n";
+        second() -> string => "second() -> int => 2\n";
+
+        both() -> EDIT_FILE[] =>
+            [EDIT_FILE("first.ghul", first()), EDIT_FILE("second.ghul", second())];
+
+        @Test()
+        the_analyser_advertises_progress_frames() is
+            let use analyser = ANALYSER_PROCESS();
+
+            is_true(analyser.supports("progress-frames"), "capabilities: {analyser.capabilities}");
+        si
+
+        @Test()
+        without_asking_an_edit_is_answered_by_diagnostics_alone() is
+            let use analyser = ANALYSER_PROCESS();
+
+            analyser.send_edit_files(both());
+
+            are_equal("diagnostics", kinds_until_diagnostics(analyser) |> join(" "));
+        si
+
+        // An edit naming several files is never applied incrementally.
+        @Test()
+        an_edit_that_rebuilds_is_announced_with_its_reason() is
+            let use analyser = ANALYSER_PROCESS();
+
+            analyser.send_report_progress();
+            analyser.send_edit_files(both());
+
+            let response = analyser.read_response();
+
+            if let rebuilding: Response.REBUILDING = response then
+                are_equal("not-eligible", rebuilding.reason);
+            else
+                fail("expected REBUILDING, got {response}");
+            fi
+
+            let rest = kinds_until_diagnostics(analyser);
+
+            are_equal("diagnostics", rest[rest.count - 1]);
+            is_true(rest |> take(rest.count - 1) |> all(k => k =~ "working"), "frames: {rest |> join(" ")}");
+        si
+
+        @Test()
+        an_edit_applied_incrementally_is_not_announced() is
+            let use analyser = ANALYSER_PROCESS();
+
+            analyser.send_edit_files(both());
+            kinds_until_diagnostics(analyser);
+
+            analyser.send_report_progress();
+            analyser.send_edit("first.ghul", "first() -> int => 1 + 1\n");
+
+            are_equal("diagnostics", kinds_until_diagnostics(analyser) |> join(" "));
+        si
+
+        // Large enough that its first build takes more than a few seconds,
+        // so the build is long enough to need a WORKING frame.
+        @Test()
+        a_long_build_says_it_is_working_no_more_than_once_a_second() is
+            let use analyser = ANALYSER_PROCESS();
+
+            analyser.send_report_progress();
+
+            let files = LIST[EDIT_FILE]();
+
+            for i in 0..200 do
+                files.add(EDIT_FILE("generated_{i}.ghul", generated_file(i)));
+            od
+
+            let watch = System.Diagnostics.Stopwatch.start_new();
+
+            analyser.send_edit_files(files);
+
+            let kinds = kinds_until_diagnostics(analyser);
+
+            watch.stop();
+
+            let elapsed = watch.elapsed_milliseconds;
+            let working = kinds |> count(k => k =~ "working");
+
+            is_true(working <= int(elapsed / 1000L) + 1, "{working} WORKING frames in {elapsed} ms");
+
+            if elapsed >= 3000L then
+                is_true(working >= 1, "no WORKING frame in {elapsed} ms");
+            fi
+        si
+
+        generated_file(index: int) -> string is
+            let text = System.Text.StringBuilder();
+
+            text.append("namespace Generated{index} is\n");
+            text.append("    use Collections.LIST;\n");
+            text.append("    class THING_{index} is\n");
+            text.append("        _items: LIST[int];\n");
+            text.append("        init() is _items = LIST[int](); si\n");
+
+            for m in 0..40 do
+                text.append("        method_{m}(x: int) -> int is\n");
+                text.append("            let total mut = x;\n");
+                text.append("            for i in 0..{m + 1} do total = total + i * {m}; _items.add(total); od\n");
+                text.append("            let found = _items |> filter(v => v % 3 == 0) |> map(v => v * 2) |> sum();\n");
+                text.append("            return if found > total then found else total fi;\n");
+                text.append("        si\n");
+            od
+
+            text.append("    si\n");
+            text.append("si\n");
+
+            return text.to_string();
+        si
+
+        // The kinds of the frames up to and including the next
+        // DIAGNOSTICS, in lower case.
+        kinds_until_diagnostics(analyser: ANALYSER_PROCESS) -> LIST[string] is
+            let kinds = LIST[string]();
+
+            do
+                let response = analyser.read_response();
+
+                kinds.add(response.get_type().name.to_lower_invariant());
+
+                if isa Response.DIAGNOSTICS(response) then
+                    return kinds;
+                fi
+
+                if kinds.count > 10000 then
+                    fail("no DIAGNOSTICS after {kinds.count} frames");
+                fi
+            od
+        si
+    si
+si
