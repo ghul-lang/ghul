@@ -919,7 +919,7 @@ namespace IR.WasmGC is
                 let long_type = IoC.CONTAINER.instance.innate_symbol_lookup.get_long_type()
 
                 _bigint_of_small(bigint.type, Values.Literal.NUMBER(Values.Literal.CONSTANT.I8(small), long_type))
-            elif let parse = _static_method(bigint.type, "parse", 1) then
+            elif let parse = _static_method(bigint.type, "parse", [IoC.CONTAINER.instance.innate_symbol_lookup.get_string_type()]) then
                 let string_type = IoC.CONTAINER.instance.innate_symbol_lookup.get_string_type()
 
                 gen(Values.Call.STATIC(parse, LIST[Value]([Values.Literal.STRING(bigint.value, string_type)]), bigint.type, null))
@@ -1441,7 +1441,7 @@ namespace IR.WasmGC is
         // A MAYBE holding a value is built by the core library's constructor
         // taking that value.
         visit(construct: Values.CONSTRUCT_MAYBE) is
-            if let constructor = INTERPOLATION_CALLS.method(construct.type, "init", 1) then
+            if let constructor = INTERPOLATION_CALLS.method(construct.type, "init", [construct.type.optional_inner_type]) then
                 gen(Values.NEW(construct.type, constructor, LIST[Value]([construct.value])))
             else
                 _report("an optional value, whose MAYBE has no constructor taking its value")
@@ -1559,7 +1559,7 @@ namespace IR.WasmGC is
 
             // A range is constructed from its two endpoints.
             if runtime.operation == IR.RuntimeOperation.NEW_RANGE then
-                if let constructor = _method(runtime.type, "init", 2) then
+                if let constructor = _method(runtime.type, "init", Collections.LIST[Type?](runtime.operands |> Ghul.Pipes.map(o => o.type))) then
                     gen(Values.NEW(runtime.type!, constructor, LIST[Value](runtime.operands)))
                 else
                     _report("a range, whose type has no constructor taking its endpoints")
@@ -1650,26 +1650,14 @@ namespace IR.WasmGC is
             fi
         si
 
-        // The method of `type` named `name` that takes `arity` arguments.
-        _method(type: Type?, name: string, arity: int) -> Function? => INTERPOLATION_CALLS.method(type, name, arity)
+        // The method of `type` named `name` taking exactly the parameter
+        // types `parameters`.
+        _method(type: Type?, name: string, parameters: Type?[]) -> Function? => INTERPOLATION_CALLS.method(type, name, parameters)
 
-        // The static method of `type` named `name` that takes `arity`
-        // arguments.
-        _static_method(type: Type?, name: string, arity: int) -> Function? is
-            let found = type?.find_member(name)
-
-            if let group: Semantic.Symbols.FUNCTION_GROUP = found then
-                for function in group.functions do
-                    if !function.is_instance /\ function.arguments.count == arity then
-                        return function
-                    fi
-                od
-            elif let function: Function = found /\ !function.is_instance /\ function.arguments.count == arity then
-                return function
-            fi
-
-            return null
-        si
+        // The static method of `type` named `name` taking exactly the
+        // parameter types `parameters`.
+        _static_method(type: Type?, name: string, parameters: Type?[]) -> Function? =>
+            Semantic.KNOWN_MEMBERS.find(type, name, Semantic.KNOWN_SIGNATURE(parameters, false))
 
         _call_string_helper(index: int, strings: WASMGC_STRINGS, arguments: Value[]) is
             for argument in arguments do
@@ -4788,7 +4776,7 @@ namespace IR.WasmGC is
         // in place of `function`, which the root declares: same name, same
         // arity.
         _scalar_member(type: Type?, function: Function) -> Function? is
-            if let own = _method(type, function.name, function.arguments.count) then
+            if let own = _method(type, function.name, function.arguments) then
                 if let owner: Semantic.Symbols.Classy = own.owner /\ !owner.is_object then
                     return own
                 fi
@@ -5304,7 +5292,7 @@ namespace IR.WasmGC is
             // The core library's `_canonical` moves a value that fits in an
             // i64 into the box's i64 field, which is where every other
             // bigint operation looks for it first.
-            let canonical = _static_method(type, "_canonical", 1)
+            let canonical = _static_method(type, "_canonical", [type])
 
             if !canonical? then
                 _report("a bigint the host answers with, with no bigint._canonical")
