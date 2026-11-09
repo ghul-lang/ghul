@@ -99,6 +99,9 @@ namespace IR.Program is
         _rows: MAP[FUNCTION_INSTANCE, MAP[int, FUNCTION_INSTANCE]]
         _generic_calls: MAP[FUNCTION_INSTANCE, (root: Function, owner: CLASS_INSTANCE, arguments: Type[])]
 
+        // The classes `plan_slots` was given, parents before children.
+        _ordered: CLASS_INSTANCE[]
+
         // For each definition, the method it declares that fills each slot
         // it overrides, directly or through what that overrides.
         _fillers: MAP[Classy, MAP[Function, Function]]
@@ -120,6 +123,7 @@ namespace IR.Program is
             _rows = MAP[FUNCTION_INSTANCE, MAP[int, FUNCTION_INSTANCE]]()
             _generic_calls = MAP[FUNCTION_INSTANCE, (root: Function, owner: CLASS_INSTANCE, arguments: Type[])]()
             _fillers = MAP[Classy, MAP[Function, Function]]()
+            _ordered = LIST[CLASS_INSTANCE]()
         si
 
         /// The trait table's size, once `plan_traits` has packed it.
@@ -144,6 +148,8 @@ namespace IR.Program is
         /// Plans the slots of the classes in `ordered`, which lists parents
         /// before children, and finds the traits each implements.
         plan_slots(ordered: CLASS_INSTANCE[]) is
+            _ordered = ordered
+
             for type in ordered do
                 // A box and the string type implement whatever traits an `impl`
                 // block gives their built-in type, so they take places in the
@@ -220,11 +226,12 @@ namespace IR.Program is
         is_dispatched(method: Function) -> bool static =>
             method.is_instance /\ method.is_virtual /\ !method.is_constructor /\ method.generic_arguments.count == 0
 
-        /// Whether `method` is a trait method generic in its own right,
-        /// whose calls dispatch through a row of the table for each
-        /// instantiation the program calls it at.
+        /// Whether `method` is a trait method, or a virtual class method,
+        /// generic in its own right, whose calls dispatch through a row of
+        /// the table for each instantiation the program calls it at.
         is_dispatched_generic(method: Function) -> bool static =>
-            method.is_instance /\ !method.is_constructor /\ method.generic_arguments.count > 0 /\ (cast Classy?(method.owner)?.is_trait ?? false)
+            method.is_instance /\ !method.is_constructor /\ method.generic_arguments.count > 0 /\
+            ((cast Classy?(method.owner)?.is_trait ?? false) \/ method.is_virtual)
 
         /// The type arguments `call`, the instance a call names, gives its
         /// function's own type parameters, or null where it has none.
@@ -250,18 +257,18 @@ namespace IR.Program is
             return result
         si
 
-        /// Records a call to the generic trait method `method` on an
-        /// instance of `trait_type`, made at `arguments`, its own type
+        /// Records a call to the generic method `method` on an instance of
+        /// `through`, a trait or a class, made at `arguments`, its own type
         /// arguments, so that `plan_traits` gives the instantiation a row.
-        /// Answers the selector's method, or null where `trait_type` is not
-        /// an instance of the trait that declares it.
+        /// Answers the selector's method, or null where `through` is not
+        /// an instance of the type that declares it.
         ///
-        /// - method: the trait method called
-        /// - trait_type: the trait instance the call goes through
+        /// - method: the trait or virtual class method called
+        /// - through: the trait or class instance the call goes through
         /// - arguments: the method's own type arguments at the call
-        note_generic_call(method: Function, trait_type: CLASS_INSTANCE, arguments: Type[]) -> FUNCTION_INSTANCE? is
-            let root = _root_trait_method(method)
-            let owner = _trait_ancestor(trait_type, root.owner)
+        note_generic_call(method: Function, through: CLASS_INSTANCE, arguments: Type[]) -> FUNCTION_INSTANCE? is
+            let root = _generic_root(method, through)
+            let owner = _generic_owner(through, root)
 
             if !owner? \/ root.generic_arguments.count != arguments.count then
                 return null
@@ -276,16 +283,22 @@ namespace IR.Program is
             return key
         si
 
-        /// The method a call to the generic trait method `method` runs on an
+        /// The method a call to the generic method `method` runs on an
         /// instance of `type` at `arguments`, its own type arguments: the
         /// class's override or its implementation by name and signature, or
-        /// a trait's default, at those arguments. Null where `type` has none.
+        /// a trait's default, at those arguments; for a class method, the
+        /// nearest override up the class chain. Null where `type` has none.
         ///
         /// - type: the class of the receiver
-        /// - method: the trait method called
+        /// - method: the trait or virtual class method called
         /// - arguments: the method's own type arguments at the call
         generic_implementation(type: CLASS_INSTANCE, method: Function, arguments: Type[]) -> FUNCTION_INSTANCE? is
             let root = _root_trait_method(method)
+
+            if !(cast Classy?(root.owner)?.is_trait ?? false) then
+                return _generic_class_implementation(type, _root_class_method(method), arguments)
+            fi
+
             let traits = _traits_of(type)
 
             if !(traits |> Ghul.Pipes.any(t => t.definition == root.owner)) then
@@ -319,6 +332,64 @@ namespace IR.Program is
 
         _takes_generic_call(method: Function, arguments: Type[]) -> bool =>
             method.is_instance /\ !method.is_constructor /\ method.generic_arguments.count == arguments.count
+
+        // The method a call to the generic class method `root` runs on an
+        // instance of `type` at `arguments`: the nearest override up the
+        // class chain, or `root` itself, or null where both are abstract.
+        _generic_class_implementation(type: CLASS_INSTANCE, root: Function, arguments: Type[]) -> FUNCTION_INSTANCE? is
+            let current: CLASS_INSTANCE? mut = type
+
+            while current? do
+                let candidate = if current.definition == root.owner then root else _filler(current.definition, root) fi
+
+                if let c = candidate /\ _takes_generic_call(c, arguments) /\ !c.is_abstract then
+                    return FUNCTION_INSTANCE(c, _with_arguments(current.type_map, c, arguments))
+                fi
+
+                current = parent(current)
+            od
+
+            return null
+        si
+
+        // The class method `method` overrides, through any number of
+        // overrides, that itself overrides no class method.
+        _root_class_method(method: Function) -> Function is
+            if let overridees = method.overridees then
+                for overridee in overridees do
+                    if let function: Function = overridee /\ !(cast Classy?(function.owner)?.is_trait ?? true) then
+                        return _root_class_method(function)
+                    fi
+                od
+            fi
+
+            return method
+        si
+
+        // The method heading the row a call to the generic method `method`
+        // through `through` dispatches on: the trait method it overrides
+        // nothing above, through a trait, or the class method, through a
+        // class.
+        _generic_root(method: Function, through: CLASS_INSTANCE) -> Function =>
+            if through.definition.is_trait then _root_trait_method(method) else _root_class_method(method) fi
+
+        // The instance of `root`'s declaring trait or class that `through`
+        // is or derives from.
+        _generic_owner(through: CLASS_INSTANCE, root: Function) -> CLASS_INSTANCE? =>
+            if through.definition.is_trait then _trait_ancestor(through, root.owner) else _ancestor(through, root.owner) fi
+
+        // The planned classes that are `owner` or derive from it.
+        _deriving_from(owner: CLASS_INSTANCE) -> LIST[CLASS_INSTANCE] is
+            let result = LIST[CLASS_INSTANCE]()
+
+            for type in _ordered do
+                if let ancestor = _ancestor(type, owner.definition) /\ ancestor =~ owner then
+                    result.add(type)
+                fi
+            od
+
+            return result
+        si
 
         // `map` with each of `method`'s own type parameters taking the
         // argument at its position.
@@ -670,13 +741,19 @@ namespace IR.Program is
             let row = MAP[int, FUNCTION_INSTANCE]()
             let classes: LIST[CLASS_INSTANCE] mut
 
-            if _trait_classes.try_get_value(owner, classes ref) then
-                for type in classes do
-                    if let implementation = generic_implementation(type, root, arguments) then
-                        row[_target.numbering.id(type)] = implementation
-                    fi
-                od
+            // A class method's row holds every class derived from the
+            // class the call goes through.
+            if !owner.definition.is_trait then
+                classes = _deriving_from(owner)
+            elif !_trait_classes.try_get_value(owner, classes ref) then
+                classes = LIST[CLASS_INSTANCE]()
             fi
+
+            for type in classes do
+                if let implementation = generic_implementation(type, root, arguments) then
+                    row[_target.numbering.id(type)] = implementation
+                fi
+            od
 
             _rows[selector] = row
         si
@@ -831,17 +908,17 @@ namespace IR.Program is
             return null
         si
 
-        /// The selector a call to the generic trait method `method` at
+        /// The selector a call to the generic method `method` at
         /// `arguments` dispatches on, where it is called on an instance of
-        /// `trait_type`, or null where no call at those arguments was
-        /// recorded.
+        /// `through`, a trait or a class, or null where no call at those
+        /// arguments was recorded.
         ///
-        /// - method: the trait method called
-        /// - trait_type: the trait instance the call goes through
+        /// - method: the trait or virtual class method called
+        /// - through: the trait or class instance the call goes through
         /// - arguments: the method's own type arguments at the call
-        generic_selector_of(method: Function, trait_type: CLASS_INSTANCE, arguments: Type[]) -> TRAIT_SELECTOR? is
-            let root = _root_trait_method(method)
-            let owner = _trait_ancestor(trait_type, root.owner)
+        generic_selector_of(method: Function, through: CLASS_INSTANCE, arguments: Type[]) -> TRAIT_SELECTOR? is
+            let root = _generic_root(method, through)
+            let owner = _generic_owner(through, root)
 
             if !owner? \/ root.generic_arguments.count != arguments.count then
                 return null
