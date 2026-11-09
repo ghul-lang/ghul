@@ -147,6 +147,27 @@ namespace Syntax.Process is
         // elements are constructed from, one per count of unmatched
         // pulled elements up to three. Reported here rather than at
         // generation, where a missing stage would be an internal error.
+        // The parameters of the buffered stage holding `prefix` elements:
+        // each element, the source, how many to skip and the live iterator,
+        // `init(e0: T, ..., source: Iterable[T], skip: int, live: Iterator[T]?)`.
+        _rest_stage_parameters(probe: LAZY_SEQUENCE_PROBE, prefix: int) -> Type?[] is
+            let element = probe.element_type
+            let iterable = cast Semantic.Symbols.Classy(_innate_symbol_lookup.get_unspecialized_iterable_type().symbol)
+            let iterator = cast Semantic.Symbols.Classy(_innate_symbol_lookup.get_unspecialized_iterator_type().symbol)
+
+            let result = Collections.LIST[Type?]()
+
+            for _ in 0..prefix do
+                result.add(element)
+            od
+
+            result.add(Semantic.Types.GENERIC(probe.location, iterable, Collections.LIST[Type]([element])))
+            result.add(_innate_symbol_lookup.get_int_type())
+            result.add(_innate_symbol_lookup.get_optional_type(Semantic.Types.GENERIC(probe.location, iterator, Collections.LIST[Type]([element]))))
+
+            return result
+        si
+
         _resolve_lazy_rest_calls(probe: LAZY_SEQUENCE_PROBE) is
             if !probe.has_rest_group then
                 return
@@ -178,14 +199,8 @@ namespace Syntax.Process is
                     // elements, the source, the skip and the live
                     // iterator; an older runtime's constructor over a
                     // memo cache is not it.
-                    if let group: Semantic.Symbols.FUNCTION_GROUP = stage_type.find_member("init") then
-                        let wanted = 3 + stages.count
-
-                        for init in group.functions do
-                            if init.arguments.count == wanted then
-                                stage = LAZY_REST_STAGE(stage_type, init)
-                            fi
-                        od
+                    if let init = Semantic.KNOWN_MEMBERS.find(stage_type, "init", _rest_stage_parameters(probe, stages.count)) then
+                        stage = LAZY_REST_STAGE(stage_type, init)
                     fi
                 fi
 
