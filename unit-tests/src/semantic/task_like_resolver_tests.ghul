@@ -25,6 +25,7 @@ namespace Semantic.UnitTests is
     class TASK_LIKE_RESOLVER_TESTS is
         _int_type: Type
         _exception_type: Type
+        _object_type: Type
         _ref_carrier: CLASS
         _string_type: Type
         _logger: DIAGNOSTICS_STORE
@@ -33,10 +34,11 @@ namespace Semantic.UnitTests is
         init() is
             _int_type = new_class("int").type!
             _exception_type = new_class("Exception").type!
+            _object_type = new_class("object").type!
             _ref_carrier = new_generic("Ref")
             _string_type = new_class("string").type!
             _logger = DIAGNOSTICS_STORE()
-            _resolver = TASK_LIKE_RESOLVER(_logger, () => Semantic.PATTERN_TYPES(_exception_type, null, null))
+            _resolver = TASK_LIKE_RESOLVER(_logger, () => Semantic.PATTERN_TYPES(_exception_type, null, _object_type))
         si
 
         loc() -> LOCATION => LOCATION("test.ghul", 1, 1, 1, 1)
@@ -300,6 +302,30 @@ namespace Semantic.UnitTests is
             is_null(_resolver.resolve(loc(), constructed))
             is_true(first_error().contains("no set_exception method taking Exception"), first_error())
             is_true(first_error().contains("it declares set_exception(int)"), first_error())
+        si
+
+        @Test()
+        Resolving__a_generic_task_like_whose_builder_is_not_generic__takes_set_result_of_object() is
+            let task_like = new_generic("COROUTINE")
+            let b = new_class("COROUTINE_BUILDER")
+            add_member(b, "create", 0, b.type!)
+            add_ref_member(b, "start", 1, null)
+            add_property(b, "task", task_like.type!)
+            add_member(b, "set_exception", 1, null)
+            add_ref_member(b, "await_on_completed", 2, null)
+            add_ref_member(b, "await_unsafe_on_completed", 2, null)
+
+            let set_result = INSTANCE_METHOD(loc(), loc(), b, "set_result", Semantic.BLOCK_SCOPE())
+            set_result.arguments = LIST[Type]([_object_type])
+            b.add_member(set_result)
+
+            task_like.async_builder = b.type
+            let constructed = Semantic.Types.GENERIC(loc(), task_like, LIST[Type]([_int_type]))
+
+            let result = _resolver.resolve(loc(), constructed)
+
+            assert result? else "expected a task-like: {first_error()}"
+            are_same(_int_type, result.result_type)
         si
 
         @Test()

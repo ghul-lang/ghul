@@ -29,11 +29,12 @@ namespace Semantic is
         // resolution route through here, so the contract they enforce is
         // the same one.
         member_of_arity(type: Type, name: string, arity: int) -> Symbols.Function? static =>
-            builder_member(type, name, arity, PATTERN_TYPES.from_lookup())
+            builder_member(type, name, arity, PATTERN_TYPES.from_lookup(), null)
 
-        // The same, given the types the pattern names.
-        builder_member(type: Type, name: string, arity: int, types: PATTERN_TYPES) -> Symbols.Function? static is
-            for signature in builder_signatures(type, name, arity, types) do
+        // The same, given the types the pattern names, and the task's
+        // result type where it is known.
+        builder_member(type: Type, name: string, arity: int, types: PATTERN_TYPES, result: Type?) -> Symbols.Function? static is
+            for signature in builder_signatures(type, name, arity, types, result) do
                 if let member = KNOWN_MEMBERS.find(type, name, signature) then
                     return member
                 fi
@@ -63,7 +64,7 @@ namespace Semantic is
         // `set_result` taking the
         // task's result or nothing; `set_exception` taking the exception.
         // Empty where the pattern has no such member.
-        builder_signatures(type: Type, name: string, arity: int, types: PATTERN_TYPES) -> KNOWN_SIGNATURE[] static is
+        builder_signatures(type: Type, name: string, arity: int, types: PATTERN_TYPES, task_result: Type?) -> KNOWN_SIGNATURE[] static is
             let own: Type? = null
             let state_machine = types.state_machine
             let exception_type = types.exception
@@ -92,8 +93,15 @@ namespace Semantic is
             when "set_result" then
                 if arity == 0 then
                     result.add(KNOWN_SIGNATURE(Collections.LIST[Type?]()))
-                elif let r = result_parameter(type) /\ arity == 1 then
-                    result.add(KNOWN_SIGNATURE(Collections.LIST[Type?]([r])))
+                elif arity == 1 then
+                    // The builder's own type parameter where it is generic in
+                    // the result; the task's result where it is known; and,
+                    // for a builder that is not, a parameter that takes any
+                    // result: a type parameter of the member, or object.
+                    if let r = result_parameter(type) then result.add(KNOWN_SIGNATURE(Collections.LIST[Type?]([r]))) fi
+                    if let r = task_result then result.add(KNOWN_SIGNATURE(Collections.LIST[Type?]([r]))) fi
+                    result.add(KNOWN_SIGNATURE(Collections.LIST[Type?]([own])))
+                    if let o = any then result.add(KNOWN_SIGNATURE(Collections.LIST[Type?]([o]))) fi
                 fi
             esac
 
@@ -214,7 +222,7 @@ namespace Semantic is
             fi
 
             for (name, arity) in required do
-                let member = TASK_LIKE.builder_member(builder_type, name, arity, _types_of())
+                let member = TASK_LIKE.builder_member(builder_type, name, arity, _types_of(), result_type)
 
                 if !member? then
                     _logger.error(
