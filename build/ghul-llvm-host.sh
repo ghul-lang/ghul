@@ -26,8 +26,15 @@ url="https://github.com/ghul-lang/ghul-llvm/releases/latest/download/$archive"
 mkdir -p "$1"
 dir="$(cd "$1" && pwd)"
 
-curl -fsSL -o "$dir/$archive" "$url"
-curl -fsSL -o "$dir/$archive.sha256" "$url.sha256"
+# Retried where GitHub answers with an error or the connection drops, so a
+# release asset that is briefly unavailable doesn't fail the build. What
+# arrives is checked against its digest below before anything is unpacked.
+fetch() {
+    curl -fsSL --retry 5 --retry-all-errors --retry-delay 5 --connect-timeout 30 "$@"
+}
+
+fetch -o "$dir/$archive" "$url"
+fetch -o "$dir/$archive.sha256" "$url.sha256"
 
 (cd "$dir" && sha256sum --check --quiet "$archive.sha256") >&2
 
