@@ -23,8 +23,8 @@ namespace Semantic is
         si
 
         /// Whether `function` has exactly these parameters: the same number,
-        /// each the same type, and a type parameter of its own wherever the
-        /// signature names none.
+        /// each the same type, and a type parameter of its own, by value or
+        /// by reference, wherever the signature names none.
         matches(function: Function) -> bool is
             if !function.are_arguments_declared \/ function.arguments.count != parameters.count then
                 return false
@@ -54,8 +54,17 @@ namespace Semantic is
                 return false
             fi
 
+            // A parameter passed by reference, as an async builder's
+            // `start(ref state_machine)` is, is its referenced type.
+            let referenced =
+                if let reference: Types.REFERENCE = type /\ reference.arguments.count == 1 then
+                    reference.arguments[0]
+                else
+                    type
+                fi
+
             for argument in function.generic_arguments do
-                if argument.compare(type) == Types.MATCH.SAME then
+                if argument.compare(referenced) == Types.MATCH.SAME then
                     return true
                 fi
             od
@@ -123,6 +132,22 @@ namespace Semantic is
         /// - parameters: its parameter types, null for a method type parameter
         find(type: Type?, name: string, parameters: Type?[]) -> Function? static =>
             find(type, name, KNOWN_SIGNATURE(parameters))
+
+        /// The function `owner` itself declares named `name` with exactly
+        /// the parameters `signature` gives, or null where it declares none.
+        ///
+        /// - owner: the symbol the member is declared on
+        /// - name: the member's name
+        /// - signature: the parameters it is pinned by
+        declared(owner: Symbols.Symbol?, name: string, signature: KNOWN_SIGNATURE) -> Function? static is
+            let found = owner?.find_direct(name)
+
+            if let function: Function = found then
+                return if signature.matches(function) then function else null fi
+            fi
+
+            return in_group(cast Symbols.FUNCTION_GROUP?(found), signature)
+        si
 
         /// The function of `group` with exactly the parameters `signature`
         /// gives, or null where it has none: for a group the innate lookup
