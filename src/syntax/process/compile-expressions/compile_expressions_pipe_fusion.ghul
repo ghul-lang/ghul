@@ -762,8 +762,8 @@ namespace Syntax.Process is
             if consumer_kind =~ "find" \/ consumer_kind =~ "first" then
                 let maybe_type = call.value!.type!
 
-                let empty_ctor = _resolve_ctor_by_arity(maybe_type, 0)
-                let wrap_ctor = _resolve_ctor_by_arity(maybe_type, 1)
+                let empty_ctor = _resolve_member(maybe_type, "init", [])
+                let wrap_ctor = _resolve_member(maybe_type, "init", [maybe_type.optional_inner_type])
 
                 if !empty_ctor? \/ !wrap_ctor? then
                     return _decline_consumer(call, recognizer, consumer_kind)
@@ -789,8 +789,8 @@ namespace Syntax.Process is
             then
                 let maybe_type = call.value!.type!
 
-                let empty_ctor = _resolve_ctor_by_arity(maybe_type, 0)
-                let wrap_ctor = _resolve_ctor_by_arity(maybe_type, 1)
+                let empty_ctor = _resolve_member(maybe_type, "init", [])
+                let wrap_ctor = _resolve_member(maybe_type, "init", [maybe_type.optional_inner_type])
 
                 if !empty_ctor? \/ !wrap_ctor? then
                     return _decline_consumer(call, recognizer, consumer_kind)
@@ -865,8 +865,8 @@ namespace Syntax.Process is
             if consumer_kind =~ "collect" \/ consumer_kind =~ "collect_set" then
                 let list_type = call.value!.type!
 
-                let ctor = _resolve_ctor_by_arity(list_type, 0)
-                let add_fn = _resolve_member_by_arity(list_type, "add", 1)
+                let ctor = _resolve_member(list_type, "init", [])
+                let add_fn = _resolve_member(list_type, "add", [_collection_element(list_type)])
 
                 if !ctor? \/ !add_fn? then
                     return _decline_consumer(call, recognizer, consumer_kind)
@@ -924,9 +924,9 @@ namespace Syntax.Process is
                             cast Semantic.Symbols.Classy(list_symbol),
                             list_arguments))
 
-                let ctor = _resolve_ctor_by_arity(list_type, 0)
-                let add_fn = _resolve_member_by_arity(list_type, "add", 1)
-                let to_array = _resolve_member_by_arity(list_type, "to_array", 0)
+                let ctor = _resolve_member(list_type, "init", [])
+                let add_fn = _resolve_member(list_type, "add", [_collection_element(list_type)])
+                let to_array = _resolve_member(list_type, "to_array", [])
 
                 if !ctor? \/ !add_fn? \/ !to_array? then
                     return _decline_consumer(call, recognizer, consumer_kind)
@@ -1168,28 +1168,18 @@ namespace Syntax.Process is
             return null
         si
 
-        // A member of `type` named `name` taking `arity` arguments (or null).
-        _resolve_member_by_arity(type: Type, name: string, arity: int) -> Semantic.Symbols.Function? is
-            let member = type.find_member(name)
+        // The member of `type` named `name` taking exactly the parameter
+        // types `parameters` (or null).
+        _resolve_member(type: Type, name: string, parameters: Type?[]) -> Semantic.Symbols.Function? =>
+            Semantic.KNOWN_MEMBERS.find(type, name, parameters)
 
-            if !member? \/ !isa Semantic.Symbols.FUNCTION_GROUP(member) then
-                return null
+        // The element type of the collection `type`, which its `add` takes.
+        _collection_element(type: Type) -> Type? =>
+            if let generic: Semantic.Types.GENERIC = type /\ generic.arguments.count == 1 then
+                generic.arguments[0]
+            else
+                null
             fi
-
-            let group = cast Semantic.Symbols.FUNCTION_GROUP(member)
-
-            for f in group.functions do
-                if f.argument_names.count == arity then
-                    return f
-                fi
-            od
-
-            return null
-        si
-
-        // The constructor of `type` taking `arity` arguments (or null).
-        _resolve_ctor_by_arity(type: Type, arity: int) -> Semantic.Symbols.Function? =>
-            _resolve_member_by_arity(type, "init", arity)
 
         // Pre-build the per-stage application for a consumer loop, threading
         // the element through freshly-named locals (a map produces a new
@@ -1351,23 +1341,13 @@ namespace Syntax.Process is
             return stage.is_index_ready
         si
 
-        // The single INDEXED_VALUE[element] constructor `init(int, element)`,
+        // The INDEXED_VALUE[element] constructor `init(int, element)`,
         // specialized to the stage's element type, that the fused index stage
         // calls per element in place of building an INDEX_PIPE.
         _resolve_index_constructor(indexed_value_type: Type) -> Semantic.Symbols.Function? is
-            let init_symbol = indexed_value_type.find_member("init")
+            let int_type = IoC.CONTAINER.instance.innate_symbol_lookup.get_int_type()
 
-            if !init_symbol? \/ !isa Semantic.Symbols.FUNCTION_GROUP(init_symbol) then
-                return null
-            fi
-
-            let group = cast Semantic.Symbols.FUNCTION_GROUP(init_symbol)
-
-            if group.count != 1 then
-                return null
-            fi
-
-            return group.functions[0]
+            return _resolve_member(indexed_value_type, "init", [int_type, _collection_element(indexed_value_type)])
         si
 
         _fused_local_id_counter: int static

@@ -47,10 +47,19 @@ namespace Syntax.Process is
             // contains_key then the indexer rather than try_get_value: the
             // wasm target cannot take the address of a local for its out
             // parameter.
-            let contains = _memo_member(cache_type, "contains_key", 1)
-            let read = _memo_member(cache_type, Semantic.Symbols.INDEXER_NAMES.read, 1)
-            let assign = _memo_member(cache_type, Semantic.Symbols.INDEXER_NAMES.assign, 2)
-            let constructor = _memo_member(cache_type, "init", 0)
+            // The cache is a MAP of the memoised function's arguments to its
+            // result, whose members are pinned by those two types.
+            let generic = cast Semantic.Types.GENERIC?(cache_type)
+
+            assert generic? /\ generic.arguments.count == 2 else "memo cache type {cache_type} is not a map"
+
+            let key_type = generic.arguments[0]
+            let value_type = generic.arguments[1]
+
+            let contains = _memo_member(cache_type, "contains_key", [key_type])
+            let read = _memo_member(cache_type, Semantic.Symbols.INDEXER_NAMES.read, [key_type])
+            let assign = _memo_member(cache_type, Semantic.Symbols.INDEXER_NAMES.assign, [key_type, value_type])
+            let constructor = _memo_member(cache_type, "init", [])
 
             assert contains? /\ read? /\ assign? /\ constructor? else "memo cache type {cache_type} lacks the members a memo body uses"
 
@@ -176,16 +185,7 @@ namespace Syntax.Process is
                 null
             fi
 
-        _memo_member(type: Semantic.Types.Type, name: string, arity: int) -> Semantic.Symbols.Function? is
-            if let group: Semantic.Symbols.FUNCTION_GROUP = type.find_member(name) then
-                for f in group.functions do
-                    if f.argument_names.count == arity then
-                        return f
-                    fi
-                od
-            fi
-
-            return null
-        si
+        _memo_member(type: Semantic.Types.Type, name: string, parameters: Semantic.Types.Type?[]) -> Semantic.Symbols.Function? =>
+            Semantic.KNOWN_MEMBERS.find(type, name, parameters)
     si
 si

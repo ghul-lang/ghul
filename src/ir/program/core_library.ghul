@@ -50,15 +50,41 @@ namespace IR.Program is
             return null
         si
 
-        /// The constructor of `type` taking `arity` arguments, or null where
-        /// it declares none.
+        /// The constructor of `type` taking exactly the parameter types
+        /// `parameters`, or null where it declares none.
         ///
         /// - type: the class, or null
-        /// - arity: how many arguments the constructor takes
-        constructor(type: Semantic.Symbols.Classy?, arity: int) -> Semantic.Symbols.Function? static is
+        /// - parameters: the constructor's parameter types
+        constructor(type: Semantic.Symbols.Classy?, parameters: Semantic.Types.Type?[]) -> Semantic.Symbols.Function? static =>
+            Semantic.KNOWN_MEMBERS.in_group(
+                cast Semantic.Symbols.FUNCTION_GROUP?(type?.find_direct("init")),
+                Semantic.KNOWN_SIGNATURE(parameters, true))
+
+        /// The constructor of `type` taking the types of `arguments`.
+        ///
+        /// - type: the class, or null
+        /// - arguments: the values it is to be constructed from
+        constructor_for(type: Semantic.Symbols.Classy?, arguments: IR.Values.Value[]) -> Semantic.Symbols.Function? static =>
+            constructor(type, Collections.LIST[Semantic.Types.Type?](arguments |> Ghul.Pipes.map(a => a.type)))
+
+        /// The type object constructor that takes the type's name and a
+        /// function describing it, or null where the core library's type
+        /// object, or `type`, has none. The describing function's type is
+        /// the library's own, so it is recognised as a function type.
+        ///
+        /// - type: the type object class, or null
+        describing_constructor(type: Semantic.Symbols.Classy?) -> Semantic.Symbols.Function? static is
+            let string_type = IoC.CONTAINER.instance.innate_symbol_lookup.get_string_type()
+
             if let group = cast Semantic.Symbols.FUNCTION_GROUP?(type?.find_direct("init")) then
                 for constructor in group.functions do
-                    if constructor.arguments.count == arity /\ !constructor.is_static_constructor then
+                    if
+                        constructor.is_instance /\
+                        constructor.are_arguments_declared /\
+                        constructor.arguments.count == 2 /\
+                        string_type.compare(constructor.arguments[0]) == Semantic.Types.MATCH.SAME /\
+                        constructor.arguments[1].is_function
+                    then
                         return constructor
                     fi
                 od
@@ -66,6 +92,10 @@ namespace IR.Program is
 
             return null
         si
+
+        // The core library's string type, for a constructor taking a name
+        // or a message.
+        string_type: Semantic.Types.Type static => IoC.CONTAINER.instance.innate_symbol_lookup.get_string_type()
 
         /// The getter of the property `name` that `type` declares, or null
         /// where it declares no readable property of that name.

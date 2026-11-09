@@ -1,0 +1,262 @@
+namespace Semantic is
+    use Types.Type
+    use Symbols.Function
+
+    /// The parameter list a known member is pinned by: a type for each
+    /// parameter, or null for one whose type is a type parameter of the
+    /// method itself, as in `append_formatted[T](value: T)`.
+    class KNOWN_SIGNATURE is
+        parameters: Type?[]
+
+        /// Whether the member is an instance member, a static one, or
+        /// either where null.
+        is_instance: bool?
+
+        init(parameters: Type?[]) is
+            self.parameters = parameters
+            self.is_instance = null
+        si
+
+        init(parameters: Type?[], is_instance: bool) is
+            self.parameters = parameters
+            self.is_instance = is_instance
+        si
+
+        /// Whether `function` has exactly these parameters: the same number,
+        /// each the same type, and a type parameter of its own, by value or
+        /// by reference, wherever the signature names none.
+        matches(function: Function) -> bool is
+            if !function.are_arguments_declared \/ function.arguments.count != parameters.count then
+                return false
+            fi
+
+            if let instance = is_instance /\ function.is_instance != instance then
+                return false
+            fi
+
+            for i in 0..parameters.count do
+                let actual = function.arguments[i]
+
+                if let wanted = parameters[i] then
+                    // A type still being inferred stands for the parameter it
+                    // will be settled to, so it is not compared yet.
+                    if !(wanted.is_type_variable \/ wanted.is_wild \/ wanted.is_sentinel) /\ wanted.compare(actual) != Types.MATCH.SAME then
+                        return false
+                    fi
+                elif !_is_method_type_parameter(function, actual) then
+                    return false
+                fi
+            od
+
+            return true
+        si
+
+        _is_method_type_parameter(function: Function, type: Type) -> bool is
+            if !function.is_generic then
+                return false
+            fi
+
+            // A parameter passed by reference, as an async builder's
+            // `start(ref state_machine)` is, is its referenced type.
+            let referenced =
+                if let reference: Types.REFERENCE = type /\ reference.arguments.count == 1 then
+                    reference.arguments[0]
+                else
+                    type
+                fi
+
+            for argument in function.generic_arguments do
+                if argument.compare(referenced) == Types.MATCH.SAME then
+                    return true
+                fi
+            od
+
+            return false
+        si
+    si
+
+    /// The members the compiler itself calls, each found once on its type
+    /// by its exact signature and kept. A member is never chosen by its
+    /// name and how many arguments it takes: a type that gains an overload
+    /// of the same arity would otherwise have the new one called with
+    /// arguments of the wrong types.
+    class KNOWN_MEMBERS is
+        _found: Collections.MAP[KNOWN_MEMBER_KEY, Function?] static
+        _gate: object static
+
+        init() static is
+            _found = Collections.MAP[KNOWN_MEMBER_KEY, Function?]()
+            _gate = object()
+        si
+
+        // The cache is shared by the passes that run in parallel on .NET;
+        // the other targets run one thread, and have no monitor to take.
+        @IF.dotnet()
+        _enter() static is System.Threading.Monitor.enter(_gate); si
+
+        @IF.dotnet()
+        _exit() static is System.Threading.Monitor.exit(_gate); si
+
+        @IF.not.dotnet()
+        _enter() static is si
+
+        @IF.not.dotnet()
+        _exit() static is si
+
+        /// Forgets every member found, for a new compilation, whose types
+        /// are not the last one's.
+        clear_cache() static is
+            _enter()
+
+            try
+                _found.clear()
+            finally
+                _exit()
+            yrt
+        si
+
+        /// The member of `type` named `name` with exactly the parameters
+        /// `signature` gives, or null where `type` declares none.
+        ///
+        /// - type: the type the member belongs to
+        /// - name: the member's name
+        /// - signature: the parameters it is pinned by
+        find(type: Type?, name: string, signature: KNOWN_SIGNATURE) -> Function? static =>
+            if let owner = type then _find(owner, name, signature) else null fi
+
+        _find(owner: Type, name: string, signature: KNOWN_SIGNATURE) -> Function? static is
+            let key = KNOWN_MEMBER_KEY(owner, name, signature)
+
+            _enter()
+
+            try
+                let cached: Function? mut = null
+
+                if _found.try_get_value(key, cached ref) then
+                    return cached
+                fi
+            finally
+                _exit()
+            yrt
+
+            let result = _search(owner, name, signature)
+
+            _enter()
+
+            try
+                _found[key] = result
+            finally
+                _exit()
+            yrt
+
+            return result
+        si
+
+        /// The member of `type` named `name` taking exactly the parameter
+        /// types `parameters`, of either kind.
+        ///
+        /// - type: the type the member belongs to
+        /// - name: the member's name
+        /// - parameters: its parameter types, null for a method type parameter
+        find(type: Type?, name: string, parameters: Type?[]) -> Function? static =>
+            find(type, name, KNOWN_SIGNATURE(parameters))
+
+        /// The function `owner` itself declares named `name` with exactly
+        /// the parameters `signature` gives, or null where it declares none.
+        ///
+        /// - owner: the symbol the member is declared on
+        /// - name: the member's name
+        /// - signature: the parameters it is pinned by
+        declared(owner: Symbols.Symbol?, name: string, signature: KNOWN_SIGNATURE) -> Function? static is
+            let found = owner?.find_direct(name)
+
+            if let function: Function = found then
+                return if signature.matches(function) then function else null fi
+            fi
+
+            return in_group(cast Symbols.FUNCTION_GROUP?(found), signature)
+        si
+
+        /// The function of `group` with exactly the parameters `signature`
+        /// gives, or null where it has none: for a group the innate lookup
+        /// already holds, which needs no type to find it on.
+        ///
+        /// - group: the overloads to choose among
+        /// - signature: the parameters it is pinned by
+        in_group(group: Symbols.FUNCTION_GROUP?, signature: KNOWN_SIGNATURE) -> Function? static is
+            if let overloads = group then
+                for function in overloads.functions do
+                    if signature.matches(function) then
+                        return function
+                    fi
+                od
+            fi
+
+            return null
+        si
+
+        // The overload of `name` on `type` that `signature` matches. A type
+        // cannot declare two overloads with the same parameter types, so at
+        // most one does.
+        _search(type: Type, name: string, signature: KNOWN_SIGNATURE) -> Function? static is
+            let found = type.find_member(name)
+
+            if let group: Symbols.FUNCTION_GROUP = found then
+                for function in group.functions do
+                    if signature.matches(function) then
+                        return function
+                    fi
+                od
+            elif let function: Function = found /\ signature.matches(function) then
+                return function
+            fi
+
+            return null
+        si
+    si
+
+    // What a pinned member is kept under: the type object it was found
+    // on, its name, and the parameter types it was pinned by, compared
+    // exactly.
+    struct KNOWN_MEMBER_KEY: Ghul.Equatable[KNOWN_MEMBER_KEY] is
+        type: Type
+        name: string
+        signature: KNOWN_SIGNATURE
+
+        init(type: Type, name: string, signature: KNOWN_SIGNATURE) is
+            self.type = type
+            self.name = name
+            self.signature = signature
+        si
+
+        =~(other: KNOWN_MEMBER_KEY) -> bool pure is
+            // The type object itself, not types that compare the same: two
+            // tuple types differing only in their element names compare the
+            // same, and a member found on one must not be handed to the other.
+            if !(name =~ other.name) \/ type != other.type then
+                return false
+            fi
+
+            if signature.is_instance !~ other.signature.is_instance \/ signature.parameters.count != other.signature.parameters.count then
+                return false
+            fi
+
+            for i in 0..signature.parameters.count do
+                let mine = signature.parameters[i]
+                let theirs = other.signature.parameters[i]
+
+                if let a = mine then
+                    if !theirs? \/ a.compare(theirs) != Types.MATCH.SAME then
+                        return false
+                    fi
+                elif theirs? then
+                    return false
+                fi
+            od
+
+            return true
+        si
+
+        get_hash_code() -> int => type.get_hash_code() ^ name.get_hash_code() ^ signature.parameters.count
+    si
+si

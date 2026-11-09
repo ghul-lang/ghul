@@ -30,12 +30,8 @@ namespace IR is
             if let capacity = _capacity(hints) /\ capacity > 0 then
                 let int_type = IoC.CONTAINER.instance.innate_symbol_lookup.get_int_type()
 
-                if let group: Semantic.Symbols.FUNCTION_GROUP = type?.find_member("init") then
-                    for function in group.functions do
-                        if function.arguments.count == 1 /\ function.arguments[0].symbol == int_type.symbol then
-                            return Values.NEW(type!, function, LIST[Value]([Values.Literal.NUMBER(capacity, int_type)]))
-                        fi
-                    od
+                if let function = method(type, "init", [int_type]) then
+                    return Values.NEW(type!, function, LIST[Value]([Values.Literal.NUMBER(capacity, int_type)]))
                 fi
             fi
 
@@ -62,7 +58,7 @@ namespace IR is
         /// The construction of the builder `type`, or null where it has no
         /// constructor taking nothing.
         new_builder(type: Type?) -> Value? is
-            if let constructor = method(type, "init", 0) then
+            if let constructor = method(type, "init", []) then
                 return Values.NEW(type!, constructor, LIST[Value]())
             fi
 
@@ -89,7 +85,7 @@ namespace IR is
         /// The call appending `text` to `builder` padded to `alignment`, or
         /// null where the builder cannot.
         append_aligned(builder: Value, text: Value, alignment: Value) -> Value? is
-            if let append = method(builder.type, "_append_aligned", 2) then
+            if let append = method(builder.type, "_append_aligned", [_string_type, _int_type]) then
                 return Values.Call.INSTANCE(builder, append, LIST[Value]([text, alignment]), null)
             fi
 
@@ -101,7 +97,7 @@ namespace IR is
         /// The call answering everything appended to `builder`, or null
         /// where it has no `to_string`.
         build(builder: Value) -> Value? is
-            if let build = method(builder.type, "to_string", 0) then
+            if let build = method(builder.type, "to_string", []) then
                 return Values.Call.INSTANCE(builder, build, LIST[Value](), null)
             fi
 
@@ -121,7 +117,7 @@ namespace IR is
                 return value
             elif let text = enum_text(value, type) then
                 return text
-            elif let to_string = method(type, "to_string", 0) then
+            elif let to_string = method(type, "to_string", []) then
                 if let owner: Semantic.Symbols.Classy = to_string.owner /\ owner.is_object then
                     _report("an interpolated value whose type has no to_string of its own")
 
@@ -183,7 +179,7 @@ namespace IR is
                 fi
             fi
 
-            if let to_string = method(type, "to_string", 1) then
+            if let to_string = method(type, "to_string", [_string_type]) then
                 return Values.Call.INSTANCE(value, to_string, LIST[Value]([format]), null)
             fi
 
@@ -192,22 +188,11 @@ namespace IR is
             return value
         si
 
-        /// The builder's one-argument `append` whose argument is a string.
-        string_append(type: Type?) -> Function? is
-            if let group: Semantic.Symbols.FUNCTION_GROUP = type?.find_member("append") then
-                for function in group.functions do
-                    if function.arguments.count == 1 /\ _is_string(function.arguments[0]) then
-                        return function
-                    fi
-                od
-            elif let function: Function = type?.find_member("append") /\
-                function.arguments.count == 1 /\ _is_string(function.arguments[0])
-            then
-                return function
-            fi
-
-            return null
-        si
+        /// The builder's `append` taking a string: one that may be null, as
+        /// both the core library's and .NET's declare it, or else one that
+        /// may not, as a builder written in ghūl can.
+        string_append(type: Type?) -> Function? =>
+            method(type, "append", [_string_type.as_optional()]) ?? method(type, "append", [_string_type])
 
         // `value` written in `format` by its `to_string(format, provider)`,
         // where its type implements the core library's `System.IFormattable`,
@@ -219,29 +204,32 @@ namespace IR is
                 return null
             fi
 
-            if let to_string = method(type, "to_string", 2) then
+            // The `to_string` the trait itself declares, beside those it
+            // inherits from `object`; the type's implementation of it is the
+            // one taking exactly its parameters.
+            let declared: Function? mut = null
+
+            if let group: Semantic.Symbols.FUNCTION_GROUP = Semantic.Types.NAMED(formattable).find_member("to_string") then
+                for f in group.functions do
+                    if f.owner?.unspecialized_symbol == formattable.unspecialized_symbol then
+                        declared = f
+                    fi
+                od
+            elif let f: Function = Semantic.Types.NAMED(formattable).find_member("to_string") then
+                declared = f
+            fi
+
+            if let d = declared, to_string = method(type, "to_string", d.arguments) then
                 return Values.Call.INSTANCE(value, to_string, LIST[Value]([format, Values.NULL(to_string.arguments[1])]), null)
             fi
 
             return null
         si
 
-        /// The method of `type` named `name` that takes `arity` arguments.
-        method(type: Type?, name: string, arity: int) -> Function? static is
-            let found = type?.find_member(name)
-
-            if let group: Semantic.Symbols.FUNCTION_GROUP = found then
-                for function in group.functions do
-                    if function.arguments.count == arity then
-                        return function
-                    fi
-                od
-            elif let function: Function = found /\ function.arguments.count == arity then
-                return function
-            fi
-
-            return null
-        si
+        /// The method of `type` named `name` taking exactly the parameter
+        /// types `parameters`, pinned once and kept by `KNOWN_MEMBERS`.
+        method(type: Type?, name: string, parameters: Type?[]) -> Function? static =>
+            Semantic.KNOWN_MEMBERS.find(type, name, parameters)
 
         /// The text of `value`, a value of the enum `type`, as .NET gives
         /// it: its member's name, the names a flags value combines, or the
@@ -259,7 +247,7 @@ namespace IR is
                 return null
             fi
 
-            let function = _method_of(functions, 4)
+            let function = Semantic.KNOWN_MEMBERS.in_group(functions, Semantic.KNOWN_SIGNATURE([lookup.get_int_type(), lookup.get_array_type(lookup.get_string_type()), lookup.get_array_type(lookup.get_int_type()), lookup.get_bool_type()]))
 
             if !function? then
                 return null
@@ -296,15 +284,9 @@ namespace IR is
             return Values.Call.STATIC(function, arguments, string_type, null)
         si
 
-        _method_of(group: Semantic.Symbols.FUNCTION_GROUP, arity: int) -> Function? static is
-            for function in group.functions do
-                if function.arguments.count == arity then
-                    return function
-                fi
-            od
+        _string_type: Type static => IoC.CONTAINER.instance.innate_symbol_lookup.get_string_type()
 
-            return null
-        si
+        _int_type: Type static => IoC.CONTAINER.instance.innate_symbol_lookup.get_int_type()
 
         _is_string(type: Type?) -> bool =>
             type? /\ type.symbol == IoC.CONTAINER.instance.innate_symbol_lookup.get_string_type().symbol

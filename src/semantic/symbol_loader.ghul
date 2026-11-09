@@ -343,10 +343,9 @@ namespace Semantic is
                 // `init(value: T)`), so we get a FUNCTION_GROUP
                 // back. Pick the overload matching what we have.
                 let box_type = symbol.storage_type!
-                let arity = if value? then 1 else 0 fi
-                let ctor = _resolve_box_constructor(box_type, arity)
+                let ctor = _resolve_box_constructor(box_type, value?)
 
-                assert ctor? else "no box constructor of arity {arity} for {box_type}"
+                assert ctor? else "no box constructor for {box_type}"
 
                 let arguments =
                     if value? then
@@ -371,47 +370,22 @@ namespace Semantic is
             return member.store(location, typed_box, value!, self, false)
         si
 
-        // Constructor of `Ghul.BOX[T]` taking `arity` arguments —
-        // 1 for the value-carrying overload, 0 for the empty one.
-        // `find_member("init")` on the specialised GENERIC
-        // returns a FUNCTION_GROUP (BOX has both); pick the
-        // matching overload. Returns null if box_type is unresolved
-        // or the constructor can't be located — callers null-check
-        // before use.
-        _resolve_box_constructor(box_type: Type?, arity: int) -> Symbols.Function? is
-            if !box_type? then
-                return null
-            fi
+        // Constructor of `Ghul.BOX[T]`: `init(value: T)` where the box is
+        // made with a value, `init()` where it is not. Returns null if
+        // box_type is unresolved or the constructor can't be located;
+        // callers null-check before use.
+        _resolve_box_constructor(box_type: Type?, with_value: bool) -> Symbols.Function? is
+            let parameters = Collections.LIST[Type?]()
 
-            let member = box_type.symbol.find_member("init")
-
-            if !member? then
-                return null
-            fi
-
-            let direct = cast Symbols.Function?(member)
-
-            if direct? then
-                if direct.are_arguments_declared /\ direct.arguments.count == arity then
-                    return direct
+            if with_value then
+                if let generic: Types.GENERIC = box_type /\ generic.arguments.count == 1 then
+                    parameters.add(generic.arguments[0])
                 else
                     return null
                 fi
             fi
 
-            let group = cast Symbols.FUNCTION_GROUP?(member)
-
-            if !group? then
-                return null
-            fi
-
-            for f in group.functions do
-                if f.are_arguments_declared /\ f.arguments.count == arity then
-                    return f
-                fi
-            od
-
-            return null
+            return KNOWN_MEMBERS.find(box_type, "init", parameters)
         si
 
         // The `value` member of `Ghul.BOX[T]` — what reads and

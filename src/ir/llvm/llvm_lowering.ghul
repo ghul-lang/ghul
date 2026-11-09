@@ -756,7 +756,7 @@ namespace IR.LLVMTarget is
                 let long_type = IoC.CONTAINER.instance.innate_symbol_lookup.get_long_type()
 
                 _bigint_of_small(bigint.type, Values.Literal.NUMBER(Values.Literal.CONSTANT.I8(small), long_type))
-            elif let parse = _static_method(bigint.type, "parse", 1) then
+            elif let parse = _static_method(bigint.type, "parse", [IoC.CONTAINER.instance.innate_symbol_lookup.get_string_type()]) then
                 let string_type = IoC.CONTAINER.instance.innate_symbol_lookup.get_string_type()
 
                 gen(Values.Call.STATIC(parse, LIST[Value]([Values.Literal.STRING(bigint.value, string_type)]), bigint.type, null))
@@ -1089,7 +1089,7 @@ namespace IR.LLVMTarget is
         // A MAYBE holding a value is built by the core library's constructor
         // taking that value.
         visit(construct: Values.CONSTRUCT_MAYBE) is
-            if let constructor = INTERPOLATION_CALLS.method(construct.type, "init", 1) then
+            if let constructor = INTERPOLATION_CALLS.method(construct.type, "init", [construct.type.optional_inner_type]) then
                 gen(Values.NEW(construct.type, constructor, LIST[Value]([construct.value])))
             else
                 _report("an optional value, whose MAYBE has no constructor taking its value")
@@ -1188,7 +1188,7 @@ namespace IR.LLVMTarget is
                 _push(_i32(0))
             elif runtime.operation == IR.RuntimeOperation.NEW_RANGE then
                 // A range is constructed from its two endpoints.
-                if let constructor = INTERPOLATION_CALLS.method(runtime.type, "init", 2) then
+                if let constructor = INTERPOLATION_CALLS.method(runtime.type, "init", Collections.LIST[Type?](runtime.operands |> Ghul.Pipes.map(o => o.type))) then
                     gen(Values.NEW(runtime.type!, constructor, LIST[Value](runtime.operands)))
                 else
                     _report("a range, whose type has no constructor taking its endpoints")
@@ -3167,7 +3167,7 @@ namespace IR.LLVMTarget is
         // core library's `_canonical` moves into the i64 field where it fits,
         // as every other bigint operation looks there first.
         _bigint_from_host(b: CLASS_INSTANCE, type: Type, big: LLVM.Value) is
-            let canonical = _static_method(type, "_canonical", 1)
+            let canonical = _static_method(type, "_canonical", [type])
 
             if !canonical? then
                 _report("a bigint the runtime answers with, with no bigint._canonical")
@@ -3185,23 +3185,10 @@ namespace IR.LLVMTarget is
             fi
         si
 
-        // The static method of `type` named `name` that takes `arity`
-        // arguments.
-        _static_method(type: Type?, name: string, arity: int) -> Function? is
-            let found = type?.find_member(name)
-
-            if let group: Semantic.Symbols.FUNCTION_GROUP = found then
-                for function in group.functions do
-                    if !function.is_instance /\ function.arguments.count == arity then
-                        return function
-                    fi
-                od
-            elif let function: Function = found /\ !function.is_instance /\ function.arguments.count == arity then
-                return function
-            fi
-
-            return null
-        si
+        // The static method of `type` named `name` taking exactly the
+        // parameter types `parameters`.
+        _static_method(type: Type?, name: string, parameters: Type?[]) -> Function? =>
+            Semantic.KNOWN_MEMBERS.find(type, name, Semantic.KNOWN_SIGNATURE(parameters, false))
         // A host operation is a function the native runtime defines, named
         // for the operation. A string crosses as the address of its code
         // units and their count, and comes back as a string the runtime made
@@ -3591,7 +3578,7 @@ namespace IR.LLVMTarget is
         si
 
         _type_object_constructor() -> (CLASS_INSTANCE, Function)? is
-            if let constructor = IR.Program.CORE_LIBRARY.constructor(IR.Program.CORE_LIBRARY.type_class(), 1) then
+            if let constructor = IR.Program.CORE_LIBRARY.constructor(IR.Program.CORE_LIBRARY.type_class(), [IR.Program.CORE_LIBRARY.string_type]) then
                 if let type = _owner_class(constructor.owner), objects = _objects /\ objects.is_object_type(type) then
                     return (type, constructor)
                 fi
@@ -3711,7 +3698,7 @@ namespace IR.LLVMTarget is
         _new_exception(kind: Semantic.Lookups.RuntimeException, arguments: Value[]) -> LLVM.Value? is
             let name = Semantic.Lookups.RUNTIME_EXCEPTIONS.name_of(kind)
 
-            if let constructor = IR.Program.CORE_LIBRARY.constructor(IR.Program.CORE_LIBRARY.exception_class(kind), arguments.count) then
+            if let constructor = IR.Program.CORE_LIBRARY.constructor_for(IR.Program.CORE_LIBRARY.exception_class(kind), arguments) then
                 return _construct(constructor, arguments, name)
             fi
 
@@ -3724,7 +3711,7 @@ namespace IR.LLVMTarget is
         // exception class for `kind`, so a later lowering can throw one,
         // where there is one.
         _reach_exception(kind: Semantic.Lookups.RuntimeException) is
-            if let constructor = IR.Program.CORE_LIBRARY.constructor(IR.Program.CORE_LIBRARY.exception_class(kind), 0) then
+            if let constructor = IR.Program.CORE_LIBRARY.constructor(IR.Program.CORE_LIBRARY.exception_class(kind), []) then
                 _owner_class(constructor.owner)
                 _callee(_instance_of(constructor))
             fi
@@ -3733,7 +3720,7 @@ namespace IR.LLVMTarget is
         // Throws a new instance of the core library's exception class for
         // `kind`, made by its constructor taking nothing.
         _throw_new(kind: Semantic.Lookups.RuntimeException) is
-            if let constructor = IR.Program.CORE_LIBRARY.constructor(IR.Program.CORE_LIBRARY.exception_class(kind), 0) then
+            if let constructor = IR.Program.CORE_LIBRARY.constructor(IR.Program.CORE_LIBRARY.exception_class(kind), []) then
                 if let exception = _construct(constructor, LIST[Value](), Semantic.Lookups.RUNTIME_EXCEPTIONS.name_of(kind)) then
                     _throw(exception)
                     return
@@ -5358,7 +5345,7 @@ namespace IR.LLVMTarget is
             // value's address, and is boxed to reach one it inherits, as
             // CIL's constrained call does.
             if type?.is_value_type ?? false then
-                let own = INTERPOLATION_CALLS.method(type, call.function.name, call.function.arguments.count)
+                let own = INTERPOLATION_CALLS.method(type, call.function.name, Collections.LIST[Type?](call.function.arguments |> Ghul.Pipes.map(a => _specialize(a))))
 
                 if let o = own /\ isa Semantic.Symbols.STRUCT(o.root_specialized_from.owner) then
                     _call_struct(constrained.value, o, call.arguments)
