@@ -59,13 +59,15 @@ namespace Semantic is
         // `create()`; `start` taking the state machine, and the two await
         // registrations taking the awaiter and the state machine, each a
         // type parameter of the member itself (null here), or with the
-        // state machine as `IAsyncStateMachine`; `set_result` taking the
+        // state machine as `IAsyncStateMachine`, or with both as `object`;
+        // `set_result` taking the
         // task's result or nothing; `set_exception` taking the exception.
         // Empty where the pattern has no such member.
         builder_signatures(type: Type, name: string, arity: int, types: PATTERN_TYPES) -> KNOWN_SIGNATURE[] static is
             let own: Type? = null
             let state_machine = types.state_machine
             let exception_type = types.exception
+            let any = types.any_object
             let result = Collections.LIST[KNOWN_SIGNATURE]()
 
             case name
@@ -76,12 +78,14 @@ namespace Semantic is
                     result.add(KNOWN_SIGNATURE(Collections.LIST[Type?]([own])))
 
                     if let s = state_machine then result.add(KNOWN_SIGNATURE(Collections.LIST[Type?]([s]))) fi
+                    if let o = any then result.add(KNOWN_SIGNATURE(Collections.LIST[Type?]([o]))) fi
                 fi
             when "await_on_completed", "await_unsafe_on_completed" then
                 if arity == 2 then
                     result.add(KNOWN_SIGNATURE(Collections.LIST[Type?]([own, own])))
 
                     if let s = state_machine then result.add(KNOWN_SIGNATURE(Collections.LIST[Type?]([own, s]))) fi
+                    if let o = any then result.add(KNOWN_SIGNATURE(Collections.LIST[Type?]([o, o]))) fi
                 fi
             when "set_exception" then
                 if arity == 1 /\ exception_type? then result.add(KNOWN_SIGNATURE(Collections.LIST[Type?]([exception_type]))) fi
@@ -93,7 +97,10 @@ namespace Semantic is
                 fi
             esac
 
-            return result
+            // How each parameter is passed is the resolver's own check, with
+            // its own message, so a parameter is compared as the type it
+            // refers to.
+            return Collections.LIST[KNOWN_SIGNATURE](result |> Ghul.Pipes.map(sig => sig.by_value_or_reference()))
         si
 
         init(task_type: Type, result_type: Type?, builder_type: Type) is
@@ -110,13 +117,14 @@ namespace Semantic is
     // both before any body is compiled, so the answer does not depend
     // on file order.
     /// The types the async method builder pattern names: what
-    /// `set_exception` takes, and the state machine trait.
-    struct PATTERN_TYPES(exception: Type? public, state_machine: Type? public) is
+    /// `set_exception` takes, the state machine trait, and `object`, which a
+    /// builder may take the state machine or the awaiter as.
+    struct PATTERN_TYPES(exception: Type? public, state_machine: Type? public, any_object: Type? public) is
         /// The innate types, once they have loaded.
         from_lookup() -> PATTERN_TYPES static is
             let lookup = IoC.CONTAINER.instance.innate_symbol_lookup
 
-            return PATTERN_TYPES(lookup.get_exception_type(), lookup.get_async_state_machine_interface_type())
+            return PATTERN_TYPES(lookup.get_exception_type(), lookup.get_async_state_machine_interface_type(), lookup.get_object_type())
         si
     si
 
