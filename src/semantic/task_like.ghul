@@ -22,20 +22,98 @@ namespace Semantic is
 
         is_void_like: bool => !result_type?
 
-        // The one home for locating a builder member: an overload of the
-        // name taking exactly `arity` arguments. Both the completeness
-        // check above and the emission-time member resolution route
-        // through here, so the contract they enforce is the same one.
-        member_of_arity(type: Type, name: string, arity: int) -> Symbols.Function? static is
-            if let group: Symbols.FUNCTION_GROUP = type.find_member(name) then
-                for f in group.functions do
-                    if f.arguments.count == arity then
-                        return f
-                    fi
-                od
-            fi
+        // The one home for locating a builder member: the member of the
+        // async method builder pattern named `name` taking `arity`
+        // arguments, found by the exact parameters the pattern gives it.
+        // Both the completeness check below and the emission-time member
+        // resolution route through here, so the contract they enforce is
+        // the same one.
+        member_of_arity(type: Type, name: string, arity: int) -> Symbols.Function? static =>
+            builder_member(type, name, arity, PATTERN_TYPES.from_lookup(), null)
+
+        // The same, given the task's result type, which `set_result` may
+        // take.
+        member_of_arity(type: Type, name: string, arity: int, result: Type?) -> Symbols.Function? static =>
+            builder_member(type, name, arity, PATTERN_TYPES.from_lookup(), result)
+
+        // The same, given the types the pattern names, and the task's
+        // result type where it is known.
+        builder_member(type: Type, name: string, arity: int, types: PATTERN_TYPES, result: Type?) -> Symbols.Function? static is
+            for signature in builder_signatures(type, name, arity, types, result) do
+                if let member = KNOWN_MEMBERS.find(type, name, signature) then
+                    return member
+                fi
+            od
 
             return null
+        si
+
+        // The type a builder generic in one type parameter carries its
+        // result as: its type argument where it is specialised, its own
+        // type parameter where it is not. Null for any other builder.
+        result_parameter(type: Type) -> Type? static =>
+            if let generic: Types.GENERIC = type /\ generic.arguments.count == 1 then
+                generic.arguments[0]
+            elif let classy: Symbols.Classy = type.symbol /\ classy.argument_names.count == 1 then
+                classy.type_parameter_at(0)?.type
+            else
+                null
+            fi
+
+        // The parameter lists the pattern accepts for the member `name` of
+        // `type` taking `arity` arguments, in the order they are tried:
+        // `create()`; `start` taking the state machine, and the two await
+        // registrations taking the awaiter and the state machine, each a
+        // type parameter of the member itself (null here), or with the
+        // state machine as `IAsyncStateMachine`, or with both as `object`;
+        // `set_result` taking the
+        // task's result or nothing; `set_exception` taking the exception.
+        // Empty where the pattern has no such member.
+        builder_signatures(type: Type, name: string, arity: int, types: PATTERN_TYPES, task_result: Type?) -> KNOWN_SIGNATURE[] static is
+            let own: Type? = null
+            let state_machine = types.state_machine
+            let exception_type = types.exception
+            let any = types.any_object
+            let result = Collections.LIST[KNOWN_SIGNATURE]()
+
+            case name
+            when "create" then
+                if arity == 0 then result.add(KNOWN_SIGNATURE(Collections.LIST[Type?]())) fi
+            when "start" then
+                if arity == 1 then
+                    result.add(KNOWN_SIGNATURE(Collections.LIST[Type?]([own])))
+
+                    if let s = state_machine then result.add(KNOWN_SIGNATURE(Collections.LIST[Type?]([s]))) fi
+                    if let o = any then result.add(KNOWN_SIGNATURE(Collections.LIST[Type?]([o]))) fi
+                fi
+            when "await_on_completed", "await_unsafe_on_completed" then
+                if arity == 2 then
+                    result.add(KNOWN_SIGNATURE(Collections.LIST[Type?]([own, own])))
+
+                    if let s = state_machine then result.add(KNOWN_SIGNATURE(Collections.LIST[Type?]([own, s]))) fi
+                    if let o = any then result.add(KNOWN_SIGNATURE(Collections.LIST[Type?]([o, o]))) fi
+                fi
+            when "set_exception" then
+                if arity == 1 /\ exception_type? then result.add(KNOWN_SIGNATURE(Collections.LIST[Type?]([exception_type]))) fi
+            when "set_result" then
+                if arity == 0 then
+                    result.add(KNOWN_SIGNATURE(Collections.LIST[Type?]()))
+                elif arity == 1 then
+                    // The builder's own type parameter where it is generic in
+                    // the result; the task's result where it is known; and,
+                    // for a builder that is not, a parameter that takes any
+                    // result: a type parameter of the member, or object.
+                    if let r = result_parameter(type) then result.add(KNOWN_SIGNATURE(Collections.LIST[Type?]([r]))) fi
+                    if let r = task_result then result.add(KNOWN_SIGNATURE(Collections.LIST[Type?]([r]))) fi
+                    result.add(KNOWN_SIGNATURE(Collections.LIST[Type?]([own])))
+                    if let o = any then result.add(KNOWN_SIGNATURE(Collections.LIST[Type?]([o]))) fi
+                fi
+            esac
+
+            // How each parameter is passed is the resolver's own check, with
+            // its own message, so a parameter is compared as the type it
+            // refers to.
+            return Collections.LIST[KNOWN_SIGNATURE](result |> Ghul.Pipes.map(sig => sig.by_value_or_reference()))
         si
 
         init(task_type: Type, result_type: Type?, builder_type: Type) is
@@ -51,12 +129,26 @@ namespace Semantic is
     // type, from its attribute pragma during resolve-type-expressions -
     // both before any body is compiled, so the answer does not depend
     // on file order.
-    class TASK_LIKE_RESOLVER(_logger: Logging.Logger) is
+    /// The types the async method builder pattern names: what
+    /// `set_exception` takes, the state machine trait, and `object`, which a
+    /// builder may take the state machine or the awaiter as.
+    struct PATTERN_TYPES(exception: Type? public, state_machine: Type? public, any_object: Type? public) is
+        /// The innate types, once they have loaded.
+        from_lookup() -> PATTERN_TYPES static is
+            let lookup = IoC.CONTAINER.instance.innate_symbol_lookup
+
+            return PATTERN_TYPES(lookup.get_exception_type(), lookup.get_async_state_machine_interface_type(), lookup.get_object_type())
+        si
+    si
+
+    // `types_of` answers the types the pattern names, asked only when a
+    // builder is checked, after the innate types load.
+    class TASK_LIKE_RESOLVER(_logger: Logging.Logger, _types_of: () -> PATTERN_TYPES) is
         // The same answer with nothing reported: for probing a type
         // that may not be a task-like at all, where a malformed one
         // is somebody else's to diagnose, at a location of its own.
         try_resolve(type: Type?) -> TASK_LIKE? =>
-            TASK_LIKE_RESOLVER(Logging.DIAGNOSTICS_STORE()).resolve(LOCATION.internal, type)
+            TASK_LIKE_RESOLVER(Logging.DIAGNOSTICS_STORE(), _types_of).resolve(LOCATION.internal, type)
 
         resolve(location: LOCATION, return_type: Type?) -> TASK_LIKE? is
             if !return_type? \/ return_type.is_error then
@@ -135,12 +227,12 @@ namespace Semantic is
             fi
 
             for (name, arity) in required do
-                let member = TASK_LIKE.member_of_arity(builder_type, name, arity)
+                let member = TASK_LIKE.builder_member(builder_type, name, arity, _types_of(), result_type)
 
                 if !member? then
                     _logger.error(
                         location,
-                        "builder {builder_type} for a task-like return type has no {name} method taking {arity} argument(s)")
+                        "builder {builder_type} for a task-like return type has no {name} method {_expected_shape(name, arity, builder_type)}{_near_misses(builder_type, name)}")
                     return false
                 fi
 
@@ -162,6 +254,40 @@ namespace Semantic is
             od
 
             return true
+        si
+
+        // What the pattern asks the member `name` to take, as the
+        // diagnostic says it.
+        _expected_shape(name: string, arity: int, builder_type: Type) -> string =>
+            case name
+            when "create" then "taking no arguments"
+            when "start" then "taking its state machine by reference, as a type parameter of its own, as IAsyncStateMachine or as object"
+            when "set_exception" then "taking {_types_of().exception?.to_string() ?? "an exception"}"
+            when "set_result" then
+                if arity == 0 then
+                    "taking no arguments"
+                elif let result = TASK_LIKE.result_parameter(builder_type) then
+                    "taking {result}"
+                else
+                    "taking the task's result"
+                fi
+            else "taking its awaiter by reference and its state machine, each a type parameter of its own or object, or the state machine as IAsyncStateMachine"
+            esac
+
+        // The overloads of `name` the builder does declare, which the
+        // pattern does not accept, for a reader to compare with.
+        _near_misses(builder_type: Type, name: string) -> string is
+            let shapes = Collections.LIST[string]()
+
+            if let group: Symbols.FUNCTION_GROUP = builder_type.find_member(name) then
+                for f in group.functions do
+                    shapes.add("{name}({f.arguments |> Ghul.Pipes.map(a => a.to_string()) |> Ghul.Pipes.join(", ")})")
+                od
+            elif let f: Symbols.Function = builder_type.find_member(name) then
+                shapes.add("{name}({f.arguments |> Ghul.Pipes.map(a => a.to_string()) |> Ghul.Pipes.join(", ")})")
+            fi
+
+            return if shapes.count > 0 then "; it declares {shapes |> Ghul.Pipes.join(", ")}" else "" fi
         si
     si
 si

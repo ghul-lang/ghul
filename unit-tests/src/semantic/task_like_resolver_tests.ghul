@@ -24,6 +24,8 @@ namespace Semantic.UnitTests is
     @TestClass()
     class TASK_LIKE_RESOLVER_TESTS is
         _int_type: Type
+        _exception_type: Type
+        _object_type: Type
         _ref_carrier: CLASS
         _string_type: Type
         _logger: DIAGNOSTICS_STORE
@@ -31,10 +33,12 @@ namespace Semantic.UnitTests is
 
         init() is
             _int_type = new_class("int").type!
+            _exception_type = new_class("Exception").type!
+            _object_type = new_class("object").type!
             _ref_carrier = new_generic("Ref")
             _string_type = new_class("string").type!
             _logger = DIAGNOSTICS_STORE()
-            _resolver = TASK_LIKE_RESOLVER(_logger)
+            _resolver = TASK_LIKE_RESOLVER(_logger, () => Semantic.PATTERN_TYPES(_exception_type, null, _object_type))
         si
 
         loc() -> LOCATION => LOCATION("test.ghul", 1, 1, 1, 1)
@@ -48,8 +52,19 @@ namespace Semantic.UnitTests is
         add_member(owner: CLASS, name: string, argument_count: int, return_type: Type?) -> INSTANCE_METHOD is
             let f = INSTANCE_METHOD(loc(), loc(), owner, name, Semantic.BLOCK_SCOPE())
             let arguments = LIST[Type]()
+            // The pattern's own parameter types where it has them: the
+            // exception `set_exception` takes and the result `set_result`
+            // takes, the builder's own type parameter.
             for i in 0..argument_count do
-                arguments.add(_int_type)
+                arguments.add(
+                    if name =~ "set_exception" then
+                        _exception_type
+                    elif let result = Semantic.TASK_LIKE.result_parameter(owner.type!) /\ name =~ "set_result" then
+                        result
+                    else
+                        _int_type
+                    fi
+                )
             od
             f.arguments = arguments
             f.return_type = return_type
@@ -62,12 +77,23 @@ namespace Semantic.UnitTests is
         add_ref_member(owner: CLASS, name: string, argument_count: int, return_type: Type?) -> INSTANCE_METHOD is
             let f = INSTANCE_METHOD(loc(), loc(), owner, name, Semantic.BLOCK_SCOPE())
             let arguments = LIST[Type]()
-            arguments.add(
-                Semantic.Types.REFERENCE(
-                    loc(), cast Semantic.Symbols.Classy(_ref_carrier), LIST[Type]([_int_type])))
-            for i in 1..argument_count do
-                arguments.add(_int_type)
+            let generic_names = LIST[string]()
+            let generic_types = LIST[Type]()
+
+            // Generic in each parameter, as the pattern's state machine and
+            // awaiter are, and each taken by reference.
+            for i in 0..argument_count do
+                let parameter = Semantic.Symbols.FUNCTION_GENERIC_ARGUMENT(loc(), f, "T{i}", i)
+                generic_names.add("T{i}")
+                generic_types.add(parameter.type!)
+                arguments.add(
+                    Semantic.Types.REFERENCE(
+                        loc(), cast Semantic.Symbols.Classy(_ref_carrier), LIST[Type]([parameter.type!])))
             od
+
+            f.generic_argument_names = generic_names
+            f.generic_arguments = generic_types
+            f.is_generic = true
             f.arguments = arguments
             f.return_type = return_type
             owner.add_member(f)
@@ -242,9 +268,10 @@ namespace Semantic.UnitTests is
             let b = builder()
 
             if let group: Semantic.Symbols.FUNCTION_GROUP = b.find_member("start") then
+                // Its own type parameter, taken by value.
                 for f in group.functions do
                     let arguments = LIST[Type]()
-                    arguments.add(_int_type)
+                    arguments.add(f.generic_arguments[0])
                     f.arguments = arguments
                 od
             fi
@@ -256,6 +283,49 @@ namespace Semantic.UnitTests is
 
             is_null(result)
             is_true(first_error().contains("by reference"), first_error())
+        si
+
+        @Test()
+        Resolving__a_builder_whose_set_exception_takes_another_type__names_the_shape_and_what_it_declares() is
+            let task_like = new_generic("TASK_LIKE")
+            let b = builder()
+
+            if let group: Semantic.Symbols.FUNCTION_GROUP = b.find_member("set_exception") then
+                for f in group.functions do
+                    f.arguments = LIST[Type]([_int_type])
+                od
+            fi
+
+            task_like.async_builder = b.type
+            let constructed = Semantic.Types.GENERIC(loc(), task_like, LIST[Type]([_int_type]))
+
+            is_null(_resolver.resolve(loc(), constructed))
+            is_true(first_error().contains("no set_exception method taking Exception"), first_error())
+            is_true(first_error().contains("it declares set_exception(int)"), first_error())
+        si
+
+        @Test()
+        Resolving__a_generic_task_like_whose_builder_is_not_generic__takes_set_result_of_object() is
+            let task_like = new_generic("COROUTINE")
+            let b = new_class("COROUTINE_BUILDER")
+            add_member(b, "create", 0, b.type!)
+            add_ref_member(b, "start", 1, null)
+            add_property(b, "task", task_like.type!)
+            add_member(b, "set_exception", 1, null)
+            add_ref_member(b, "await_on_completed", 2, null)
+            add_ref_member(b, "await_unsafe_on_completed", 2, null)
+
+            let set_result = INSTANCE_METHOD(loc(), loc(), b, "set_result", Semantic.BLOCK_SCOPE())
+            set_result.arguments = LIST[Type]([_object_type])
+            b.add_member(set_result)
+
+            task_like.async_builder = b.type
+            let constructed = Semantic.Types.GENERIC(loc(), task_like, LIST[Type]([_int_type]))
+
+            let result = _resolver.resolve(loc(), constructed)
+
+            assert result? else "expected a task-like: {first_error()}"
+            are_same(_int_type, result.result_type)
         si
 
         @Test()

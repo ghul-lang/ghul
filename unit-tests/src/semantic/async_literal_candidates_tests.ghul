@@ -30,6 +30,7 @@ namespace Semantic.UnitTests is
     @TestClass()
     class ASYNC_LITERAL_CANDIDATES_TESTS is
         _int_type: Type
+        _exception_type: Type
         _ref_carrier: CLASS
         _function_owner: CLASS
         _action_owner: CLASS
@@ -41,6 +42,7 @@ namespace Semantic.UnitTests is
 
         init() is
             _int_type = new_class("int").type!
+            _exception_type = new_class("Exception").type!
             _ref_carrier = new_generic("Ref")
             _function_owner = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Function", LIST[string](["A", "R"]), Semantic.BLOCK_SCOPE())
             _action_owner = new_generic("Action")
@@ -55,7 +57,7 @@ namespace Semantic.UnitTests is
             lookup.get_void_task_type() |> returns(_void_task.type, null)
 
             _logger = DIAGNOSTICS_STORE()
-            _candidates = ASYNC_LITERAL_CANDIDATES(lookup, TASK_LIKE_RESOLVER(_logger))
+            _candidates = ASYNC_LITERAL_CANDIDATES(lookup, TASK_LIKE_RESOLVER(_logger, () => Semantic.PATTERN_TYPES(_exception_type, null, null)))
         si
 
         loc() -> LOCATION => LOCATION("test.ghul", 1, 1, 1, 1)
@@ -69,8 +71,19 @@ namespace Semantic.UnitTests is
         add_member(owner: CLASS, name: string, argument_count: int, return_type: Type?) is
             let f = INSTANCE_METHOD(loc(), loc(), owner, name, Semantic.BLOCK_SCOPE())
             let arguments = LIST[Type]()
+            // The pattern's own parameter types where it has them: the
+            // exception `set_exception` takes and the result `set_result`
+            // takes, the builder's own type parameter.
             for i in 0..argument_count do
-                arguments.add(_int_type)
+                arguments.add(
+                    if name =~ "set_exception" then
+                        _exception_type
+                    elif let result = Semantic.TASK_LIKE.result_parameter(owner.type!) /\ name =~ "set_result" then
+                        result
+                    else
+                        _int_type
+                    fi
+                )
             od
             f.arguments = arguments
             f.return_type = return_type
@@ -80,12 +93,23 @@ namespace Semantic.UnitTests is
         add_ref_member(owner: CLASS, name: string, argument_count: int) is
             let f = INSTANCE_METHOD(loc(), loc(), owner, name, Semantic.BLOCK_SCOPE())
             let arguments = LIST[Type]()
-            arguments.add(
-                Semantic.Types.REFERENCE(
-                    loc(), cast Semantic.Symbols.Classy(_ref_carrier), LIST[Type]([_int_type])))
-            for i in 1..argument_count do
-                arguments.add(_int_type)
+            let generic_names = LIST[string]()
+            let generic_types = LIST[Type]()
+
+            // Generic in each parameter, as the pattern's state machine and
+            // awaiter are, and each taken by reference.
+            for i in 0..argument_count do
+                let parameter = Semantic.Symbols.FUNCTION_GENERIC_ARGUMENT(loc(), f, "T{i}", i)
+                generic_names.add("T{i}")
+                generic_types.add(parameter.type!)
+                arguments.add(
+                    Semantic.Types.REFERENCE(
+                        loc(), cast Semantic.Symbols.Classy(_ref_carrier), LIST[Type]([parameter.type!])))
             od
+
+            f.generic_argument_names = generic_names
+            f.generic_arguments = generic_types
+            f.is_generic = true
             f.arguments = arguments
             f.return_type = null
             owner.add_member(f)
