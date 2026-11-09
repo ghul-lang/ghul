@@ -1,0 +1,208 @@
+namespace Analysis.Tests is
+    use Collections.LIST;
+
+    use Ghul.Pipes;
+
+    use Analysis.Protocol.ANALYSER_PROCESS;
+    use Analysis.Protocol.DIAGNOSTIC;
+    use Analysis.Protocol.Response;
+    use Analysis.Protocol.user_diagnostics_of;
+
+    use Microsoft.VisualStudio.TestTools.UnitTesting.Assert;
+    use TestClass = Microsoft.VisualStudio.TestTools.UnitTesting.TestClassAttribute;
+    use Test = Microsoft.VisualStudio.TestTools.UnitTesting.TestMethodAttribute;
+    use Assertions;
+
+    // In a file with a function written without types, an edit to a body
+    // that neither is in the file's inference unit nor names one of its
+    // functions takes the body re-walk, and answers what a build of the
+    // edited source from nothing answers. An edit that reaches the unit
+    // still rebuilds.
+    @TestClass()
+    class INFERRED_SIGNATURE_INCREMENTAL_EDIT_TESTS is
+        init() is si
+
+        // `wrong` reports an error only the inferred return of `twice`
+        // decides, so a re-walk that settled it differently shows.
+        baseline() -> string =>
+            "twice(x) => x * 2\n"
+            "\n"
+            "show() -> int => twice(21)\n"
+            "\n"
+            "wrong() -> string => twice(3)\n"
+            "\n"
+            "other() -> int => 1\n"
+            "\n"
+            "class Thing is\n"
+            "    init() is si\n"
+            "    size() -> int => 1\n"
+            "si\n";
+
+        unrelated_function_edited() -> string =>
+            "twice(x) => x * 2\n"
+            "\n"
+            "show() -> int => twice(21)\n"
+            "\n"
+            "wrong() -> string => twice(3)\n"
+            "\n"
+            "other() -> int => 1 + 1\n"
+            "\n"
+            "class Thing is\n"
+            "    init() is si\n"
+            "    size() -> int => 1\n"
+            "si\n";
+
+        unrelated_function_made_wrong() -> string =>
+            "twice(x) => x * 2\n"
+            "\n"
+            "show() -> int => twice(21)\n"
+            "\n"
+            "wrong() -> string => twice(3)\n"
+            "\n"
+            "other() -> int => \"one\"\n"
+            "\n"
+            "class Thing is\n"
+            "    init() is si\n"
+            "    size() -> int => 1\n"
+            "si\n";
+
+        method_edited() -> string =>
+            "twice(x) => x * 2\n"
+            "\n"
+            "show() -> int => twice(21)\n"
+            "\n"
+            "wrong() -> string => twice(3)\n"
+            "\n"
+            "other() -> int => 1\n"
+            "\n"
+            "class Thing is\n"
+            "    init() is si\n"
+            "    size() -> int => 2\n"
+            "si\n";
+
+        // The edited body now calls the inferred function, so it bounds
+        // its parameter.
+        call_added() -> string =>
+            "twice(x) => x * 2\n"
+            "\n"
+            "show() -> int => twice(21)\n"
+            "\n"
+            "wrong() -> string => twice(3)\n"
+            "\n"
+            "other() -> int => twice(1)\n"
+            "\n"
+            "class Thing is\n"
+            "    init() is si\n"
+            "    size() -> int => 1\n"
+            "si\n";
+
+        @Test()
+        an_edit_to_a_function_that_does_not_call_it_takes_the_body_rewalk() is
+            assert_rewalks_and_matches_a_fresh_build("an unrelated function edited", unrelated_function_edited());
+        si
+
+        @Test()
+        an_error_in_a_function_that_does_not_call_it_is_reported_by_the_body_rewalk() is
+            assert_rewalks_and_matches_a_fresh_build("an unrelated function made wrong", unrelated_function_made_wrong());
+        si
+
+        @Test()
+        an_edit_to_a_method_that_does_not_call_it_takes_the_body_rewalk() is
+            assert_rewalks_and_matches_a_fresh_build("a method edited", method_edited());
+        si
+
+        @Test()
+        an_edit_that_adds_a_call_to_it_rebuilds() is
+            let use analyser = ANALYSER_PROCESS();
+
+            edit_and_collect(analyser, "inferred.ghul", baseline());
+
+            let incremental = LIST[DIAGNOSTIC]();
+
+            assert_work(
+                analyser,
+                "a call added",
+                [
+                    exactly(declined("inferred-signatures"), 1),
+                    exactly(edit_path_full_rebuild, 1),
+                    exactly(edit_path_body_rewalk, 0)
+                ],
+                () is
+                    incremental.add_range(edit_and_collect(analyser, "inferred.ghul", call_added()));
+                si
+            );
+
+            are_equal(
+                described(diagnostics_of_fresh_build(call_added())),
+                described(incremental),
+                "a call added"
+            );
+        si
+
+        // Edits in turn, then back to the baseline: nothing a re-walk
+        // leaves behind changes the answer.
+        @Test()
+        edits_and_their_reverse_answer_as_the_baseline_does() is
+            let use analyser = ANALYSER_PROCESS();
+
+            edit_and_collect(analyser, "inferred.ghul", baseline());
+            edit_and_collect(analyser, "inferred.ghul", unrelated_function_made_wrong());
+            edit_and_collect(analyser, "inferred.ghul", method_edited());
+
+            are_equal(
+                described(diagnostics_of_fresh_build(baseline())),
+                described(edit_and_collect(analyser, "inferred.ghul", baseline())),
+                "reverting the edits"
+            );
+        si
+
+        assert_rewalks_and_matches_a_fresh_build(description: string, edited_source: string) is
+            let use analyser = ANALYSER_PROCESS();
+
+            edit_and_collect(analyser, "inferred.ghul", baseline());
+
+            let incremental = LIST[DIAGNOSTIC]();
+
+            assert_work(
+                analyser,
+                description,
+                [
+                    exactly(edit_path_body_rewalk, 1),
+                    exactly(edit_path_full_rebuild, 0)
+                ],
+                () is
+                    incremental.add_range(edit_and_collect(analyser, "inferred.ghul", edited_source));
+                si
+            );
+
+            are_equal(
+                described(diagnostics_of_fresh_build(edited_source)),
+                described(incremental),
+                description
+            );
+        si
+
+        diagnostics_of_fresh_build(source: string) -> Collections.Iterable[DIAGNOSTIC] is
+            let use analyser = ANALYSER_PROCESS();
+
+            return LIST[DIAGNOSTIC](edit_and_collect(analyser, "inferred.ghul", source));
+        si
+
+        edit_and_collect(analyser: ANALYSER_PROCESS, path: string, source: string) -> Collections.Iterable[DIAGNOSTIC] is
+            analyser.send_edit(path, source);
+
+            let response = analyser.read_response();
+
+            assert isa Response.DIAGNOSTICS(response) else "expected DIAGNOSTICS response after EDIT";
+
+            return LIST[DIAGNOSTIC](user_diagnostics_of(response));
+        si
+
+        // Position, severity and message of each diagnostic, ordered.
+        described(diagnostics: Collections.Iterable[DIAGNOSTIC]) -> string =>
+            diagnostics
+                |> map(d => "{d.start_line},{d.start_column}..{d.end_line},{d.end_column} {d.severity} {d.message}")
+                |> sort()
+                |> join("\n");
+    si
+si

@@ -1671,6 +1671,36 @@ namespace Analysis is
             od
         si
 
+        // Whether a body the edit changes is in its file's inference unit,
+        // joins it, or names one of the functions or `let` variables the unit
+        // is formed around. A file with inferred signatures whose unit can't
+        // be found counts as reached.
+        _edit_reaches_inference_unit(pairs: Syntax.FUNCTION_PAIR[], retained_text: string?, donor_text: string?) -> bool is
+            let unit = pairs |> find_map(pair => pair.retained.inference_unit)
+
+            if !unit? then
+                return true
+            fi
+
+            let scanner = Syntax.Process.NAME_REFERENCE_SCANNER()
+
+            for pair in pairs do
+                if !_body_text_matches(pair.retained, pair.donor, retained_text, donor_text) then
+                    if pair.retained.inference_unit? \/ pair.donor.inference_unit? then
+                        return true
+                    fi
+
+                    for name in unit.names do
+                        if scanner.body_references(pair.retained.body, name) \/ scanner.body_references(pair.donor.body, name) then
+                            return true
+                        fi
+                    od
+                fi
+            od
+
+            return false
+        si
+
         // Whether two function definitions' bodies are textually
         // identical, each sliced from the source text its tree was
         // parsed from. Unavailable text or a non-function definition
@@ -1826,18 +1856,6 @@ namespace Analysis is
                 return _decline(WORK_COUNTERS.TOP_LEVEL_STATEMENTS)
             fi
 
-            // The parameter and return types of a function whose signature is
-            // inferred are settled from bounds every body in its file's
-            // inference unit records on its symbols. A re-walk keeps the
-            // bounds a deleted call recorded, so only the full rebuild, with
-            // fresh symbols, settles them again.
-            if
-                Syntax.Process.SYNTHESISE_TOP_LEVEL_ENTRY.has_inferred_signatures(retained.definition) \/
-                Syntax.Process.SYNTHESISE_TOP_LEVEL_ENTRY.has_inferred_signatures(donor.definition)
-            then
-                return _decline(WORK_COUNTERS.INFERRED_SIGNATURES)
-            fi
-
             // Keep the retained AST as the registered file; the fresh parse is
             // only a body donor.
             _source_files_by_path[edited_path] = retained
@@ -1849,6 +1867,24 @@ namespace Analysis is
             if !pairs? then
                 _source_files_by_path[edited_path] = donor
                 return _decline(WORK_COUNTERS.FUNCTION_PAIRING_DESYNC)
+            fi
+
+            // The parameter and return types of a function whose signature is
+            // inferred are settled from bounds every body in its file's
+            // inference unit records on its symbols. A re-walk keeps the
+            // bounds a deleted call recorded, so an edit to a body that is in
+            // the unit, or that names one of its functions or top-level `let`
+            // variables before or after the edit, rebuilds with fresh symbols.
+            // Any other body re-walks against the signatures already settled.
+            if
+                (
+                    Syntax.Process.SYNTHESISE_TOP_LEVEL_ENTRY.has_inferred_signatures(retained.definition) \/
+                    Syntax.Process.SYNTHESISE_TOP_LEVEL_ENTRY.has_inferred_signatures(donor.definition)
+                ) /\
+                _edit_reaches_inference_unit(pairs, retained.source_text, donor.source_text)
+            then
+                _source_files_by_path[edited_path] = donor
+                return _decline(WORK_COUNTERS.INFERRED_SIGNATURES)
             fi
 
             // Capture the pre-edit spans of the bodies about to be
