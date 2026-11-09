@@ -7,6 +7,7 @@ namespace Syntax.Process is
     use Semantic.LEAST_UPPER_BOUND_MAP
 
     use IR.Values
+    use Ghul.Pipes
 
     // An operator or index expression whose operand walks are held
     // under a speculation because an operand takes its type from
@@ -448,8 +449,8 @@ namespace Syntax.Process is
         si
 
         // The index counterpart of _resolve_deferred_operands: the
-        // resolved indexer's first formal is the index argument's type.
-        // Both accessors take the index there, so `get_Item` and
+        // resolved indexer's formals are the index arguments' types, in
+        // order. Both accessors take the indexes first, so `get_Item` and
         // `set_Item` need no distinguishing.
         _resolve_deferred_index(
             index: Trees.Expressions.INDEX,
@@ -461,9 +462,19 @@ namespace Syntax.Process is
                 return false
             fi
 
-            let formal = _formal_type(function, 0)
+            let waiting = Collections.LIST[(Trees.Expressions.Expression, Semantic.Types.Type)]()
 
-            if !formal? \/ !index.index.awaits_context_type then
+            for position in 0..index.indexes.count do
+                let argument = index.indexes[position]
+
+                if argument.awaits_context_type then
+                    if let formal = _formal_type(function, position) then
+                        waiting.add((argument, formal))
+                    fi
+                fi
+            od
+
+            if waiting.count == 0 then
                 return false
             fi
 
@@ -474,8 +485,10 @@ namespace Syntax.Process is
             _logger.speculate()
             _flow.restore()
 
-            index.index.set_expected_type(formal, "")
-            _visitor.rewalk(index.index)
+            for (argument, formal) in waiting do
+                argument.set_expected_type(formal, "")
+                _visitor.rewalk(argument)
+            od
 
             return true
         si
@@ -3304,7 +3317,7 @@ namespace Syntax.Process is
         // candidate: an untyped one has no members for the indexer to
         // be found on, so there is nothing to resolve against.
         pre_index(index: Trees.Expressions.INDEX) -> bool is
-            if index.index.awaits_context_type then
+            if index.indexes |> any(i => i.awaits_context_type) then
                 _deferred_operands.add(DEFERRED_OPERANDS(index))
 
                 RETRY_SITE_STATS.note("operators.pre_index_deferred")
@@ -3336,7 +3349,7 @@ namespace Syntax.Process is
             let existing_value = index.value
             let need_store = existing_value? /\ existing_value.is_need_store
 
-            if index.left.value? /\ index.index.value? then
+            if index.left.value? /\ index.indexes |> all(i => i.value?) then
                 let left_value = index.left.value
                 let type = left_value.type
 
@@ -3371,7 +3384,7 @@ namespace Syntax.Process is
                     // that no longer describes the index. Wait for it
                     // instead: what the index resolves to is the
                     // deduction this constraint is meant to carry.
-                    if index_type.is_settled then
+                    if index_type.is_settled /\ index.indexes.count == 1 then
                         let constraint =
                             if _range_slice_resolver.is_range(index_type) then
                                 Semantic.INDEX_CONSTRAINT(
@@ -3414,14 +3427,26 @@ namespace Syntax.Process is
                 let arguments: Collections.LIST[Value] mut
                 let argument_types: Collections.LIST[Type] mut
 
-                let index_value = index.index.value!
+                let index_values = Collections.LIST[Value]()
+
+                for i in index.indexes do
+                    index_values.add(i.value!)
+                od
+
+                let index_value = index_values[0]
 
                 // An index with no type has nothing for the indexer's
                 // overload resolution to match against.
-                if !index_value.type? then
+                if index_values |> any(v => !v.type?) then
                     index.compile_expressions_state.value = DUMMY(Semantic.Types.ERROR(), index.location)
                     return
                 fi
+
+                let index_types = Collections.LIST[Type]()
+
+                for v in index_values do
+                    index_types.add(v.type!)
+                od
 
                 if need_store then
                     function_name = Semantic.Symbols.INDEXER_NAMES.assign
@@ -3436,12 +3461,14 @@ namespace Syntax.Process is
                         return
                     fi
 
-                    arguments = Collections.LIST[Value]([index_value, need_store_value])
-                    argument_types = Collections.LIST[Type]([index_value.type!, need_store_value.type!])
+                    arguments = Collections.LIST[Value](index_values)
+                    arguments.add(need_store_value)
+                    argument_types = Collections.LIST[Type](index_types)
+                    argument_types.add(need_store_value.type!)
                 else
                     function_name = Semantic.Symbols.INDEXER_NAMES.read
-                    arguments = Collections.LIST[Value]([index_value])
-                    argument_types = Collections.LIST[Type]([index_value.type!])
+                    arguments = Collections.LIST[Value](index_values)
+                    argument_types = Collections.LIST[Type](index_types)
                 fi
 
                 let symbol = named_type.find_member(function_name)
@@ -3470,10 +3497,12 @@ namespace Syntax.Process is
                 // the read by whichever indexer accepts it, ahead of the range
                 // slice it may stand for. An index waiting for the indexer to
                 // give it a type is not a failure.
-                if argument_types[0].is_error /\ !index.index.awaits_context_type then
-                    index.compile_expressions_state.value = DUMMY(Semantic.Types.ERROR(), index.location)
-                    return
-                fi
+                for position in 0..index.indexes.count do
+                    if argument_types[position].is_error /\ !index.indexes[position].awaits_context_type then
+                        index.compile_expressions_state.value = DUMMY(Semantic.Types.ERROR(), index.location)
+                        return
+                    fi
+                od
 
                 let overload_result: Semantic.OVERLOAD_RESOLVE_RESULT? mut
 
@@ -3493,21 +3522,23 @@ namespace Syntax.Process is
                 logger_snapshot.backtrack()
 
                 if overload_result == null then
-                    if !need_store /\ _try_range_slice(index, left_value, index_value, argument_types[0]) then
+                    if !need_store /\ index.indexes.count == 1 /\ _try_range_slice(index, left_value, index_value, argument_types[0]) then
                         return
                     fi
 
                     // An argument that is already an error has been
                     // reported where it was written.
-                    if argument_types[0].is_error \/ (need_store /\ argument_types[1].is_error) then
+                    if argument_types |> any(t => t.is_error) then
                         index.compile_expressions_state.value = DUMMY(Semantic.Types.ERROR(), index.location)
                         return
                     fi
 
+                    let written = index_types |> map(t => "{t}") |> join(", ")
+
                     if need_store then
-                        _logger.error(index.location, "indexer [{argument_types[0]}] = {argument_types[1]} not found in {type}")
+                        _logger.error(index.location, "indexer [{written}] = {argument_types[argument_types.count - 1]} not found in {type}")
                     else
-                        _logger.error(index.location, "indexer [{argument_types[0]}] not found in {type}")
+                        _logger.error(index.location, "indexer [{written}] not found in {type}")
                     fi
 
                     index.compile_expressions_state.value = DUMMY(Semantic.Types.ERROR(), index.location)
@@ -3548,7 +3579,7 @@ namespace Syntax.Process is
                 if need_store then
                     index.compile_expressions_state.value =
                     TYPE_WRAPPER(
-                        function.arguments[1],
+                        function.arguments[index.indexes.count],
                         function.call(index.location, left_value, arguments, null, _function_caller))
                 else
                     index.compile_expressions_state.value = function.call(index.location, left_value, arguments, null, _function_caller)

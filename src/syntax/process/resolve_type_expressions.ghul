@@ -858,16 +858,16 @@ namespace Syntax.Process is
         pre(ambiguous_expression: Trees.Expressions.AMBIGUOUS_EXPRESSION) -> bool is
             let logger_snapshot = _logger.speculate_then_commit()
 
-            // we know we must have exactly one generic type argument
-            // because otherwise we could have elimited the index expression
-            // possibility and parsed this as a GENERIC_APPLICATION tree
-            let arg = ambiguous_expression.type_arguments.elements[0]
+            // Every argument reads as a value expression too, or the parser
+            // would have taken this as a GENERIC_APPLICATION: `x[a]` or
+            // `x[a, b]` is a type application only if they all name types.
+            let arguments = ambiguous_expression.type_arguments
 
             let incomplete_generic_names_before = _incomplete_generic_names
 
             let type_argument_walk_succeeded mut = false
             try
-                arg.walk(self)
+                arguments.walk(self)
                 type_argument_walk_succeeded = true
             catch ex: System.Exception
                 debug_always("caught exception speculatively walking type arguments tree {ex.to_string().replace_line_endings()}")
@@ -882,7 +882,7 @@ namespace Syntax.Process is
             // application and walk it again for real, so what comes out
             // names the incomplete type.
             if _incomplete_generic_names > incomplete_generic_names_before then
-                arg.walk(self)
+                arguments.walk(self)
 
                 if let ambiguous_expression.left? then
                     left.walk(self)
@@ -895,7 +895,7 @@ namespace Syntax.Process is
             type_argument_walk_succeeded =
                 type_argument_walk_succeeded /\
                 !errors.any_errors /\
-                (let arg_type = arg?.type in arg_type? /\ !arg_type.is_error)
+                arguments.elements |> all(a => (let arg_type = a?.type in arg_type? /\ !arg_type.is_error))
 
             if type_argument_walk_succeeded then
                 // need to walk the left expression as it may
@@ -904,8 +904,8 @@ namespace Syntax.Process is
                     left.walk(self)
                 fi
             else
-                // our single actual generic type argument didn't resolve to
-                // a type - assume this means we actually have an index expression
+                // an argument didn't resolve to a type - assume this means
+                // we actually have an index expression
                 // not a type application. We still don't know what kind of type
                 // application so leave result null
 

@@ -79,7 +79,10 @@ namespace Syntax.Process is
                 _wrap_unless_await(member, member.left)
             elif let idx: Expressions.INDEX = assign.left then
                 _wrap_unless_await(idx, idx.left)
-                _wrap_unless_await(idx, idx.index)
+
+                for i in Collections.LIST[Expressions.Expression](idx.indexes) do
+                    _wrap_unless_await(idx, i)
+                od
             fi
 
             if !_is_spill_node(assign.right) then
@@ -87,19 +90,35 @@ namespace Syntax.Process is
             fi
         si
 
+        // Each argument is evaluated after the receiver and the arguments
+        // before it, so any of them needing an empty stack spills those.
         visit(idx: Expressions.INDEX) is
-            if _needs_empty_stack(idx.index) then
-                if !_is_await_node(idx.left) /\ !_is_spill_node(idx.left) then
-                    idx.replace_child(
-                        idx.left,
-                        Expressions.SPILL(idx.left.location, idx.left)
-                    )
-                fi
+            let indexes = Collections.LIST[Expressions.Expression](idx.indexes)
 
-                if _contains_protected_region(idx.index) then
-                    _wrap_unless_await(idx, idx.index)
+            for position in 0..indexes.count do
+                let index = indexes[position]
+
+                if _needs_empty_stack(index) then
+                    if !_is_await_node(idx.left) /\ !_is_spill_node(idx.left) then
+                        idx.replace_child(
+                            idx.left,
+                            Expressions.SPILL(idx.left.location, idx.left)
+                        )
+                    fi
+
+                    for earlier in 0..position do
+                        let before = indexes[earlier]
+
+                        if !_is_await_node(before) /\ !_is_spill_node(before) then
+                            idx.replace_child(before, Expressions.SPILL(before.location, before))
+                        fi
+                    od
+
+                    if _contains_protected_region(index) then
+                        _wrap_unless_await(idx, index)
+                    fi
                 fi
-            fi
+            od
         si
 
         visit(construct: Expressions.CONSTRUCT) is

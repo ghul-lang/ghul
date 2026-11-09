@@ -691,6 +691,8 @@ namespace Semantic.DotNet is
                 fi
             od
 
+            _note_unsupported(result, method.get_parameters() |> map(p => p.parameter_type))
+
             result.argument_is_pack = argument_is_pack
             result.argument_pack_depth = argument_pack_depth
             result.spread_argument_index = spread_argument_index
@@ -818,6 +820,8 @@ namespace Semantic.DotNet is
 
             result.set_doc(_doc_attribute(field_attributes))
             result.set_deprecation(_obsolete_attribute(field_attributes))
+
+            _note_unsupported(result, [`field.field_type])
 
             result.set_type(
                 NULLABILITY.resolve(
@@ -969,6 +973,8 @@ namespace Semantic.DotNet is
             else
                 result = Symbols.INSTANCE_PROPERTY(Source.LOCATION.reflected, Source.LOCATION.reflected, owner, name, setter?, false)
             fi
+
+            _note_unsupported(result, [property.property_type])
 
             result.set_type(
                 _with_property_tuple_element_names(
@@ -1334,6 +1340,8 @@ namespace Semantic.DotNet is
                 fi
             od
 
+            _note_unsupported(result, method.get_parameters() |> map(p => p.parameter_type))
+
             result.argument_is_pack = argument_is_pack
             result.argument_pack_depth = argument_pack_depth
             result.spread_argument_index = spread_argument_index
@@ -1350,6 +1358,8 @@ namespace Semantic.DotNet is
             if has_direction_override then
                 result.set_argument_directions(argument_reads, argument_writes)
             fi
+
+            _note_unsupported(result, [method.return_type])
 
             let return_attributes = method.return_parameter.get_custom_attributes_data()
             result.return_type =
@@ -2179,6 +2189,43 @@ namespace Semantic.DotNet is
             fi
 
             return REFLECTED_CONSTANTS.text_of(raw, a.parameter_type)
+        si
+
+        // Records on `symbol` the first of `types` that mentions a .NET
+        // multidimensional array, which ghūl has no type for, so a use of
+        // the symbol is reported rather than compiled against the
+        // one-dimensional array the type mapper reads it as.
+        _note_unsupported(symbol: Symbols.Symbol, types: Collections.Iterable[System.Type]) is
+            for type in types do
+                if let unsupported = _multidimensional_array_in(type) then
+                    symbol.unsupported_dotnet_type = unsupported.to_string()
+                    return
+                fi
+            od
+        si
+
+        _multidimensional_array_in(type: System.Type) -> System.Type? is
+            if type.is_array then
+                if type.get_array_rank() > 1 then
+                    return type
+                fi
+
+                if let element = type.get_element_type() then
+                    return _multidimensional_array_in(element)
+                fi
+            elif type.is_by_ref \/ type.is_pointer then
+                if let element = type.get_element_type() then
+                    return _multidimensional_array_in(element)
+                fi
+            elif type.is_generic_type then
+                for argument in type.get_generic_arguments() do
+                    if let found = _multidimensional_array_in(argument) then
+                        return found
+                    fi
+                od
+            fi
+
+            return null
         si
     si
 si
