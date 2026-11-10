@@ -1,0 +1,226 @@
+namespace IR.Emitter.UnitTests is
+    use System.Reflection.Metadata.ILOpCode
+
+    use Ghul.Pipes
+
+    use IR.Emitter.BufferedInstruction
+    use IR.Emitter.CIL_BODY_LAYOUT
+    use IR.Emitter.SRM_METHOD_BODY_EMITTER
+    use TestClass = Microsoft.VisualStudio.TestTools.UnitTesting.TestClassAttribute
+    use Test = Microsoft.VisualStudio.TestTools.UnitTesting.TestMethodAttribute
+    use Assertions
+
+    // Which instructions of a method body are kept, and which branches
+    // are encoded short.
+    @TestClass()
+    class CIL_BODY_LAYOUT_TESTS is
+        init() is si
+
+        @Test()
+        tidy__should_drop_instructions_after_a_return_up_to_a_label_that_is_branched_to() is
+            let target = IR.LABEL()
+            let unused = IR.LABEL()
+
+            let body = Collections.LIST[BufferedInstruction]([
+                BufferedInstruction.OP(ILOpCode.LDARG_0),
+                BufferedInstruction.BRANCH(ILOpCode.BRTRUE, target),
+                BufferedInstruction.OP(ILOpCode.RET),
+                BufferedInstruction.OP(ILOpCode.NOP),
+                BufferedInstruction.LABEL(unused),
+                BufferedInstruction.OP(ILOpCode.NOP),
+                BufferedInstruction.LABEL(target),
+                BufferedInstruction.OP(ILOpCode.RET)
+            ])
+
+            let tidied = CIL_BODY_LAYOUT.tidy(body)
+
+            are_equal(6, tidied.count)
+            are_same(body[4], tidied[3])
+            are_same(body[6], tidied[4])
+            are_same(body[7], tidied[5])
+        si
+
+        @Test()
+        tidy__should_keep_instructions_after_a_region_boundary() is
+            let body = Collections.LIST[BufferedInstruction]([
+                BufferedInstruction.OP(ILOpCode.THROW),
+                BufferedInstruction.REGION_BOUNDARY(0),
+                BufferedInstruction.OP(ILOpCode.POP),
+                BufferedInstruction.OP(ILOpCode.RET)
+            ])
+
+            are_equal(4, CIL_BODY_LAYOUT.tidy(body).count)
+        si
+
+        @Test()
+        tidy__should_drop_an_unconditional_branch_to_the_next_instruction() is
+            let next = IR.LABEL()
+            let location = Source.LOCATION.internal
+
+            let body = Collections.LIST[BufferedInstruction]([
+                BufferedInstruction.BRANCH(ILOpCode.BR, next),
+                BufferedInstruction.SEQUENCE_POINT(location),
+                BufferedInstruction.LABEL(next),
+                BufferedInstruction.OP(ILOpCode.RET)
+            ])
+
+            let tidied = CIL_BODY_LAYOUT.tidy(body)
+
+            are_equal(3, tidied.count)
+            is_false(tidied |> any(entry => isa BufferedInstruction.BRANCH(entry)))
+        si
+
+        @Test()
+        tidy__should_keep_a_branch_to_the_next_instruction_across_a_region_boundary() is
+            let next = IR.LABEL()
+
+            let body = Collections.LIST[BufferedInstruction]([
+                BufferedInstruction.BRANCH(ILOpCode.BR, next),
+                BufferedInstruction.REGION_BOUNDARY(0),
+                BufferedInstruction.LABEL(next),
+                BufferedInstruction.OP(ILOpCode.RET)
+            ])
+
+            are_equal(4, CIL_BODY_LAYOUT.tidy(body).count)
+        si
+
+        @Test()
+        tidy__should_keep_a_conditional_branch_to_the_next_instruction() is
+            let next = IR.LABEL()
+
+            let body = Collections.LIST[BufferedInstruction]([
+                BufferedInstruction.OP(ILOpCode.LDARG_0),
+                BufferedInstruction.BRANCH(ILOpCode.BRTRUE, next),
+                BufferedInstruction.LABEL(next),
+                BufferedInstruction.OP(ILOpCode.RET)
+            ])
+
+            are_equal(4, CIL_BODY_LAYOUT.tidy(body).count)
+        si
+
+        @Test()
+        short_branches__should_shorten_a_forward_branch_that_reaches_127_bytes_and_no_further() is
+            are_equal(true, _forward_branch_is_short(127))
+            are_equal(false, _forward_branch_is_short(128))
+        si
+
+        // A backward branch made short ends 3 bytes earlier, so it has 3
+        // bytes less to reach back than it does in the long layout.
+        @Test()
+        short_branches__should_shorten_a_backward_branch_that_reaches_128_bytes_once_short_and_no_further() is
+            are_equal(true, _backward_branch_is_short(131))
+            are_equal(false, _backward_branch_is_short(132))
+        si
+
+        // The outer branch is 3 bytes out of reach until the inner branch
+        // it jumps over is made short.
+        @Test()
+        short_branches__should_shorten_a_branch_brought_within_reach_by_shortening_another() is
+            let outer = IR.LABEL()
+            let inner = IR.LABEL()
+
+            let body = Collections.LIST[BufferedInstruction]()
+
+            body.add(BufferedInstruction.BRANCH(ILOpCode.BR, outer))
+            body.add(BufferedInstruction.BRANCH(ILOpCode.BR, inner))
+            body.add(BufferedInstruction.LABEL(inner))
+
+            for i in 0..125 do
+                body.add(BufferedInstruction.OP(ILOpCode.NOP))
+            od
+
+            body.add(BufferedInstruction.LABEL(outer))
+
+            let short = CIL_BODY_LAYOUT.short_branches(body, _measure).short
+
+            are_equal(true, short[0])
+            are_equal(true, short[1])
+        si
+
+        // SRM drops the byte after a short branch whose operand is the
+        // last byte of a chunk of its code builder. Here the branch's
+        // operand is byte 32 of the body, where a builder with 32-byte
+        // chunks starts a new one.
+        @Test()
+        flushing__should_keep_the_instruction_after_a_short_branch_that_ends_a_32_byte_block() is
+            let context =
+                IR.Emitter.CIL_CONTEXT(
+                    NSubstitute.Substitute.`for`[Logging.Logger](System.Array.empty`[object]()))
+
+            context.install_srm_assembly_emitter("test", "0:0:0:0", true)
+
+            let body = SRM_METHOD_BODY_EMITTER()
+            let skip = IR.LABEL()
+
+            body.ldarg(0)
+
+            for i in 0..29 do
+                body.op(ILOpCode.NOP)
+            od
+
+            body.branch(ILOpCode.BRTRUE, skip)
+            body.call(System.Reflection.Metadata.Ecma335.MetadataTokens.entity_handle(0x0A000001))
+            body.mark_label(skip)
+            body.ret()
+
+            let offset = body.flush(context.srm_assembly_emitter)
+            let bytes = context.srm_assembly_emitter.method_bodies
+
+            // A tiny header is one byte, then the code.
+            are_equal(cast ubyte(cast int(ILOpCode.BRTRUE_S)), bytes[offset + 1 + 30])
+            are_equal(cast ubyte(cast int(ILOpCode.CALL)), bytes[offset + 1 + 32])
+        si
+
+        _forward_branch_is_short(distance: int) -> bool is
+            let target = IR.LABEL()
+            let body = Collections.LIST[BufferedInstruction]()
+
+            body.add(BufferedInstruction.BRANCH(ILOpCode.BR, target))
+
+            for i in 0..distance do
+                body.add(BufferedInstruction.OP(ILOpCode.NOP))
+            od
+
+            body.add(BufferedInstruction.LABEL(target))
+
+            return CIL_BODY_LAYOUT.short_branches(body, _measure).short[0]
+        si
+
+        // `distance` is how far back the long branch reaches, from its end.
+        _backward_branch_is_short(distance: int) -> bool is
+            let target = IR.LABEL()
+            let body = Collections.LIST[BufferedInstruction]()
+
+            body.add(BufferedInstruction.LABEL(target))
+
+            for i in 0..distance - 5 do
+                body.add(BufferedInstruction.OP(ILOpCode.NOP))
+            od
+
+            body.add(BufferedInstruction.BRANCH(ILOpCode.BR, target))
+
+            return CIL_BODY_LAYOUT.short_branches(body, _measure).short[body.count - 1]
+        si
+
+        // The offsets of a body of single-byte instructions, labels and
+        // branches, laid out as the encoder lays them out.
+        _measure(body: Collections.List[BufferedInstruction], short: Collections.List[bool]) -> Collections.List[int] is
+            let offsets = Collections.LIST[int]()
+            let at mut = 0
+
+            for i in 0..body.count do
+                offsets.add(at)
+
+                if isa BufferedInstruction.BRANCH(body[i]) then
+                    at = at + (if short[i] then 2 else 5 fi)
+                elif CIL_BODY_LAYOUT.is_instruction(body[i]) then
+                    at = at + 1
+                fi
+            od
+
+            offsets.add(at)
+
+            return offsets
+        si
+    si
+si
