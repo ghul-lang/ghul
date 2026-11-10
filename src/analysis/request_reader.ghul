@@ -54,22 +54,6 @@ namespace Analysis is
         @IF.not.dotnet()
         start() is si
 
-        // Whether a frame can arrive in the queue while the despatcher is
-        // busy, which is what answering a query or seeing an edit mid-compile
-        // depends on. On .NET the reader thread fills the queue whatever the
-        // despatcher is doing. On wasm the queue is filled by draining the
-        // input the host has already received, at the safe points below, and
-        // the host answers whether a line is waiting; on llvm there is no
-        // analysis mode to serve.
-        @IF.dotnet()
-        reads_while_compiling: bool static => true
-
-        @IF.wasm()
-        reads_while_compiling: bool static => true
-
-        @IF.llvm()
-        reads_while_compiling: bool static => false
-
         _read_loop() is
             while _read_one() do od
         si
@@ -82,7 +66,7 @@ namespace Analysis is
         // Called at the points a compile can pause - the per-file
         // boundaries the queries are served at - and before every wait, in
         // place of the reader thread .NET runs.
-        @IF.wasm()
+        @IF.not.dotnet()
         _drain_available() is
             if _ended then
                 return
@@ -187,7 +171,7 @@ namespace Analysis is
         // caller's loop sees a frame rather than waiting again for a line
         // that is already here; at the end of the input the host answers
         // true as well, and the read below queues END_OF_INPUT.
-        @IF.wasm()
+        @IF.not.dotnet()
         _wait(timeout_ms: int) -> bool is
             if !IO.Std.wait_for_input(timeout_ms) then
                 return false
@@ -205,13 +189,6 @@ namespace Analysis is
             return true
         si
 
-        @IF.llvm()
-        _wait(timeout_ms: int) -> bool is
-            _read_one()
-
-            return true
-        si
-
         // Wait for the next frame, giving up after timeout_ms with
         // TIMED_OUT; a timeout of zero or less waits indefinitely.
         //
@@ -222,7 +199,7 @@ namespace Analysis is
             _enter()
 
             try
-                @IF.wasm()
+                @IF.not.dotnet()
                 _drain_available()
 
                 while _frames.count == 0 do
@@ -254,7 +231,7 @@ namespace Analysis is
             _enter()
 
             try
-                @IF.wasm()
+                @IF.not.dotnet()
                 _drain_available()
 
                 if _frames.count == 0 then
@@ -283,7 +260,7 @@ namespace Analysis is
             _enter()
 
             try
-                @IF.wasm()
+                @IF.not.dotnet()
                 _drain_available()
 
                 for frame in _frames do
