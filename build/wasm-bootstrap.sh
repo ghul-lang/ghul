@@ -134,6 +134,51 @@ else
     status=1
 fi
 
+# A response longer than a pipe holds reaches the client while the analyser
+# waits for the next request, with the client's end of the input still open:
+# the diagnostics for a file with thousands of errors. Standard output is a
+# pipe here, as it is for an editor; written to a file it would not show this.
+mkfifo "$work/large.in"
+
+node "$work/pass-2/ghul.mjs" --target wasm --analyse @"$work/libraries.rsp" \
+    < "$work/large.in" 2> "$work/large.log" | cat > "$work/large.json" &
+analyser=$!
+
+exec 3> "$work/large.in"
+
+source="entry() is\n$(for i in $(seq 1 2000); do printf '    let v%d = not_declared_%d\\n' "$i" "$i"; done)si\n"
+
+printf '%s\n' \
+    '{"kind":"set_open_files","paths":["a.ghul"]}' \
+    "{\"kind\":\"edit\",\"files\":[{\"path\":\"a.ghul\",\"source\":\"$source\"}]}" >&3
+
+# Whether a whole diagnostics response has arrived, rather than the part
+# of it a pipe holds.
+answered() {
+    node -e '
+        const text = require("fs").readFileSync(process.argv[1], "utf8");
+        const whole = text.split("\n").some(line => {
+            try { return JSON.parse(line).kind === "diagnostics"; } catch { return false; }
+        });
+        process.exit(whole ? 0 : 1);' "$work/large.json"
+}
+
+for _ in $(seq 1 300); do
+    answered && break
+    sleep 0.2
+done
+
+if answered; then
+    echo "analysis mode writes a long response while waiting for the next request"
+else
+    cat "$work/large.log"
+    echo "analysis mode held a long response back while waiting for the next request ($(wc -c < "$work/large.json") bytes arrived)"
+    status=1
+fi
+
+exec 3>&-
+wait "$analyser" 2>/dev/null || true
+
 # A function declared extern is an import the program's caller supplies, by
 # name. The program is built by the wasm-built compiler and run with them.
 mkdir -p "$work/extern"

@@ -1424,6 +1424,34 @@ const no_files = {
     directory_entry: () => "",
 };
 
+// Writes each piece of text to the descriptor `fd` before returning, as
+// UTF-8. Node's own process.stdout writes what the descriptor takes at once
+// and leaves the rest for the event loop, which does not run while the
+// program blocks waiting for input, so a long line could sit unwritten for
+// as long as the wait lasts. A descriptor that is non-blocking and full is
+// waited on rather than given up on.
+function node_output(writeSync, fd) {
+    const pause = new Int32Array(new SharedArrayBuffer(4));
+
+    return (text) => {
+        const bytes = Buffer.from(text, "utf8");
+        let offset = 0;
+
+        while (offset < bytes.length) {
+            try {
+                offset += writeSync(fd, bytes, offset, bytes.length - offset);
+            } catch (error) {
+                if (error.code === "EAGAIN") {
+                    Atomics.wait(pause, 0, 0, 1);
+                    continue;
+                }
+
+                throw error;
+            }
+        }
+    };
+}
+
 // Node's standard input as pieces of text, read synchronously so the
 // program can block on it. Input arriving on a non-blocking descriptor is
 // waited for rather than taken as the end.
@@ -1531,13 +1559,13 @@ function describe(error, instance) {
 }
 
 if (is_node && process.argv[1] && import.meta.url === (await import("node:url")).pathToFileURL(process.argv[1]).href) {
-    const { readSync } = await import("node:fs");
+    const { readSync, writeSync } = await import("node:fs");
 
     process.exitCode = await run({
         args: process.argv.slice(2),
         env: { ...process.env },
         stdin: node_stdin(readSync),
-        stdout: (text) => process.stdout.write(text),
-        stderr: (text) => process.stderr.write(text),
+        stdout: node_output(writeSync, 1),
+        stderr: node_output(writeSync, 2),
     });
 }
