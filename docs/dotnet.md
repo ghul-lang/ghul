@@ -85,12 +85,16 @@ doubled(x: int) -> int => x * 2;
 tripled(x: int) -> int => x * 3;
 ```
 
-`System.Runtime.CompilerServices.MethodImpl` tells the runtime how to treat the method it is written on. The options it names become the method's implementation flags, which is where the runtime reads them, and not an attribute on the method. So `NO_INLINING` stops the method from being inlined, and `SYNCHRONIZED` takes the lock. Reflection reads the flags with `get_method_implementation_flags`, and finds no `MethodImplAttribute` among the method's custom attributes:
+`System.Runtime.CompilerServices.MethodImpl` tells the runtime how to treat the method it is written on. The options it names become the method's implementation flags, which is where the runtime reads them, and not an attribute on the method. So `NO_INLINING` stops the method from being inlined, and `SYNCHRONIZED` takes the lock. Reflection reads the flags with `get_method_implementation_flags`, and finds no `MethodImplAttribute` among the method's custom attributes. Options combine with `|`. Written on a property or an indexer, the attribute applies to each of its accessors, `get_` and `set_`, since a property has no implementation flags of its own:
 
 ```ghul
 @System.Runtime.CompilerServices.MethodImpl(
     System.Runtime.CompilerServices.MethodImplOptions.NO_INLINING)
 measured(x: int) -> int => x + 1;
+
+@System.Runtime.CompilerServices.MethodImpl(
+    System.Runtime.CompilerServices.MethodImplOptions.NO_INLINING | System.Runtime.CompilerServices.MethodImplOptions.NO_OPTIMIZATION)
+traced(x: int) -> int => x + 2;
 ```
 
 `System.Runtime.InteropServices.DllImport` on a static method with no body declares a call into a shared library. The compiler emits the method as the call itself, not as a method with an attribute. So the method needs no body, and cannot have one:
