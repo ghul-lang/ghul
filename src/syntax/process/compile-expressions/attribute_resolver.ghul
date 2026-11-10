@@ -52,7 +52,12 @@ namespace Syntax.Process is
             name =~ "finalizer" \/
             name =~ "extern"
 
-        resolve(pragma: Trees.Pragmas.PRAGMA, target: Semantic.Symbols.Symbol?) is
+        resolve(pragma: Trees.Pragmas.PRAGMA, target: Semantic.Symbols.Symbol?) =>
+            resolve(pragma, target, null)
+
+        // `accessors` are the accessors of the indexer a pragma is written
+        // on, which has no symbol of its own to be the target.
+        resolve(pragma: Trees.Pragmas.PRAGMA, target: Semantic.Symbols.Symbol?, accessors: Collections.LIST[Semantic.Symbols.Function]?) is
             let name = pragma.name.to_string()
 
             // The test pragmas emitted MSTest 3 attributes against an
@@ -99,6 +104,24 @@ namespace Syntax.Process is
                     Semantic.Capability.IL_PRAGMA,
                     pragma.name.location,
                     "pragma {name}")
+            fi
+
+            // `MethodImpl` on a property or an indexer says how its
+            // accessors are compiled, so it goes to each of them, as C#
+            // asks for it on each accessor. Any other attribute on an
+            // indexer has nothing to go to, as before.
+            let accessor_functions = _accessors_of(target, accessors)
+
+            if accessor_functions.count > 0 /\ !isa Semantic.Symbols.Function(target) then
+                if !is_built_in(name) then
+                    if let attribute_type = resolve_attribute_type(pragma.name) /\ attribute_type == _method_impl_attribute() then
+                        for accessor in accessor_functions do
+                            _record_attribute(pragma, accessor, attribute_type)
+                        od
+
+                        return
+                    fi
+                fi
             fi
 
             if !target? then
@@ -149,6 +172,25 @@ namespace Syntax.Process is
             fi
 
             _record_attribute(pragma, target, attribute_type)
+        si
+
+        // The accessors of the property `target` is, or else `accessors`.
+        _accessors_of(target: Semantic.Symbols.Symbol?, accessors: Collections.LIST[Semantic.Symbols.Function]?) -> Collections.LIST[Semantic.Symbols.Function] is
+            let result = Collections.LIST[Semantic.Symbols.Function]()
+
+            if let property: Semantic.Symbols.Property = target then
+                if let read = property.read_function then
+                    result.add(read)
+                fi
+
+                if let assign = property.assign_function then
+                    result.add(assign)
+                fi
+            elif let given = accessors then
+                result.add_range(given)
+            fi
+
+            return result
         si
 
         // Resolves the pragma's arguments against the attribute type's
@@ -904,10 +946,8 @@ namespace Syntax.Process is
                 return null
             fi
 
-            if let literal: IR.Values.Literal.NUMBER = values[index] then
-                if let i4: IR.Values.Literal.CONSTANT.I4 = literal.constant then
-                    return i4.value
-                fi
+            if let folded = IR.Values.INTEGER_CONSTANT.fold(values[index]) /\ folded >= -2147483648L /\ folded <= 2147483647L then
+                return int(folded)
             fi
 
             null
@@ -1584,6 +1624,10 @@ namespace Syntax.Process is
         try_get_number_text(value: IR.Values.Value) -> string? is
             if let number: IR.Values.Literal.NUMBER = value then
                 return number.rendered
+            fi
+
+            if let folded = IR.Values.INTEGER_CONSTANT.fold(value) then
+                return "{folded}"
             fi
 
             if let innate_call: IR.Values.Call.INNATE = value then
