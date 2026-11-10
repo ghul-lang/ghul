@@ -1036,6 +1036,72 @@ jobs:
         name: llvm-programs-${{ matrix.optimisation }}
         path: llvm-programs
 
+  # The llvm integration tests at -O0 on an arm64 runner, with ghul-llvm's
+  # aarch64 release: what a native compiler for aarch64 would build. Not part
+  # of the Gate, and run by the scheduled build only, so it holds no pull
+  # request: a gap it finds is fixed or filed the next day.
+  llvm_tests_arm64:
+    needs: [version, bootstrap]
+    if: needs.version.outputs.build == 'true' && (github.event_name == 'schedule' || github.event_name == 'pull_request')
+    name: Run llvm tests on arm64 (O0)
+
+    runs-on: ubuntu-26.04-arm
+
+    container: mcr.microsoft.com/dotnet/sdk:10.0
+
+    timeout-minutes: 30
+
+    steps:
+    - uses: actions/checkout@v7
+
+    - name: Download bootstrap compiler tool tree
+      uses: actions/download-artifact@v8
+      with:
+        name: ghul-compiler-tool
+        path: publish
+
+    - name: Restore local .NET tools
+      run: dotnet tool restore
+
+    - name: Choose the runtime release
+      id: libraries
+      shell: bash
+      run: |
+        set -euo pipefail
+        if [ "${{ github.event_name }}" = schedule ]; then
+          echo "runtime=" >> "$GITHUB_OUTPUT"
+        else
+          runtime=$(build/library-tag.sh ghul-runtime)
+          echo "runtime=$runtime" >> "$GITHUB_OUTPUT"
+        fi
+
+    - name: Checkout ghul-runtime
+      uses: actions/checkout@v7
+      with:
+        repository: ghul-lang/ghul-runtime
+        path: libraries/ghul-runtime
+        ref: ${{ steps.libraries.outputs.runtime }}
+
+    - name: Fetch ghul-llvm
+      run: |
+        ghul_llvm="$(build/ghul-llvm.sh "$RUNNER_TEMP/ghul-llvm")"
+        test -x "$ghul_llvm"
+        "$ghul_llvm" --version
+        dirname "$ghul_llvm" >> "$GITHUB_PATH"
+
+    - name: Build the objects the llvm tests link
+      run: build/llvm-test-objects.sh
+
+    - name: Optimise at -O0
+      run: |
+        ghul_llvm="$(command -v ghul-llvm)"
+        printf '#!/bin/sh\nexec "%s" -O0 "$@"\n' "$ghul_llvm" > "$RUNNER_TEMP/ghul-llvm-O0"
+        chmod +x "$RUNNER_TEMP/ghul-llvm-O0"
+        echo "GHUL_LLVM=$RUNNER_TEMP/ghul-llvm-O0" >> "$GITHUB_ENV"
+
+    - name: Run the llvm integration tests
+      run: bash -c "set -o pipefail ; dotnet ghul-test --config llvm integration-tests | tee test-results.txt"
+
   # Runs the programs llvm_tests built in a `FROM scratch` image, which holds
   # nothing but the programs themselves: no loader, no shared libraries, no
   # files. A program that is not fully static fails to start there. This is
