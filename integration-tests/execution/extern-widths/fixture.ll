@@ -5,8 +5,6 @@
 ;
 ; Built by build/llvm-test-objects.sh, which the llvm test runs need first.
 
-target triple = "x86_64-unknown-linux-musl"
-
 define i32 @fx_widen_i8(i8 signext %x) {
   %r = sext i8 %x to i32
   ret i32 %r

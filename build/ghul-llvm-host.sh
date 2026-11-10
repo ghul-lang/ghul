@@ -19,7 +19,12 @@ if [ $# -ne 1 ]; then
     exit 2
 fi
 
-triple=x86_64-unknown-linux-gnu
+# The release built for this machine's processor.
+case "$(uname -m)" in
+    x86_64) triple=x86_64-unknown-linux-gnu ;;
+    aarch64 | arm64) triple=aarch64-unknown-linux-gnu ;;
+    *) echo "ghul-llvm is not released for $(uname -m)" >&2; exit 1 ;;
+esac
 archive="ghul-llvm-host-$triple.tar.gz"
 url="https://github.com/ghul-lang/ghul-llvm/releases/latest/download/$archive"
 
