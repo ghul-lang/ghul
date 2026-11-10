@@ -160,7 +160,7 @@ Not yet supported on the `wasm` target:
 
 A program run by Node reads and writes the real file system through `File`, `Directory` and the readers and writers over a file, as a .NET program does. In a web page there is no file system. There, these types use a file system held in memory, which starts empty and holds what the program writes, and each file written is passed to the page. Under Node, a caller of the loader can also supply the program's files, or a sink for the files it writes, and these are then held in memory. `Path` works as it does on .NET. Standard input and output are read and written as on .NET.
 
-Reflection on the `wasm` target is a subset of .NET reflection, with the same names and meanings:
+Reflection on the `wasm` and `llvm` targets is a subset of .NET reflection, with the same names and meanings:
 
 - a `Type`'s fields, properties, constructors, base type, generic arguments and attributes
 - `FieldInfo`, `PropertyInfo`, `ConstructorInfo` and `ParameterInfo`
@@ -168,4 +168,4 @@ Reflection on the `wasm` target is a subset of .NET reflection, with the same na
 - `Nullable.get_underlying_type`
 - an enum's names and values, through `System.Enum`
 
-Fields and properties are reported as declared. So an auto-property `x` is reported as the property `x` and its backing field `$x`. On both targets, the attribute that the compiler puts on a union, among the union's `get_custom_attributes`, lists the union's variants. The compiler describes the program's types only when it builds with `--rtti`, which adds code for each type. Reflecting on a type in a build without `--rtti` throws `NotSupportedException`. `--rtti` is not yet supported on the `llvm` target.
+Fields and properties are reported as declared. So an auto-property `x` is reported as the property `x` and its backing field `$x`. On both targets, the attribute that the compiler puts on a union, among the union's `get_custom_attributes`, lists the union's variants. The compiler describes the program's types only when it builds with `--rtti`, which adds code for each type. Reflecting on a type in a build without `--rtti` throws `NotSupportedException`. On `llvm`, setting a field or property of a struct through reflection changes a copy of the struct, not the boxed value it was called on.

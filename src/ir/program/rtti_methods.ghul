@@ -1,0 +1,416 @@
+namespace IR.Program is
+    use Collections.LIST
+    use Collections.MAP
+    use Semantic.Types.Type
+    use Semantic.Symbols.Classy
+    use Semantic.Symbols.Function
+    use IR.Values.Value
+    use Source.LOCATION
+
+    /// The functions that describe a type for reflection, made as ordinary
+    /// functions with bodies of values, for a target that compiles them as
+    /// it compiles any other: the describer, which makes the calls the
+    /// type's `RTTI_PLAN` lists on the core library's description builder,
+    /// and the accessors and constructors it passes as function values.
+    ///
+    /// Each is a static method of the type's class, made once for each
+    /// instance of it and compiled under that instance's type arguments.
+    class RTTI_METHODS is
+        _plan: RTTI_PLAN
+        _add_body: (Function, LIST[Value]) -> void
+        _can_call: (FUNCTION_INSTANCE) -> bool
+        _describers: MAP[CLASS_INSTANCE, FUNCTION_INSTANCE?]
+
+        /// - plan: what each type's description calls
+        /// - add_body: takes each function made and its body, to be compiled
+        /// - can_call: whether the target can call a constructor; one it
+        ///   can't is left out of the description, with its parameters
+        init(plan: RTTI_PLAN, add_body: (Function, LIST[Value]) -> void, can_call: (FUNCTION_INSTANCE) -> bool) is
+            _plan = plan
+            _add_body = add_body
+            _can_call = can_call
+            _describers = MAP[CLASS_INSTANCE, FUNCTION_INSTANCE?]()
+        si
+
+        /// The function that describes `type`, taking the description
+        /// builder and returning nothing, made the first time it is asked
+        /// for; null where the type's description makes no calls, or makes
+        /// one these functions cannot make.
+        ///
+        /// - type: the type described
+        describer(type: CLASS_INSTANCE) -> FUNCTION_INSTANCE? is
+            let found: FUNCTION_INSTANCE? mut
+
+            if _describers.try_get_value(type, found ref) then
+                return found
+            fi
+
+            let made = _make_describer(type)
+
+            _describers[type] = made
+
+            return made
+        si
+
+        /// The function that describes the type every function value has:
+        /// a class with no members. Null where the builder can't record a
+        /// kind.
+        function_value_describer() -> FUNCTION_INSTANCE? is
+            let kind = _plan.kind_method
+
+            if !kind? then
+                return null
+            fi
+
+            let lookup = IoC.CONTAINER.instance.innate_symbol_lookup
+            let describer = _function(_plan.description, "$describe_function_value", ["description"], [_type_of(_plan.description)], lookup.get_void_type())
+
+            _add_body(describer, LIST[Value]([
+                Values.Call.INSTANCE(Values.Load.ARGUMENT(describer, 0), kind.definition, [_int(1)], lookup.get_void_type()),
+                Values.RET()
+            ]))
+
+            return FUNCTION_INSTANCE.of(describer)
+        si
+
+        _make_describer(type: CLASS_INSTANCE) -> FUNCTION_INSTANCE? is
+            let calls = _plan.calls(type)
+
+            if calls.count == 0 then
+                return null
+            fi
+
+            let lookup = IoC.CONTAINER.instance.innate_symbol_lookup
+            let description_type = _type_of(_plan.description)
+            let describer = _function(type, "$describe", ["description"], [description_type], lookup.get_void_type())
+            let body = LIST[Value]()
+
+            for call in _callable(calls) do
+                let method = _specialized(call.method)
+
+                if !method? then
+                    return null
+                fi
+
+                let arguments = LIST[Value]()
+
+                if let kind: RTTI_CALL.KIND = call then
+                    arguments.add(_int(kind.flags))
+                elif let `field: RTTI_CALL.FIELD = call then
+                    let getter = _field_getter(type, `field, call.method)
+                    let setter = _field_setter(type, `field, call.method)
+
+                    if !getter? \/ !setter? then
+                        return null
+                    fi
+
+                    arguments.add(_string(`field.name))
+                    arguments.add(_bool(`field.is_public))
+                    arguments.add(getter)
+                    arguments.add(setter)
+                elif let property: RTTI_CALL.PROPERTY = call then
+                    arguments.add(_string(property.name))
+                    arguments.add(_property_getter(type, property, call.method))
+                    arguments.add(_bool(property.read_is_public))
+                    arguments.add(_property_setter(type, property, call.method))
+                    arguments.add(_bool(property.assign_is_public))
+                elif let member: RTTI_CALL.ENUM_MEMBER = call then
+                    let enum_type = call.method.specialize(call.method.definition.arguments[1])
+
+                    if !enum_type? then
+                        return null
+                    fi
+
+                    arguments.add(_string(member.name))
+                    arguments.add(Values.Literal.NUMBER(member.value, enum_type))
+                    arguments.add(Values.Literal.NUMBER(member.value, lookup.get_long_type()))
+                elif let attribute: RTTI_CALL.ATTRIBUTE = call then
+                    if let make = _maker(attribute.type, attribute.constructor, call.method, 0) then
+                        arguments.add(make)
+                    else
+                        return null
+                    fi
+                elif let parameter: RTTI_CALL.PARAMETER = call then
+                    arguments.add(_string(parameter.name))
+                elif let constructor: RTTI_CALL.CONSTRUCTOR = call then
+                    if let make = _maker(type, constructor.constructor, call.method, 0) then
+                        arguments.add(make)
+                    else
+                        return null
+                    fi
+
+                    arguments.add(_bool(constructor.is_public))
+                fi
+
+                body.add(Values.Call.INSTANCE(Values.Load.ARGUMENT(describer, 0), method, arguments.to_array(), lookup.get_void_type()))
+            od
+
+            body.add(Values.RET())
+
+            _add_body(describer, body)
+
+            return FUNCTION_INSTANCE(describer, type.type_map)
+        si
+
+        // `calls` without the constructors the target can't call, each with
+        // the calls that record its parameters, and without the attributes
+        // whose constructors it can't call, each with the calls that record
+        // its arguments' types. Those calls come just before the one they
+        // belong to.
+        _callable(calls: RTTI_CALL[]) -> LIST[RTTI_CALL] is
+            let result = LIST[RTTI_CALL]()
+            let pending = LIST[RTTI_CALL]()
+
+            for call in calls do
+                if isa RTTI_CALL.PARAMETER(call) \/ call.method.definition.name =~ "_attribute_type" then
+                    pending.add(call)
+                    continue
+                fi
+
+                let callable =
+                    if let constructor: RTTI_CALL.CONSTRUCTOR = call then
+                        _can_call(constructor.constructor)
+                    elif let attribute: RTTI_CALL.ATTRIBUTE = call then
+                        _can_call(attribute.constructor)
+                    else
+                        true
+                    fi
+
+                if callable then
+                    result.add_range(pending)
+                    result.add(call)
+                fi
+
+                pending.clear()
+            od
+
+            return result
+        si
+
+        // `(object) -> T`, reading the field from the object cast to `type`.
+        _field_getter(type: CLASS_INSTANCE, `field: RTTI_CALL.FIELD, method: FUNCTION_INSTANCE) -> Value? is
+            let value_type = _parameter(method, 2)
+            let field_type = method.specialize(method.definition.generic_arguments[0])
+
+            if !value_type? \/ !field_type? then
+                return null
+            fi
+
+            let lookup = IoC.CONTAINER.instance.innate_symbol_lookup
+            let getter = _function(type, "$get_{`field.name}", ["instance"], [lookup.get_object_type()], field_type)
+
+            _add_body(getter, LIST[Value]([
+                Values.Load.INSTANCE_FIELD(_instance(type, getter), `field.`field),
+                Values.RET()
+            ]))
+
+            return _value(value_type, getter)
+        si
+
+        // `(object, T) -> void`, writing the field of the object cast to
+        // `type`.
+        _field_setter(type: CLASS_INSTANCE, `field: RTTI_CALL.FIELD, method: FUNCTION_INSTANCE) -> Value? is
+            let value_type = _parameter(method, 3)
+            let field_type = method.specialize(method.definition.generic_arguments[0])
+
+            if !value_type? \/ !field_type? then
+                return null
+            fi
+
+            let lookup = IoC.CONTAINER.instance.innate_symbol_lookup
+            let setter = _function(type, "$set_{`field.name}", ["instance", "value"], [lookup.get_object_type(), field_type], lookup.get_void_type())
+
+            _add_body(setter, LIST[Value]([
+                Values.Store.INSTANCE_FIELD(_instance(type, setter), `field.`field, Values.Load.ARGUMENT(setter, 1)),
+                Values.RET()
+            ]))
+
+            return _value(value_type, setter)
+        si
+
+        // `(object) -> T`, calling the property's read accessor on the
+        // object cast to `type`, or an absent function value where it has
+        // none.
+        _property_getter(type: CLASS_INSTANCE, property: RTTI_CALL.PROPERTY, method: FUNCTION_INSTANCE) -> Value is
+            let optional_type = _parameter(method, 1)!
+
+            if let read = property.read, accessor = _member_of(type, read, property.name), value_type = optional_type.optional_inner_type then
+                let lookup = IoC.CONTAINER.instance.innate_symbol_lookup
+                let getter = _function(type, "$read_{property.name}", ["instance"], [lookup.get_object_type()], accessor.return_type!)
+
+                _add_body(getter, LIST[Value]([
+                    Values.Call.INSTANCE(_instance(type, getter), accessor, Collections.LIST[Value]().to_array(), accessor.return_type),
+                    Values.RET()
+                ]))
+
+                return _value(value_type, getter)
+            fi
+
+            return Values.NULL(optional_type)
+        si
+
+        // `(object, T) -> void`, calling the property's assign accessor on
+        // the object cast to `type`, or an absent function value where it
+        // has none.
+        _property_setter(type: CLASS_INSTANCE, property: RTTI_CALL.PROPERTY, method: FUNCTION_INSTANCE) -> Value is
+            let optional_type = _parameter(method, 3)!
+
+            if let assign = property.assign, accessor = _member_of(type, assign, property.name), value_type = optional_type.optional_inner_type then
+                let lookup = IoC.CONTAINER.instance.innate_symbol_lookup
+                let setter = _function(type, "$assign_{property.name}", ["instance", "value"], [lookup.get_object_type(), accessor.arguments[0]], lookup.get_void_type())
+
+                _add_body(setter, LIST[Value]([
+                    Values.Call.INSTANCE(_instance(type, setter), accessor, LIST[Value]([Values.Load.ARGUMENT(setter, 1)]).to_array(), lookup.get_void_type()),
+                    Values.RET()
+                ]))
+
+                return _value(value_type, setter)
+            fi
+
+            return Values.NULL(optional_type)
+        si
+
+        // `(ARRAY[object?]) -> object`, making an instance of `type` with
+        // `constructor`, each argument taken from the array and converted
+        // to the parameter's type.
+        _maker(type: CLASS_INSTANCE, constructor: FUNCTION_INSTANCE, method: FUNCTION_INSTANCE, position: int) -> Value? is
+            let value_type = _parameter(method, position)
+
+            if !value_type? \/ value_type.arguments.count < 2 then
+                return null
+            fi
+
+            let arguments_type = value_type.arguments[0]
+            let lookup = IoC.CONTAINER.instance.innate_symbol_lookup
+            let instance_type = _type_of(type)
+            let maker = _function(type, "$make_{constructor.definition.arguments.count}", ["arguments"], [arguments_type], lookup.get_object_type())
+
+            let specialized = _member_of(type, constructor, "init")
+            let read = _array_read(arguments_type)
+
+            if !specialized? \/ !read? then
+                return null
+            fi
+
+            let values = LIST[Value]()
+
+            for i in 0..specialized.arguments.count do
+                let element = Values.Call.INSTANCE(Values.Load.ARGUMENT(maker, 0), read, LIST[Value]([_int(i)]).to_array(), read.return_type)
+
+                values.add(_from_object(element, specialized.arguments[i]))
+            od
+
+            let made = Values.NEW(instance_type, specialized, values.to_array())
+
+            // A struct is made as a value, and handed back boxed.
+            let result: Value = if instance_type.is_value_type then Values.BOX(made) else made fi
+
+            _add_body(maker, LIST[Value]([result, Values.RET()]))
+
+            return _value(value_type, maker)
+        si
+
+        // `value`, an object, as a value of `type`: unboxed where `type` is
+        // a value type, and cast otherwise.
+        _from_object(value: Value, type: Type) -> Value =>
+            if type.is_value_type /\ !type.is_optional then
+                Values.UNBOX(Values.TYPE_WRAPPER(type, value))
+            else
+                Values.CAST(type, value, true)
+            fi
+
+        // The read accessor of the indexer of the array type `type`.
+        _array_read(type: Type) -> Function? =>
+            Semantic.KNOWN_MEMBERS.find(type, Semantic.Symbols.INDEXER_NAMES.read, [IoC.CONTAINER.instance.innate_symbol_lookup.get_int_type()])
+
+        // The member of `type` named `name`, specialized at its type
+        // arguments, that `instance` stands for: a method or constructor, or
+        // an accessor of a property.
+        _member_of(type: CLASS_INSTANCE, instance: FUNCTION_INSTANCE, name: string) -> Function? is
+            let root = instance.definition
+            let found = _type_of(type).find_member(name)
+
+            if let group: Semantic.Symbols.FUNCTION_GROUP = found then
+                for f in group.functions do
+                    if f.root_specialized_from == root then
+                        return f
+                    fi
+                od
+            elif let f: Function = found /\ f.root_specialized_from == root then
+                return f
+            elif let property: Semantic.Symbols.Property = found then
+                if property.read_function?.root_specialized_from == root then
+                    return property.read_function
+                elif property.assign_function?.root_specialized_from == root then
+                    return property.assign_function
+                fi
+            fi
+
+            return null
+        si
+
+        // The object a function's first argument holds, cast to `type`.
+        _instance(type: CLASS_INSTANCE, function: Function) -> Value =>
+            Values.CAST(_type_of(type), Values.Load.ARGUMENT(function, 0), true)
+
+        // A function value of `type` holding `function`, with no receiver.
+        _value(type: Type, function: Function) -> Value =>
+            Values.MAKE_CLOSURE(type, function, Values.NULL(IoC.CONTAINER.instance.innate_symbol_lookup.get_object_type()))
+
+        // The type `method` takes at `position`, at its type arguments.
+        _parameter(method: FUNCTION_INSTANCE, position: int) -> Type? =>
+            if position < method.definition.arguments.count then
+                method.specialize(method.definition.arguments[position])
+            else
+                null
+            fi
+
+        // `instance` as a function symbol called with its type arguments.
+        _specialized(instance: FUNCTION_INSTANCE) -> Function? is
+            let definition = instance.definition
+
+            if !definition.is_generic then
+                return definition
+            fi
+
+            let arguments = LIST[Type]()
+
+            for argument in definition.generic_arguments do
+                if let specialized = instance.specialize(argument) then
+                    arguments.add(specialized)
+                else
+                    return null
+                fi
+            od
+
+            return cast Function?(definition.specialize(arguments))
+        si
+
+        _type_of(type: CLASS_INSTANCE) -> Type =>
+            if type.arguments.count == 0 then
+                Semantic.Types.NAMED(type.definition)
+            else
+                Semantic.Types.GENERIC(LOCATION.internal, type.definition, type.arguments)
+            fi
+
+        // A static method of the class `type` is an instance of, so its body
+        // is compiled under that instance's type arguments.
+        _function(type: CLASS_INSTANCE, name: string, argument_names: string[], argument_types: Type[], result: Type) -> Function is
+            let function = Semantic.Symbols.STATIC_METHOD(LOCATION.internal, LOCATION.internal, type.definition, name, type.definition)
+
+            function.set_arguments(LIST[string](argument_names), LIST[Type](argument_types))
+            function.set_return_type(result)
+
+            return function
+        si
+
+        _int(value: int) -> Value =>
+            Values.Literal.NUMBER(value, IoC.CONTAINER.instance.innate_symbol_lookup.get_int_type())
+
+        _bool(value: bool) -> Value =>
+            Values.Literal.NUMBER(if value then 1 else 0 fi, IoC.CONTAINER.instance.innate_symbol_lookup.get_bool_type())
+
+        _string(value: string) -> Value =>
+            Values.Literal.STRING(value, IoC.CONTAINER.instance.innate_symbol_lookup.get_string_type())
+    si
+si

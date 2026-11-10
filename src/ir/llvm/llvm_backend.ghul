@@ -406,6 +406,39 @@ namespace IR.LLVMTarget is
                     display,
                     _order)
 
+            // Under --rtti each type the program has is described by a
+            // function compiled like any other, which its type object holds.
+            if container.build_flags.want_rtti then
+                if let description = RTTI_PLAN.description_class((t: Semantic.Types.Type) -> CLASS_INSTANCE? => objects.class_of(t)) then
+                    let rtti = RTTI_PLAN(objects, description, () -> Collections.Iterable[CLASS_INSTANCE] => objects.descriptor_only)
+
+                    let methods =
+                        RTTI_METHODS(
+                            rtti,
+                            (function: Function, body: LIST[Value]) -> void is
+                                _bodies[function] = body
+                                _order.add(function)
+                            si,
+                            (instance: FUNCTION_INSTANCE) -> bool => _bodies.contains_key(instance.definition))
+
+                    plan.rtti = rtti
+
+                    if let function_value_describer = methods.function_value_describer() then
+                        objects.closure_describer = function_value_describer
+                        declare(function_value_describer)
+                    fi
+                    plan.describer_of = (type: CLASS_INSTANCE) -> FUNCTION_INSTANCE? is
+                        let describer = methods.describer(type)
+
+                        if let d = describer then
+                            objects.set_describer(type, d)
+                        fi
+
+                        return describer
+                    si
+                fi
+            fi
+
             objects.reach = instance => declare(instance)
 
             objects.declare_external = instance => _declare_external(module, names, instance)

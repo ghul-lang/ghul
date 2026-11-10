@@ -61,6 +61,9 @@ namespace IR.LLVMTarget is
         _unit_variants: Collections.SET[CLASS_INSTANCE]
         _global_names: MAP[(CLASS_INSTANCE, string), string]
         _trait_type_objects: MAP[CLASS_INSTANCE, LLVM.Value]
+        _pending_type_objects: LIST[(type: CLASS_INSTANCE, descriptor_name: string, name: LLVM.Value)]
+        _descriptor_only: LIST[CLASS_INSTANCE]
+        _descriptor_only_set: Collections.SET[CLASS_INSTANCE]
         _trait_instances: LIST[CLASS_INSTANCE]
         _seen_trait_instances: Collections.SET[CLASS_INSTANCE]
         _declared_methods: MAP[Classy, Function[]]
@@ -74,6 +77,7 @@ namespace IR.LLVMTarget is
         _boxes_made: Collections.SET[CLASS_INSTANCE]
         _display_state: CLASS_INSTANCE?
         _displayers: MAP[CLASS_INSTANCE, LLVM.FUNCTION]
+        _describers: MAP[CLASS_INSTANCE, FUNCTION_INSTANCE]
 
         /// The offset of the class number within a descriptor.
         DESCRIPTOR_CLASS_ID: int static => 0
@@ -151,6 +155,9 @@ namespace IR.LLVMTarget is
             _unit_variants = Collections.SET[CLASS_INSTANCE]()
             _global_names = MAP[(CLASS_INSTANCE, string), string]()
             _trait_type_objects = MAP[CLASS_INSTANCE, LLVM.Value]()
+            _pending_type_objects = LIST[(type: CLASS_INSTANCE, descriptor_name: string, name: LLVM.Value)]()
+            _descriptor_only = LIST[CLASS_INSTANCE]()
+            _descriptor_only_set = Collections.SET[CLASS_INSTANCE]()
             _trait_instances = LIST[CLASS_INSTANCE]()
             _seen_trait_instances = Collections.SET[CLASS_INSTANCE]()
             _declared_methods = MAP[Classy, Function[]]()
@@ -163,6 +170,7 @@ namespace IR.LLVMTarget is
             _unsupported = LIST[(location: Source.LOCATION, construct: string)]()
             _boxes_made = Collections.SET[CLASS_INSTANCE]()
             _displayers = MAP[CLASS_INSTANCE, LLVM.FUNCTION]()
+            _describers = MAP[CLASS_INSTANCE, FUNCTION_INSTANCE]()
         si
 
         /// Where function values' thunks and descriptor are made, once the
@@ -893,6 +901,10 @@ namespace IR.LLVMTarget is
         /// module, each function referred to by the LLVM function `callee`
         /// answers for it, null where the program never compiles it.
         finish(strings: LLVM_STRINGS, callee: (FUNCTION_INSTANCE) -> LLVM.FUNCTION?) is
+            for (type, descriptor_name, name) in _pending_type_objects do
+                type_object(descriptor_name, name, _describe_value(type, callee))
+            od
+
             let wanted = _descriptors_wanted()
 
             for type in _classes.numbering.in_order() do
@@ -962,7 +974,16 @@ namespace IR.LLVMTarget is
         /// - descriptor_name: the name of the descriptor the type object
         ///   stands beside
         /// - name: the type's full name, a string literal
-        type_object(descriptor_name: string, name: LLVM.Value) -> LLVM.Value is
+        type_object(descriptor_name: string, name: LLVM.Value) -> LLVM.Value => type_object(descriptor_name, name, null)
+
+        /// As above, with `describe`, where it is given, as the function
+        /// value that describes the type for reflection.
+        ///
+        /// - descriptor_name: the name of the descriptor the type object
+        ///   stands beside
+        /// - name: the type's full name, a string literal
+        /// - describe: a constant function value, or null for none
+        type_object(descriptor_name: string, name: LLVM.Value, describe: LLVM.Value?) -> LLVM.Value is
             let type_class = _type_class_instance()
 
             if !type_class? then
@@ -989,6 +1010,10 @@ namespace IR.LLVMTarget is
             for (`field, _, position) in fields_of(type_class) do
                 if `field.name =~ "_full_name" then
                     values[position] = name
+                elif `field.name =~ "_describe" then
+                    if let d = describe then
+                        values[position] = d
+                    fi
                 fi
             od
 
@@ -1011,23 +1036,17 @@ namespace IR.LLVMTarget is
             return Values.global(global_name)
         si
 
-        /// The type object of the trait `type`, which has no descriptor of
-        /// its own since no value is an instance of a trait: a constant
+        /// The type object of `type`, a trait or a class with no descriptor
+        /// of its own since no value is an instance of it: a constant
         /// instance of the core library's `Type` named as the other targets
         /// name it, one for each instantiation. Null where `type` is not a
-        /// trait or the program holds no `Type`.
+        /// class or trait, or the program holds no `Type`.
         ///
         /// - type: the trait instantiation, as specialized
         /// - strings: where the name's literal is made
         trait_type_object(type: Type?, strings: LLVM_STRINGS) -> LLVM.Value? is
-            if !type? \/ !type.is_trait \/ !_type_class_instance()? then
+            if !type? \/ !_type_class_instance()? then
                 return null
-            fi
-
-            // Before the objects are laid out, nothing is named yet, and the
-            // lowering that asks is only finding out what is needed.
-            if !_is_built then
-                return Values.null_pointer
             fi
 
             let definition =
@@ -1048,19 +1067,47 @@ namespace IR.LLVMTarget is
             fi
 
             let key = CLASS_INSTANCE(definition, type.arguments, map)
+
+            // Before the objects are laid out, nothing is named yet, and the
+            // lowering that asks is only finding out what is needed: here,
+            // that the type is described, where the build describes types.
+            if !_is_built then
+                if _descriptor_only_set.add(key) then
+                    _descriptor_only.add(key)
+                fi
+
+                return Values.null_pointer
+            fi
+
             let found: LLVM.Value mut
 
             if _trait_type_objects.try_get_value(key, found ref) then
                 return found
             fi
 
-            let name = strings.literal(TYPE_NAMES.name_of(key, _classes, null, LLVM_TYPES.scalar(*), LLVM_TYPES.is_string(*)))
-            let result = type_object(_named(key, "$descriptor"), name)
+            // Named now and made when the module is finished, once the
+            // function that describes it, if any, is compiled.
+            let descriptor_name = _named(key, "$descriptor")
+            let name = strings.literal(TYPE_NAMES.name_of(key, _classes, _string, LLVM_TYPES.scalar(*), LLVM_TYPES.is_string(*)))
+            let global_name =
+                if descriptor_name.ends_with(".$descriptor") then
+                    "{descriptor_name.substring(0, descriptor_name.length - ".$descriptor".length)}.$type"
+                else
+                    "{descriptor_name}.$type"
+                fi
 
+            let result = Values.global(global_name)
+
+            _pending_type_objects.add((key, descriptor_name, name))
             _trait_type_objects[key] = result
 
             return result
         si
+
+        /// The types the program names that no value is an instance of, so
+        /// have a type object and no descriptor: traits, and classes nothing
+        /// makes.
+        descriptor_only: Collections.Iterable[CLASS_INSTANCE] => _descriptor_only
 
         // The core library's `Type`, where the program holds one.
         _type_class_instance() -> CLASS_INSTANCE? is
@@ -1392,7 +1439,7 @@ namespace IR.LLVMTarget is
 
             let descriptor_type = descriptor_struct(vtable_type)
 
-            let name = strings.literal(TYPE_NAMES.name_of(type, _classes, null, LLVM_TYPES.scalar(*), LLVM_TYPES.is_string(*)))
+            let name = strings.literal(TYPE_NAMES.name_of(type, _classes, _string, LLVM_TYPES.scalar(*), LLVM_TYPES.is_string(*)))
 
             let fields = LIST[LLVM.Value](
                 [
@@ -1401,7 +1448,7 @@ namespace IR.LLVMTarget is
                     superclass,
                     name,
                     _displayer_reference(type),
-                    type_object(descriptor_name(type), name),
+                    type_object(descriptor_name(type), name, _describe_value(type, callee)),
                     Values.i64(cast long(size_of(type)))
                 ]
             )
@@ -1748,6 +1795,49 @@ namespace IR.LLVMTarget is
         /// the core library's state class `state`.
         note_display(state: CLASS_INSTANCE) is
             _display_state = state
+        si
+
+        /// The function that describes every function value's type for
+        /// reflection, or null where the build describes no types.
+        closure_describer: FUNCTION_INSTANCE? public
+
+        /// The constant function value describing every function value's
+        /// type, or null where there is none.
+        ///
+        /// - callee: the compiled function of an instance
+        closure_describe_value(callee: (FUNCTION_INSTANCE) -> LLVM.FUNCTION?) -> LLVM.Value? =>
+            if let describer = closure_describer then _describe_constant(describer, callee) else null fi
+
+        /// Makes `describer` the function that describes `type` for
+        /// reflection, which the type's type object holds.
+        set_describer(type: CLASS_INSTANCE, describer: FUNCTION_INSTANCE) is
+            _describers[type] = describer
+        si
+
+        // The function value describing `type`, a constant closure over its
+        // describer, or null where it has none or it was not compiled.
+        _describe_value(type: CLASS_INSTANCE, callee: (FUNCTION_INSTANCE) -> LLVM.FUNCTION?) -> LLVM.Value? is
+            let describer: FUNCTION_INSTANCE mut
+
+            if !_describers.try_get_value(type, describer ref) then
+                return null
+            fi
+
+            return _describe_constant(describer, callee)
+        si
+
+        // A constant closure over `describer`, which takes the description
+        // builder, or null where it was not compiled.
+        _describe_constant(describer: FUNCTION_INSTANCE, callee: (FUNCTION_INSTANCE) -> LLVM.FUNCTION?) -> LLVM.Value? is
+            if let target = callee(describer), closures = self.closures then
+                let signature = LLVM.Type.FUNCTION(LLVM.Type.VOID, [Types.pointer, Types.pointer], false)
+
+                if let thunk = closures.thunk(signature, describer, target, ThunkKind.DROP_RECEIVER, 0) then
+                    return closures.constant(thunk)
+                fi
+            fi
+
+            return null
         si
 
         /// Records `displayer` as the function that writes a value of
