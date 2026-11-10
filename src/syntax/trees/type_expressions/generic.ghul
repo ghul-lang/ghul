@@ -10,23 +10,41 @@ namespace Syntax.Trees.TypeExpressions is
         is_void: bool =>
             arguments |> any(e => e.is_void)
 
+        // The index this reads as where it is written in value position:
+        // `m[i]`, or `m[i, j]` where every argument is a name, the same rule
+        // the expression parser reads `m[i, j]` by. A tuple, function or
+        // generic type among several arguments says this is a type.
         try_copy_as_value_expression() -> Expressions.Expression? is
-            if arguments.count != 1 then
-                return null
+            if arguments.count == 1 then
+                let ee = arguments.elements[0].try_copy_as_value_expression()
+
+                if !ee? then
+                    return null
+                fi
+
+                return
+                    Expressions.INDEX(
+                        location,
+                        name.copy_as_expression(),
+                        ee
+                    )
             fi
 
-            let ee = arguments.elements[0].try_copy_as_value_expression()
+            let indexes = Collections.LIST[Expressions.Expression]()
 
-            if !ee? then
-                return null
-            fi
+            for element in arguments.elements do
+                if !isa NAMED(element) then
+                    return null
+                fi
 
-            return
-                Expressions.INDEX(
-                    location,
-                    name.copy_as_expression(),
-                    ee
-                )
+                if let index = element.try_copy_as_value_expression() then
+                    indexes.add(index)
+                else
+                    return null
+                fi
+            od
+
+            return Expressions.INDEX(location, name.copy_as_expression(), indexes)
         si
 
         super(location, name)
