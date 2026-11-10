@@ -52,6 +52,11 @@ namespace Syntax.Process is
         // count only where no other file declares one.
         _library_candidates: Collections.LIST[ENTRY_POINT_CANDIDATE]
 
+        // The first declaration of the entry-point name in a file under a
+        // library root that cannot be entered at, which counts only where
+        // the library's candidates do.
+        _library_rejected_named: REJECTED_ENTRY_NAME?
+
         _pending_entry_pragma: bool
 
         // The function declaration the next synthesised `_entry` wrapper
@@ -102,6 +107,7 @@ namespace Syntax.Process is
         start() is
             _candidates.clear()
             _library_candidates.clear()
+            _library_rejected_named = null
             _pending_entry_pragma = false
             _entry_name_claimed = false
             _rejected_named = null
@@ -114,20 +120,27 @@ namespace Syntax.Process is
             _wrapped_original = null
 
             let first_added = _candidates.count
+            let was_rejected = _rejected_named?
 
             source_file.definition.walk(self)
 
             // A library compiled from source alongside the program is not
             // where the program starts, as a referenced assembly's entry
-            // point is not, so its candidates are held aside. A library's
-            // file is any under its root, which can hold the program's own
-            // files too; where every candidate comes from under a library
-            // root, `finish` takes them back.
+            // point is not, so its candidates, and a declaration of the
+            // entry-point name it cannot be entered at, are held aside. A
+            // library's file is any under its root, which can hold the
+            // program's own files too; where every candidate comes from
+            // under a library root, `finish` takes them back.
             if source_file.library? then
                 while _candidates.count > first_added do
                     _library_candidates.add(_candidates[first_added])
                     _candidates.remove_at(first_added)
                 od
+
+                if !was_rejected /\ _rejected_named? then
+                    _library_rejected_named = _library_rejected_named ?? _rejected_named
+                    _rejected_named = null
+                fi
             fi
         si
 
@@ -264,6 +277,7 @@ namespace Syntax.Process is
         finish() is
             if _candidates.count == 0 then
                 _candidates.add_range(_library_candidates)
+                _rejected_named = _rejected_named ?? _library_rejected_named
             fi
 
             let chosen mut = _choose()
