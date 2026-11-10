@@ -92,12 +92,107 @@ namespace IR.Program is
         /// describes that no value is an instance of.
         ///
         /// - classes: the classes and array types the program uses
+        ///
+        /// Under `--rtti-roots`, only the types marked `@reflected()` and
+        /// those their descriptions reach: their bases, the types of their
+        /// fields, properties and constructor parameters, their type
+        /// arguments, array elements and optionals' values, and every class
+        /// among `classes` that extends or implements the type of a value a
+        /// described type holds, other than the root.
         described(classes: Collections.Iterable[CLASS_INSTANCE]) -> CLASS_INSTANCE[] is
             let result = LIST[CLASS_INSTANCE](classes)
 
             result.add_range(_descriptor_only())
 
+            if IoC.CONTAINER.instance.build_flags.want_rtti_roots_only then
+                return _reached_from_roots(result)
+            fi
+
             return result
+        si
+
+        _reached_from_roots(candidates: LIST[CLASS_INSTANCE]) -> CLASS_INSTANCE[] is
+            let known = Collections.SET[CLASS_INSTANCE](candidates)
+            let reached = Collections.SET[CLASS_INSTANCE]()
+            let held = Collections.SET[CLASS_INSTANCE]()
+            let result = LIST[CLASS_INSTANCE]()
+            let pending = LIST[CLASS_INSTANCE]()
+
+            // A value a described type holds can be an instance of any
+            // subclass of the type it is held as, so those are described
+            // too. A base or a constructor parameter's type holds nothing,
+            // and a value held as the root is described only where its
+            // own type is reached some other way: every class extends the
+            // root.
+            let add = (type: CLASS_INSTANCE, holds: bool) is
+                if !known.contains(type) then
+                    return
+                fi
+
+                if holds /\ !type.definition.is_object then
+                    held.add(type)
+                fi
+
+                if reached.add(type) then
+                    result.add(type)
+                    pending.add(type)
+                fi
+            si
+
+            let base = _method("_base")
+            let parameter = _method("_parameter")
+
+            for type in candidates do
+                if type.definition.is_marked_reflected then
+                    add(type, true)
+                fi
+            od
+
+            let is_done mut = false
+
+            while !is_done do
+                while pending.count > 0 do
+                    let type = pending[pending.count - 1]
+                    pending.remove_at(pending.count - 1)
+
+                    for call in calls(type) do
+                        if !isa RTTI_CALL.KIND(call) /\ !isa RTTI_CALL.CONSTRUCTOR(call) /\ !isa RTTI_CALL.ATTRIBUTE(call) then
+                            let method = call.method.definition
+                            let holds = method != base /\ method != parameter
+
+                            for argument in call.method.type_map.values do
+                                if let instance = _instance_of(argument) then
+                                    add(instance, holds)
+                                fi
+                            od
+                        fi
+                    od
+                od
+
+                for type in candidates do
+                    if !reached.contains(type) /\ _extends(type, held) then
+                        add(type, true)
+                    fi
+                od
+
+                is_done = pending.count == 0
+            od
+
+            return result
+        si
+
+        _instance_of(type: Type) -> CLASS_INSTANCE? =>
+            _target.trait_of(type) ?? _target.class_of(type)
+
+        // Whether `type` directly extends or implements one of `types`.
+        _extends(type: CLASS_INSTANCE, types: Collections.SET[CLASS_INSTANCE]) -> bool is
+            for ancestor in type.definition.ancestors do
+                if let specialized = type.specialize(ancestor), instance = _instance_of(specialized) /\ types.contains(instance) then
+                    return true
+                fi
+            od
+
+            return false
         si
 
         /// The builder method recording a type's kind, or null where the
