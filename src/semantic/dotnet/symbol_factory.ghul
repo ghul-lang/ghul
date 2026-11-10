@@ -1105,7 +1105,12 @@ namespace Semantic.DotNet is
                 // second name — re-adding the method under it would
                 // import the one method twice as identical symbols.
                 alias_name = if _ghul_name_override(method)? then null else "equals" fi
-                hide_from_operator_resolution = type.full_name? /\ _innate_equality_type_names.contains(type.full_name)
+                // A tuple's `=~` is the language's own, element by element
+                // with each element's `=~`, which the compiler lowers; the
+                // value tuple's `Equals` is reached only by name.
+                hide_from_operator_resolution =
+                    (type.full_name? /\ _innate_equality_type_names.contains(type.full_name)) \/
+                    _tuple_types |> any(t => t == type)
             elif method.name =~ "CompareTo" /\ _is_self_relational_interface_target(type, method, _comparable_open_type, _int_type) then
                 name = "<>"
                 alias_name = if _ghul_name_override(method)? then null else "compare_to" fi
@@ -1852,11 +1857,15 @@ namespace Semantic.DotNet is
             fi
 
             // An implementer: `type` closed-implements `IEquatable[type]`
-            // and the parameter is `type` itself.
-            let closed_interface = open_interface.make_generic_type([type])
+            // and the parameter is `type` itself. A generic definition, such
+            // as `ValueTuple<T1, T2>`, names itself in its interfaces and
+            // parameters at its own type parameters, which reflection holds
+            // as a type distinct from the definition.
+            let self_type = if type.is_generic_type_definition then type.make_generic_type(type.get_generic_arguments()) else type fi
+            let closed_interface = open_interface.make_generic_type([self_type])
 
             return type.get_interfaces() |> any(i => i == closed_interface) /\
-                parameters[0].parameter_type == type
+                parameters[0].parameter_type == self_type
         si
 
         // The intrinsic operation name (e.g. "arithmetic.add") carried by
