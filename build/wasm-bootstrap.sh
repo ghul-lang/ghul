@@ -3,7 +3,8 @@
 # llvm-bootstrap.sh does on llvm: the compiler builds a wasm compiler from
 # its own source, that compiler, run by Node, builds the same source again,
 # and the two passes must write the same module and the same loader. The
-# second pass then serves one edit and one hover in analysis mode.
+# second pass's compiler must then pass the analysis tests in the bootstrap
+# category.
 #
 # usage: build/wasm-bootstrap.sh [<compiler dll> [<ghul-runtime>]]
 #
@@ -65,119 +66,15 @@ for file in ghul.wasm ghul.mjs; do
     fi
 done
 
-# Analysis mode reads requests by reflection, which the wasm target answers
-# from the descriptions --rtti-roots compiles in.
-printf '%s\n' \
-    '{"kind":"set_open_files","paths":["a.ghul"]}' \
-    '{"kind":"edit","files":[{"path":"a.ghul","source":"entry() is\n    let x: int = 1\nsi\n"}]}' \
-    '{"kind":"hover","path":"a.ghul","line":2,"column":9}' |
-    node "$work/pass-2/ghul.mjs" --target wasm --analyse @"$work/libraries.rsp" > "$work/analysis.json" 2> "$work/analysis.log" || true
-
-if grep -q '"signature":"x: int"' "$work/analysis.json" && ! grep -q '"kind":"error"' "$work/analysis.json"; then
-    echo "analysis mode answers"
-else
-    cat "$work/analysis.json" "$work/analysis.log"
+# The second pass's compiler is the one released, so it must serve analysis
+# mode: the analysis tests in the bootstrap category run against it.
+if ! ANALYSIS_TESTS_ON_DIR="$work/pass-2" "$root/build/analysis-tests-on.sh" wasm "$compiler" "$runtime" -- --filter TestCategory=bootstrap > "$work/analysis-tests.log" 2>&1; then
+    cat "$work/analysis-tests.log"
     echo "analysis mode failed"
     status=1
-fi
-
-# The analyser reads requests while it compiles, so it says so, and it exits
-# when left idle - with the client's end of the pipe still open, which is
-# the case a worker blocked in a read once made hang.
-for capability in mid-compile-queries compile-abort idle-exit; do
-    if ! grep -q "\"$capability\"" "$work/analysis.json"; then
-        echo "analysis mode does not advertise $capability"
-        status=1
-    fi
-done
-
-mkfifo "$work/idle.in"
-
-node "$work/pass-2/ghul.mjs" --target wasm --analyse --analysis-idle-timeout 2 @"$work/libraries.rsp" \
-    < "$work/idle.in" > "$work/idle.json" 2> "$work/idle.log" &
-analyser=$!
-
-# Held open until the analyser has had time to exit by itself.
-exec 3> "$work/idle.in"
-printf '%s\n' '{"kind":"set_open_files","paths":["a.ghul"]}' >&3
-
-for _ in $(seq 1 150); do
-    kill -0 "$analyser" 2>/dev/null || break
-    sleep 0.2
-done
-
-if kill -0 "$analyser" 2>/dev/null; then
-    kill "$analyser" 2>/dev/null || true
-    echo "analysis mode did not exit when idle"
-    status=1
-elif grep -q '"kind":"exit"' "$work/idle.json"; then
-    echo "analysis mode exits when idle"
 else
-    cat "$work/idle.json" "$work/idle.log"
-    echo "analysis mode exited without saying why"
-    status=1
+    echo "analysis mode answers"
 fi
-
-exec 3>&-
-
-# A client that closes its end of the pipe, as the editor does on shutdown,
-# ends the analyser rather than leaving it waiting for input.
-printf '%s\n' '{"kind":"set_open_files","paths":["a.ghul"]}' \
-    | timeout 60 node "$work/pass-2/ghul.mjs" --target wasm --analyse @"$work/libraries.rsp" \
-    > "$work/closed.json" 2> "$work/closed.log" && closed=0 || closed=$?
-
-if [ "$closed" -eq 0 ]; then
-    echo "analysis mode exits when its input closes"
-else
-    cat "$work/closed.log"
-    echo "analysis mode did not exit when its input closed (status $closed)"
-    status=1
-fi
-
-# A response longer than a pipe holds reaches the client while the analyser
-# waits for the next request, with the client's end of the input still open:
-# the diagnostics for a file with thousands of errors. Standard output is a
-# pipe here, as it is for an editor; written to a file it would not show this.
-mkfifo "$work/large.in"
-
-node "$work/pass-2/ghul.mjs" --target wasm --analyse @"$work/libraries.rsp" \
-    < "$work/large.in" 2> "$work/large.log" | cat > "$work/large.json" &
-analyser=$!
-
-exec 3> "$work/large.in"
-
-source="entry() is\n$(for i in $(seq 1 2000); do printf '    let v%d = not_declared_%d\\n' "$i" "$i"; done)si\n"
-
-printf '%s\n' \
-    '{"kind":"set_open_files","paths":["a.ghul"]}' \
-    "{\"kind\":\"edit\",\"files\":[{\"path\":\"a.ghul\",\"source\":\"$source\"}]}" >&3
-
-# Whether a whole diagnostics response has arrived, rather than the part
-# of it a pipe holds.
-answered() {
-    node -e '
-        const text = require("fs").readFileSync(process.argv[1], "utf8");
-        const whole = text.split("\n").some(line => {
-            try { return JSON.parse(line).kind === "diagnostics"; } catch { return false; }
-        });
-        process.exit(whole ? 0 : 1);' "$work/large.json"
-}
-
-for _ in $(seq 1 300); do
-    answered && break
-    sleep 0.2
-done
-
-if answered; then
-    echo "analysis mode writes a long response while waiting for the next request"
-else
-    cat "$work/large.log"
-    echo "analysis mode held a long response back while waiting for the next request ($(wc -c < "$work/large.json") bytes arrived)"
-    status=1
-fi
-
-exec 3>&-
-wait "$analyser" 2>/dev/null || true
 
 # A function declared extern is an import the program's caller supplies, by
 # name. The program is built by the wasm-built compiler and run with them.

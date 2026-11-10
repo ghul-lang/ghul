@@ -1,0 +1,73 @@
+namespace Analysis.Tests is
+    use Collections.LIST
+
+    use Analysis.Protocol.ANALYSER_PROCESS
+    use Analysis.Protocol.Response
+
+    use TestClass = Microsoft.VisualStudio.TestTools.UnitTesting.TestClassAttribute
+    use Test = Microsoft.VisualStudio.TestTools.UnitTesting.TestMethodAttribute
+    use TestCategory = Microsoft.VisualStudio.TestTools.UnitTesting.TestCategoryAttribute
+    use Assertions
+
+    // How the analyser behaves at the ends of its input: it exits when the
+    // client closes it, and it writes a response in full while the client
+    // still holds it open. Both talk to the analyser through pipes, as an
+    // editor does.
+    @TestClass()
+    class INPUT_LIFETIME_TESTS is
+        init() is si
+
+        @Test()
+        @TestCategory("bootstrap")
+        closing_input_should_end_the_analyser() is
+            let use analyser = ANALYSER_PROCESS()
+
+            analyser.send_open_files(["a.ghul"])
+            analyser.close_input()
+
+            is_true(
+                analyser.wait_for_exit(60000),
+                "analyser did not exit when its input closed\n"
+                "--- analyser stderr ---\n{analyser.stderr_capture}")
+
+            are_equal(
+                0,
+                analyser.exit_code,
+                "analyser exited with a failure when its input closed\n"
+                "--- analyser stderr ---\n{analyser.stderr_capture}")
+        si
+
+        // Thousands of diagnostics make a response longer than a pipe holds.
+        // The analyser must write all of it while it waits for the next
+        // request, not hold the rest back until its input closes.
+        @Test()
+        @TestCategory("bootstrap")
+        a_long_response_should_arrive_while_input_stays_open() is
+            let use analyser = ANALYSER_PROCESS()
+            let lines = LIST[string]()
+
+            lines.add("entry() is")
+
+            for i in 1::2000 do
+                lines.add("    let v{i} = not_declared_{i}")
+            od
+
+            lines.add("si")
+
+            analyser.send_open_files(["a.ghul"])
+            analyser.send_edit("a.ghul", "{lines |> Ghul.Pipes.join("\n")}\n")
+
+            let read = Tasks.TASK.run(() -> Response => analyser.read_response())
+
+            is_true(
+                read.wait(120000),
+                "no whole response arrived while the analyser's input was open\n"
+                "--- analyser stderr ---\n{analyser.stderr_capture}")
+
+            let response = read.result
+
+            assert isa Response.DIAGNOSTICS(response) else "expected DIAGNOSTICS for the edit\n"
+                "--- analyser stderr ---\n{analyser.stderr_capture}"
+        si
+    si
+si

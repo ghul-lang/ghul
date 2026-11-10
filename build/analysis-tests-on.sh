@@ -62,7 +62,8 @@ fi
 "$root/build/llvm-self-sources.sh" "$work" "$runtime"
 
 # Analysis mode reads requests by reflection, which a target other than
-# .NET answers from the descriptions --rtti compiles in.
+# .NET answers from the descriptions --rtti-roots compiles in, as the
+# released compilers are built.
 case $target in
     wasm)
         analyser=$work/ghul.mjs
@@ -77,7 +78,7 @@ esac
 if [ ! -e "$analyser" ]; then
     start=$(date +%s)
 
-    if ! dotnet "$compiler" "${build[@]}" --rtti --underscore-access legacy @"$work/libraries.rsp" @"$work/sources.rsp" > "$work/build.log" 2>&1; then
+    if ! dotnet "$compiler" "${build[@]}" --rtti-roots --underscore-access legacy @"$work/libraries.rsp" @"$work/sources.rsp" > "$work/build.log" 2>&1; then
         grep -v ': warn: ' "$work/build.log" || true
         echo "building the $target analyser failed"
         exit 1
