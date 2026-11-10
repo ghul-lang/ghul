@@ -89,11 +89,13 @@ namespace Analysis.Protocol is
                 excluded.add(name.to_lower_invariant())
             od
 
-            if let libraries = wasm_libraries then
+            if let libraries = library_sources then
                 let result = LIST[string]()
 
-                result.add("--target")
-                result.add("wasm")
+                if let target = analyser_target then
+                    result.add("--target")
+                    result.add(target)
+                fi
 
                 add_library_sources(libraries, excluded, result)
                 add_common_arguments(result)
@@ -158,11 +160,12 @@ namespace Analysis.Protocol is
             return result
         si
 
-        // The library sources a wasm analyser compiles, from the response file
+        // The library sources an analyser compiles, from the response file
         // `libraries` names, one argument a line: each `--library-source`
         // declaration followed by its files. A library whose assembly is in
         // `excluded` is left out, so a test standing in for a project that
-        // declares the runtime itself works on wasm as it does on .NET.
+        // declares the runtime itself works on a source-library analyser as
+        // it does on one that reads assemblies.
         add_library_sources(libraries: string, excluded: Collections.SET[string], result: LIST[string]) static is
             let skipping mut = false
             let lines = File.read_all_lines(libraries)
@@ -215,15 +218,26 @@ namespace Analysis.Protocol is
             result.add("-A")
         si
 
-        // The wasm-built compiler's loader, where ANALYSIS_TESTS_WASM_COMPILER
-        // names one: the harness then starts it under node rather than
-        // starting ghul.dll under dotnet.
-        wasm_compiler: string? static => _non_empty("ANALYSIS_TESTS_WASM_COMPILER")
+        // The analyser to start, where ANALYSIS_TESTS_ANALYSER names one in
+        // place of the ghul.dll beside the tests: a .dll is started under
+        // dotnet, a .mjs loader (the wasm-built compiler) under node, and
+        // anything else, such as the llvm-built compiler, directly.
+        analyser_command: string? static => _non_empty("ANALYSIS_TESTS_ANALYSER")
 
-        // The response file of library sources a wasm analyser compiles,
-        // which ANALYSIS_TESTS_WASM_LIBRARIES names alongside the compiler.
-        wasm_libraries: string? static =>
-            if wasm_compiler? then _non_empty("ANALYSIS_TESTS_WASM_LIBRARIES") else null fi
+        // The target the analyser is told to analyse for, from
+        // ANALYSIS_TESTS_TARGET; where it is not set the analyser's own
+        // default stands.
+        analyser_target: string? static => _non_empty("ANALYSIS_TESTS_TARGET")
+
+        // The response file of library sources the analyser compiles in
+        // place of reading assemblies, from ANALYSIS_TESTS_LIBRARIES: each
+        // `--library-source` declaration followed by its files.
+        library_sources: string? static => _non_empty("ANALYSIS_TESTS_LIBRARIES")
+
+        // Whether the analyser under test reads library sources rather than
+        // .NET assemblies, which decides the tests whose fixtures are
+        // assemblies.
+        reads_library_sources: bool static => library_sources?
 
         _non_empty(variable: string) -> string? static =>
             if let value: string = Ghul.ENVIRONMENT.instance[variable] /\ !string.is_null_or_white_space(value) then
@@ -300,8 +314,8 @@ namespace Analysis.Protocol is
             let left_out = LIST[string](without_assemblies)
 
             // A test that names its own library sources stands in for the
-            // libraries a wasm analyser is otherwise given.
-            if wasm_compiler? /\ extra_arguments |> any(a => a =~ "--library-source") then
+            // libraries a source-library analyser is otherwise given.
+            if reads_library_sources /\ extra_arguments |> any(a => a =~ "--library-source") then
                 left_out.add("ghul-core.dll")
                 left_out.add("ghul-runtime.dll")
             fi
@@ -330,16 +344,17 @@ namespace Analysis.Protocol is
 
             let start_info = ProcessStartInfo()
 
-            if let loader = wasm_compiler then
-                if !wasm_libraries? then
-                    throw Exception("ANALYSIS_TESTS_WASM_COMPILER is set but ANALYSIS_TESTS_WASM_LIBRARIES, the library sources, is not")
-                fi
+            let command = analyser_command ?? resolve_compiler_dll()
+            let extension = (Path.get_extension(command) ?? "").to_lower_invariant()
 
-                start_info.file_name = "node"
-                start_info.argument_list.add(loader)
-            else
+            if extension =~ ".dll" then
                 start_info.file_name = "dotnet"
-                start_info.argument_list.add(resolve_compiler_dll())
+                start_info.argument_list.add(command)
+            elif extension =~ ".mjs" then
+                start_info.file_name = "node"
+                start_info.argument_list.add(command)
+            else
+                start_info.file_name = command
             fi
 
             start_info.argument_list.add("@{response_file}")
