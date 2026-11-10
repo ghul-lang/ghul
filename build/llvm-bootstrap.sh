@@ -2,7 +2,9 @@
 # Checks that the compiler reproduces itself on the llvm target, as
 # bootstrap.sh does on .NET: the compiler builds a native compiler from its
 # own source, that native compiler builds the same source again, and the
-# two passes must write the same LLVM module and the same executable.
+# two passes must write the same LLVM module and the same executable. The
+# second pass's compiler must then pass the analysis tests in the bootstrap
+# category.
 #
 # usage: build/llvm-bootstrap.sh [<compiler dll> [<ghul-runtime>]]
 #
@@ -69,6 +71,16 @@ if cmp -s "$work/pass-1/ghul" "$work/pass-2/ghul"; then
 else
     echo "the executables differ"
     status=1
+fi
+
+# The second pass's compiler is the one released, so it must serve analysis
+# mode: the analysis tests in the bootstrap category run against it.
+if ! ANALYSIS_TESTS_ON_DIR="$work/pass-2" "$root/build/analysis-tests-on.sh" llvm "$compiler" "$runtime" -- --filter TestCategory=bootstrap > "$work/analysis-tests.log" 2>&1; then
+    cat "$work/analysis-tests.log"
+    echo "analysis mode failed"
+    status=1
+else
+    echo "analysis mode answers"
 fi
 
 exit $status
