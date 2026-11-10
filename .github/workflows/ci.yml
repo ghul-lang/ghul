@@ -239,6 +239,10 @@ jobs:
              && [ -f "carried/wasm/ghul-compiler-wasm.tar.gz" ]; then
             compiler=$(tr -d '[:space:]' < carried/bootstrap-compiler-version.txt)
             build=false
+            # The arm64 archive is carried where the run built it, and
+            # otherwise left out, as that run's job was allowed to fail.
+            gh run download "${run}" -n ghul-compiler-llvm-arm64 -D carried/llvm-arm64 2>/dev/null \
+              || echo "::warning::pull request run ${run} built no arm64 llvm-built compiler; the release will not carry one"
             echo "carrying the packages pull request #${pr} built and tested in run ${run}, whose tested tree is this commit's"
           else
             echo "::warning::no successful pull request run tested tree ${tree} and packed ${{ steps.version.outputs.package }} (pull request ${pr:-not found}, run ${run:-not found}); building and testing here"
@@ -290,6 +294,13 @@ jobs:
       with:
         name: ghul-compiler-llvm
         path: carried/llvm/
+
+    - name: Upload the carried arm64 llvm-built compiler archive
+      if: steps.compiler_version.outputs.build == 'false' && hashFiles('carried/llvm-arm64/*.tar.gz') != ''
+      uses: actions/upload-artifact@v7
+      with:
+        name: ghul-compiler-llvm-arm64
+        path: carried/llvm-arm64/
 
     - name: Upload the carried wasm-built compiler archive
       if: steps.compiler_version.outputs.build == 'false'
@@ -796,6 +807,90 @@ jobs:
         path: |
           ghul-compiler-llvm-x86_64-unknown-linux-musl.tar.gz
           ghul-compiler-llvm-x86_64-unknown-linux-musl.tar.gz.sha256
+
+  # llvm_bootstrap on an arm64 runner with ghul-llvm's aarch64 release: the
+  # native compiler for linux-arm64, built and checked the same way and
+  # carried into the release beside the x64 one. Not in the Gate's needs, and
+  # allowed to fail without failing the run, so an arm64 gap or an
+  # unavailable arm runner does not hold every pull request; a release made
+  # without its archive says so in its notes.
+  llvm_bootstrap_arm64:
+    needs: [version, bootstrap]
+    if: needs.version.outputs.build == 'true'
+    name: Bootstrap the compiler on llvm (arm64)
+
+    runs-on: ubuntu-26.04-arm
+
+    continue-on-error: true
+
+    timeout-minutes: 45
+
+    steps:
+    - uses: actions/checkout@v7
+
+    - name: Set up .NET 10
+      uses: actions/setup-dotnet@v6
+      with:
+        dotnet-version: '10.0.x'
+
+    - name: Download bootstrap compiler tool tree
+      uses: actions/download-artifact@v8
+      with:
+        name: ghul-compiler-tool
+        path: publish
+
+    - name: Restore local .NET tools
+      run: dotnet tool restore
+
+    - name: Choose the runtime release
+      id: libraries
+      shell: bash
+      run: |
+        set -euo pipefail
+        if [ "${{ github.event_name }}" = schedule ]; then
+          echo "runtime=" >> "$GITHUB_OUTPUT"
+        else
+          runtime=$(build/library-tag.sh ghul-runtime)
+          echo "runtime=$runtime" >> "$GITHUB_OUTPUT"
+        fi
+
+    - name: Checkout ghul-runtime
+      uses: actions/checkout@v7
+      with:
+        repository: ghul-lang/ghul-runtime
+        path: libraries/ghul-runtime
+        ref: ${{ steps.libraries.outputs.runtime }}
+
+    - name: Fetch ghul-llvm
+      run: |
+        ghul_llvm="$(build/ghul-llvm.sh "$RUNNER_TEMP/ghul-llvm")"
+        test -x "$ghul_llvm"
+        "$ghul_llvm" --version
+        dirname "$ghul_llvm" >> "$GITHUB_PATH"
+
+    - name: Build the compiler natively twice and compare
+      env:
+        LLVM_BOOTSTRAP_DIR: ${{ runner.temp }}/llvm-bootstrap
+        GHUL_NATIVE_VERSION: ${{ needs.version.outputs.package }}
+      run: build/llvm-bootstrap.sh
+
+    - name: Pack the llvm-built compiler
+      shell: bash
+      run: |
+        set -euo pipefail
+        compiler="${{ runner.temp }}/llvm-bootstrap/pass-2/ghul"
+        test "$("$compiler")" = "ghūl ${{ needs.version.outputs.package }} llvm"
+        mkdir -p llvm-compiler/ghul-compiler
+        cp "$compiler" llvm-compiler/ghul-compiler/ghul-compiler
+        tar -C llvm-compiler -czf ghul-compiler-llvm-aarch64-unknown-linux-musl.tar.gz ghul-compiler
+        sha256sum ghul-compiler-llvm-aarch64-unknown-linux-musl.tar.gz > ghul-compiler-llvm-aarch64-unknown-linux-musl.tar.gz.sha256
+
+    - uses: actions/upload-artifact@v7
+      with:
+        name: ghul-compiler-llvm-arm64
+        path: |
+          ghul-compiler-llvm-aarch64-unknown-linux-musl.tar.gz
+          ghul-compiler-llvm-aarch64-unknown-linux-musl.tar.gz.sha256
 
   # The compiler builds a wasm compiler, which run by Node builds itself;
   # the two passes must write the same module and loader.
@@ -1928,7 +2023,7 @@ jobs:
       run: dotnet nuget push ./nupkg/ghul.analysis.protocol.${{ needs.version.outputs.package }}.nupkg --api-key ${{ steps.login_protocol.outputs.NUGET_API_KEY }} --source https://api.nuget.org/v3/index.json --skip-duplicate --no-symbols
 
   create_release:
-    needs: [version, gate, publish_release_package]
+    needs: [version, gate, publish_release_package, llvm_bootstrap_arm64]
     name: Create release
     runs-on: ubuntu-latest
 
@@ -1967,6 +2062,14 @@ jobs:
         name: ghul-compiler-wasm
         path: wasm
 
+    # Absent where the pull request run's arm64 bootstrap failed.
+    - name: Download the arm64 llvm-built compiler archive
+      continue-on-error: true
+      uses: actions/download-artifact@v8
+      with:
+        name: ghul-compiler-llvm-arm64
+        path: llvm-arm64
+
     # A push to main is normally one squashed pull request; the range covers
     # a direct push of several commits too, and the notes list each.
     - name: Create changelog
@@ -1974,13 +2077,22 @@ jobs:
         range="${{ github.event.before }}..${{ github.sha }}"
         git rev-parse -q --verify "${{ github.event.before }}^{commit}" >/dev/null || range="-1"
         git log --format="%s%n%n%b%n%n" ${range} >changelog.txt
+        if [ ! -f llvm-arm64/ghul-compiler-llvm-aarch64-unknown-linux-musl.tar.gz ]; then
+          echo "::warning::this release has no arm64 llvm-built compiler"
+          printf '%s\n\n' "This release has no llvm-built compiler for linux-arm64: its arm64 bootstrap did not succeed." >>changelog.txt
+        fi
 
     - name: Create a release
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       run: |
+        arm64=()
+        if [ -f llvm-arm64/ghul-compiler-llvm-aarch64-unknown-linux-musl.tar.gz ]; then
+          arm64=(./llvm-arm64/ghul-compiler-llvm-aarch64-unknown-linux-musl.tar.gz ./llvm-arm64/ghul-compiler-llvm-aarch64-unknown-linux-musl.tar.gz.sha256)
+        fi
         gh release create "${{ needs.version.outputs.tag }}" \
           ./nupkg/ghul.compiler.${{ needs.version.outputs.package }}.nupkg \
+          "${arm64[@]}" \
           ./aot/ghul-compiler-linux-x64.tar.gz \
           ./aot/ghul-compiler-linux-x64.tar.gz.sha256 \
           ./llvm/ghul-compiler-llvm-x86_64-unknown-linux-musl.tar.gz \
