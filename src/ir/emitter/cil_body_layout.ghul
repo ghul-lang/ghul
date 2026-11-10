@@ -1,0 +1,229 @@
+@@IF.dotnet()
+
+namespace IR.Emitter is
+    use System.Reflection.Metadata.ILOpCode
+
+    use Ghul.Pipes
+
+    use BufferedInstruction.OP
+    use BufferedInstruction.BRANCH
+    use BufferedInstruction.LABEL
+    use BufferedInstruction.REGION_BOUNDARY
+
+    // Decides the final shape of a method body before it is encoded:
+    // which instructions are kept, and which branches are encoded in
+    // their short form.
+    class CIL_BODY_LAYOUT is
+        // The body without the instructions no path reaches, and without
+        // any unconditional branch to the instruction straight after it.
+        // Labels, region boundaries and the other positions are kept.
+        tidy(body: Collections.List[BufferedInstruction]) -> Collections.LIST[BufferedInstruction] static is
+            let reached = _reached(body)
+            let kept = Collections.LIST[BufferedInstruction]()
+
+            for i in 0..body.count do
+                let entry = body[i]
+
+                if reached[i] \/ !is_instruction(entry) then
+                    kept.add(entry)
+                fi
+            od
+
+            let result = Collections.LIST[BufferedInstruction]()
+
+            for i in 0..kept.count do
+                if !_branches_to_next(kept, i) then
+                    result.add(kept[i])
+                fi
+            od
+
+            return result
+        si
+
+        // Which branches of `body` to encode in their short form, and the
+        // size of the last layout measured, which is no shorter than the
+        // body will be with those branches short, or 0 when the body has
+        // no branch and nothing was measured. A short
+        // branch reaches 127 bytes forward or 128 back from the end of the
+        // instruction. `measure` encodes the body with the given branches
+        // short and returns the offset of every entry, plus the offset of
+        // the end.
+        //
+        // A branch is made short only when it would reach its target in
+        // the layout just measured. Shortening branches only brings
+        // targets closer, so a branch chosen this way still reaches its
+        // target whichever other branches are shortened with it. Each
+        // round can bring more branches within reach, so rounds repeat
+        // until one shortens nothing, up to a fixed limit.
+        short_branches(
+            body: Collections.List[BufferedInstruction],
+            measure: (Collections.List[BufferedInstruction], Collections.List[bool]) -> Collections.List[int]
+        ) -> (short: Collections.LIST[bool], size: int) static is
+            let short = Collections.LIST[bool](repeat(false, body.count))
+            let marks = _label_indexes(body)
+
+            let has_branch = body |> any(entry => isa BRANCH(entry))
+
+            if !has_branch then
+                return (short, 0)
+            fi
+
+            let size mut = 0
+
+            let rounds mut = 0
+
+            while rounds < 4 do
+                rounds = rounds + 1
+
+                let offsets = measure(body, short)
+                let changed mut = false
+
+                size = offsets[body.count]
+
+                for i in 0..body.count do
+                    if let branch: BRANCH = body[i] /\ !short[i] /\ short_form(branch.op_code)? /\ marks.contains_key(branch.target) then
+                        let size = offsets[i + 1] - offsets[i]
+                        let distance = offsets[marks[branch.target]] - offsets[i + 1]
+
+                        // The short form ends `size - 2` bytes earlier,
+                        // which a backward branch has to cover.
+                        let reaches =
+                            if distance >= 0 then
+                                distance <= 127
+                            else
+                                distance + size - 2 >= -128
+                            fi
+
+                        if reaches then
+                            short[i] = true
+                            changed = true
+                        fi
+                    fi
+                od
+
+                if !changed then
+                    break
+                fi
+            od
+
+            return (short, size)
+        si
+
+        short_form(op_code: ILOpCode) -> ILOpCode? static =>
+            case op_code
+            when ILOpCode.BR then ILOpCode.BR_S
+            when ILOpCode.BRFALSE then ILOpCode.BRFALSE_S
+            when ILOpCode.BRTRUE then ILOpCode.BRTRUE_S
+            when ILOpCode.BEQ then ILOpCode.BEQ_S
+            when ILOpCode.BGE then ILOpCode.BGE_S
+            when ILOpCode.BGE_UN then ILOpCode.BGE_UN_S
+            when ILOpCode.BGT then ILOpCode.BGT_S
+            when ILOpCode.BGT_UN then ILOpCode.BGT_UN_S
+            when ILOpCode.BLE then ILOpCode.BLE_S
+            when ILOpCode.BLE_UN then ILOpCode.BLE_UN_S
+            when ILOpCode.BLT then ILOpCode.BLT_S
+            when ILOpCode.BLT_UN then ILOpCode.BLT_UN_S
+            when ILOpCode.BNE_UN then ILOpCode.BNE_UN_S
+            when ILOpCode.LEAVE then ILOpCode.LEAVE_S
+            else null
+            esac
+
+        // Whether the entry is encoded as an instruction, rather than
+        // being a position between instructions.
+        is_instruction(entry: BufferedInstruction) -> bool static =>
+            !(
+                isa LABEL(entry) \/
+                isa REGION_BOUNDARY(entry) \/
+                isa BufferedInstruction.SEQUENCE_POINT(entry) \/
+                isa BufferedInstruction.OUTPUT_BEGIN(entry) \/
+                isa BufferedInstruction.OUTPUT_END(entry))
+
+        // Whether execution never continues to the next entry.
+        _ends_flow(entry: BufferedInstruction) -> bool static =>
+            case entry
+            when op: OP then
+                case op.op_code
+                when ILOpCode.RET, ILOpCode.THROW, ILOpCode.RETHROW, ILOpCode.ENDFINALLY, ILOpCode.ENDFILTER, ILOpCode.JMP then true
+                else false
+                esac
+            when branch: BRANCH then
+                branch.op_code == ILOpCode.BR \/ branch.op_code == ILOpCode.LEAVE
+            else false
+            esac
+
+        // Which entries some path from the start of the body reaches.
+        // Every region boundary is treated as reached, so a protected
+        // region and its handlers are never emptied: a handler is entered
+        // by the runtime rather than by a branch.
+        _reached(body: Collections.List[BufferedInstruction]) -> Collections.LIST[bool] static is
+            let reached = Collections.LIST[bool](repeat(false, body.count))
+            let marks = _label_indexes(body)
+            let pending = Collections.LIST[int]()
+
+            if body.count > 0 then
+                pending.add(0)
+            fi
+
+            for i in 0..body.count do
+                if isa REGION_BOUNDARY(body[i]) then
+                    pending.add(i)
+                fi
+            od
+
+            while pending.count > 0 do
+                let i = pending[pending.count - 1]
+
+                pending.remove_at(pending.count - 1)
+
+                if i < body.count /\ !reached[i] then
+                    reached[i] = true
+
+                    let entry = body[i]
+
+                    if let branch: BRANCH = entry then
+                        if marks.contains_key(branch.target) then
+                            pending.add(marks[branch.target])
+                        fi
+                    fi
+
+                    if !_ends_flow(entry) then
+                        pending.add(i + 1)
+                    fi
+                fi
+            od
+
+            return reached
+        si
+
+        // Whether the entry at `index` is an unconditional branch to a
+        // label marked before the next instruction, with no region
+        // boundary in between.
+        _branches_to_next(body: Collections.List[BufferedInstruction], index: int) -> bool static is
+            if let branch: BRANCH = body[index] /\ branch.op_code == ILOpCode.BR then
+                for i in index + 1..body.count do
+                    let entry = body[i]
+
+                    if let label: LABEL = entry /\ label.label == branch.target then
+                        return true
+                    elif isa REGION_BOUNDARY(entry) \/ is_instruction(entry) then
+                        return false
+                    fi
+                od
+            fi
+
+            return false
+        si
+
+        _label_indexes(body: Collections.List[BufferedInstruction]) -> Collections.MAP[IR.LABEL, int] static is
+            let result = Collections.MAP[IR.LABEL, int]()
+
+            for i in 0..body.count do
+                if let label: LABEL = body[i] then
+                    result[label.label] = i
+                fi
+            od
+
+            return result
+        si
+    si
+si
