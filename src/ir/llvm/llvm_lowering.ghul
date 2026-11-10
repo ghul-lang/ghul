@@ -3685,6 +3685,11 @@ namespace IR.LLVMTarget is
         // `kind`, such as an invalid cast, where `condition`, an `i1`, holds.
         // Where the program has no such class, what is thrown carries no type
         // or message.
+        //
+        // The exception is made and thrown by a function the module holds
+        // once for each kind, so a check adds one call to the function it is
+        // in, as a test for null does. A check in a small function, such as
+        // an element access, then leaves it small enough to inline.
         _throw_if(condition: LLVM.Value, kind: Semantic.Lookups.RuntimeException) is
             let thrown = _new_block()
             let carry_on = _new_block()
@@ -3693,9 +3698,65 @@ namespace IR.LLVMTarget is
 
             _start(thrown)
 
-            _throw_new(kind)
+            if let thrower = _thrower(kind) then
+                _emit_call(thrower, [])
+                _current.unreachable()
+                _is_terminated = true
+            else
+                _throw_new(kind)
+            fi
 
             _start(carry_on)
+        si
+
+        // The module's function that makes and throws a new instance of the
+        // core library's exception class for `kind`, added the first time it
+        // is asked for, or null where the class has no constructor taking
+        // nothing or needs its static constructor run first.
+        _thrower(kind: Semantic.Lookups.RuntimeException) -> FUNCTION? is
+            let name = "$ghul_throw.{Semantic.Lookups.RUNTIME_EXCEPTIONS.name_of(kind)}"
+
+            if let existing = _module.function_named(name) then
+                return existing
+            fi
+
+            let objects = _objects
+            let constructor = IR.Program.CORE_LIBRARY.constructor(IR.Program.CORE_LIBRARY.exception_class(kind), [])
+
+            if !objects? \/ !constructor? then
+                return null
+            fi
+
+            let type = _owner_class(constructor.owner)
+
+            if !type? \/ !objects.is_object_type(type) \/ objects.static_constructor(type)? \/ type.definition.is_unit_variant then
+                return null
+            fi
+
+            let callee = _callee(_instance_of(constructor))
+
+            if !callee? then
+                return null
+            fi
+
+            objects.note_allocated(type)
+
+            let thrower = FUNCTION(name, LLVM.Type.VOID, [])
+
+            thrower.linkage = LLVM.Linkage.INTERNAL
+            thrower.attributes.add(LLVM.Attribute.FLAG("cold"))
+            thrower.attributes.add(LLVM.Attribute.FLAG("noreturn"))
+            thrower.attributes.add(LLVM.Attribute.FLAG("noinline"))
+
+            let entry = thrower.add_block("entry")
+            let exception =
+                _strings!.allocate_object(entry, LLVM.Values.global(objects.descriptor_name(type)), LLVM.Values.i64(cast long(objects.size_of(type))), true)
+
+            entry.call(callee, [exception])
+            entry.call(_strings!.runtime("$ghul_throw", LLVM.Type.VOID, [Types.pointer]), [exception])
+            entry.unreachable()
+
+            return _module.add_function(thrower)
         si
 
         // The exception a runtime operation makes, or null where it makes
