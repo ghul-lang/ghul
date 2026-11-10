@@ -1433,7 +1433,9 @@ namespace Syntax.Process is
         // unspecialised type carries its own type parameters, which mean
         // nothing where the construction is written, and a consumer that
         // took them for a type - a fused loop's local, a closure frame -
-        // would carry them into the emitted code. Otherwise it is the
+        // would carry them into the emitted code. An argument that is
+        // still an error, such as a member read from a value whose type a
+        // later walk settles, waits the same way. Otherwise it is the
         // callee's type, as before.
         _unresolved_construction(
             cache_key: Trees.Node,
@@ -1443,8 +1445,8 @@ namespace Syntax.Process is
         ) -> Value is
             if
                 let caller = _symbol_table.current_function /\
-                Semantic.CALL_ARGUMENT_WAIT.is_inferred_construction(type),
-                awaited = Semantic.CALL_ARGUMENT_WAIT.awaited(argument_types),
+                Semantic.CALL_ARGUMENT_WAIT.is_inferred_construction(type) /\
+                (Semantic.CALL_ARGUMENT_WAIT.awaited(argument_types)? \/ argument_types |> any(t => t.is_error)),
                 origin = Semantic.RESULT_ORIGINS.origin_for(
                     cache_key,
                     location,
@@ -1454,9 +1456,16 @@ namespace Syntax.Process is
                 origin.description = "the result of this construction"
                 origin.is_reported_by_its_input = true
 
-                Semantic.OBLIGATIONS.defer(Semantic.OBLIGATIONS.UNBOUND_RETURN, awaited, location)
+                let result = Semantic.Types.INFERRED_VARIABLE_TYPE(origin)
 
-                return DUMMY(Semantic.Types.INFERRED_VARIABLE_TYPE(origin), location)
+                // An error argument has no placeholder of its own to wait
+                // on, so the construction's result is what waits.
+                Semantic.OBLIGATIONS.defer(
+                    Semantic.OBLIGATIONS.UNBOUND_RETURN,
+                    Semantic.CALL_ARGUMENT_WAIT.awaited(argument_types) ?? result,
+                    location)
+
+                return DUMMY(result, location)
             fi
 
             return DUMMY(type, location)

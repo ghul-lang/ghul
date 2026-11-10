@@ -4128,6 +4128,11 @@ namespace IR.LLVMTarget is
 
             if dispatch == IR.Dispatch.VIRTUAL /\ _is_trait_method(function) \/ dispatch == IR.Dispatch.INTERFACE then
                 _call_interface(call)
+            elif
+                dispatch == IR.Dispatch.VIRTUAL /\ !function.has_no_overriders /\
+                DISPATCH_PLAN.own_type_arguments(_instance_of(function))?
+            then
+                _call_generic_virtual(call, DISPATCH_PLAN.own_type_arguments(_instance_of(function))!)
             elif dispatch == IR.Dispatch.VIRTUAL /\ !function.has_no_overriders then
                 _call_virtual(call)
             elif dispatch == IR.Dispatch.DIRECT \/ dispatch == IR.Dispatch.VIRTUAL then
@@ -4453,6 +4458,49 @@ namespace IR.LLVMTarget is
                 _call_on_null(call)
                 return
             fi
+
+            _call_through_selector(call, selector, targets)
+        si
+
+        // A call to a virtual class method generic in its own right reads
+        // the trait table at the row for its instantiation, as a generic
+        // trait call does: a vtable slot holds one function, and each
+        // instantiation is a function of its own.
+        _call_generic_virtual(call: Values.Call.INSTANCE, arguments: Type[]) is
+            let objects = _objects!
+            let function = call.function
+            let root = cast Function?(function.root_specialized_from)!
+            let through = objects.class_of(_specialize(call.from.type))
+
+            if !objects.is_built then
+                if let t = through then
+                    objects.note_generic_call(root, t, arguments)
+                fi
+
+                _discover_dispatched_call(call, null)
+                return
+            fi
+
+            let selector = if let t = through /\ !CELL_LINK.is_active then objects.generic_selector_of(root, t, arguments) else null fi
+
+            if !selector? then
+                _report("a virtual call to {function.name}")
+                return
+            fi
+
+            _call_through_selector(call, selector, null)
+        si
+
+        // Calls the one method `selector`'s row can run directly, or the
+        // receiver's own class's method where its class is known, or reads
+        // the table at the row, offset by the receiver's class number.
+        _call_through_selector(
+            call: Values.Call.INSTANCE,
+            selector: TRAIT_SELECTOR,
+            targets: (() -> Collections.Iterable[FUNCTION_INSTANCE]?)?
+        ) is
+            let objects = _objects!
+            let function = call.function
 
             if let only = objects.only_implementation(selector) then
                 if _callee(only)? then

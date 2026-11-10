@@ -4890,6 +4890,12 @@ namespace IR.WasmGC is
             if dispatch == IR.Dispatch.VIRTUAL /\ _is_trait_method(function) then
                 _call_interface(call)
                 return
+            elif
+                dispatch == IR.Dispatch.VIRTUAL /\ !function.has_no_overriders /\
+                DISPATCH_PLAN.own_type_arguments(_instance_of(function))?
+            then
+                _call_generic_virtual(call, DISPATCH_PLAN.own_type_arguments(_instance_of(function))!)
+                return
             elif dispatch == IR.Dispatch.VIRTUAL /\ !function.has_no_overriders then
                 _call_virtual(call)
                 return
@@ -5182,6 +5188,45 @@ namespace IR.WasmGC is
 
                 return
             fi
+
+            _call_through_selector(call, selector)
+        si
+
+        // A call to a virtual class method generic in its own right reads
+        // the trait table at the row for its instantiation, as a generic
+        // trait call does: a vtable slot holds one function, and each
+        // instantiation is a function of its own.
+        _call_generic_virtual(call: Values.Call.INSTANCE, arguments: Type[]) is
+            let function = call.function
+            let dispatch = _registry.dispatch
+            let root = cast Function?(function.root_specialized_from)!
+            let through = _registry.class_of(_specialize(call.from.type))
+
+            if _registry.discovering then
+                if let t = through then
+                    dispatch.note_generic_call(root, t, arguments)
+                fi
+
+                gen(call.from)
+                _lower_all(call.arguments)
+                return
+            fi
+
+            let selector = if let t = through then dispatch.generic_selector_of(root, t, arguments) else null fi
+
+            if !selector? then
+                _report("a virtual call to {function.name}")
+                return
+            fi
+
+            _call_through_selector(call, selector)
+        si
+
+        // Calls the one method `selector`'s row can run directly, or reads
+        // the table at the row, offset by the receiver's class number.
+        _call_through_selector(call: Values.Call.INSTANCE, selector: TRAIT_SELECTOR) is
+            let function = call.function
+            let dispatch = _registry.dispatch
 
             if let only = dispatch.only_implementation(selector) then
                 _call_direct(call, only)
