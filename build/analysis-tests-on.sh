@@ -88,11 +88,9 @@ fi
 
 cd "$root"
 
-# A test waiting on an analyser that never answers fails by name after
-# three minutes rather than holding the run. The .NET run does not set this:
-# a timed test runs on a thread of its own, which slows the suite and makes
-# its start-up timing tests flaky.
+# A run held by an analyser that never answers is stopped after five
+# minutes without progress, naming the test it was in.
 ANALYSIS_TESTS_ANALYSER=$analyser \
 ANALYSIS_TESTS_TARGET=$target \
 ANALYSIS_TESTS_LIBRARIES=$work/libraries.rsp \
-    dotnet test analysis-tests "$@" -- MSTest.TestTimeout=180000
+    dotnet test analysis-tests --blame-hang --blame-hang-timeout 5m "$@"
