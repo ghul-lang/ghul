@@ -304,6 +304,10 @@ namespace IR.LLVMTarget is
         si
 
         _report(construct: string) is
+            if System.Environment.get_environment_variable("RTTI_DEBUG")? then
+                IO.Std.error.write_line("RTTI-DEBUG report '{construct}' in {_instance}")
+            fi
+
             if !_unsupported.contains(construct) then
                 _unsupported.add(construct)
             fi
@@ -1855,7 +1859,11 @@ namespace IR.LLVMTarget is
         /// through a type parameter follows the cast that tested the box,
         /// so there a null is the declined cast and gives the default.
         visit(unbox: Values.UNBOX) is
-            if (unbox.type?.is_type_variable ?? false) /\ !LLVM_TYPES.is_object_reference(_specialize(unbox.type)) then
+            // An optional value type, a type parameter can be bound to too,
+            // takes null as the absent value.
+            if (unbox.type?.is_type_variable ?? false) /\ _value_optional_inner(_specialize(unbox.type))? then
+                _unbox(unbox.value, _specialize(unbox.type))
+            elif (unbox.type?.is_type_variable ?? false) /\ !LLVM_TYPES.is_object_reference(_specialize(unbox.type)) then
                 _unbox_or_default(unbox.value, unbox.type)
             else
                 _unbox(unbox.value, unbox.type)
@@ -1958,6 +1966,27 @@ namespace IR.LLVMTarget is
                 return object
             fi
 
+            // An optional reference is unboxed as the reference it holds,
+            // null included.
+            if let t = type /\ t.is_optional /\ !_value_optional_inner(t)? then
+                return _unbox_value(object, t.optional_inner_type)
+            fi
+
+            // A function value is a closure, which carries the one closure
+            // descriptor, so the cast checks for that and lets null through.
+            if let t = type /\ (t.is_function \/ t.is_action) then
+                let ranges = LIST[(first: int, last: int)]()
+
+                ranges.add((LLVM_CLOSURES.CLASS_ID, LLVM_CLOSURES.CLASS_ID))
+
+                let in_class = _in_ranges(_class_id(object), ranges)
+                let fits = _current.binary(BinaryOperator.OR, IntegerFlags.NONE, in_class, _current.compare(IntegerPredicate.EQ, object, LLVM.Values.null_pointer))
+
+                _throw_if(_current.compare(IntegerPredicate.EQ, fits, LLVM.Values.boolean(false)), Semantic.Lookups.RuntimeException.INVALID_CAST)
+
+                return object
+            fi
+
             // Unboxing to a reference type, as a type parameter bound to one
             // does, is a checked cast that lets null through.
             if type? /\ LLVM_TYPES.is_object_reference(type) then
@@ -2002,12 +2031,33 @@ namespace IR.LLVMTarget is
         /// descriptor stands for: a scalar's box's, or a struct's own.
         visit(type_of: Values.TYPEOF) is
             let objects = _objects!
-            let type = _specialize(type_of.typeof_type)
+            let named = _specialize(type_of.typeof_type)
+
+            // An optional reference is the type it holds, as on .NET.
+            let type =
+                if let n = named /\ n.is_optional /\ !_value_optional_inner(n)? then n.optional_inner_type else named fi
+
+            // Every function value shares one descriptor, and so one type
+            // object.
+            if let t = type /\ (t.is_function \/ t.is_action) then
+                // Before the objects are laid out the lowering is only finding
+                // out what is needed, and the closures are not made yet.
+                if !objects.is_built then
+                    _push(LLVM.Values.null_pointer)
+                elif let closures = objects.closures then
+                    _push(_type_object(closures.descriptor) ?? LLVM.Values.null_pointer)
+                else
+                    _report("typeof {t}")
+                fi
+
+                return
+            fi
+
             let held = if let box = objects.box_type(type) then box else objects.class_of(type) fi
 
             if !held? then
-                // A trait has no descriptor, since no value is an instance
-                // of one, but has a type object of its own.
+                // A trait, or a class nothing is an instance of, has no
+                // descriptor, but has a type object of its own.
                 if let strings = _strings, t = objects.trait_type_object(type, strings) then
                     _push(t)
                 else
@@ -3911,6 +3961,9 @@ namespace IR.LLVMTarget is
             let position = objects.field_position(symbol)
 
             if !owner? \/ !position? then
+                if System.Environment.get_environment_variable("RTTI_DEBUG")? then
+                    IO.Std.error.write_line("RTTI-DEBUG field {symbol} kind={symbol.get_type().name} owner={owner} position={position} built={objects.is_built} root={symbol.root_specialized_from}")
+                fi
                 _report("a field of {symbol.owner}")
                 return null
             fi
@@ -4082,6 +4135,9 @@ namespace IR.LLVMTarget is
             fi
 
             if constructor.intrinsic_operation? \/ !objects? \/ !type? \/ !(objects.is_object_type(type) \/ objects.is_object(type)) then
+                if System.Environment.get_environment_variable("RTTI_DEBUG")? then
+                    IO.Std.error.write_line("RTTI-DEBUG construct owner={constructor.owner} resolved={type} map={_type_map |> Ghul.Pipes.map(kv => "{kv.key}={kv.value}") |> Ghul.Pipes.join(";")}")
+                fi
                 _report("constructing a {description}")
                 return null
             fi
@@ -4801,6 +4857,16 @@ namespace IR.LLVMTarget is
 
             if is_box /\ !conversion.is_checked /\ !conversion.type.is_type_variable then
                 _unbox(conversion.value, target)
+                return
+            fi
+
+            // A function value, or an optional reference, is checked as an
+            // unboxing to it checks.
+            if let t = target /\ (t.is_function \/ t.is_action \/ (t.is_optional /\ !_value_optional_inner(t)?)) then
+                if let object = _value_of(operand), checked = _unbox_value(object, t) then
+                    _push(checked)
+                fi
+
                 return
             fi
 

@@ -307,6 +307,10 @@ namespace IR.LLVMTarget is
                     return found
                 fi
 
+                if System.Environment.get_environment_variable("RTTI_DEBUG")? /\ (_objects?.is_built ?? false) /\ (instance.definition.name =~ "_field" \/ instance.definition.name =~ "$describe") then
+                    IO.Std.error.write_line("RTTI-DEBUG late declare {instance}")
+                fi
+
                 let function =
                     if worklist.add(instance)? then
                         _declare(instance, names.name_of(instance))
@@ -405,6 +409,43 @@ namespace IR.LLVMTarget is
                     objects.dispatched,
                     display,
                     _order)
+
+            // Under --rtti each type the program has is described by a
+            // function compiled like any other, which its type object holds.
+            if container.build_flags.want_rtti then
+                if let description = RTTI_PLAN.description_class((t: Semantic.Types.Type) -> CLASS_INSTANCE? => objects.class_of(t)) then
+                    let rtti = RTTI_PLAN(objects, description, () -> Collections.Iterable[CLASS_INSTANCE] => objects.descriptor_only)
+
+                    let methods =
+                        RTTI_METHODS(
+                            rtti,
+                            (function: Function, body: LIST[Value]) -> void is
+                                _bodies[function] = body
+                                _order.add(function)
+                            si,
+                            (instance: FUNCTION_INSTANCE) -> bool => _bodies.contains_key(instance.definition))
+
+                    plan.rtti = rtti
+
+                    if let function_value_describer = methods.function_value_describer() then
+                        objects.closure_describer = function_value_describer
+                        declare(function_value_describer)
+                    fi
+                    plan.describer_of = (type: CLASS_INSTANCE) -> FUNCTION_INSTANCE? is
+                        let describer = methods.describer(type)
+
+                        if System.Environment.get_environment_variable("RTTI_DEBUG")? then
+                            IO.Std.error.write_line("RTTI-DEBUG hook {type} -> {describer}")
+                        fi
+
+                        if let d = describer then
+                            objects.set_describer(type, d)
+                        fi
+
+                        return describer
+                    si
+                fi
+            fi
 
             objects.reach = instance => declare(instance)
 
