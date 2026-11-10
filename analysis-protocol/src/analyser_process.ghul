@@ -89,6 +89,20 @@ namespace Analysis.Protocol is
                 excluded.add(name.to_lower_invariant())
             od
 
+            if let libraries = library_sources then
+                let result = LIST[string]()
+
+                if let target = analyser_target then
+                    result.add("--target")
+                    result.add(target)
+                fi
+
+                add_library_sources(libraries, excluded, result)
+                add_common_arguments(result)
+
+                return result
+            fi
+
             let assemblies_json_path = Path.combine(project_directory, ".assemblies.json")
 
             if !File.exists(assemblies_json_path) then
@@ -141,6 +155,51 @@ namespace Analysis.Protocol is
                 fi
             od
 
+            add_common_arguments(result)
+
+            return result
+        si
+
+        // The library sources an analyser compiles, from the response file
+        // `libraries` names, one argument a line: each `--library-source`
+        // declaration followed by its files. A library whose assembly is in
+        // `excluded` is left out, so a test standing in for a project that
+        // declares the runtime itself works on a source-library analyser as
+        // it does on one that reads assemblies.
+        add_library_sources(libraries: string, excluded: Collections.SET[string], result: LIST[string]) static is
+            let skipping mut = false
+            let lines = File.read_all_lines(libraries)
+            let i mut = 0
+
+            while i < lines.count do
+                let line = lines[i].trim()
+
+                if line =~ "--library-source" /\ i + 1 < lines.count then
+                    let declaration = lines[i + 1].trim()
+                    let name = declaration.split(['@'])[0]
+
+                    skipping = excluded.contains("{name}.dll".to_lower_invariant())
+
+                    if !skipping then
+                        result.add(line)
+                        result.add(declaration)
+                    fi
+
+                    i = i + 2
+                    continue
+                fi
+
+                if line.length > 0 /\ !skipping then
+                    result.add(line)
+                fi
+
+                i = i + 1
+            od
+        si
+
+        // The flags every analyser the harness starts is given, whichever
+        // compiler runs it.
+        add_common_arguments(result: LIST[string]) static is
             // The analysis-test fixtures exercise IPC / query / state behaviour,
             // not the definite-return / definite-assignment flow warnings.
             result.add("--no-warn-definite-return")
@@ -157,9 +216,35 @@ namespace Analysis.Protocol is
             fi
 
             result.add("-A")
-
-            return result
         si
+
+        // The analyser to start, where ANALYSIS_TESTS_ANALYSER names one in
+        // place of the ghul.dll beside the tests: a .dll is started under
+        // dotnet, a .mjs loader (the wasm-built compiler) under node, and
+        // anything else, such as the llvm-built compiler, directly.
+        analyser_command: string? static => _non_empty("ANALYSIS_TESTS_ANALYSER")
+
+        // The target the analyser is told to analyse for, from
+        // ANALYSIS_TESTS_TARGET; where it is not set the analyser's own
+        // default stands.
+        analyser_target: string? static => _non_empty("ANALYSIS_TESTS_TARGET")
+
+        // The response file of library sources the analyser compiles in
+        // place of reading assemblies, from ANALYSIS_TESTS_LIBRARIES: each
+        // `--library-source` declaration followed by its files.
+        library_sources: string? static => _non_empty("ANALYSIS_TESTS_LIBRARIES")
+
+        // Whether the analyser under test reads library sources rather than
+        // .NET assemblies, which decides the tests whose fixtures are
+        // assemblies.
+        reads_library_sources: bool static => library_sources?
+
+        _non_empty(variable: string) -> string? static =>
+            if let value: string = Ghul.ENVIRONMENT.instance[variable] /\ !string.is_null_or_white_space(value) then
+                value
+            else
+                null
+            fi
 
         is_compiler_own_dll(path: string) -> bool static =>
             Path.get_file_name(path)!.to_lower_invariant() =~ "ghul.dll"
@@ -226,7 +311,16 @@ namespace Analysis.Protocol is
 
             let project_directory = find_project_directory()
 
-            let arguments = LIST[string](build_analyser_arguments(project_directory, without_assemblies))
+            let left_out = LIST[string](without_assemblies)
+
+            // A test that names its own library sources stands in for the
+            // libraries a source-library analyser is otherwise given.
+            if reads_library_sources /\ extra_arguments |> any(a => a =~ "--library-source") then
+                left_out.add("ghul-core.dll")
+                left_out.add("ghul-runtime.dll")
+            fi
+
+            let arguments = LIST[string](build_analyser_arguments(project_directory, left_out))
             arguments.add_range(extra_arguments)
 
             // A directory of this instance's own, so parallel analyser
@@ -248,12 +342,22 @@ namespace Analysis.Protocol is
 
             let response_file = write_response_file(_response_directory, arguments)
 
-            let compiler_dll = resolve_compiler_dll()
-
             let start_info = ProcessStartInfo()
 
-            start_info.file_name = "dotnet"
-            start_info.arguments = "\"{compiler_dll}\" @\"{response_file}\""
+            let command = analyser_command ?? resolve_compiler_dll()
+            let extension = (Path.get_extension(command) ?? "").to_lower_invariant()
+
+            if extension =~ ".dll" then
+                start_info.file_name = "dotnet"
+                start_info.argument_list.add(command)
+            elif extension =~ ".mjs" then
+                start_info.file_name = "node"
+                start_info.argument_list.add(command)
+            else
+                start_info.file_name = command
+            fi
+
+            start_info.argument_list.add("@{response_file}")
             start_info.working_directory = project_directory
 
             start_info.use_shell_execute = false
