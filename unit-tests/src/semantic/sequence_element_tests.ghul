@@ -1,0 +1,178 @@
+namespace Semantic.UnitTests is
+    use Collections.LIST
+
+    use Source.LOCATION
+
+    use Semantic.SEQUENCE_ELEMENT
+    use Semantic.Symbols.CLASS
+    use Semantic.Types.GENERIC
+    use Semantic.Types.Type
+    use TestClass = Microsoft.VisualStudio.TestTools.UnitTesting.TestClassAttribute
+    use Test = Microsoft.VisualStudio.TestTools.UnitTesting.TestMethodAttribute
+    use Assertions
+
+    // A lookup that answers the list, sequence and matrix traits with
+    // fixtures, and stands in for the test lookup everywhere else.
+    class SEQUENCE_TRAITS_LOOKUP: TEST_INNATE_SYMBOL_LOOKUP is
+        iterable: CLASS
+        list: CLASS
+        matrix_2: CLASS
+        matrix_3: CLASS
+
+        init() is
+            super.init()
+
+            let loc = LOCATION("test.ghul", 1, 1, 1, 1)
+
+            iterable = CLASS(loc, loc, Semantic.BLOCK_SCOPE(), "Iterable", LIST[string](["T"]), Semantic.BLOCK_SCOPE())
+            list = CLASS(loc, loc, Semantic.BLOCK_SCOPE(), "List", LIST[string](["T"]), Semantic.BLOCK_SCOPE())
+            matrix_2 = CLASS(loc, loc, Semantic.BLOCK_SCOPE(), "Matrix2", LIST[string](["T"]), Semantic.BLOCK_SCOPE())
+            matrix_3 = CLASS(loc, loc, Semantic.BLOCK_SCOPE(), "Matrix3", LIST[string](["T"]), Semantic.BLOCK_SCOPE())
+        si
+
+        find_unspecialized_iterable_type() -> Type? => iterable.type
+        get_unspecialized_list_type() -> Type => list.type!
+
+        find_unspecialized_matrix_type(rank: int) -> Type? =>
+            if rank == 2 then matrix_2.type elif rank == 3 then matrix_3.type else null fi
+    si
+
+    // What a list literal's elements are expected to be, where the literal
+    // is expected to be a given type: what iterating that type yields.
+    @TestClass()
+    class SEQUENCE_ELEMENT_TESTS is
+        _lookup: SEQUENCE_TRAITS_LOOKUP
+
+        init() is
+            _lookup = SEQUENCE_TRAITS_LOOKUP()
+        si
+
+        loc() -> LOCATION => LOCATION("test.ghul", 1, 1, 1, 1)
+
+        a_class(name: string) -> CLASS =>
+            CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), name, LIST[string](), Semantic.BLOCK_SCOPE())
+
+        a_generic_class(name: string) -> CLASS is
+            let result = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), name, LIST[string](["T"]), Semantic.BLOCK_SCOPE())
+            result.declare_type(loc(), "T", 0, null)
+            return result
+        si
+
+        over(container: CLASS, argument: Type) -> Type =>
+            GENERIC(loc(), container, LIST[Type]([argument]))
+
+        // ROWS[T] iterates rows of T, as `T[,]` iterates `T[]`: its element
+        // is the row, not its type argument.
+        @Test()
+        A_sequence_whose_element_differs_from_its_type_argument_answers_the_element() is
+            let row = a_generic_class("ROW")
+            let rows = a_generic_class("ROWS")
+            let t = rows.find_direct("T")!.type!
+
+            rows.push_ancestor(over(_lookup.iterable, over(row, t)))
+
+            let int_type = a_class("int").type!
+            let element = SEQUENCE_ELEMENT.of(over(rows, int_type), _lookup)
+
+            assert element? else "a sequence has an element"
+            is_true(element.compare(over(row, int_type)) == Semantic.Types.MATCH.SAME, "the element of ROWS[int] is ROW[int], not {element}")
+        si
+
+        // The sequence trait itself is its own element's container: its
+        // element is its type argument.
+        @Test()
+        The_sequence_trait_answers_its_type_argument() is
+            let int_type = a_class("int").type!
+
+            are_same(int_type, SEQUENCE_ELEMENT.of(over(_lookup.iterable, int_type), _lookup))
+        si
+
+        // A generic that isn't a sequence answers its type argument, as a
+        // reference or an optional does.
+        @Test()
+        A_type_that_is_not_a_sequence_answers_its_element_type() is
+            let box = a_generic_class("BOX")
+            let int_type = a_class("int").type!
+
+            are_same(int_type, SEQUENCE_ELEMENT.of(over(box, int_type), _lookup))
+        si
+
+        @Test()
+        Without_a_lookup_a_type_answers_its_element_type() is
+            let row = a_generic_class("ROW")
+            let rows = a_generic_class("ROWS")
+            let t = rows.find_direct("T")!.type!
+
+            rows.push_ancestor(over(_lookup.iterable, over(row, t)))
+
+            let int_type = a_class("int").type!
+
+            are_same(int_type, SEQUENCE_ELEMENT.of(over(rows, int_type), null))
+        si
+
+        // An ancestor of the sequence trait's name taking other than one
+        // type argument says nothing about the element.
+        @Test()
+        An_iterable_ancestor_of_another_arity_answers_the_element_type() is
+            let pairs = a_generic_class("PAIRS")
+            let int_type = a_class("int").type!
+            let string_type = a_class("string").type!
+
+            pairs.push_ancestor(GENERIC(loc(), _lookup.iterable, LIST[Type]([int_type, string_type])))
+
+            are_same(string_type, SEQUENCE_ELEMENT.of(over(pairs, string_type), _lookup))
+        si
+    si
+
+    // The suffix a generic over one element is spelled with.
+    @TestClass()
+    class LIST_SPELLING_SUFFIX_TESTS is
+        init() is si
+
+        loc() -> LOCATION => LOCATION("test.ghul", 1, 1, 1, 1)
+
+        with_lookup(lookup: SEQUENCE_TRAITS_LOOKUP, action: () -> void) is
+            let saved = IoC.CONTAINER.instance.innate_symbol_lookup
+
+            IoC.CONTAINER.instance.innate_symbol_lookup = lookup
+
+            try
+                action()
+            finally
+                IoC.CONTAINER.instance.innate_symbol_lookup = saved
+            yrt
+        si
+
+        @Test()
+        The_matrix_traits_are_spelled_with_commas() is
+            let lookup = SEQUENCE_TRAITS_LOOKUP()
+
+            with_lookup(lookup, () is
+                are_equal("[]", LIST_SPELLING.suffix_for(lookup.list, 1))
+                are_equal("[,]", LIST_SPELLING.suffix_for(lookup.matrix_2, 1))
+                are_equal("[,,]", LIST_SPELLING.suffix_for(lookup.matrix_3, 1))
+            si)
+        si
+
+        // A type the program declares under the trait's name is an
+        // ordinary generic.
+        @Test()
+        Another_type_named_like_a_matrix_trait_has_no_suffix() is
+            let lookup = SEQUENCE_TRAITS_LOOKUP()
+            let impostor = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Matrix2", LIST[string](["T"]), Semantic.BLOCK_SCOPE())
+
+            with_lookup(lookup, () is
+                is_null(LIST_SPELLING.suffix_for(impostor, 1))
+            si)
+        si
+
+        @Test()
+        A_generic_over_other_than_one_argument_has_no_suffix() is
+            let lookup = SEQUENCE_TRAITS_LOOKUP()
+
+            with_lookup(lookup, () is
+                is_null(LIST_SPELLING.suffix_for(lookup.matrix_2, 2))
+            si)
+        si
+    si
+si
