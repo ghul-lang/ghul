@@ -48,6 +48,8 @@ On the llvm target, a crash is reported in the same way. The program's output is
 
 A frame has the name that the linker gives the function. On the llvm target, a build with `--debug` adds the frame's file and line. At the default optimisation level, a function inlined into another function has no frame of its own. A stack that the llvm optimiser has turned into a loop does not run out, so it is never reported.
 
+On the llvm target, `System.Runtime.CompilerServices.MethodImpl` asks for or against inlining, as it does on .NET: a function marked `NO_INLINING` is never inlined, and one marked `AGGRESSIVE_INLINING` is inlined wherever it is called. Its other options change nothing there, and on the wasm target none of them do.
+
 A `wasm` build loads no .NET assemblies. One library, ghul-runtime, compiled into the module from source, supplies what the .NET assemblies supply on .NET. It holds two source trees:
 
 - `ghul-core` gives the built-in types their members, and declares the collections.
