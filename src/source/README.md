@@ -7,7 +7,8 @@ need to correlate generated code back to the original source.  `BUILD_NUMBER`
 tracks a monotonically increasing integer for incremental builds.  `SOURCE_LIBRARY`
 and `SOURCE_LIBRARIES` record the source libraries declared with
 `--library-source` and answer which library a source file belongs to: a file
-is a library's when the command line lists it after that library's declaration,
-before the next option, and it lies under the library's root.
+is a library's when it lies under the library's root and, where the command
+line lists files after that library's declaration (before the next option), is
+one of them. A declaration that lists no files claims everything under its root.
 
 If you need to add new kinds of source metadata, bear in mind the run-time cost as it's attached to every AST node
