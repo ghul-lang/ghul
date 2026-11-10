@@ -15,15 +15,6 @@ namespace IR is
     class INTERPOLATION_CALLS is
         _report: string -> void
 
-        // The temporaries each lowered `System.Enum.try_parse` call writes
-        // through, kept so every lowering of the call names the same ones.
-        // Keyed on the call itself, and held only as long as it is.
-        _try_parse_temporaries: System.Runtime.CompilerServices.ConditionalWeakTable[Values.Call.STATIC, TRY_PARSE_TEMPORARIES] static
-
-        init() static is
-            _try_parse_temporaries = System.Runtime.CompilerServices.ConditionalWeakTable[Values.Call.STATIC, TRY_PARSE_TEMPORARIES]()
-        si
-
         /// - report: called with a description of what an interpolation needs
         ///   that the core library does not provide
         init(report: string -> void) is
@@ -357,25 +348,21 @@ namespace IR is
             // The helper writes an int, and a reference to an enum is not
             // one to an int on every target: it writes a temporary, which is
             // then stored through the caller's reference as the enum.
-            // The same temporaries each time the call is lowered, since a
-            // target that decides which locals live in cells while it
-            // discovers the program looks them up again when it emits it.
+            // The same temporaries each time the call is lowered, kept on
+            // the call itself.
             let int_type = lookup.get_int_type()
             let expansion = EXPANSION(bool_type)
 
-            let temporaries: TRY_PARSE_TEMPORARIES mut
-
-            if !_try_parse_temporaries.try_get_value(call, temporaries ref) then
-                temporaries = TRY_PARSE_TEMPORARIES(
+            if !call.lowered_temporaries? then
+                call.lowered_temporaries = [
                     LOCAL(".enum_value.{TEMP.get_next_id()}", int_type),
                     LOCAL(".enum_found.{TEMP.get_next_id()}", bool_type)
-                )
-
-                _try_parse_temporaries.add(call, temporaries)
+                ]
             fi
 
-            let written = expansion.declare(temporaries.written)
-            let found = expansion.declare(temporaries.found)
+            let temporaries = call.lowered_temporaries!
+            let written = expansion.declare(temporaries[0])
+            let found = expansion.declare(temporaries[1])
 
             arguments.add(Values.ADDRESS(written.load(), int_reference))
 
@@ -424,8 +411,4 @@ namespace IR is
         _is_string(type: Type?) -> bool =>
             type? /\ type.symbol == IoC.CONTAINER.instance.innate_symbol_lookup.get_string_type().symbol
     si
-
-    // The two temporaries a lowered `System.Enum.try_parse` call uses: the
-    // int its helper writes, and whether it found a value.
-    class TRY_PARSE_TEMPORARIES(written: LOCAL public, found: LOCAL public)
 si
