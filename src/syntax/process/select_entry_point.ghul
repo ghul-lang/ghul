@@ -47,21 +47,6 @@ namespace Syntax.Process is
         _build_flags: Compiler.GLOBAL_BUILD_FLAGS
 
         _candidates: Collections.LIST[ENTRY_POINT_CANDIDATE]
-
-        // The candidates declared in files under a library root, which
-        // count only where every file lies under one.
-        _library_candidates: Collections.LIST[ENTRY_POINT_CANDIDATE]
-
-        // The first declaration of the entry-point name in a file under a
-        // library root that cannot be entered at, which counts only where
-        // the library's candidates do.
-        _library_rejected_named: REJECTED_ENTRY_NAME?
-
-        // Whether any file lies outside every library root, which makes it
-        // the program's own: then nothing under a library root is where the
-        // program starts.
-        _saw_program_file: bool
-
         _pending_entry_pragma: bool
 
         // The function declaration the next synthesised `_entry` wrapper
@@ -106,14 +91,10 @@ namespace Syntax.Process is
             _entry_point = entry_point
             _build_flags = build_flags
             _candidates = Collections.LIST[ENTRY_POINT_CANDIDATE]()
-            _library_candidates = Collections.LIST[ENTRY_POINT_CANDIDATE]()
         si
 
         start() is
             _candidates.clear()
-            _library_candidates.clear()
-            _library_rejected_named = null
-            _saw_program_file = false
             _pending_entry_pragma = false
             _entry_name_claimed = false
             _rejected_named = null
@@ -125,34 +106,14 @@ namespace Syntax.Process is
             _pending_entry_pragma = false
             _wrapped_original = null
 
-            if !source_file.library? then
-                _saw_program_file = true
-            fi
-
-            let first_added = _candidates.count
-            let was_rejected = _rejected_named?
-
-            source_file.definition.walk(self)
-
             // A library compiled from source alongside the program is not
             // where the program starts, as a referenced assembly's entry
-            // point is not, so its candidates, and a declaration of the
-            // entry-point name it cannot be entered at, are held aside. A
-            // library's file is any under its root, which can hold the
-            // program's own files too; where every file lies under a
-            // library root, as a library's own tests do, `finish` takes
-            // them back.
+            // point is not: nothing it declares is a candidate.
             if source_file.library? then
-                while _candidates.count > first_added do
-                    _library_candidates.add(_candidates[first_added])
-                    _candidates.remove_at(first_added)
-                od
-
-                if !was_rejected /\ _rejected_named? then
-                    _library_rejected_named = _library_rejected_named ?? _rejected_named
-                    _rejected_named = null
-                fi
+                return
             fi
+
+            source_file.definition.walk(self)
         si
 
         pre(pragma: Definitions.PRAGMA) -> bool is
@@ -286,11 +247,6 @@ namespace Syntax.Process is
         si
 
         finish() is
-            if !_saw_program_file then
-                _candidates.add_range(_library_candidates)
-                _rejected_named = _rejected_named ?? _library_rejected_named
-            fi
-
             let chosen mut = _choose()
 
             // A rejected name is a fault only where nothing outranked

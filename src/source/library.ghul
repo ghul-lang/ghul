@@ -4,14 +4,28 @@ namespace Source is
 
     // A source library declared on the command line with --library-source:
     // an identity - a name and an opaque version string, compared for
-    // equality only - and the directory root its files live under, as a
-    // full path. Which files under the root are the library's is the
-    // caller's concern: the compiler is only ever handed the files to
-    // compile, and uses the root to say which library each one belongs to.
+    // equality only - the directory root its files live under, as a full
+    // path, and the files the command line lists for it. A file is the
+    // library's when it is listed for it and lies under its root; a file
+    // under the root that is not listed, such as a library's own test
+    // program, is the program's.
     class SOURCE_LIBRARY(name: string public, version: string public, root: string public) is
-        // Whether a full path names one of this library's files: it lies
-        // under the root, below it rather than beside it.
-        contains(full_path: string) -> bool => is_under(full_path, root)
+        _files: SET[string]
+
+        init(..) is
+            _files = SET[string]()
+        si
+
+        // Records a full path the command line lists for this library
+        add_file(full_path: string) is
+            _files.add(full_path)
+        si
+
+        // Whether a full path names one of this library's files: it is
+        // listed for the library, and lies under the root, below it rather
+        // than beside it.
+        contains(full_path: string) -> bool =>
+            _files.contains(full_path) /\ is_under(full_path, root)
 
         // Whether one path lies under another, below it rather than beside
         // it. The boundary has to be a separator, so a sibling directory
@@ -59,8 +73,27 @@ namespace Source is
         // its root is the one the library is compiled from
         _declarations: LIST[(library: SOURCE_LIBRARY, is_included: bool)]
 
+        // The library the files that follow a declaration on the command
+        // line are listed for, until the next option ends the list
+        _listing: SOURCE_LIBRARY?
+
         init() is
             _declarations = LIST[(library: SOURCE_LIBRARY, is_included: bool)]()
+        si
+
+        // Records a file the command line lists after the most recent
+        // declaration, as one of that library's files. A file listed
+        // after anything else, or after a declaration that conflicts, is
+        // the program's.
+        list_file(full_path: string) is
+            if let library = _listing then
+                library.add_file(full_path)
+            fi
+        si
+
+        // Ends the list of files the most recent declaration began
+        end_listing() is
+            _listing = null
         si
 
         // Records one declaration, resolving the root to a full path.
@@ -68,8 +101,11 @@ namespace Source is
         // one already recorded - the same library name at another version,
         // or a root that overlaps another declaration's - and records
         // nothing. Null means the declaration stands, as the one a library
-        // is compiled from or as a later root of one already included.
+        // is compiled from or as a later root of one already included,
+        // and the files listed next are its files.
         add(name: string, version: string, root: string) -> string? is
+            _listing = null
+
             let full_root = Path.get_full_path(root)
 
             let seen_name mut = false
@@ -87,6 +123,8 @@ namespace Source is
                     // another declaration's was reported when the other
                     // was added.
                     if other.root =~ full_root then
+                        _listing = other
+
                         return null
                     fi
 
@@ -102,9 +140,11 @@ namespace Source is
                 fi
             od
 
-            _declarations.add(
-                (library = SOURCE_LIBRARY(name, version, full_root), is_included = !seen_name)
-            )
+            let library = SOURCE_LIBRARY(name, version, full_root)
+
+            _declarations.add((library = library, is_included = !seen_name))
+
+            _listing = library
 
             return null
         si
