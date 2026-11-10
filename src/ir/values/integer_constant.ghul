@@ -1,0 +1,83 @@
+namespace IR.Values is
+    // Folds the integer constants an attribute argument can be written as,
+    // for the attribute resolver and the binary attribute encoder alike.
+    class INTEGER_CONSTANT is
+        init() is si
+
+        // The integer `value` folds to: a number, or `|`, `&` or `^` of two
+        // values that fold, as an enum's flags are combined. Null where it
+        // doesn't fold.
+        fold(value: Value) -> long? static is
+            if let number: Literal.NUMBER = value then
+                return
+                    case number.constant
+                    when i4: Literal.CONSTANT.I4 then long(i4.value)
+                    when i8: Literal.CONSTANT.I8 then i8.value
+                    else null
+                    esac
+            fi
+
+            // A block holding one value, which is how an operator's lowering
+            // can arrive here.
+            if let block: BLOCK = value /\ block.values.count == 1 then
+                return fold(block.values[0])
+            fi
+
+            if let arithmetic: ARITHMETIC = value /\ arithmetic.operands.count == 2 then
+                let a = fold(arithmetic.operands[0])
+                let b = fold(arithmetic.operands[1])
+
+                if !a? \/ !b? then
+                    return null
+                fi
+
+                return
+                    case arithmetic.operation
+                    when IR.ArithmeticOperation.OR then a! | b!
+                    when IR.ArithmeticOperation.AND then a! & b!
+                    when IR.ArithmeticOperation.XOR then a! ^ b!
+                    else null
+                    esac
+            fi
+
+            let operation: string? mut = null
+            let left: Value? mut = null
+            let right: Value? mut = null
+
+            if let innate_call: Call.INNATE = value then
+                operation = innate_call.innate_name
+
+                if let receiver = innate_call.from /\ innate_call.arguments.count == 1 then
+                    left = receiver
+                    right = innate_call.arguments[0]
+                elif !innate_call.from? /\ innate_call.arguments.count == 2 then
+                    left = innate_call.arguments[0]
+                    right = innate_call.arguments[1]
+                fi
+            elif let call: Call.GLOBAL = value /\ call.arguments.count == 2 then
+                operation = call.function.intrinsic_operation
+                left = call.arguments[0]
+                right = call.arguments[1]
+            fi
+
+            if !operation? \/ !left? \/ !right? then
+                return null
+            fi
+
+            let a = fold(left!)
+            let b = fold(right!)
+
+            if !a? \/ !b? then
+                return null
+            fi
+
+            return
+                case operation!
+                when "arithmetic.or" then a! | b!
+                when "arithmetic.and" then a! & b!
+                when "arithmetic.xor" then a! ^ b!
+                else null
+                esac
+        si
+    si
+si
