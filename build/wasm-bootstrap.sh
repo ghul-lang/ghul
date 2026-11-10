@@ -134,6 +134,38 @@ else
     status=1
 fi
 
+# A response longer than a pipe holds reaches the client while the analyser
+# waits for the next request, with the client's end of the pipe still open:
+# completion at the top level of a file offers every global the library
+# declares.
+mkfifo "$work/large.in"
+
+node "$work/pass-2/ghul.mjs" --target wasm --analyse @"$work/libraries.rsp" \
+    < "$work/large.in" > "$work/large.json" 2> "$work/large.log" &
+analyser=$!
+
+exec 3> "$work/large.in"
+printf '%s\n' \
+    '{"kind":"set_open_files","paths":["a.ghul"]}' \
+    '{"kind":"edit","files":[{"path":"a.ghul","source":"entry() is\n    let a = \nsi\n"}]}' \
+    '{"kind":"complete","path":"a.ghul","line":2,"column":13,"is_member_trigger":false}' >&3
+
+for _ in $(seq 1 300); do
+    grep -q '"kind":"completion"' "$work/large.json" && break
+    sleep 0.2
+done
+
+if grep -q '"kind":"completion"' "$work/large.json"; then
+    echo "analysis mode writes a long response while waiting for the next request ($(wc -c < "$work/large.json") bytes)"
+else
+    cat "$work/large.log"
+    echo "analysis mode held a long response back while waiting for the next request"
+    status=1
+fi
+
+exec 3>&-
+wait "$analyser" 2>/dev/null || true
+
 # A function declared extern is an import the program's caller supplies, by
 # name. The program is built by the wasm-built compiler and run with them.
 mkdir -p "$work/extern"
