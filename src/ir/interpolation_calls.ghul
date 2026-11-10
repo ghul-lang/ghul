@@ -253,6 +253,130 @@ namespace IR is
                 return null
             fi
 
+            let (names, values) = _members(`enum)
+
+            let arguments = LIST[Value]([
+                inner,
+                names,
+                values,
+                Values.Literal.NUMBER(if `enum.is_flags then 1 else 0 fi, lookup.get_bool_type())
+            ])
+
+            return Values.Call.STATIC(function, arguments, lookup.get_string_type(), null)
+        si
+
+        /// What a call to the core library's `System.Enum.parse` or
+        /// `try_parse`, at an enum the core library can name, becomes: a call
+        /// to the `ENUM_TEXT` helper that reads an enum's text, handed the
+        /// enum's members as `enum_text` hands them, so no reflection is
+        /// needed. Null where the call is to neither, or `type_argument` is
+        /// not such an enum.
+        ///
+        /// - call: the static call
+        /// - function: the function it calls
+        /// - type_argument: the type argument it calls the function at
+        enum_parse(call: Values.Call.STATIC, function: Function, type_argument: Type?) -> Value? static is
+            let lookup = IoC.CONTAINER.instance.innate_symbol_lookup
+            let `enum = cast Semantic.Symbols.ENUM_STRUCT?(type_argument?.symbol)
+
+            if !`enum? \/ `enum.is_wider_than_int32(lookup) then
+                return null
+            fi
+
+            let declared = cast Function?(function.root_specialized_from) ?? function
+
+            let string_type = lookup.get_string_type()
+            let optional_string = string_type.as_optional()
+            let bool_type = lookup.get_bool_type()
+            let string_array = lookup.get_array_type(string_type)
+            let int_array = lookup.get_array_type(lookup.get_int_type())
+            let int_reference = lookup.get_reference_type(lookup.get_int_type())
+
+            let parse = lookup.get_system_enum_group("parse")
+            let try_parse = lookup.get_system_enum_group("try_parse")
+
+            let is_try mut = false
+            let ignores_case mut = false
+
+            if Semantic.KNOWN_MEMBERS.in_group(parse, Semantic.KNOWN_SIGNATURE([string_type])) == declared then
+                is_try = false
+            elif Semantic.KNOWN_MEMBERS.in_group(parse, Semantic.KNOWN_SIGNATURE([string_type, bool_type])) == declared then
+                ignores_case = true
+            elif Semantic.KNOWN_MEMBERS.in_group(try_parse, Semantic.KNOWN_SIGNATURE([optional_string, null])) == declared then
+                is_try = true
+            elif Semantic.KNOWN_MEMBERS.in_group(try_parse, Semantic.KNOWN_SIGNATURE([optional_string, bool_type, null])) == declared then
+                is_try = true
+                ignores_case = true
+            else
+                return null
+            fi
+
+            let helper =
+                if is_try then
+                    Semantic.KNOWN_MEMBERS.in_group(
+                        lookup.get_enum_text_group("try_value_of"),
+                        Semantic.KNOWN_SIGNATURE([optional_string, bool_type, string_array, int_array, int_reference]))
+                else
+                    Semantic.KNOWN_MEMBERS.in_group(
+                        lookup.get_enum_text_group("value_of"),
+                        Semantic.KNOWN_SIGNATURE([string_type, bool_type, string_array, int_array]))
+                fi
+
+            if !helper? then
+                return null
+            fi
+
+            let (names, values) = _members(`enum)
+
+            let arguments = LIST[Value]()
+
+            arguments.add(call.arguments[0])
+
+            if ignores_case then
+                arguments.add(call.arguments[1])
+            else
+                arguments.add(Values.Literal.NUMBER(0, bool_type))
+            fi
+
+            arguments.add(names)
+            arguments.add(values)
+
+            if !is_try then
+                return Values.Call.STATIC(helper, arguments, type_argument!, null)
+            fi
+
+            // The helper writes an int, and a reference to an enum is not
+            // one to an int on every target: it writes a temporary, which is
+            // then stored through the caller's reference as the enum.
+            // The same temporaries each time the call is lowered, kept on
+            // the call itself.
+            let int_type = lookup.get_int_type()
+            let expansion = EXPANSION(bool_type)
+
+            if !call.lowered_temporaries? then
+                call.lowered_temporaries = [
+                    LOCAL(".enum_value.{TEMP.get_next_id()}", int_type),
+                    LOCAL(".enum_found.{TEMP.get_next_id()}", bool_type)
+                ]
+            fi
+
+            let temporaries = call.lowered_temporaries!
+            let written = expansion.declare(temporaries[0])
+            let found = expansion.declare(temporaries[1])
+
+            arguments.add(Values.ADDRESS(written.load(), int_reference))
+
+            expansion.store(found, Values.Call.STATIC(helper, arguments, bool_type, null))
+            expansion.add(Values.Store.INDIRECT(call.arguments[call.arguments.count - 1], written.load(), type_argument!))
+            expansion.add(found.load())
+
+            return expansion.result
+        si
+
+        // An enum's member names and values, in ascending order of value, as
+        // the two arrays the `ENUM_TEXT` helpers take.
+        _members(`enum: Semantic.Symbols.ENUM_STRUCT) -> (names: Value, values: Value) static is
+            let lookup = IoC.CONTAINER.instance.innate_symbol_lookup
             let members = LIST[(name: string, value: int)]()
 
             for symbol in `enum.symbols do
@@ -274,14 +398,10 @@ namespace IR is
                 values.add(Values.Literal.NUMBER(number, int_type))
             od
 
-            let arguments = LIST[Value]([
-                inner,
-                Values.SEQUENCE(lookup.get_array_type(string_type), string_type, names),
-                Values.SEQUENCE(lookup.get_array_type(int_type), int_type, values),
-                Values.Literal.NUMBER(if `enum.is_flags then 1 else 0 fi, lookup.get_bool_type())
-            ])
-
-            return Values.Call.STATIC(function, arguments, string_type, null)
+            return (
+                names = Values.SEQUENCE(lookup.get_array_type(string_type), string_type, names),
+                values = Values.SEQUENCE(lookup.get_array_type(int_type), int_type, values)
+            )
         si
 
         _string_type: Type static => IoC.CONTAINER.instance.innate_symbol_lookup.get_string_type()
