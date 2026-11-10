@@ -1079,6 +1079,20 @@ namespace Syntax.Process is
 
         // The types that cannot declare a `=~` of their own and so are
         // compared through the runtime's comparer instead.
+        // The runtime's comparer, where two values of these types compare
+        // through it; null otherwise.
+        _comparer_equality(left_type: Type, right_type: Type) -> EqualityLowering? is
+            if _compares_through_comparer(left_type) /\ left_type.matches(right_type) then
+                let comparer_type = _innate_symbol_lookup.get_equality_comparer_type(left_type)
+
+                if comparer_type? \/ _innate_symbol_lookup.compares_by_instantiation then
+                    return EqualityLowering.COMPARER(comparer_type)
+                fi
+            fi
+
+            return null
+        si
+
         _compares_through_comparer(type: Semantic.Types.Type) -> bool =>
             type.is_type_variable \/ _is_tuple(type)
 
@@ -1086,10 +1100,10 @@ namespace Syntax.Process is
         // get, decided once here for every place an equality is built.
         //
         // In order: an operator the left type declares or inherits, or
-        // the innate or global one a scalar, string or enum carries; a
-        // `<>` the type declares, read against zero; the runtime's
-        // comparer, for a tuple or a bare type parameter that can
-        // declare nothing; a sequence, element by element at the
+        // the innate or global one a scalar, string or enum carries; for
+        // a tuple, the runtime's comparer; a `<>` the type declares, read
+        // against zero; the runtime's comparer, for a bare type parameter
+        // that can declare nothing; a sequence, element by element at the
         // element's own static type; and reference identity for a class
         // that declares neither operator. Null when nothing compares
         // them - a struct declaring neither, or a sequence of one, where
@@ -1135,18 +1149,23 @@ namespace Syntax.Process is
                 return EqualityLowering.OPERATOR(global_function)
             fi
 
+            // A tuple's equality is element by element, through the
+            // comparer, whether or not its elements also order: the `<>` a
+            // value tuple has is its ordering, not its equality.
+            if _is_tuple(left_type) then
+                if let comparer = _comparer_equality(left_type, right_type) then
+                    return comparer
+                fi
+            fi
+
             let order = _find_order_operator(left_type, right_type, location)
 
             if order? then
                 return EqualityLowering.ORDER(order)
             fi
 
-            if _compares_through_comparer(left_type) /\ left_type.matches(right_type) then
-                let comparer_type = _innate_symbol_lookup.get_equality_comparer_type(left_type)
-
-                if comparer_type? \/ (_innate_symbol_lookup.compares_by_instantiation /\ _compares_through_comparer(left_type)) then
-                    return EqualityLowering.COMPARER(comparer_type)
-                fi
+            if let comparer = _comparer_equality(left_type, right_type) then
+                return comparer
             fi
 
             let left_element = _sequence_element_type(left_type)
