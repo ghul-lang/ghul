@@ -304,10 +304,6 @@ namespace IR.LLVMTarget is
         si
 
         _report(construct: string) is
-            if System.Environment.get_environment_variable("RTTI_DEBUG")? then
-                IO.Std.error.write_line("RTTI-DEBUG report '{construct}' in {_instance}")
-            fi
-
             if !_unsupported.contains(construct) then
                 _unsupported.add(construct)
             fi
@@ -1902,6 +1898,13 @@ namespace IR.LLVMTarget is
             _start(join)
 
             _push(_current.load(held, slot, 0))
+        si
+
+        // The function type `type` is, or is the optional of; null otherwise.
+        _function_type_of(type: Type?) -> Type? is
+            let inner = if let t = type /\ t.is_optional then t.optional_inner_type else type fi
+
+            return if let i = inner /\ (i.is_function \/ i.is_action) then i else null fi
         si
 
         _unbox(value: Value, type: Type?) is
@@ -3961,9 +3964,6 @@ namespace IR.LLVMTarget is
             let position = objects.field_position(symbol)
 
             if !owner? \/ !position? then
-                if System.Environment.get_environment_variable("RTTI_DEBUG")? then
-                    IO.Std.error.write_line("RTTI-DEBUG field {symbol} kind={symbol.get_type().name} owner={owner} position={position} built={objects.is_built} root={symbol.root_specialized_from}")
-                fi
                 _report("a field of {symbol.owner}")
                 return null
             fi
@@ -4135,9 +4135,6 @@ namespace IR.LLVMTarget is
             fi
 
             if constructor.intrinsic_operation? \/ !objects? \/ !type? \/ !(objects.is_object_type(type) \/ objects.is_object(type)) then
-                if System.Environment.get_environment_variable("RTTI_DEBUG")? then
-                    IO.Std.error.write_line("RTTI-DEBUG construct owner={constructor.owner} resolved={type} map={_type_map |> Ghul.Pipes.map(kv => "{kv.key}={kv.value}") |> Ghul.Pipes.join(";")}")
-                fi
                 _report("constructing a {description}")
                 return null
             fi
@@ -4860,11 +4857,26 @@ namespace IR.LLVMTarget is
                 return
             fi
 
-            // A function value, or an optional reference, is checked as an
-            // unboxing to it checks.
-            if let t = target /\ (t.is_function \/ t.is_action \/ (t.is_optional /\ !_value_optional_inner(t)?)) then
-                if let object = _value_of(operand), checked = _unbox_value(object, t) then
-                    _push(checked)
+            // A function value is a closure: the cast tests for the closure
+            // descriptor, letting null through, and throws where the cast is
+            // checked or declines to null where it is not.
+            if let t = _function_type_of(target) then
+                if let object = _value_of(operand) then
+                    let ranges = LIST[(first: int, last: int)]()
+
+                    ranges.add((LLVM_CLOSURES.CLASS_ID, LLVM_CLOSURES.CLASS_ID))
+
+                    let in_class = _in_ranges(_class_id(object), ranges)
+
+                    if conversion.is_checked /\ !(target?.is_optional ?? false) then
+                        let fits = _current.binary(BinaryOperator.OR, IntegerFlags.NONE, in_class, _current.compare(IntegerPredicate.EQ, object, LLVM.Values.null_pointer))
+
+                        _throw_if(_current.compare(IntegerPredicate.EQ, fits, LLVM.Values.boolean(false)), Semantic.Lookups.RuntimeException.INVALID_CAST)
+
+                        _push(object)
+                    else
+                        _push(_current.select(in_class, object, LLVM.Values.null_pointer))
+                    fi
                 fi
 
                 return
