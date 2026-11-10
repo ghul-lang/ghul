@@ -433,6 +433,27 @@ The slice is an `E[]` that reads the source. Nothing is copied, so a later chang
 
 The from-the-end operators build a `System.Range`. A `System.Range` has endpoints that only have values relative to a length, so a `System.Range` cannot be iterated. `..` and `::` can be iterated. `for i in 1..<1 do` is an error.
 
+A **two-dimensional array** of `E` is written `E[,]`, and a three-dimensional one `E[,,]`. Higher ranks are an error. `E[,]` is `Collections.Matrix2[E]`, a list of its rows, and `E[,,]` is `Collections.Matrix3[E]`, a list of its planes. Diagnostics, hover and inlays show `E[,]` and `E[,,]`. Both are read-only and covariant:
+
+- `m[i, j]` (or `c[p, i, j]`) reads one element, and `m[i]` is row `i` as an `E[]`.
+- `count` is the number of rows (or planes), and iterating gives the rows (or planes).
+- `lengths` is the extents as a tuple, `(rows, columns)` or `(planes, rows, columns)`.
+- `elements` is every element, row by row.
+- `=~` compares element by element, and is true only for equal extents.
+
+An array literal of rows builds an `E[,]` where one is expected: from an annotation, a return type or a parameter. A literal of planes builds an `E[,,]` in the same way. Rows written as literals must all have the same length, and planes the same shape, and a literal where they don't is an error. A literal with no `E[,]` expected is an array of arrays, as before:
+
+```ghul
+let m: int[,] = [[1, 2, 3], [4, 5, 6]]
+let c: string[,,] = [[["a", "b"]], [["c", "d"]]]
+
+m[1, 2]          // 6
+m.lengths        // (2, 3)
+m[1]             // [4, 5, 6]
+```
+
+`MATRIX(...)` builds a mutable two- or three-dimensional array, which `m[i, j] = v` assigns to. It takes the rows or planes to copy, or a source and the extents to fill row by row from it, reading only as many elements as it needs: `MATRIX([[1, 2], [3, 4]])`, `MATRIX([[[1, 2]], [[3, 4]]])`, `repeat('.') |> MATRIX(5, 4)` and `from(1) |> MATRIX(2, 3, 4)`. A rows or planes argument whose rows aren't all one length throws, as does a source with too few elements. A .NET multidimensional array is a different type, and can't be used from ghūl (see [.NET interop](#net-interop)).
+
 A **tuple** groups two or more values, which can have different types. A tuple with one element is an error. A tuple has at most 7 elements. Tuple types and tuple literals both use parentheses. Elements can have names. An unnamed element has the name of a backtick and its index. Tuples are immutable, can nest, and can be destructured. Tuples compare element by element with `=~`. `==` on a tuple is an error, as on any other struct (see [equality](#equality)):
 
 ```ghul
