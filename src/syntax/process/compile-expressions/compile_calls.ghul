@@ -1619,6 +1619,27 @@ namespace Syntax.Process is
             od
         si
 
+        // Whether `function` takes a function, or a named delegate, at each
+        // argument that is a reference to an overloaded function still
+        // waiting for one.
+        _is_callable_at_group_arguments(function: Semantic.Symbols.Function, argument_expressions: Trees.Expressions.Expression?[]) -> bool is
+            for (index, slot) in argument_expressions |> index() do
+                if let a = slot /\ COMPILE_CALLS.is_unresolved_group_argument(a) then
+                    if index >= function.arguments.count then
+                        return false
+                    fi
+
+                    let formal = function.arguments[index]
+
+                    if !formal.is_function /\ !_delegate_shape.is_named_delegate(formal, _innate_symbol_lookup) then
+                        return false
+                    fi
+                fi
+            od
+
+            return true
+        si
+
         // Constraint-push retry: when the first resolve fails AND
         // there's exactly one arity-matching candidate AND at least
         // one argument's first-walk type is under-determined for
@@ -1672,9 +1693,19 @@ namespace Syntax.Process is
             // member by the parameters of the function the slot expects, so
             // overloads that agree on those can push them although they
             // differ in what the function returns.
+            //
+            // Only an overload whose formal is callable at every such
+            // reference is in question: a reference is given a function's
+            // parameters to pick its member by, and an overload that takes
+            // something else there, such as the library's own
+            // `apply[T.., U](f, v)` beside the program's `apply`, can't be
+            // what the call means.
             let agreeing_push =
                 if !earlier_candidate? /\ !pack_push? /\ COMPILE_CALLS.has_unresolved_group_argument(argument_expressions) then
-                    _pack_push_candidates.find(function_group, want_instance, f => f.arguments.count == argument_types.count)
+                    _pack_push_candidates.find(
+                        function_group,
+                        want_instance,
+                        f => f.arguments.count == argument_types.count /\ _is_callable_at_group_arguments(f, argument_expressions))
                 else
                     null
                 fi

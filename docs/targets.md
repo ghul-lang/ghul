@@ -61,6 +61,8 @@ cd hello
 ghul run --target wasm
 ```
 
+On every target, a type object's name, as `typeof` and `get_type` give it, names the scalars, `string` and `object` as .NET names them. Any other type is named on .NET by its CLR name, ``System.Collections.Generic.IReadOnlyList`1[System.String]`` for `typeof string[]`, and on wasm and llvm by the name it is emitted under, `Collections.List[System.String]`. So code that compares a type's name with text is target-specific; comparing type objects with `==` is not.
+
 ## conditional compilation
 
 `@IF.<name>()` before a definition or a statement keeps it only when `<name>` is on. `@IF.not.<name>()` keeps it only when `<name>` is off. The name of the target being built is on, and the other targets' names are off. So `@IF.dotnet()`, `@IF.wasm()` and `@IF.llvm()` give each target its own declaration. `@IF.source_core()` is on for every target whose core library is compiled from source, which is `wasm` and `llvm`. It is off for `dotnet`. So a declaration that only needs the absence of the .NET base class library is written once:
