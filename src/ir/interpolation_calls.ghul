@@ -17,10 +17,11 @@ namespace IR is
 
         // The temporaries each lowered `System.Enum.try_parse` call writes
         // through, kept so every lowering of the call names the same ones.
-        _try_parse_temporaries: Collections.MAP[Values.Call.STATIC, (written: LOCAL, found: LOCAL)] static
+        // Keyed on the call itself, and held only as long as it is.
+        _try_parse_temporaries: System.Runtime.CompilerServices.ConditionalWeakTable[Values.Call.STATIC, TRY_PARSE_TEMPORARIES] static
 
         init() static is
-            _try_parse_temporaries = Collections.MAP[Values.Call.STATIC, (written: LOCAL, found: LOCAL)]()
+            _try_parse_temporaries = System.Runtime.CompilerServices.ConditionalWeakTable[Values.Call.STATIC, TRY_PARSE_TEMPORARIES]()
         si
 
         /// - report: called with a description of what an interpolation needs
@@ -362,15 +363,15 @@ namespace IR is
             let int_type = lookup.get_int_type()
             let expansion = EXPANSION(bool_type)
 
-            let temporaries: (written: LOCAL, found: LOCAL) mut
+            let temporaries: TRY_PARSE_TEMPORARIES mut
 
             if !_try_parse_temporaries.try_get_value(call, temporaries ref) then
-                temporaries = (
-                    written = LOCAL(".enum_value.{TEMP.get_next_id()}", int_type),
-                    found = LOCAL(".enum_found.{TEMP.get_next_id()}", bool_type)
+                temporaries = TRY_PARSE_TEMPORARIES(
+                    LOCAL(".enum_value.{TEMP.get_next_id()}", int_type),
+                    LOCAL(".enum_found.{TEMP.get_next_id()}", bool_type)
                 )
 
-                _try_parse_temporaries[call] = temporaries
+                _try_parse_temporaries.add(call, temporaries)
             fi
 
             let written = expansion.declare(temporaries.written)
@@ -423,4 +424,8 @@ namespace IR is
         _is_string(type: Type?) -> bool =>
             type? /\ type.symbol == IoC.CONTAINER.instance.innate_symbol_lookup.get_string_type().symbol
     si
+
+    // The two temporaries a lowered `System.Enum.try_parse` call uses: the
+    // int its helper writes, and whether it found a value.
+    class TRY_PARSE_TEMPORARIES(written: LOCAL public, found: LOCAL public)
 si
