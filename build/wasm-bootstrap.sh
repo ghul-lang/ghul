@@ -42,7 +42,7 @@ build() {
 
     local start=$(date +%s)
 
-    if ! "$@" --target wasm --wasm-loader "$runtime/ghul-core/host/loader.mjs" --rtti --underscore-access legacy -o "$directory/ghul" @"$work/libraries.rsp" @"$work/sources.rsp" > "$work/$name.log" 2>&1; then
+    if ! "$@" --target wasm --wasm-loader "$runtime/ghul-core/host/loader.mjs" --rtti-roots --underscore-access legacy -o "$directory/ghul" @"$work/libraries.rsp" @"$work/sources.rsp" > "$work/$name.log" 2>&1; then
         grep -v ': warn: ' "$work/$name.log" || true
         echo "$name failed"
         exit 1
@@ -66,7 +66,7 @@ for file in ghul.wasm ghul.mjs; do
 done
 
 # Analysis mode reads requests by reflection, which the wasm target answers
-# from the descriptions --rtti compiles in.
+# from the descriptions --rtti-roots compiles in.
 printf '%s\n' \
     '{"kind":"set_open_files","paths":["a.ghul"]}' \
     '{"kind":"edit","files":[{"path":"a.ghul","source":"entry() is\n    let x: int = 1\nsi\n"}]}' \
