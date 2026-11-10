@@ -60,6 +60,7 @@ namespace IR.LLVMTarget is
         _static_constructors: MAP[CLASS_INSTANCE, (constructor: FUNCTION_INSTANCE, flag: string)?]
         _unit_variants: Collections.SET[CLASS_INSTANCE]
         _global_names: MAP[(CLASS_INSTANCE, string), string]
+        _trait_type_objects: MAP[CLASS_INSTANCE, LLVM.Value]
         _trait_instances: LIST[CLASS_INSTANCE]
         _seen_trait_instances: Collections.SET[CLASS_INSTANCE]
         _declared_methods: MAP[Classy, Function[]]
@@ -149,6 +150,7 @@ namespace IR.LLVMTarget is
             _static_constructors = MAP[CLASS_INSTANCE, (constructor: FUNCTION_INSTANCE, flag: string)?]()
             _unit_variants = Collections.SET[CLASS_INSTANCE]()
             _global_names = MAP[(CLASS_INSTANCE, string), string]()
+            _trait_type_objects = MAP[CLASS_INSTANCE, LLVM.Value]()
             _trait_instances = LIST[CLASS_INSTANCE]()
             _seen_trait_instances = Collections.SET[CLASS_INSTANCE]()
             _declared_methods = MAP[Classy, Function[]]()
@@ -1007,6 +1009,57 @@ namespace IR.LLVMTarget is
             _module.add_global(global)
 
             return Values.global(global_name)
+        si
+
+        /// The type object of the trait `type`, which has no descriptor of
+        /// its own since no value is an instance of a trait: a constant
+        /// instance of the core library's `Type` named as the other targets
+        /// name it, one for each instantiation. Null where `type` is not a
+        /// trait or the program holds no `Type`.
+        ///
+        /// - type: the trait instantiation, as specialized
+        /// - strings: where the name's literal is made
+        trait_type_object(type: Type?, strings: LLVM_STRINGS) -> LLVM.Value? is
+            if !type? \/ !type.is_trait \/ !_type_class_instance()? then
+                return null
+            fi
+
+            // Before the objects are laid out, nothing is named yet, and the
+            // lowering that asks is only finding out what is needed.
+            if !_is_built then
+                return Values.null_pointer
+            fi
+
+            let definition =
+                if let generic: Semantic.Symbols.GENERIC = type.symbol then cast Classy?(generic.unspecialized_symbol) else cast Classy?(type.symbol) fi
+
+            if !definition? then
+                return null
+            fi
+
+            let map = MAP[Symbol, Type]()
+
+            if let generic: Semantic.Symbols.GENERIC = type.symbol then
+                for (parameter, argument) in generic.type_map do
+                    if parameter.owner == definition then
+                        map[parameter] = argument
+                    fi
+                od
+            fi
+
+            let key = CLASS_INSTANCE(definition, type.arguments, map)
+            let found: LLVM.Value mut
+
+            if _trait_type_objects.try_get_value(key, found ref) then
+                return found
+            fi
+
+            let name = strings.literal(TYPE_NAMES.name_of(key, _classes, null, LLVM_TYPES.scalar(*), LLVM_TYPES.is_string(*)))
+            let result = type_object(_named(key, "$descriptor"), name)
+
+            _trait_type_objects[key] = result
+
+            return result
         si
 
         // The core library's `Type`, where the program holds one.
