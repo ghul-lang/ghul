@@ -846,6 +846,10 @@ namespace Analysis is
 
         _is_interface_changed: bool
 
+        // Whether the first whole-project rebuild has been followed by a
+        // full collection.
+        _collected_after_first_rebuild: bool
+
         // The guard that last gave up on this EDIT, reported if it ends up
         // taking the whole-project rebuild. Null when no incremental path
         // was attempted at all.
@@ -860,6 +864,24 @@ namespace Analysis is
         // incremental body re-walk splices the new bodies onto it (its symbols
         // are still valid). Null on a cold / first-parse EDIT.
         _retained: SOURCE_FILE?
+
+        // Where the collector does not collect in the background, the first
+        // whole-project rebuild leaves most of a full collection's work
+        // pending, and requests start straight after it, too close together
+        // for the collections made while idle to finish. Collecting here, as
+        // part of a cold load that takes seconds anyway, keeps that
+        // collection out of the requests that follow.
+        @IF.not.dotnet()
+        _collect_after_first_rebuild() is
+            if !_collected_after_first_rebuild then
+                _collected_after_first_rebuild = true
+
+                let _ = System.GC.get_total_memory(true)
+            fi
+        si
+
+        @IF.dotnet()
+        _collect_after_first_rebuild() is si
 
         file_names: Iterable[string] => _source_files_by_path.keys
 
@@ -2116,6 +2138,8 @@ namespace Analysis is
                         // and for a file carrying top-level statements
                         // that is every edit.
                         _compiler.build(false)
+
+                        _collect_after_first_rebuild()
 
                         DIAGNOSTICS_COLLECTOR.collect_into(IoC.CONTAINER.instance.logger, diagnostics, checked_paths)
                     fi
