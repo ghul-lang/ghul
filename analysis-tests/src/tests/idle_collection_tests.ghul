@@ -1,0 +1,58 @@
+namespace Analysis.Tests is
+    use Collections.LIST;
+
+    use IO.File;
+    use IO.Path;
+
+    use Analysis.Protocol.ANALYSER_PROCESS;
+    use Analysis.Protocol.EDIT_FILE;
+    use Analysis.Protocol.Response;
+
+    use TestClass = Microsoft.VisualStudio.TestTools.UnitTesting.TestClassAttribute;
+    use Test = Microsoft.VisualStudio.TestTools.UnitTesting.TestMethodAttribute;
+    use Assertions;
+
+    // An analyser built for llvm collects once input has been quiet for a
+    // moment after a request, and gives the collection up when the next
+    // request arrives. These pause between edits for less than, about, and
+    // well over that moment, so the collection is skipped, abandoned part
+    // way through, and finished, and every edit after it must still be
+    // answered in full. Elsewhere the pauses are only pauses.
+    @TestClass()
+    class IDLE_COLLECTION_TESTS is
+        init() is si
+
+        @Test()
+        edits_after_pauses_of_each_length_should_be_answered_in_full() is
+            let dir = fixture_dir("cross-file-greeter");
+            let main_source = File.read_all_text(Path.combine(dir, "main.ghul"));
+            let greeter_source = File.read_all_text(Path.combine(dir, "greeter.ghul"));
+
+            let use analyser = ANALYSER_PROCESS();
+
+            analyser.send_edit_files([
+                EDIT_FILE("main.ghul", main_source),
+                EDIT_FILE("greeter.ghul", greeter_source)
+            ]);
+
+            expect_clean(analyser, "initial EDIT");
+
+            for pause_ms in [10, 60, 150, 400, 1000] do
+                System.Threading.Thread.sleep(pause_ms);
+
+                analyser.send_edit("main.ghul", main_source);
+
+                expect_clean(analyser, "EDIT after a {pause_ms} ms pause");
+            od
+        si
+
+        expect_clean(analyser: ANALYSER_PROCESS, what: string) is
+            let response = analyser.read_response();
+            assert isa Response.DIAGNOSTICS(response) else "{what}: expected DIAGNOSTICS response\n"
+                "--- analyser stderr ---\n{analyser.stderr_capture}";
+
+            let diagnostics = LIST(user_diagnostics_of(response));
+            are_equal(0, diagnostics.count, diagnostics_summary("{what} had unexpected diagnostics", diagnostics));
+        si
+    si
+si

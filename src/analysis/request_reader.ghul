@@ -34,6 +34,14 @@ namespace Analysis is
             _frames = Collections.LIST[QueuedFrame]()
         si
 
+        // Whether a request has been taken since the last collection made
+        // while idle.
+        _collect_when_idle_due: bool
+
+        // How long input must stay quiet after a request is answered before
+        // the collector runs.
+        idle_quiet_ms: int static => 50
+
         @IF.dotnet()
         start() is
             let start: System.Threading.ThreadStart = () is _read_loop(); si
@@ -173,6 +181,19 @@ namespace Analysis is
         // true as well, and the read below queues END_OF_INPUT.
         @IF.not.dotnet()
         _wait(timeout_ms: int) -> bool is
+            if _collect_when_idle_due then
+                // Nothing has arrived for a moment after a request was
+                // answered: collect now, so the next request starts with the
+                // collector's whole allocation budget instead of paying for a
+                // collection part way through. The collection gives up the
+                // moment input arrives.
+                if !IO.Std.wait_for_input(idle_quiet_ms) then
+                    if System.GC.collect_when_idle() then
+                        _collect_when_idle_due = false
+                    fi
+                fi
+            fi
+
             if !IO.Std.wait_for_input(timeout_ms) then
                 return false
             fi
@@ -215,6 +236,8 @@ namespace Analysis is
                 fi
 
                 _frames.remove_at(0)
+
+                _collect_when_idle_due = true
 
                 return head
             finally
