@@ -12,7 +12,9 @@
 # ghul-llvm has to be on the PATH, or named by GHUL_LLVM. The stages are
 # written to a temporary directory, or to LLVM_CHAIN_DIR where it is set,
 # which is then kept. The stage that settled is named in <dir>/final, and
-# its module and executable are hashed into <dir>/final.sha256.
+# its module and executable are hashed into <dir>/final.sha256. How the
+# chain ended is in <dir>/status: settled, stage0-failed where stage 0
+# could not build the source, or unsettled.
 #
 # Every stage is built by build/llvm-build-pass.sh, the command
 # llvm-bootstrap.sh builds its passes with, so a settled stage can be
@@ -39,6 +41,10 @@ else
 fi
 
 "$root/build/llvm-self-sources.sh" "$work" "$runtime"
+
+# Anything that stops the chain before it says otherwise counts as stage 0
+# failing to build the source.
+echo stage0-failed > "$work/status"
 
 cd "$root"
 
@@ -67,6 +73,7 @@ if ! same stage-1 stage-2; then
     build stage-3 "$work/stage-2/ghul"
 
     if ! same stage-2 stage-3; then
+        echo unsettled > "$work/status"
         echo "::error::the chain did not settle: stages 2 and 3 differ, so the build is not reproducible"
         diff "$work/stage-2/ghul.ll" "$work/stage-3/ghul.ll" | head -40 || true
         exit 1
@@ -80,3 +87,5 @@ echo "the chain settled at $final"
 echo "$final" > "$work/final"
 
 (cd "$work/$final" && sha256sum ghul.ll ghul) > "$work/final.sha256"
+
+echo settled > "$work/status"
