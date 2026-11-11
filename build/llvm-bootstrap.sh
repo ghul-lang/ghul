@@ -32,25 +32,8 @@ fi
 
 cd "$root"
 
-# Builds the compiler into <directory>/ghul, keeping its module as
-# <directory>/ghul.ll. Both passes use the same names, since the module's
-# file name is recorded in the executable.
 build() {
-    local name=$1
-    local directory=$work/$name
-    shift
-
-    mkdir -p "$directory"
-
-    local start=$(date +%s)
-
-    if ! "$@" --target llvm --rtti-roots --underscore-access legacy --llvm-output "$directory/ghul.ll" -o "$directory/ghul" @"$work/libraries.rsp" @"$work/sources.rsp" > "$work/$name.log" 2>&1; then
-        grep -v ': warn: ' "$work/$name.log" || true
-        echo "$name failed"
-        exit 1
-    fi
-
-    echo "$name: $(( $(date +%s) - start ))s"
+    "$root/build/llvm-build-pass.sh" "$work" "$@"
 }
 
 build pass-1 dotnet "$compiler"
