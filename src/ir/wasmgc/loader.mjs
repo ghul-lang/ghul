@@ -165,6 +165,10 @@ export async function run(options = {}) {
         stdin_wait: (ms) => pump.wait(ms),
 
         heap_bytes: (force) => heap_bytes(force),
+
+        // The engine collects on its own schedule: there is nothing to tune.
+        gc_collect_when_idle: () => true,
+        gc_set_free_space_divisor: (divisor) => {},
         working_set_bytes: () => working_set_bytes(),
 
         argument_count: () => args.length,
