@@ -17,6 +17,7 @@ These options control an `llvm` build:
 - `--llvm-program-only` keeps in that text only the functions compiled from the program's own sources.
 - `--debug` adds line tables and variables, so a debugger and a crash's backtrace show ghūl files, lines and variables.
 - `--optimise <0-3>` sets the optimisation level. The default is 2, and 0 for a `--debug` build that sets no level.
+- `--llvm-parallel-gc` links the collector that marks with several threads: as many as there are processors, up to four, or `GC_MARKERS` of them where that is set. It is for programs that keep a large heap. On the compiler's own native build, with about 500 MB live, a full mark falls from about 350 ms to about 150 ms. It is not for general programs yet: a small program starts with about 7 MB resident rather than under 1 MB, and one that allocates many short-lived objects ran about 50% slower.
 
 A library build writes the module's text and links nothing.
 
