@@ -32,6 +32,22 @@ namespace Semantic.Symbols is
                 "{index}"
             fi
 
+        // The element `member`, a positional field of this tuple, is: the
+        // name the analyser records where the field is reached by name.
+        // Null where `member` is not one of the tuple's positional fields.
+        element_of(member: Symbol) -> TUPLE_ELEMENT? is
+            for i in 0..arguments.count do
+                if member.name =~ "{i}" then
+                    return TUPLE_ELEMENT(self, i)
+                fi
+            od
+
+            return null
+        si
+
+        // The element at `index`.
+        element(index: int) -> TUPLE_ELEMENT => TUPLE_ELEMENT(self, index)
+
         find_named_element(name: string) -> Symbol? is
             if !names? then
                 return null
@@ -105,5 +121,74 @@ namespace Semantic.Symbols is
         si
 
         to_string() -> string => description
+    si
+
+    // One element of a tuple type, as a name that reaches it: a member
+    // access, a tuple literal's element name, or a tuple type expression's.
+    // The value itself is the tuple's positional field, which code reads
+    // and writes; this is what the analyser records at those names, so
+    // that hover, references and definition answer for the element of this
+    // tuple type rather than for the positional field every tuple of the
+    // same arity shares.
+    //
+    // Two are the same element where their tuple types are the same, by
+    // GENERIC's structural =~, and they are at the same index under the
+    // same name.
+    class TUPLE_ELEMENT: Symbol is
+        _tuple: TUPLE
+        _index: int
+
+        type: Type? =>
+            if _index < _tuple.arguments.count then
+                _tuple.arguments[_index]
+            fi
+
+        // The tuple type as it is written, then the element's name: a tuple
+        // has no name of its own to qualify the element with.
+        describe(context: DESCRIBE_CONTEXT) -> SignaturePart =>
+            _describe_typed(context, PARTS.literal("{Types.TUPLE.get_short_description(_tuple.type, _tuple.names)}.{name}"), type)
+
+        describe_kind(context: DESCRIBE_CONTEXT) -> string? => "tuple element"
+
+        // A name the program writes, so its uses are recorded like any
+        // member's, but declared by the tuple type rather than in source:
+        // as for a member read from an assembly, there is no declaration
+        // to go to and nothing to rename.
+        is_internal: bool => false
+        is_reflected: bool => true
+
+        init(tuple: TUPLE, index: int) is
+            super.init(LOCATION.internal, tuple, _element_name(tuple, index))
+
+            _tuple = tuple
+            _index = index
+        si
+
+        // The element's name, or the default name of an unnamed element:
+        // a backtick and its index. An unnamed element among named ones
+        // carries its index as its name.
+        _element_name(tuple: TUPLE, index: int) -> string static =>
+            if let names = tuple.names /\ index < names.count, name = names[index] /\ !(name =~ "{index}") then
+                name
+            else
+                "`{index}"
+            fi
+
+        =~(other: Symbol) -> bool =>
+            if let element: TUPLE_ELEMENT = other then
+                element._index == _index /\ element.name =~ name /\ element._tuple =~ _tuple
+            else
+                false
+            fi
+
+        =~(other: object?) -> bool =>
+            if let element: TUPLE_ELEMENT = other then
+                self =~ cast Symbol(element)
+            else
+                false
+            fi
+
+        get_hash_code() -> int =>
+            (_tuple.get_hash_code() * 31 + _index) * 31 + name.get_hash_code()
     si
 si

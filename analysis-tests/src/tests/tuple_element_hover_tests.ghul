@@ -1,0 +1,123 @@
+namespace Analysis.Tests is
+    use Collections.LIST
+
+    use IO.File
+
+    use Analysis.Protocol.ANALYSER_PROCESS
+    use Analysis.Protocol.Response
+
+    use Microsoft.VisualStudio.TestTools.UnitTesting.Assert
+    use TestClass = Microsoft.VisualStudio.TestTools.UnitTesting.TestClassAttribute
+    use Test = Microsoft.VisualStudio.TestTools.UnitTesting.TestMethodAttribute
+    use Assertions
+
+    // HOVER and REFERENCES on a tuple element's name: a member access, a
+    // tuple literal's element name, and a tuple type expression's. Each
+    // answers for the element of that tuple type, written as the tuple
+    // type, the element's name and its type.
+    @TestClass()
+    class TUPLE_ELEMENT_HOVER_TESTS is
+        init() is si
+
+        prime(analyser: ANALYSER_PROCESS) -> ANALYSER_PROCESS is
+            let path = fixture_path("tuple-element-hover/tuple-element-hover.ghul")
+
+            assert File.exists(path) else "fixture missing: {path}"
+
+            analyser.send_edit("tuple-element-hover.ghul", File.read_all_text(path))
+
+            let diagnostics = analyser.read_response()
+            assert isa Response.DIAGNOSTICS(diagnostics) else "expected DIAGNOSTICS response"
+
+            let user_diagnostics = LIST(user_diagnostics_of(diagnostics))
+            are_equal(0, user_diagnostics.count, diagnostics_summary("EDIT had unexpected diagnostics", user_diagnostics))
+
+            return analyser
+        si
+
+        hover(analyser: ANALYSER_PROCESS, line: int, column: int) -> Response.HOVER is
+            analyser.send_hover("tuple-element-hover.ghul", line, column)
+            let response = analyser.read_query_response()
+            assert isa Response.HOVER(response) else "expected HOVER response at {line}:{column}, got {response.get_type().name}"
+
+            return response
+        si
+
+        references(analyser: ANALYSER_PROCESS, line: int, column: int) -> Collections.SET[string] is
+            analyser.send_references("tuple-element-hover.ghul", line, column)
+            let response = analyser.read_query_response()
+            assert isa Response.REFERENCES(response) else "expected REFERENCES response"
+
+            let result = Collections.SET[string]()
+
+            for location in response.locations do
+                result.add("{location.start_line}:{location.start_column}")
+            od
+
+            return result
+        si
+
+        @Test()
+        hover_on_a_member_access__shows_the_element_of_the_tuple_type() is
+            let use analyser = ANALYSER_PROCESS()
+            let response = hover(prime(analyser), 4, 19)
+
+            are_equal("(x: int, y: int).x: int", response.signature)
+            are_equal("tuple element", response.kind_label)
+        si
+
+        @Test()
+        hover_on_a_tuple_literal_name__shows_the_element() is
+            let use analyser = ANALYSER_PROCESS()
+            let response = hover(prime(analyser), 2, 26)
+
+            are_equal("(x: int, y: int).y: int", response.signature)
+            are_equal("tuple element", response.kind_label)
+        si
+
+        @Test()
+        hover_on_a_tuple_type_name__shows_the_element() is
+            let use analyser = ANALYSER_PROCESS()
+            let response = hover(prime(analyser), 3, 17)
+
+            are_equal("(x: int, y: int).x: int", response.signature)
+            are_equal("tuple element", response.kind_label)
+        si
+
+        @Test()
+        hover_on_an_unnamed_element__shows_its_default_name() is
+            let use analyser = ANALYSER_PROCESS()
+            let response = hover(prime(analyser), 7, 22)
+
+            are_equal("(int, string).`0: int", response.signature)
+            are_equal("tuple element", response.kind_label)
+        si
+
+        // A tuple type is structural, so an element has no declaration to
+        // go to.
+        @Test()
+        definition_of_an_element__is_none() is
+            let use analyser = ANALYSER_PROCESS()
+
+            prime(analyser).send_definition("tuple-element-hover.ghul", 4, 19)
+            let response = analyser.read_query_response()
+            assert isa Response.DEFINITION(response) else "expected DEFINITION response"
+
+            are_equal(0, response.locations.count, "expected no definition")
+        si
+
+        @Test()
+        references_to_an_element__are_its_uses_in_that_tuple_type_only() is
+            let use analyser = ANALYSER_PROCESS()
+            let found = references(prime(analyser), 4, 19)
+
+            for expected in ["2:18", "3:17", "4:19"] do
+                is_true(found.contains(expected), "expected a reference at {expected}, got {found |> Ghul.Pipes.join(", ")}")
+            od
+
+            for unexpected in ["7:21", "8:18", "9:19"] do
+                is_false(found.contains(unexpected), "a reference at {unexpected} belongs to another tuple type: {found |> Ghul.Pipes.join(", ")}")
+            od
+        si
+    si
+si
