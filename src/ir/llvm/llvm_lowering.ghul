@@ -543,6 +543,14 @@ namespace IR.LLVMTarget is
                 return _held_in_place(_value_of(value))
             fi
 
+            if let unbox: Values.UNBOX = value /\ unbox.in_place then
+                if let object = _value_of(unbox.value) then
+                    return _unboxed_address(object, unbox.type)
+                fi
+
+                return null
+            fi
+
             if value.has_address then
                 let depth = _stack.count
 
@@ -1933,6 +1941,31 @@ namespace IR.LLVMTarget is
             _current.store(held, _current.element_pointer(boxed, object, [_i32(0), _i32(1)], true), 0)
 
             return object
+        si
+
+        // The address of the struct of `type` inside the box `object` points
+        // at, or null, reported, where `type` is not a struct. A null, or a
+        // box of another type, throws, as unboxing does.
+        _unboxed_address(object: LLVM.Value, unboxed: Type?) -> LLVM.Value? is
+            let objects = _objects
+            let type = _specialize(unboxed)
+
+            if let o = objects, s = o.struct_of(type) then
+                let held = o.struct_type(s)
+                let range = LIST[(first: int, last: int)]()
+
+                range.add(o.class_range(s))
+
+                let fits = _fits(object, range)
+
+                _throw_if(_current.compare(IntegerPredicate.EQ, fits, LLVM.Values.boolean(false)), Semantic.Lookups.RuntimeException.INVALID_CAST)
+
+                return _current.element_pointer(Types.structure([Types.pointer, held]), object, [_i32(0), _i32(1)], true)
+            fi
+
+            _report("the struct inside a box of {type}")
+
+            return null
         si
 
         // The value of `type` held in the box `object` points at, or null,
