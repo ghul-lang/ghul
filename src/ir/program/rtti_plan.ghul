@@ -95,8 +95,9 @@ namespace IR.Program is
         ///
         /// Under `--rtti-roots`, only the types marked `@reflected()` and
         /// those their descriptions reach: their bases, the types of their
-        /// fields, properties and constructor parameters, their type
-        /// arguments, array elements and optionals' values, and every class
+        /// fields, properties and constructor parameters (a value-type
+        /// optional's carrier included), their type arguments, array elements
+        /// and optionals' values, and every class
         /// among `classes` that extends or implements the type of a value a
         /// described type holds, other than the root.
         described(classes: Collections.Iterable[CLASS_INSTANCE]) -> CLASS_INSTANCE[] is
@@ -161,7 +162,7 @@ namespace IR.Program is
                             let holds = method != base /\ method != parameter
 
                             for argument in call.method.type_map.values do
-                                if let instance = _instance_of(argument) then
+                                if let instance = _instance_of(argument) ?? _described_only(argument, candidates) then
                                     add(instance, holds)
                                 fi
                             od
@@ -183,6 +184,38 @@ namespace IR.Program is
 
         _instance_of(type: Type) -> CLASS_INSTANCE? =>
             _target.trait_of(type) ?? _target.class_of(type)
+
+        // The type among `candidates` that `type` is, where the target holds
+        // no class for it: one only described, such as the carrier of a
+        // value-type optional, `NULLABLE[int]` for an `int?`.
+        _described_only(type: Type, candidates: LIST[CLASS_INSTANCE]) -> CLASS_INSTANCE? is
+            let generic = cast Semantic.Symbols.GENERIC?(type.symbol)
+
+            if !generic? then
+                return null
+            fi
+
+            let definition = cast Classy?(generic.unspecialized_symbol)
+            let arguments = type.arguments
+
+            for candidate in candidates do
+                if candidate.definition == definition /\ candidate.arguments.count == arguments.count then
+                    let same mut = true
+
+                    for i in 0..arguments.count do
+                        if candidate.arguments[i].compare(arguments[i]) != Semantic.Types.MATCH.SAME then
+                            same = false
+                        fi
+                    od
+
+                    if same then
+                        return candidate
+                    fi
+                fi
+            od
+
+            return null
+        si
 
         // Whether `type` directly extends or implements one of `types`.
         _extends(type: CLASS_INSTANCE, types: Collections.SET[CLASS_INSTANCE]) -> bool is
