@@ -1,10 +1,10 @@
 #!/bin/bash
 # Builds the compiler for llvm from a chain that starts at a released native
 # compiler rather than at .NET: stage 0, the released compiler, builds this
-# source (stage 1); stage 1 builds it again (stage 2). Stages 1 and 2 must
-# be identical, module and executable. Stage 1 was built by an older
-# compiler, so it can differ from stage 2; then stage 2 builds a stage 3,
-# which must match stage 2. A chain that has not settled by stage 3 fails.
+# source (stage 1); stage 1 builds it again (stage 2). Where stages 1 and 2
+# agree, module and executable, stage 2 is the fixed point. Stage 1 was
+# built by an older compiler, so it can differ; then stage 2 builds a stage
+# 3, which must match stage 2. A chain that has not settled by stage 3 fails.
 #
 # usage: build/llvm-chain.sh <stage 0 compiler> [<ghul-runtime>]
 #
