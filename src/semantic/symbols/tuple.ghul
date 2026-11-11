@@ -32,21 +32,57 @@ namespace Semantic.Symbols is
                 "{index}"
             fi
 
+        // Each element, made the first time it is asked for, so that every
+        // use of one element of this tuple shares one symbol.
+        _elements: Collections.LIST[TUPLE_ELEMENT?]?
+
         // The element `member`, a positional field of this tuple, is: the
         // name the analyser records where the field is reached by name.
         // Null where `member` is not one of the tuple's positional fields.
         element_of(member: Symbol) -> TUPLE_ELEMENT? is
-            for i in 0..arguments.count do
-                if member.name =~ "{i}" then
-                    return TUPLE_ELEMENT(self, i)
-                fi
-            od
+            let index = positional_index(member.name)
 
-            return null
+            if index < 0 \/ index >= arguments.count then
+                return null
+            fi
+
+            return element(index)
         si
 
         // The element at `index`.
-        element(index: int) -> TUPLE_ELEMENT => TUPLE_ELEMENT(self, index)
+        element(index: int) -> TUPLE_ELEMENT is
+            if !_elements? then
+                let elements = Collections.LIST[TUPLE_ELEMENT?](arguments.count)
+
+                for _ in 0..arguments.count do
+                    elements.add(null)
+                od
+
+                _elements = elements
+            fi
+
+            let elements = _elements!
+
+            if let existing = elements[index] then
+                return existing
+            fi
+
+            let made = TUPLE_ELEMENT(self, index)
+
+            elements[index] = made
+
+            return made
+        si
+
+        // The index a positional field's name, `0` to `6`, stands for, or -1
+        // for any other name. A tuple has at most seven elements, so the
+        // name is one digit.
+        positional_index(name: string) -> int static =>
+            if name.length == 1 /\ name[0] >= '0' /\ name[0] <= '9' then
+                int(name[0]) - int('0')
+            else
+                -1
+            fi
 
         find_named_element(name: string) -> Symbol? is
             if !names? then
@@ -168,7 +204,7 @@ namespace Semantic.Symbols is
         // a backtick and its index. An unnamed element among named ones
         // carries its index as its name.
         _element_name(tuple: TUPLE, index: int) -> string static =>
-            if let names = tuple.names /\ index < names.count, name = names[index] /\ !(name =~ "{index}") then
+            if let names = tuple.names /\ index < names.count, name = names[index] /\ TUPLE.positional_index(name) != index then
                 name
             else
                 "`{index}"
