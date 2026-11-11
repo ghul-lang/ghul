@@ -784,6 +784,18 @@ jobs:
         GHUL_NATIVE_VERSION: ${{ needs.version.outputs.package }}
       run: build/llvm-bootstrap.sh
 
+    # Pass 2's module and executable, hashed for llvm_chain_compare.
+    - name: Hash pass 2
+      shell: bash
+      run: |
+        set -euo pipefail
+        (cd "${{ runner.temp }}/llvm-bootstrap/pass-2" && sha256sum ghul.ll ghul) > llvm-bootstrap-x86_64-unknown-linux-musl.sha256
+
+    - uses: actions/upload-artifact@v7
+      with:
+        name: llvm-bootstrap-sums-x86_64-unknown-linux-musl
+        path: llvm-bootstrap-x86_64-unknown-linux-musl.sha256
+
     # The native compiler the second pass built, packed as the Native AOT
     # compiler is so ghul-cli installs either the same way: the executable
     # as `ghul-compiler` in a `ghul-compiler` directory. It compiles for wasm and llvm.
@@ -874,6 +886,18 @@ jobs:
         GHUL_NATIVE_VERSION: ${{ needs.version.outputs.package }}
       run: build/llvm-bootstrap.sh
 
+    # Pass 2's module and executable, hashed for llvm_chain_compare.
+    - name: Hash pass 2
+      shell: bash
+      run: |
+        set -euo pipefail
+        (cd "${{ runner.temp }}/llvm-bootstrap/pass-2" && sha256sum ghul.ll ghul) > llvm-bootstrap-aarch64-unknown-linux-musl.sha256
+
+    - uses: actions/upload-artifact@v7
+      with:
+        name: llvm-bootstrap-sums-aarch64-unknown-linux-musl
+        path: llvm-bootstrap-aarch64-unknown-linux-musl.sha256
+
     - name: Pack the llvm-built compiler
       shell: bash
       run: |
@@ -891,6 +915,158 @@ jobs:
         path: |
           ghul-compiler-llvm-aarch64-unknown-linux-musl.tar.gz
           ghul-compiler-llvm-aarch64-unknown-linux-musl.tar.gz.sha256
+
+  # The compiler built from a chain that starts at the newest released
+  # llvm-built compiler instead of at .NET: build/llvm-chain.sh, per
+  # platform. A second route to the binary llvm_bootstrap ships, so that a
+  # miscompile in either the released native compiler or the .NET one shows
+  # as a difference. Ships nothing, holds no pull request: not in the Gate,
+  # and allowed to fail without failing the run.
+  llvm_chain:
+    needs: [version, bootstrap]
+    if: needs.version.outputs.build == 'true'
+    name: Build the compiler from the released native one (${{ matrix.triple }})
+
+    runs-on: ${{ matrix.runner }}
+
+    continue-on-error: true
+
+    timeout-minutes: 45
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            triple: x86_64-unknown-linux-musl
+          - runner: ubuntu-26.04-arm
+            triple: aarch64-unknown-linux-musl
+
+    steps:
+    - uses: actions/checkout@v7
+
+    - name: Choose the runtime release
+      id: libraries
+      shell: bash
+      run: |
+        set -euo pipefail
+        if [ "${{ github.event_name }}" = schedule ]; then
+          echo "runtime=" >> "$GITHUB_OUTPUT"
+        else
+          runtime=$(build/library-tag.sh ghul-runtime)
+          echo "runtime=$runtime" >> "$GITHUB_OUTPUT"
+        fi
+
+    - name: Checkout ghul-runtime
+      uses: actions/checkout@v7
+      with:
+        repository: ghul-lang/ghul-runtime
+        path: libraries/ghul-runtime
+        ref: ${{ steps.libraries.outputs.runtime }}
+
+    - name: Fetch ghul-llvm
+      run: |
+        ghul_llvm="$(build/ghul-llvm.sh "$RUNNER_TEMP/ghul-llvm")"
+        test -x "$ghul_llvm"
+        dirname "$ghul_llvm" >> "$GITHUB_PATH"
+
+    # Stage 0: the llvm-built compiler of the newest release, checked
+    # against the sha256 published beside it. Where no release carries one
+    # for this platform, there is nothing to start a chain from: the
+    # compiler comes from .NET alone this run, which llvm_bootstrap builds.
+    - name: Fetch the released llvm-built compiler
+      id: stage0
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        set -euo pipefail
+        archive=ghul-compiler-llvm-${{ matrix.triple }}.tar.gz
+        mkdir -p "$RUNNER_TEMP/stage-0"
+        cd "$RUNNER_TEMP/stage-0"
+        if ! gh release download --repo "${{ github.repository }}" --pattern "$archive" --pattern "$archive.sha256" 2>download.log; then
+          cat download.log
+          echo "::warning::no released llvm-built compiler for ${{ matrix.triple }}: nothing to start a chain from, so this run's compiler for it comes from .NET alone (llvm_bootstrap)"
+          echo "found=false" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+        sha256sum --check --quiet "$archive.sha256"
+        tar -xzf "$archive"
+        echo "found=true" >> "$GITHUB_OUTPUT"
+        echo "compiler=$RUNNER_TEMP/stage-0/ghul-compiler/ghul-compiler" >> "$GITHUB_OUTPUT"
+
+    - name: Build the compiler from it to a fixed point
+      if: steps.stage0.outputs.found == 'true'
+      env:
+        LLVM_CHAIN_DIR: ${{ runner.temp }}/llvm-chain
+        GHUL_NATIVE_VERSION: ${{ needs.version.outputs.package }}
+      run: build/llvm-chain.sh "${{ steps.stage0.outputs.compiler }}"
+
+    - name: Name the stage the chain settled at
+      if: steps.stage0.outputs.found == 'true'
+      shell: bash
+      run: |
+        set -euo pipefail
+        cp "$RUNNER_TEMP/llvm-chain/final.sha256" "llvm-chain-${{ matrix.triple }}.sha256"
+        echo "settled at $(cat "$RUNNER_TEMP/llvm-chain/final")" >> "$GITHUB_STEP_SUMMARY"
+
+    - uses: actions/upload-artifact@v7
+      if: steps.stage0.outputs.found == 'true'
+      with:
+        name: llvm-chain-sums-${{ matrix.triple }}
+        path: llvm-chain-${{ matrix.triple }}.sha256
+
+  # The two routes must give one binary: the chain's settled stage and
+  # llvm_bootstrap's pass 2, module and executable, byte for byte.
+  llvm_chain_compare:
+    needs: [version, llvm_bootstrap, llvm_bootstrap_arm64, llvm_chain]
+    if: ${{ !cancelled() && needs.version.outputs.build == 'true' }}
+    name: Compare the chain with the .NET-seeded build (${{ matrix.triple }})
+
+    runs-on: ubuntu-latest
+
+    continue-on-error: true
+
+    timeout-minutes: 5
+
+    strategy:
+      fail-fast: false
+      matrix:
+        triple: [x86_64-unknown-linux-musl, aarch64-unknown-linux-musl]
+
+    steps:
+    - name: Download the .NET-seeded build's hashes
+      continue-on-error: true
+      uses: actions/download-artifact@v8
+      with:
+        name: llvm-bootstrap-sums-${{ matrix.triple }}
+
+    - name: Download the chain's hashes
+      continue-on-error: true
+      uses: actions/download-artifact@v8
+      with:
+        name: llvm-chain-sums-${{ matrix.triple }}
+
+    - name: Compare
+      shell: bash
+      run: |
+        set -euo pipefail
+        bootstrap=llvm-bootstrap-${{ matrix.triple }}.sha256
+        chain=llvm-chain-${{ matrix.triple }}.sha256
+        if [ ! -f "$bootstrap" ]; then
+          echo "::warning::the .NET-seeded build for ${{ matrix.triple }} produced no compiler this run; nothing to compare"
+          exit 0
+        fi
+        if [ ! -f "$chain" ]; then
+          echo "::warning::the chain for ${{ matrix.triple }} produced no compiler this run (no released compiler to start from, or the chain failed: see llvm_chain); nothing to compare"
+          exit 0
+        fi
+        cat "$bootstrap" "$chain"
+        if ! diff "$bootstrap" "$chain"; then
+          echo "::error::the chain and the .NET-seeded build give different compilers for ${{ matrix.triple }}: one route miscompiles"
+          exit 1
+        fi
+        echo "the chain and the .NET-seeded build give one compiler for ${{ matrix.triple }}"
 
   # The compiler builds a wasm compiler, which run by Node builds itself;
   # the two passes must write the same module and loader.
