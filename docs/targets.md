@@ -159,7 +159,7 @@ Not yet supported on the `wasm` target:
 - an interpolated number with a format other than the standard formats `D`, `E`, `F`, `G`, `N`, `R` and `X`, or a custom pattern of `0`, `#`, `.` and `,`
 - an interpolated enum with any format
 
-A program run by Node reads and writes the real file system through `File`, `Directory` and the readers and writers over a file, as a .NET program does. In a web page there is no file system. There, these types use a file system held in memory, which starts empty and holds what the program writes, and each file written is passed to the page. Under Node, a caller of the loader can also supply the program's files, or a sink for the files it writes, and these are then held in memory. `Path` works as it does on .NET. Standard input and output are read and written as on .NET.
+A program run by Node reads and writes the real file system through `File`, `Directory` and the readers and writers over a file, as a .NET program does. In a web page there is no file system. There, these types use a file system held in memory, which starts empty and holds what the program writes, and each file written is passed to the page. Under Node, a caller of the loader can also supply the program's files, or a sink for the files it writes, and these are then held in memory. `Path` works as it does on .NET. Standard input and output are read and written as on .NET. When standard output is not a terminal, the Node loader holds it and writes it in 64 KiB pieces. Held output is written before a read from standard input, a write to standard error, a process start or a flush, and when the program ends, however it ends.
 
 Reflection on the `wasm` and `llvm` targets is a subset of .NET reflection, with the same names and meanings:
 

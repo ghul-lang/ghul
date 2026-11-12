@@ -35,6 +35,7 @@ fi
 
 scratch="$(mktemp -d)"
 trap 'rm -rf "$scratch"' EXIT
+: > "$scratch/loader.mjs"
 
 checked=0
 failed=0
@@ -66,6 +67,12 @@ while IFS=$'\t' read -r dir flags_text; do
     mkdir -p "$out"
 
     read -r -a flags <<< "$flags_text"
+
+    # Only the module is checked, so a test that names no loader is given
+    # an empty one: the compiler needs one to write an executable.
+    if [[ " $flags_text " != *" --wasm-loader "* ]]; then
+        flags+=(--wasm-loader "$scratch/loader.mjs")
+    fi
 
     # Compiled from the test's own directory, as ghul-test compiles it, so
     # a path its ghulflags name is read from there.
