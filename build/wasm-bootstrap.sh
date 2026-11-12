@@ -43,7 +43,15 @@ build() {
 
     local start=$(date +%s)
 
-    if ! "$@" --target wasm --wasm-loader "$runtime/ghul-core/host/loader.mjs" --rtti-roots --underscore-access legacy -o "$directory/ghul" @"$work/libraries.rsp" @"$work/sources.rsp" > "$work/$name.log" 2>&1; then
+    # The version the built compiler reports: GHUL_NATIVE_VERSION, which CI
+    # sets, or 0.0.0-local where it is unset.
+    local version=()
+
+    if [ -n "${GHUL_NATIVE_VERSION:-}" ]; then
+        version=(--version "$GHUL_NATIVE_VERSION")
+    fi
+
+    if ! "$@" --target wasm --wasm-loader "$runtime/ghul-core/host/loader.mjs" --rtti-roots --underscore-access legacy "${version[@]}" -o "$directory/ghul" @"$work/libraries.rsp" @"$work/sources.rsp" > "$work/$name.log" 2>&1; then
         grep -v ': warn: ' "$work/$name.log" || true
         echo "$name failed"
         exit 1

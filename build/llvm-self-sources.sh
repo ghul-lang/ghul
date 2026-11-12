@@ -49,36 +49,3 @@ done | sort > "$output/sources.rsp"
 grep -vxF "$root/src/ir/wasmgc/wasmgc_loader_text.ghul" "$output/sources.rsp" > "$output/sources.rsp.tmp"
 echo "$output/wasmgc_loader_text.ghul" >> "$output/sources.rsp.tmp"
 mv "$output/sources.rsp.tmp" "$output/sources.rsp"
-
-# A native build of the compiler reports the version GHUL_NATIVE_VERSION
-# names, through a copy of
-# src/driver/native_build.ghul compiled in place of the committed one.
-if [ -n "${GHUL_NATIVE_VERSION:-}" ]; then
-    case "$GHUL_NATIVE_VERSION" in
-        *[!A-Za-z0-9.+-]*)
-            echo "GHUL_NATIVE_VERSION is not a version: $GHUL_NATIVE_VERSION" >&2
-            exit 2
-            ;;
-    esac
-
-    cat > "$output/native_build.ghul" <<EOF
-namespace Driver is
-    @IF.not.dotnet()
-    class NATIVE_BUILD is
-        version: string static => "$GHUL_NATIVE_VERSION"
-
-        @IF.wasm()
-        host: string static => "wasm"
-
-        @IF.llvm()
-        host: string static => "llvm"
-    si
-si
-EOF
-
-    committed="$root/src/driver/native_build.ghul"
-
-    grep -vxF "$committed" "$output/sources.rsp" > "$output/sources.rsp.tmp"
-    echo "$output/native_build.ghul" >> "$output/sources.rsp.tmp"
-    mv "$output/sources.rsp.tmp" "$output/sources.rsp"
-fi

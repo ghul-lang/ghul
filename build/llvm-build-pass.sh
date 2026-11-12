@@ -28,9 +28,17 @@ mkdir -p "$directory"
 
 start=$(date +%s)
 
+# The version the built compiler reports: GHUL_NATIVE_VERSION, which CI
+# sets, or 0.0.0-local where it is unset.
+version=()
+
+if [ -n "${GHUL_NATIVE_VERSION:-}" ]; then
+    version=(--version "$GHUL_NATIVE_VERSION")
+fi
+
 # Every pass uses the same names, since the module's file name is recorded
 # in the executable.
-if ! "$@" --target llvm --llvm-parallel-gc --rtti-roots --underscore-access legacy --llvm-output "$directory/ghul.ll" -o "$directory/ghul" @"$work/libraries.rsp" @"$work/sources.rsp" > "$work/$name.log" 2>&1; then
+if ! "$@" --target llvm --llvm-parallel-gc --rtti-roots --underscore-access legacy "${version[@]}" --llvm-output "$directory/ghul.ll" -o "$directory/ghul" @"$work/libraries.rsp" @"$work/sources.rsp" > "$work/$name.log" 2>&1; then
     grep -v ': warn: ' "$work/$name.log" || true
     echo "$name failed"
     exit 1
