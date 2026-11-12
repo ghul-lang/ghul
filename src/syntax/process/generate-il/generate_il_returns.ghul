@@ -123,6 +123,13 @@ namespace Syntax.Process is
                 fi
             fi
 
+            _emit_return(value)
+        si
+
+        // Return `value`, or nothing where it is null, from where the walk
+        // is: through the innermost open `try`, so that every `finally`
+        // on the way out runs, or directly where none is open.
+        _emit_return(value: Value?) is
             let current_try = _loops.get_current_try()
 
             if current_try? then
@@ -142,6 +149,39 @@ namespace Syntax.Process is
             else
                 add(Values.RET())
             fi
+        si
+
+        // At a generator's resumption point: where Dispose resumed the
+        // frame, end the stream as a `return` here would, so the cleanup
+        // of every `finally` and `use` the suspended body is inside runs,
+        // innermost first. `iterator_field` is the iterator a `yield in`
+        // is stepping, disposed first.
+        _gen_leave_if_disposing(frame: Semantic.Symbols.STATE_MACHINE_FRAME, iterator_field: Semantic.Symbols.Field?) is
+            let staying = _open_region(LABEL())
+
+            add(Values.BREAK(staying, BRANCH.Z, _build_frame_field_load(frame, frame.disposing_field)))
+
+            if let stepping = iterator_field then
+                let dispose =
+                    Semantic.KNOWN_MEMBERS.find(stepping.type, "dispose", Semantic.KNOWN_SIGNATURE(Collections.LIST[Semantic.Types.Type?](), true))
+
+                assert dispose? else "yield in iterator has no dispose()"
+
+                add(
+                    dispose.call(
+                        Source.LOCATION.internal,
+                        _build_frame_field_load(frame, stepping),
+                        Collections.LIST[Values.Value](0),
+                        null,
+                        _function_caller))
+            fi
+
+            add(_build_frame_field_store(
+                frame, frame.state_field, Literal.NUMBER(-1, _innate_symbol_lookup.get_int_type())))
+
+            _emit_return(Literal.NUMBER(0, _innate_symbol_lookup.get_bool_type()))
+
+            _close_structured(staying)
         si
 
         // Emit IL for a `return E` whose target is a `val ... lav`
@@ -352,6 +392,8 @@ namespace Syntax.Process is
                 frame.state_field,
                 Literal.NUMBER(-1, _innate_symbol_lookup.get_int_type()),
                 _current_state_local()!)
+
+            _gen_leave_if_disposing(frame, null)
         si
 
         // `yield in E` - hand on every element of E. E's iterator lives
@@ -469,6 +511,8 @@ namespace Syntax.Process is
                 frame.state_field,
                 Literal.NUMBER(-1, _innate_symbol_lookup.get_int_type()),
                 _current_state_local()!)
+
+            _gen_leave_if_disposing(frame, iterator_field)
 
             _close_structured(loop)
         si

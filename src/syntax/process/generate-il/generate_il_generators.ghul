@@ -456,7 +456,8 @@ namespace Syntax.Process is
         // Each body is fixed and small, so they are built here rather
         // than walked: get_Current reads the current field,
         // GetEnumerator returns the frame itself or a fresh one, Dispose
-        // and Reset do nothing, and ToString joins the pipe.
+        // ends the stream, Reset does nothing, and ToString joins the
+        // pipe.
         _gen_state_machine_accessors(frame: Semantic.Symbols.STATE_MACHINE_FRAME) is
             // get_Current - read the current field.
             _emit_frame_member_body(
@@ -469,9 +470,7 @@ namespace Syntax.Process is
                 IR.FrameMember.GET_ENUMERATOR,
                 _get_enumerator_body(frame))
 
-            // Dispose - a no-op. A generator abandoned mid-flight does
-            // not run the user's finally bodies.
-            _emit_frame_member_body(frame, IR.FrameMember.DISPOSE, _returning(null))
+            _emit_frame_member_body(frame, IR.FrameMember.DISPOSE, _dispose_body(frame))
 
             // Reset - a no-op: a read that wants to start over takes a
             // fresh frame from GetEnumerator.
@@ -490,6 +489,55 @@ namespace Syntax.Process is
                         [_frame_self(frame)]:Value,
                         _innate_symbol_lookup.get_string_type(),
                         frame.class_element_type)))
+        si
+
+        // Dispose - end the stream. A frame suspended at a yield is
+        // resumed with its disposing flag set, and leaves its body from
+        // there as a `return` would, running each `finally` and `use` it
+        // is inside. A frame not yet started is only marked done, and one
+        // already done, or running, is left as it is. Either way MoveNext
+        // answers false from then on.
+        _dispose_body(frame: Semantic.Symbols.STATE_MACHINE_FRAME) -> Values.BLOCK is
+            let void_type = _innate_symbol_lookup.get_void_type()
+            let int_type = _innate_symbol_lookup.get_int_type()
+            let body = Values.BLOCK(void_type)
+
+            let suspended = Values.REGION(IR.LABEL(), void_type)
+            suspended.clear_position()
+
+            let done = Values.BREAK(suspended, IR.BRANCH.NE, _load_frame_field(frame, frame.state_field), Values.Literal.NUMBER(-1, int_type))
+            done.clear_position()
+            suspended.body.add(done)
+            suspended.body.add(Values.RET())
+            suspended.close()
+
+            body.add(suspended)
+
+            let started = Values.REGION(IR.LABEL(), void_type)
+            started.clear_position()
+
+            let not_started = Values.BREAK(started, IR.BRANCH.NE, _load_frame_field(frame, frame.state_field), Values.Literal.NUMBER(0, int_type))
+            not_started.clear_position()
+            started.body.add(not_started)
+            started.body.add(_store_frame_field(frame, frame.state_field, Values.Literal.NUMBER(-1, int_type)))
+            started.body.add(Values.RET())
+            started.close()
+
+            body.add(started)
+
+            body.add(_store_frame_field(frame, frame.disposing_field, Values.Literal.NUMBER(1, _innate_symbol_lookup.get_bool_type())))
+
+            // The frame declares no move_next symbol of its own: it is reached
+            // through the Iterator[T] the frame implements.
+            let iterator_type = frame.type!.find_ancestor(_innate_symbol_lookup.get_unspecialized_iterator_type())
+            let move_next = Semantic.KNOWN_MEMBERS.find(iterator_type, "move_next", Semantic.KNOWN_SIGNATURE(Collections.LIST[Semantic.Types.Type?](), true))
+
+            assert move_next? else "generator frame has no move_next()"
+
+            body.add(Values.DISCARD(move_next.call(Source.LOCATION.internal, _frame_self(frame), Collections.LIST[Value](0), null, _function_caller)))
+            body.add(Values.RET())
+
+            return body
         si
 
         // GetEnumerator - the frame implements Iterator[T] itself, so
