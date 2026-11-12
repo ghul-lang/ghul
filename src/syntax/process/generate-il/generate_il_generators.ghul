@@ -343,7 +343,7 @@ namespace Syntax.Process is
                 frame, IR.FrameMember.MOVE_NEXT, move_next_block)
 
             // Other Iterator[T] / IDisposable members.
-            _without_position(() is _gen_state_machine_accessors(frame) si)
+            _without_position(() is _gen_state_machine_accessors(state_machine, frame) si)
 
             state_machine.uninstall_body_emission_overrides()
         si
@@ -456,8 +456,10 @@ namespace Syntax.Process is
         // Each body is fixed and small, so they are built here rather
         // than walked: get_Current reads the current field,
         // GetEnumerator returns the frame itself or a fresh one, Dispose
-        // and Reset do nothing, and ToString joins the pipe.
-        _gen_state_machine_accessors(frame: Semantic.Symbols.STATE_MACHINE_FRAME) is
+        // and Reset do nothing, and ToString joins the pipe. A fused
+        // iterable's Dispose disposes the source iterator it holds, as the
+        // stages it stands in for pass a dispose on to their source.
+        _gen_state_machine_accessors(state_machine: Semantic.Symbols.STATE_MACHINE, frame: Semantic.Symbols.STATE_MACHINE_FRAME) is
             // get_Current - read the current field.
             _emit_frame_member_body(
                 frame,
@@ -469,9 +471,9 @@ namespace Syntax.Process is
                 IR.FrameMember.GET_ENUMERATOR,
                 _get_enumerator_body(frame))
 
-            // Dispose - a no-op. A generator abandoned mid-flight does
-            // not run the user's finally bodies.
-            _emit_frame_member_body(frame, IR.FrameMember.DISPOSE, _returning(null))
+            // Dispose - a no-op for a generator written in source: one
+            // abandoned mid-flight does not run the user's finally bodies.
+            _emit_frame_member_body(frame, IR.FrameMember.DISPOSE, _fused_iterable_dispose_body(state_machine, frame) ?? _returning(null))
 
             // Reset - a no-op: a read that wants to start over takes a
             // fresh frame from GetEnumerator.
@@ -490,6 +492,51 @@ namespace Syntax.Process is
                         [_frame_self(frame)]:Value,
                         _innate_symbol_lookup.get_string_type(),
                         frame.class_element_type)))
+        si
+
+        // A fused iterable's Dispose: the source iterator, once MoveNext has
+        // taken one, is disposed, unless the source is one whose iterator
+        // holds nothing.
+        _fused_iterable_dispose_body(state_machine: Semantic.Symbols.STATE_MACHINE, frame: Semantic.Symbols.STATE_MACHINE_FRAME) -> Values.BLOCK? is
+            let closure = cast Semantic.Symbols.Closure?(state_machine.function)
+
+            if !closure? then
+                return null
+            fi
+
+            let description = closure.fused_iterable
+
+            if !description? then
+                return null
+            fi
+
+            let dispose = description.fusion.source_dispose
+
+            if !dispose? \/ !description.source.type? \/ !FUSED_SOURCE_DISPOSAL.needs_dispose(description.source.type, _innate_symbol_lookup.get_int_range_types()) then
+                return null
+            fi
+
+            let void_type = _innate_symbol_lookup.get_void_type()
+            let body = Values.BLOCK(void_type)
+            let iterator_field = description.iterator_field
+            let location = description.fusion.source.location
+
+            let taken = Values.REGION(IR.LABEL(), void_type)
+            taken.clear_position()
+
+            if !(iterator_field.type?.is_value_type ?? false) then
+                let untaken = Values.BREAK(taken, IR.BRANCH.Z, _load_frame_field(frame, iterator_field))
+                untaken.clear_position()
+                taken.body.add(untaken)
+            fi
+
+            taken.body.add(dispose.call(location, _load_frame_field(frame, iterator_field), Collections.LIST[Value](0), null, _function_caller))
+            taken.close()
+
+            body.add(taken)
+            body.add(Values.RET())
+
+            return body
         si
 
         // GetEnumerator - the frame implements Iterator[T] itself, so
