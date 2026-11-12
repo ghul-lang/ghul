@@ -1229,7 +1229,7 @@ function base64_bytes(text) {
 // creating the directories it names. A path that is absolute or climbs
 // with `..` would reach outside it, so it is reported on standard error
 // and not written, and the program carries on.
-function node_file_writer(write_stderr) {
+function node_file_writer(stderr) {
     return (path, bytes) => {
         const segments = path.split(/[\\/]/);
 
