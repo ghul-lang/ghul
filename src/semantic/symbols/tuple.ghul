@@ -8,6 +8,7 @@ namespace Semantic.Symbols is
     use Source
 
     use Types.Type
+    use IR.Values.Value
 
     use Ghul.Pipes
 
@@ -32,32 +33,97 @@ namespace Semantic.Symbols is
                 "{index}"
             fi
 
+        // Each element, made the first time it is asked for, so that every
+        // use of one element of this tuple shares one symbol.
+        _elements: Collections.LIST[TUPLE_ELEMENT?]?
+
+        // The names of the positional fields of the tuple classes, by index.
+        _POSITIONAL: string[] static => ["0", "1", "2", "3", "4", "5", "6"]
+
+        // The element at `index`, standing for the positional field there,
+        // or null where the tuple has no field at `index`.
+        element(index: int) -> TUPLE_ELEMENT? is
+            if index < 0 \/ index >= arguments.count \/ index >= _POSITIONAL.count then
+                return null
+            fi
+
+            if !_elements? then
+                let elements = Collections.LIST[TUPLE_ELEMENT?](arguments.count)
+
+                for _ in 0..arguments.count do
+                    elements.add(null)
+                od
+
+                _elements = elements
+            fi
+
+            let elements = _elements!
+
+            if let existing = elements[index] then
+                return existing
+            fi
+
+            let made = TUPLE_ELEMENT(self, index)
+
+            elements[index] = made
+
+            return made
+        si
+
+        // The tuple class's field at `index`, which an element reads and
+        // writes through. Looked up only when code is generated: a tuple
+        // type written in source is resolved before the tuple class's own
+        // members are declared.
+        positional_field(index: int) -> Symbol is
+            assert_symbols_pulled_down()
+
+            return _specialize(symbol.find_direct(_POSITIONAL[index]))!
+        si
+
+        // The index a positional field's name stands for, written `0` or as
+        // the default name `` `0 ``, or -1 for any other name. A tuple has at
+        // most seven elements, so the index is one digit.
+        positional_index(name: string) -> int static =>
+            if name.length == 1 /\ name[0] >= '0' /\ name[0] <= '9' then
+                int(name[0]) - int('0')
+            elif name.length == 2 /\ name[0] == '`' /\ name[1] >= '0' /\ name[1] <= '9' then
+                int(name[1]) - int('0')
+            else
+                -1
+            fi
+
         find_named_element(name: string) -> Symbol? is
             if !names? then
                 return null
             fi
 
-            let m = names |> index() |> find(iv => iv.value =~ name)
+            for i in 0..names.count do
+                if let n = names[i] /\ n =~ name then
+                    return element(i)
+                fi
+            od
 
-            if !m? then
-                return null
-            fi
-
-            let s = symbol.find_direct("{m.index}")
-            return _specialize(s)
+            return null
         si
 
+        // A positional name reaches the element at that index.
         find_direct(name: string) -> Symbol? is
             assert_symbols_pulled_down()
+
+            if let element = element(positional_index(name)) then
+                return element
+            fi
 
             return _specialize(symbol.find_direct(name))
         si
 
         find_member(name: string) -> Symbol? is
-            let named_element = find_named_element(name)
-
-            if named_element? then
+            if let named_element = find_named_element(name) then
                 return named_element
+            fi
+
+            if let element = element(positional_index(name)) then
+                return element
             fi
 
             return _specialize(symbol.find_member(name))
@@ -105,5 +171,88 @@ namespace Semantic.Symbols is
         si
 
         to_string() -> string => description
+    si
+
+    // One element of a tuple type: what the tuple's member lookup answers
+    // for an element's name, and what the analyser records there, so that
+    // hover, references and definition answer for the element of this
+    // tuple type rather than for the positional field every tuple of the
+    // same arity shares. Reading and writing it reads and writes that
+    // positional field, so the code is the field's.
+    //
+    // Two are the same element where their tuple types are the same, by
+    // GENERIC's structural =~, and they are at the same index under the
+    // same name.
+    class TUPLE_ELEMENT: Field is
+        _tuple: TUPLE
+        _index: int
+        _positional: Symbol => _tuple.positional_field(_index)
+
+        is_instance: bool => true
+
+        // Made from a tuple that is already specialized, never itself
+        // specialized again.
+        is_specializable: bool => false
+
+        // The tuple type as it is written, then the element's name: a tuple
+        // has no name of its own to qualify the element with.
+        describe(context: DESCRIBE_CONTEXT) -> SignaturePart =>
+            _describe_typed(context, PARTS.literal("{Types.TUPLE.get_short_description(_tuple.type, _tuple.names)}.{name}"), type)
+
+        describe_kind(context: DESCRIBE_CONTEXT) -> string? => "tuple element"
+
+        // A name the program writes, so its uses are recorded like any
+        // member's, but declared by the tuple type rather than in source:
+        // as for a member read from an assembly, there is no declaration
+        // to go to and nothing to rename.
+        is_internal: bool => false
+        is_reflected: bool => true
+
+        // - tuple: the tuple type the element belongs to
+        // - index: its position
+        init(tuple: TUPLE, index: int) is
+            super.init(LOCATION.internal, tuple, _element_name(tuple, index))
+
+            _tuple = tuple
+            _index = index
+
+            set_type(tuple.arguments[index])
+
+            // An element is as visible as its tuple, whatever its name.
+            is_private = false
+        si
+
+        load(location: LOCATION, from: Value?, loader: SYMBOL_LOADER) -> Value =>
+            _positional.load(location, from, loader)
+
+        store(location: LOCATION, from: Value?, value: Value, loader: SYMBOL_LOADER, is_initialize: bool) -> Value =>
+            _positional.store(location, from, value, loader, is_initialize)
+
+        // The element's name, or the default name of an unnamed element:
+        // a backtick and its index. An unnamed element among named ones
+        // carries its index as its name.
+        _element_name(tuple: TUPLE, index: int) -> string static =>
+            if let names = tuple.names /\ index < names.count, name = names[index] /\ TUPLE.positional_index(name) != index then
+                name
+            else
+                "`{index}"
+            fi
+
+        =~(other: Symbol) -> bool =>
+            if let element: TUPLE_ELEMENT = other then
+                element._index == _index /\ element.name =~ name /\ element._tuple =~ _tuple
+            else
+                false
+            fi
+
+        =~(other: object?) -> bool =>
+            if let element: TUPLE_ELEMENT = other then
+                self =~ cast Symbol(element)
+            else
+                false
+            fi
+
+        get_hash_code() -> int =>
+            (_tuple.get_hash_code() * 31 + _index) * 31 + name.get_hash_code()
     si
 si
