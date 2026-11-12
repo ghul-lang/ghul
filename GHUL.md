@@ -712,7 +712,7 @@ Which form an operation takes follows one rule:
 - A collection is built from a sequence by its constructor: `xs |> LIST()`, `SET(xs)`.
 - A static member is not the form to write. Write `sqrt(x)`, not `double.sqrt(x)`, and `xs |> join(", ")`, not `string.join(", ", xs)`. The exceptions are constants such as `int.max_value`, and `string.compare_ordinal`.
 
-`words`, `runes` and `graphemes` are global functions although each reads one string: they produce sequences, and read best in a pipe. The character tests are statics for now: `char.is_digit(c)`.
+`words`, `runes` and `graphemes` are global functions although each reads one string: they produce sequences, and read best in a pipe. The character tests are properties and the case mappings methods: `c.is_digit`, `c.is_white_space`, `c.to_upper()`.
 
 On .NET a `LIST` also has members .NET gives it that work over any sequence: `find`, `exists`, `true_for_all`, `for_each` and `convert_all`. Each warns `[deprecated]` and names its replacement. Write `|> find`, `|> any`, `|> all`, `|> each` and `|> map`, which work on every target. .NET's `LIST.find` returns the type's default value when nothing matches, where `|> find` returns an absent value.
 
@@ -1969,7 +1969,7 @@ let seen = repeat(false, 100) |> LIST();                 // LIST[bool], a hundre
 let squares = from(1) |> map(n => n * n) |> take(5);  // 1, 4, 9, 16, 25
 ```
 
-`Ghul.Pipes.stream(initial, advance)` builds a lazy sequence, which can be infinite. `advance` takes the current state and gives the next element and the next state. `advance` can have side effects. It is called lazily, only when an element is needed, so it is much easier to reason about when it has no side effects. The `||` infix operator writes the step: `value || next_state`. A `stream(...)` is an ordinary `Pipe[T]`, so the pipe combinators chain onto it with `|>`. See <https://ghul.dev/functional-programming.html#lazy-sequences>.
+`Ghul.Pipes.stream(initial, advance)` builds a lazy sequence, which can be infinite. `advance` takes the current state and returns the next element and the next state as a tuple, or `null` to end the sequence: `stream(1, n => if n > 5 then null else (n, n + 1) fi)`. Where the state is a tuple, `advance` can take its parts as separate parameters: `stream((0, 1), (a, b) => (a, (b, a + b)))`. `advance` can have side effects. It is called lazily, only when an element is needed, so it is much easier to reason about when it has no side effects. A `stream(...)` is an ordinary `Pipe[T]`, so the pipe combinators chain onto it with `|>`. See <https://ghul.dev/functional-programming.html#lazy-sequences>.
 
 The thread-first operator `|>` calls a function with the left value as its first argument. `x |> f(a)` is `f(x, a)`, and `x |> f()` is `f(x)`. The compiler resolves the right-hand side exactly as an ordinary call. So it can be a free function, a method on an explicit receiver (`x |> box.combine(a)` is `box.combine(x, a)`), or a generic function whose type argument is inferred from the left value. Chains associate to the left, so `x |> f(a) |> g(b)` is `g(f(x, a), b)`. `|>` is a plain call. Its right-hand side must be a function call, or the name of a function whose name is an operator:
 
