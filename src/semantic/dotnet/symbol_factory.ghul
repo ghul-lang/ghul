@@ -468,6 +468,10 @@ namespace Semantic.DotNet is
                         od
                     else
                         result.add_member(m.function)
+
+                        if let replacement = REFLECTED_MEMBER_TABLES.replacement_for(m.method_info.declaring_type ?? type, m.method_info.name) then
+                            Semantic.HIDEABLE_MEMBERS.add(result, m.function.name, replacement, m.function)
+                        fi
                     fi
                 od
             fi
@@ -1102,6 +1106,12 @@ namespace Semantic.DotNet is
         ) is
             if !_is_reachable_from_other_assembly(method) then
                 return
+            fi
+
+            if let replacement = REFLECTED_MEMBER_TABLES.replacement_for(method.declaring_type ?? type, method.name) then
+                if _is_injected(type, replacement) then
+                    return
+                fi
             fi
 
             let result: Symbols.Function mut
@@ -2006,6 +2016,20 @@ namespace Semantic.DotNet is
 
                 owner.add_member(result)
             od
+        si
+
+        // Whether an assembly adds a member named `name` to `type`.
+        _is_injected(type: TYPE, name: string) -> bool =>
+            _type_details_lookup.injected_members_for(type) |> any(injected => _injected_name(injected.method, injected.operation) =~ name)
+
+        _injected_name(method: System.Reflection.MethodInfo, operation: string) -> string is
+            let property_prefix = "injected.property."
+
+            if operation.starts_with(property_prefix) then
+                return operation.substring(property_prefix.length)
+            fi
+
+            return method.name
         si
 
         // The members a runtime `partial` in a referenced assembly added to

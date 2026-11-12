@@ -2,13 +2,14 @@
 
 namespace Semantic.DotNet is
     use Collections.MAP
+    use Ghul.Pipes
 
     // The ghūl name a reflected member is surfaced under instead of its
     // de-camelled one, and whether the de-camelled name stays reachable
     // as a second name.
     class REFLECTED_MEMBER_RENAME(name: string public, keeps_old_name: bool public)
 
-    // Two compiler tables over reflected members, keyed on the declaring
+    // Three compiler tables over reflected members, keyed on the declaring
     // type's metadata name (a generic type by its definition, as
     // `System.Collections.Generic.List`1`) and the member's metadata name.
     // A key names every overload of the member at once, so a rename or a
@@ -17,10 +18,15 @@ namespace Semantic.DotNet is
     // - renames: a member reached under a better ghūl name, the old one
     //   optionally kept beside it while callers move;
     // - deprecations: a member that warns `[deprecated]` at each use,
-    //   naming what to write instead.
+    //   naming what to write instead;
+    // - hides: a member that is not imported at all where a member the
+    //   runtime adds to the same type under the replacement name is
+    //   present, so the two never share a name. Where the replacement is
+    //   absent the member is imported as usual.
     class REFLECTED_MEMBER_TABLES is
         _renames: MAP[(string, string), REFLECTED_MEMBER_RENAME] static
         _deprecations: MAP[(string, string), string] static
+        _hides: MAP[(string, string), string] static
 
         init() static is
             _renames = MAP[(string, string), REFLECTED_MEMBER_RENAME]()
@@ -38,6 +44,38 @@ namespace Semantic.DotNet is
             _deprecations[(list, "TrueForAll")] = "use '|>' all"
             _deprecations[(list, "ForEach")] = "use '|>' each"
             _deprecations[(list, "ConvertAll")] = "use '|>' map"
+
+            _hides = MAP[(string, string), string]()
+
+            for (member, replacement) in [
+                ("IsAscii", "is_ascii"),
+                ("IsAsciiDigit", "is_ascii_digit"),
+                ("IsAsciiHexDigit", "is_ascii_hex_digit"),
+                ("IsAsciiHexDigitLower", "is_ascii_hex_digit_lower"),
+                ("IsAsciiHexDigitUpper", "is_ascii_hex_digit_upper"),
+                ("IsAsciiLetter", "is_ascii_letter"),
+                ("IsAsciiLetterLower", "is_ascii_letter_lower"),
+                ("IsAsciiLetterOrDigit", "is_ascii_letter_or_digit"),
+                ("IsAsciiLetterUpper", "is_ascii_letter_upper"),
+                ("IsControl", "is_control"),
+                ("IsDigit", "is_digit"),
+                ("IsHighSurrogate", "is_high_surrogate"),
+                ("IsLetter", "is_letter"),
+                ("IsLetterOrDigit", "is_letter_or_digit"),
+                ("IsLower", "is_lower"),
+                ("IsLowSurrogate", "is_low_surrogate"),
+                ("IsNumber", "is_number"),
+                ("IsPunctuation", "is_punctuation"),
+                ("IsSeparator", "is_separator"),
+                ("IsSurrogate", "is_surrogate"),
+                ("IsSymbol", "is_symbol"),
+                ("IsUpper", "is_upper"),
+                ("IsWhiteSpace", "is_white_space"),
+                ("ToLower", "to_lower"),
+                ("ToUpper", "to_upper")
+            ] do
+                _hides[("System.Char", member)] = replacement
+            od
         si
 
         // The rename for a member, or null where it keeps its de-camelled
@@ -73,6 +111,28 @@ namespace Semantic.DotNet is
 
             return null
         si
+
+        // The name of the member that replaces this one where the runtime
+        // adds it, or null where the table hides nothing.
+        //
+        // - declaring_type: the type that declares the member
+        // - member_name: the member's metadata name
+        replacement_for(declaring_type: System.Type?, member_name: string) -> string? static is
+            if let key = _key(declaring_type, member_name) then
+                let found: string mut = _
+
+                if _hides.try_get_value(key, found ref) then
+                    return found
+                fi
+            fi
+
+            return null
+        si
+
+        // Every hide entry, as the declaring type's metadata name, the
+        // member's metadata name and its replacement's name.
+        hides: Collections.Iterable[(type_name: string, member_name: string, replacement: string)] static =>
+            _hides |> map(e => (type_name = e.key.`0, member_name = e.key.`1, replacement = e.value))
 
         _key(declaring_type: System.Type?, member_name: string) -> (string, string)? static is
             if !declaring_type? then
