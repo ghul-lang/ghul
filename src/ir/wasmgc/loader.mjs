@@ -127,9 +127,9 @@ export async function run(options = {}) {
     };
 
     const sinks = [null, write_stdout, write_stderr];
-    const onfile = options.onfile ?? (is_node ? node_file_writer(stderr) : () => {});
+    const onfile = options.onfile ?? (is_node ? node_file_writer(write_stderr) : () => {});
     const input = input_reader(options.stdin);
-    const pump = stdin_pump(input, options.stdin, stderr);
+    const pump = stdin_pump(input, options.stdin, write_stderr);
     const input_files = Object.entries(options.files ?? {}).map(([path, content]) => [path, file_bytes(content)]);
     const files = (options.file_system ?? (options.files === undefined && options.onfile === undefined)) && is_node ? node_files() : no_files;
     const processes = is_node ? node_processes() : no_processes;
@@ -1229,7 +1229,7 @@ function base64_bytes(text) {
 // creating the directories it names. A path that is absolute or climbs
 // with `..` would reach outside it, so it is reported on standard error
 // and not written, and the program carries on.
-function node_file_writer(stderr) {
+function node_file_writer(write_stderr) {
     return (path, bytes) => {
         const segments = path.split(/[\\/]/);
 
