@@ -20,6 +20,14 @@ namespace Semantic is
         _home: Symbols.NAMESPACE
         _refuse: REJECTED_BLOCK_SCOPE
 
+        // The properties refused so far, whose accessors and backing field
+        // the rewriter declares after them, under the property's name.
+        _refused_properties: Collections.SET[string]
+
+        // What was refused but declared nowhere, by name: still found from
+        // inside the block, so a use of it is not reported again.
+        _detached: Collections.MAP[string, Symbol]
+
         // The namespace whose globals carrier emits the members.
         home: Symbols.NAMESPACE => _home
 
@@ -30,6 +38,8 @@ namespace Semantic is
 
             _home = home
             _refuse = REJECTED_BLOCK_SCOPE(lexical)
+            _refused_properties = Collections.SET[string]()
+            _detached = Collections.MAP[string, Symbol]()
         si
 
         _refused(location: LOCATION, what: string, name: string) -> Symbol is
@@ -38,7 +48,34 @@ namespace Semantic is
             return Symbols.UNDEFINED(location, _refuse, name)
         si
 
+        // A refused property is declared nowhere, so its accessors, which
+        // are declared after it, still have a property to belong to.
+        _refused_property(location: LOCATION, message: string, name: string) -> Symbol is
+            IoC.CONTAINER.instance.logger.error(location, message)
+
+            _refused_properties.add(name)
+
+            return _detach(Symbols.INSTANCE_PROPERTY(location, location, _refuse, name, false, false))
+        si
+
+        // Whether `name` is the accessor or backing field of a refused
+        // property: those go where the property went, with nothing more
+        // reported.
+        _is_part_of_refused_property(name: string) -> bool is
+            for property in _refused_properties do
+                if name =~ "$get_{property}" \/ name =~ "$set_{property}" \/ name =~ "${property}" then
+                    return true
+                fi
+            od
+
+            return false
+        si
+
         declare_function(location: LOCATION, span: LOCATION, name: string, is_static: bool, is_private: bool, has_body: bool, is_property_accessor: bool, enclosing: Scope, symbol_definition_listener: SymbolDefinitionListener?) -> Symbol is
+            if _is_part_of_refused_property(name) then
+                return _refuse.declare_function(location, span, name, is_static, is_private, has_body, is_property_accessor, enclosing, symbol_definition_listener)
+            fi
+
             if name =~ "init" then
                 return _refused(location, "a constructor", name)
             fi
@@ -68,16 +105,54 @@ namespace Semantic is
         declare_async_function(location: LOCATION, span: LOCATION, name: string, is_static: bool, is_private: bool, has_body: bool, enclosing: Scope, symbol_definition_listener: SymbolDefinitionListener?) -> Symbol =>
             _refused(location, "an async function", name)
 
-        declare_variable(location: LOCATION, name: string, is_static: bool, symbol_definition_listener: SymbolDefinitionListener?) -> Symbol =>
-            _refused(location, "a field", name)
+        // A field is refused; it, and the backing field of a refused
+        // property, are declared nowhere, but are still fields, which later
+        // passes find typed.
+        declare_variable(location: LOCATION, name: string, is_static: bool, symbol_definition_listener: SymbolDefinitionListener?) -> Symbol is
+            if !_is_part_of_refused_property(name) then
+                IoC.CONTAINER.instance.logger.error(location, "a field cannot be added to imported type {target.name}")
+            fi
+
+            return _detach(Symbols.INSTANCE_FIELD(location, _refuse, name))
+        si
+
+        _detach(symbol: Symbol) -> Symbol is
+            _detached[symbol.name] = symbol
+
+            return symbol
+        si
+
+        find_direct(name: string) -> Symbol? is
+            let detached: Symbol mut = _
+
+            if _detached.try_get_value(name, detached ref) then
+                return detached
+            fi
+
+            return super.find_direct(name)
+        si
+
+        find_enclosing(name: string) -> Symbol? is
+            let detached: Symbol mut = _
+
+            if _detached.try_get_value(name, detached ref) then
+                return detached
+            fi
+
+            return super.find_enclosing(name)
+        si
 
         declare_property(location: LOCATION, span: LOCATION, name: string, is_static: bool, is_private: bool, is_assignable: bool, symbol_definition_listener: SymbolDefinitionListener?) -> Symbol is
             if is_assignable then
-                return _refused(location, "an assignable property", name)
+                return _refused_property(location, "an assignable property cannot be added to imported type {target.name}", name)
             fi
 
             if is_static then
-                return _refused(location, "a static property", name)
+                return _refused_property(location, "a static property cannot be added to imported type {target.name}", name)
+            fi
+
+            if target.find_direct(name)? then
+                return _refused_property(location, "{name} is already a member of imported type {target.name}", name)
             fi
 
             let result = Symbols.INSTANCE_PROPERTY(location, span, target, name, false, is_private)
@@ -169,7 +244,13 @@ namespace Semantic is
 
         add(owner: Symbols.Classy, name: string, member: Symbol) static is
             _members.add((owner = owner, name = name, member = member))
+
+            is_checked = false
         si
+
+        // Whether the members declared so far have been checked: the check
+        // runs once per build however many files call for it.
+        is_checked: bool static public
 
         // Takes every injected member back out of the imported type it was
         // declared into.
@@ -179,6 +260,8 @@ namespace Semantic is
             od
 
             _members.clear()
+
+            is_checked = false
         si
     si
 si
