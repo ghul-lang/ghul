@@ -7,7 +7,8 @@
 #
 # usage: build/manifest-check.sh
 #
-# Needs ghul (the ghul.cli tool) on the PATH.
+# Uses the ghul.cli release .config/dotnet-tools.json pins, after
+# `dotnet tool restore`.
 
 set -euo pipefail
 
@@ -18,7 +19,9 @@ trap 'rm -rf "$work"' EXIT
 
 cd "$root"
 
-ghul project response-file --output "$work/manifest.rsp" --source-globs "$work/globs.txt"
+echo "checking ghul-project.json with $(dotnet ghul --version | head -n 1)"
+
+dotnet ghul project response-file --output "$work/manifest.rsp" --source-globs "$work/globs.txt"
 
 runtime=$(sed -n 's/^--library-source ghul-runtime@[^=]*=//p' "$work/manifest.rsp")
 
