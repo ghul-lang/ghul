@@ -1,0 +1,78 @@
+namespace Semantic.Symbols is
+    use IR.Values.Value
+
+    use Source.LOCATION
+
+    use Types.Type
+
+    // An instance member a runtime `partial` adds to an imported type (see
+    // REFLECTED_INJECTION_SCOPE). It is reached as an instance method of the
+    // imported type, and emitted as a static of `home`'s globals carrier
+    // that takes the receiver as its first argument, so it is called
+    // without dispatch and can't override or be overridden. A value-type
+    // receiver arrives by value: the member can't change it.
+    class INJECTED_METHOD: INSTANCE_METHOD is
+        _home: NAMESPACE
+
+        // The namespace whose globals carrier emits this member.
+        injection_home: NAMESPACE? => _home
+
+        is_virtual: bool => false
+
+        init(location: LOCATION, span: LOCATION, owner: Scope, name: string, enclosing_scope: Scope, home: NAMESPACE) is
+            super.init(location, span, owner, name, enclosing_scope)
+
+            _home = home
+        si
+
+        // Closures in the body are static: the receiver is an argument of
+        // the member, not an object a closure can be made over.
+        declare_closure(location: LOCATION, name: string, owner: Scope, enclosing: Scope, is_recursive: bool, symbol_definition_listener: SymbolDefinitionListener?) -> Symbol =>
+            declare_closure_symbol(location, Symbols.STATIC_CLOSURE(location, owner, name, enclosing, is_recursive))
+
+        declare_async_closure(location: LOCATION, name: string, owner: Scope, enclosing: Scope, is_recursive: bool, symbol_definition_listener: SymbolDefinitionListener?) -> Symbol =>
+            declare_closure_symbol(location, Symbols.STATIC_ASYNC_CLOSURE(location, owner, name, enclosing, is_recursive))
+
+        declare_generator_closure(location: LOCATION, name: string, owner: Scope, enclosing: Scope, is_recursive: bool, symbol_definition_listener: SymbolDefinitionListener?) -> Symbol =>
+            declare_closure_symbol(location, Symbols.STATIC_GENERATOR_CLOSURE(location, owner, name, enclosing, is_recursive))
+
+        load(location: LOCATION, from: Value?, loader: SYMBOL_LOADER) -> Value => loader.load_instance_method(location, from, self)
+
+        load_self(location: LOCATION, loader: SYMBOL_LOADER) -> Value is
+            let context = IoC.CONTAINER.instance.symbol_table.current_instance_context
+
+            return IR.Values.Load.INJECTED_SELF(context!, context.own_instantiation)
+        si
+
+        call(location: LOCATION, from: Value?, arguments: Value[], type: Type?, caller: FUNCTION_CALLER) -> Value =>
+            caller.call_injected_method(location, from, self, arguments, self.arguments, type)
+
+        try_override(into: Classy, overridee: Function, logger: Logging.Logger) is
+            logger.error(location, "a member added to imported type {into.name} cannot override {overridee}", overridee.location, "declared here")
+        si
+    si
+
+    // An instance member another assembly's runtime `partial` added to an
+    // imported type, as an importer sees it: a member of the imported type
+    // whose call is a call to `target`, the static that implements it,
+    // with the receiver as the static's first argument.
+    class REFLECTED_INJECTED_METHOD: INSTANCE_METHOD is
+        _target: Function
+
+        // The static that implements the member.
+        member_target: Function? => _target
+
+        is_virtual: bool => false
+
+        doc: string? => _target.doc
+
+        init(location: LOCATION, owner: Scope, name: string, target: Function) is
+            super.init(location, location, owner, name, owner)
+
+            _target = target
+        si
+
+        call(location: LOCATION, from: Value?, arguments: Value[], type: Type?, caller: FUNCTION_CALLER) -> Value =>
+            caller.call_injected_target(location, from, _target, arguments, type)
+    si
+si

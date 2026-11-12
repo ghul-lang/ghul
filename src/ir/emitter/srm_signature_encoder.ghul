@@ -382,6 +382,10 @@ namespace IR.Emitter is
             let return_type: ReturnTypeEncoder mut
             let parameters: ParametersEncoder mut
 
+            // A member a runtime `partial` added to an imported type is a
+            // static whose first parameter is the receiver.
+            let receiver = injected_receiver(function)
+
             // A generic method's signature declares its arity, and its
             // own type parameters appear in it as indexes rather than
             // as the arguments some instantiation supplied.
@@ -389,12 +393,16 @@ namespace IR.Emitter is
                 .method_signature(
                     SignatureCallingConvention.DEFAULT,
                     function.generic_arguments.count,
-                    function.is_emitted_with_receiver)
-                .parameters(arguments.count, return_type ref, parameters ref)
+                    function.is_emitted_as_instance_method)
+                .parameters(arguments.count + (if receiver? then 1 else 0 fi), return_type ref, parameters ref)
 
             encode_return(
                 return_type,
                 if prefer_open then function.unspecialized_return_type ?? function.return_type else function.return_type fi)
+
+            if let r = receiver then
+                encode_type(parameters.add_parameter().`type(false), r)
+            fi
 
             for argument in arguments do
                 let referenced = pointee(argument)
@@ -404,6 +412,15 @@ namespace IR.Emitter is
 
             return builder.to_array()
         si
+
+        // The receiver type a member a runtime `partial` added to an imported
+        // type takes as its first parameter, or null for any other function.
+        injected_receiver(function: Semantic.Symbols.Function) -> Semantic.Types.Type? static =>
+            if let owner: Semantic.Symbols.Classy = function.owner /\ function.injection_home? /\ function.is_instance then
+                owner.type
+            else
+                null
+            fi
 
         // What a `T ref` points at, or null when the type is not a
         // reference.

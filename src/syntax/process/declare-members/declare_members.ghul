@@ -281,6 +281,14 @@ namespace Syntax.Process is
             if !target? then
                 _logger.error(block.name.location, cannot_find_message)
                 associate_and_enter_scope(block, _rejecting_scope())
+            elif let home = _injection_home() /\ target.is_reflected /\ isa Definitions.PARTIAL(block) then
+                // The runtime library's own build adds members to an imported
+                // type: they are emitted as statics of the enclosing
+                // namespace's globals carrier, which importers find (see
+                // REFLECTED_INJECTION_SCOPE).
+                _symbol_use_locations.add_symbol_use(block.name.right_location, cast Semantic.Symbols.Symbol(target))
+
+                associate_and_enter_scope(block, Semantic.REFLECTED_INJECTION_SCOPE(target, current_scope, home))
             elif target.is_reflected then
                 // The CLR fixes a compiled type's members and interfaces at
                 // its definition, so only a type declared in this compilation
@@ -302,6 +310,21 @@ namespace Syntax.Process is
 
                 associate_and_enter_scope(block, Semantic.INJECTION_SCOPE(target, current_scope))
             fi
+        si
+
+        // The namespace a `partial` of an imported type emits its members
+        // into: the enclosing `Ghul.Internal`, where importers look for
+        // them, in a build that allows it. Null otherwise.
+        _injection_home() -> Semantic.Symbols.NAMESPACE? is
+            if !IoC.CONTAINER.instance.build_flags.allow_member_injection then
+                return null
+            fi
+
+            if let block = _symbol_table.current_namespace_block, home = block.containing_namespace /\ home.qualified_name =~ ".Ghul.Internal" then
+                return home
+            fi
+
+            return null
         si
 
         // When a block's target cannot be resolved to a same-assembly type,
