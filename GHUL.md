@@ -2164,6 +2164,7 @@ The core types have ghūl names in ghūl namespaces:
 - `System.Exception` is `Ghul.Exception`. The common exceptions in `System` are also in `Ghul`: `Ghul.InvalidOperationException`, `Ghul.NotImplementedException`, `Ghul.ArgumentException` and the others.
 - `System.Text.StringBuilder` is `Text.STRING_BUILDER`.
 - `System.Random` is `Ghul.RANDOM`.
+- `System.Type` is `Ghul.Type`.
 - `System.StringSplitOptions` and `System.StringComparison` are `Ghul.StringSplitOptions` and `Ghul.StringComparison`.
 - `System.Lazy<T>` is `Ghul.LAZY[T]`.
 - `System.FlagsAttribute` is `Ghul.FlagsAttribute`.
