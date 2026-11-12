@@ -30,12 +30,19 @@ namespace Semantic is
                 if let function: Function = member then
                     if let group: FUNCTION_GROUP = existing then
                         for other in group.functions do
-                            if other != function /\ !other.injection_home? /\ _has_same_parameters(other, function) then
-                                if other.is_virtual /\ !(cast Symbols.Method?(other)?.cannot_be_overridden ?? false) then
-                                    logger.error(function.location, "a member added to imported type {owner.name} cannot override {other}")
-                                else
-                                    logger.error(function.location, "{function.name} is already a member of imported type {owner.name}")
+                            if other == function \/ !_has_same_parameters(other, function) then
+                                continue
+                            fi
+
+                            if other.injection_home? then
+                                // Reported at the later of the two.
+                                if _is_declared_before(other, function) then
+                                    logger.error(function.location, "{function.name} is added to imported type {owner.name} more than once", other.location, "also added here")
                                 fi
+                            elif other.is_virtual /\ !(cast Symbols.Method?(other)?.cannot_be_overridden ?? false) then
+                                logger.error(function.location, "a member added to imported type {owner.name} cannot override {other}")
+                            else
+                                logger.error(function.location, "{function.name} is already a member of imported type {owner.name}")
                             fi
                         od
                     elif existing? /\ existing != member then
@@ -45,6 +52,18 @@ namespace Semantic is
                     logger.error(member.location, "{member.name} is already a member of imported type {owner.name}")
                 fi
             od
+        si
+
+        _is_declared_before(first: Symbols.Symbol, second: Symbols.Symbol) -> bool static is
+            for member in INJECTED_MEMBERS.all do
+                if member == first then
+                    return true
+                elif member == second then
+                    return false
+                fi
+            od
+
+            return false
         si
 
         _has_same_parameters(left: Function, right: Function) -> bool static is

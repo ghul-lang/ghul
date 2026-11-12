@@ -1,0 +1,112 @@
+namespace Analysis.Tests is
+    use Collections.LIST
+
+    use Analysis.Protocol.ANALYSER_PROCESS
+    use Analysis.Protocol.Response
+
+    use Ghul
+    use Ghul.Pipes
+
+    use TestClass = Microsoft.VisualStudio.TestTools.UnitTesting.TestClassAttribute
+    use Test = Microsoft.VisualStudio.TestTools.UnitTesting.TestMethodAttribute
+    use Assertions
+
+    // A member a runtime-library build adds to an imported type answers
+    // hover like any member, and the imported type, which outlives a
+    // rebuild, holds it once however many rebuilds declare it again.
+    @TestClass()
+    class INJECTED_MEMBERS_TESTS is
+        init() is si
+
+        fixture() -> string => fixture_path("injected-members/injected.ghul")
+
+        //  4         shout() -> string => "{self}!"
+        // 10         let x = "hi".shout()      (11 with one extra line)
+        source(extra: string) -> string =>
+            "namespace Ghul.Internal is\n"
+            "    partial string is\n"
+            "        /// The text with an exclamation mark after it.\n"
+            "        shout() -> string => \"\{self\}!\"\n"
+            "{extra}"
+            "    si\n"
+            "si\n"
+            "\n"
+            "namespace Main is\n"
+            "    entry() is\n"
+            "        let x = \"hi\".shout()\n"
+            "    si\n"
+            "si\n"
+
+        start() -> ANALYSER_PROCESS => ANALYSER_PROCESS(["--allow-member-injection", fixture()])
+
+        errors(response: Response) -> LIST[string] is
+            let result = LIST[string]()
+
+            if let diagnostics: Response.DIAGNOSTICS = response then
+                for d in diagnostics.diagnostics do
+                    if d.severity == 1 then
+                        result.add(d.message)
+                    fi
+                od
+            fi
+
+            return result
+        si
+
+        hover(analyser: ANALYSER_PROCESS, line: int) -> Response.HOVER? is
+            analyser.send_hover(fixture(), line, 23)
+
+            do
+                let response = analyser.read_response()
+
+                if let hover: Response.HOVER = response then
+                    return hover
+                elif !isa Response.DIAGNOSTICS(response) then
+                    return null
+                fi
+            od
+        si
+
+        @Test()
+        a_member_added_to_an_imported_type_hovers_with_its_doc_comment() is
+            let use analyser = start()
+
+            analyser.send_edit(fixture(), source(""))
+            let edit = analyser.read_response()
+            assert isa Response.DIAGNOSTICS(edit) else "expected DIAGNOSTICS after EDIT"
+
+            is_true(errors(edit).count == 0, "expected no errors, got: {errors(edit) |> string("; ")}")
+
+            let hover = hover(analyser, 10)
+
+            is_true(hover?, "expected a hover")
+            is_true(hover!.signature.contains("shout"), "expected the member's signature, got: {hover!.signature}")
+            is_true(hover!.doc?.contains("exclamation mark") ?? false, "expected the doc comment, got: {hover!.doc}")
+        si
+
+        @Test()
+        an_edit_that_rebuilds_declares_each_added_member_once() is
+            let use analyser = start()
+
+            analyser.send_edit(fixture(), source(""))
+            analyser.read_response()
+
+            // A new member is an interface change: the edit rebuilds, and
+            // declares shout into string again.
+            analyser.send_edit(fixture(), source("        whisper() -> string => self.to_lower()\n"))
+            let rebuilt = analyser.read_response()
+            assert isa Response.DIAGNOSTICS(rebuilt) else "expected DIAGNOSTICS after the second EDIT"
+
+            is_true(errors(rebuilt).count == 0, "expected no errors after the rebuild, got: {errors(rebuilt) |> string("; ")}")
+
+            analyser.send_compile()
+            let compiled = analyser.read_response()
+
+            is_true(errors(compiled).count == 0, "expected no errors after a compile, got: {errors(compiled) |> string("; ")}")
+
+            let hover = hover(analyser, 11)
+
+            is_true(hover? /\ hover!.signature.contains("shout"), "expected the member's hover after the rebuild")
+        si
+    si
+si
