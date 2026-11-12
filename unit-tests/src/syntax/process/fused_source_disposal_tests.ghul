@@ -1,0 +1,65 @@
+namespace Syntax.Process.UnitTests is
+    use Collections.LIST
+
+    use Source.LOCATION
+
+    use Semantic.Symbols.CLASS
+    use Semantic.Types.Type
+
+    use Syntax.Process.FUSED_SOURCE_DISPOSAL
+
+    use TestClass = Microsoft.VisualStudio.TestTools.UnitTesting.TestClassAttribute
+    use Test = Microsoft.VisualStudio.TestTools.UnitTesting.TestMethodAttribute
+    use Assertions
+
+    // Pins which sources a fused consumer leaves undisposed: only those
+    // whose iterator is known to hold nothing.
+    @TestClass()
+    class FUSED_SOURCE_DISPOSAL_TESTS is
+        init() is si
+
+        loc() -> LOCATION => LOCATION("test.ghul", 1, 1, 1, 1)
+
+        class_type(name: string) -> Type =>
+            CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), name, LIST[string](), Semantic.BLOCK_SCOPE()).type!
+
+        ranges() -> (exclusive: Type, inclusive: Type) =>
+            (exclusive = class_type("INT_RANGE"), inclusive = class_type("INT_RANGE_INCLUSIVE"))
+
+        @Test()
+        needs_dispose__an_array__is_false() is
+            let array =
+                Semantic.Types.ARRAY(
+                    loc(),
+                    CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Array", LIST[string](["T"]), Semantic.BLOCK_SCOPE()),
+                    [class_type("int")]
+                )
+
+            is_false(FUSED_SOURCE_DISPOSAL.needs_dispose(array, ranges()))
+        si
+
+        @Test()
+        needs_dispose__either_int_range__is_false() is
+            let known = ranges()
+
+            is_false(FUSED_SOURCE_DISPOSAL.needs_dispose(known.exclusive, known))
+            is_false(FUSED_SOURCE_DISPOSAL.needs_dispose(known.inclusive, known))
+        si
+
+        @Test()
+        needs_dispose__any_other_source__is_true() is
+            is_true(FUSED_SOURCE_DISPOSAL.needs_dispose(class_type("LOGGED"), ranges()))
+        si
+
+        @Test()
+        needs_dispose__a_range_while_the_ranges_are_unknown__is_true() is
+            is_true(FUSED_SOURCE_DISPOSAL.needs_dispose(class_type("INT_RANGE"), null))
+        si
+
+        @Test()
+        needs_dispose__a_class_named_like_a_range__is_true() is
+            // The ranges are told apart by symbol, never by name.
+            is_true(FUSED_SOURCE_DISPOSAL.needs_dispose(class_type("INT_RANGE"), ranges()))
+        si
+    si
+si

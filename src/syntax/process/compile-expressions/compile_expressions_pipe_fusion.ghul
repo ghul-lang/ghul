@@ -528,9 +528,14 @@ namespace Syntax.Process is
 
             fusion.source_move_next = move_next
             fusion.source_read_current = read_current
+            fusion.source_dispose = _iterator_dispose(iterator_type)
 
             return true
         si
+
+        // The iterator's own `dispose()`, pinned by its signature.
+        _iterator_dispose(iterator_type: Type) -> Semantic.Symbols.Function? =>
+            Semantic.KNOWN_MEMBERS.find(iterator_type, "dispose", Semantic.KNOWN_SIGNATURE(Collections.LIST[Type?](), true))
 
         // Determine whether `call` is a terminal Pipe consumer: a
         // `Ghul.Pipes` free-function call, reached via |> thread-first
@@ -650,6 +655,13 @@ namespace Syntax.Process is
             let move_next = plan.source_move_next!.call(plan.source.location, iterator_load, Collections.LIST[IR.Values.Value](0), null, _function_caller)
             let read_current = plan.source_read_current!.call(plan.source.location, iterator_load, Collections.LIST[IR.Values.Value](0), null, _function_caller)
 
+            let dispose =
+                if let source_dispose = plan.source_dispose /\ FUSED_SOURCE_DISPOSAL.needs_dispose(plan.source.value!.type!, _innate_symbol_lookup.get_int_range_types()) then
+                    source_dispose.call(plan.source.location, iterator_load, Collections.LIST[IR.Values.Value](0), null, _function_caller)
+                else
+                    null
+                fi
+
             let element_type = plan.source_read_current!.return_type!
 
             let element = IR.LOCAL(".fc_element.{id}", element_type)
@@ -671,6 +683,8 @@ namespace Syntax.Process is
                 consumer_kind,
                 result
             )
+
+            fused.dispose = dispose
 
             let final_element_load = built.final.load()
 
@@ -1017,6 +1031,7 @@ namespace Syntax.Process is
 
             iteration.move_next = fused.move_next
             iteration.current = fused.read_current
+            iteration.dispose = fused.dispose
 
             fused.iterator.iteration = iteration
         si
@@ -1843,6 +1858,7 @@ namespace Syntax.Process is
 
                 fusion.source_move_next = move_next
                 fusion.source_read_current = read_current
+                fusion.source_dispose = _iterator_dispose(type)
 
                 return true
             elif !recursing then

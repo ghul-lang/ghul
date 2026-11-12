@@ -76,6 +76,10 @@ namespace IR.LLVMTarget is
                 _counted_loops[iteration.get_iterator] = loop
                 _counted_loops[move_next] = loop
                 _counted_loops[current] = loop
+
+                if let dispose = iteration.dispose then
+                    _counted_loops[dispose] = loop
+                fi
             fi
         si
 
@@ -90,6 +94,8 @@ namespace IR.LLVMTarget is
                 return _start_counted(loop, value)
             elif !loop.is_active then
                 return false
+            elif value == loop.iteration.dispose then
+                _counted_dispose(loop, value)
             elif value == loop.iteration.move_next then
                 _counted_step(loop, value, true)
             else
@@ -504,6 +510,24 @@ namespace IR.LLVMTarget is
                 _push(_current.load(held, result, 0))
             else
                 _push(_counted_value(loop, value, is_move))
+            fi
+        si
+
+        // A loop that walked the storage made no iterator, so there is
+        // nothing to dispose; one that fell back to the iterator at run time
+        // disposes it as the loop would have.
+        _counted_dispose(loop: COUNTED_LOOP, value: Value) is
+            if let flag = loop.flag /\ !loop.is_counted_copy then
+                let counted = _new_block()
+                let other = _new_block()
+
+                _current.branch(_current.load(Types.i1, flag, 0), counted, other)
+
+                _start(other)
+                value.accept(self)
+                _current.branch(counted)
+
+                _start(counted)
             fi
         si
 
