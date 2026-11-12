@@ -18,7 +18,7 @@ namespace Semantic is
         // slot that is neither a reference type nor a value-type
         // optional, a body that is not a value type, or a body that does
         // not implement what the slot returns.
-        of(slot: Type?, produced: Type?) -> Type? static is
+        of(slot: Type?, produced: Type?, innate_symbol_lookup: Lookups.InnateSymbolLookup) -> Type? static is
             if !slot? \/ !produced? then
                 return null
             fi
@@ -32,11 +32,29 @@ namespace Semantic is
             fi
 
             if slot.is_value_type then
-                if
-                    let inner = slot.optional_inner_type /\
-                    !produced.is_optional /\
-                    inner.is_equivalent_to(produced)
-                then
+                let inner = slot.optional_inner_type
+
+                if !inner? \/ produced.is_optional then
+                    return null
+                fi
+
+                // An inner type still holding a placeholder, or naming one
+                // of the callee's own type variables, is the slot's shape
+                // with the arguments the call left open, and compares as
+                // equivalent to anything: pinned there, the literal would
+                // return the unbound slot. Those arguments follow from the
+                // body, so the return is the optional of what the body
+                // produced, as a reference slot's is the body's own
+                // ancestor of that slot's type.
+                if !inner.is_settled \/ inner.is_wild then
+                    if inner.compare(produced) == Types.MATCH.DIFFERENT then
+                        return null
+                    fi
+
+                    return innate_symbol_lookup.get_optional_type(produced)
+                fi
+
+                if inner.is_equivalent_to(produced) then
                     return slot
                 fi
 
