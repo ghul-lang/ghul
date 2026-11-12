@@ -77,6 +77,11 @@ const TERMINAL_STREAMS = ["stdin", "stdout", "stderr"];
 //   terminal when run by Node and the process's own stream is one, and is not
 //   a terminal anywhere else: a page has no terminal, so an embedder whose
 //   input box and output pane stand in for one says so here
+// - options.stdout_buffer: how many characters of standard output to hold
+//   before passing them to options.stdout in one piece; what is held is
+//   passed on before a read from standard input, a write to standard error,
+//   a process start or a flush, and when the program ends. By default, 0,
+//   each piece is passed on as it is written
 //
 // Answers the program's exit status.
 export async function run(options = {}) {
