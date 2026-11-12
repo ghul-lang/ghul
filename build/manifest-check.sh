@@ -2,8 +2,9 @@
 # Checks that ghul-project.json still loads and describes the compiler as
 # its native build compiles it: ghul reads the manifest and writes its
 # response file, the manifest's source globs select exactly the files
-# build/llvm-self-sources.sh lists, and the options carry the underscore
-# access the native build passes.
+# build/llvm-self-sources.sh lists, and the options that change what is built
+# are the ones build/llvm-build-pass.sh passes. build/llvm-build-pass.sh is
+# what CI builds with; the manifest follows it.
 #
 # usage: build/manifest-check.sh
 #
@@ -30,8 +31,27 @@ if [ -z "$runtime" ]; then
     exit 1
 fi
 
-if ! grep -qx -- '--underscore-access legacy' "$work/manifest.rsp"; then
-    echo "ghul-project.json: the options do not set --underscore-access legacy, as build/llvm-build-pass.sh does" >&2
+# The options that change what is built, one a line with its value: from
+# the native build's command line, less its outputs, and from the response
+# file, less what changes only what is reported.
+build_line=$(grep -m 1 -- '--target llvm' "$root/build/llvm-build-pass.sh")
+
+for word in $build_line; do
+    echo "$word"
+done | awk '
+    /^--/ { if (option != "") print option; option = $0; next }
+    option != "" && $0 !~ /^[@"]/ { print option " " $0; option = ""; next }
+    { if (option != "") print option; option = "" }
+    END { if (option != "") print option }
+' | grep -v -e '^--llvm-output' -e '^-o' | sort > "$work/build-options.txt"
+
+grep -e '^--target' -e '^--rtti' -e '^--llvm-parallel-gc' -e '^--underscore-access' -e '^--global-namespace' -e '^--define' -e '^--default-use' \
+    "$work/manifest.rsp" | sort > "$work/manifest-options.txt"
+
+if ! diff -u --label 'build/llvm-build-pass.sh' --label "ghul-project.json, through $(dotnet ghul --version | head -n 1)" "$work/build-options.txt" "$work/manifest-options.txt"; then
+    echo "ghul-project.json: the options that change what is built differ from the native build's." >&2
+    echo "A '-' line is passed by build/llvm-build-pass.sh and not by the manifest, a '+' line the other way." >&2
+    echo "Where neither file changed, the ghul.cli the tool manifest pins writes the manifest differently." >&2
     exit 1
 fi
 
