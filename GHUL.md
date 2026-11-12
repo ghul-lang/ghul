@@ -1925,6 +1925,8 @@ A collection is built from a sequence by its constructor, which takes the sequen
 
 `++` joins two sequences, as `cat` does: `[1, 2] ++ [3] ++ [4, 5]` is the elements 1 to 5 in order. It reads each operand lazily and has the same precedence as `+`. Both operands are sequences, so a single element goes in an array literal: `[x] ++ xs`.
 
+`|`, `&` and `--` are the set operators over two sequences: `xs | ys` is their union, `xs & ys` their intersection, and `xs -- ys` the elements of `xs` not in `ys`. Each gives every element once, in the order the elements first appear, left operand first, and reads its operands lazily. `intersect` and `except` are the function forms. On integers, `bigint` and flags enums, `|` and `&` keep their bitwise meaning. `|` and `&` share one precedence level, tighter than a range's, so `(1::3) | (2::5)` needs its parentheses and `xs & ys | zs` is `(xs & ys) | zs`; `--` has the precedence of `++`.
+
 ```ghul
 let numbers = [1, 2, 3, 4, 5];
 let evens = numbers |> filter(x => x % 2 == 0);
