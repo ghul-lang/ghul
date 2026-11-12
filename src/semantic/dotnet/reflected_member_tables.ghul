@@ -1,0 +1,96 @@
+@@IF.dotnet()
+
+namespace Semantic.DotNet is
+    use Collections.MAP
+
+    // The ghūl name a reflected member is surfaced under instead of its
+    // de-camelled one, and whether the de-camelled name stays reachable
+    // as a second name.
+    class REFLECTED_MEMBER_RENAME(name: string public, keeps_old_name: bool public)
+
+    // Two compiler tables over reflected members, keyed on the declaring
+    // type's metadata name (a generic type by its definition, as
+    // `System.Collections.Generic.List`1`) and the member's metadata name.
+    // A key names every overload of the member at once, so a rename or a
+    // deprecation applies to the whole group, never to one overload.
+    //
+    // - renames: a member reached under a better ghūl name, the old one
+    //   optionally kept beside it while callers move;
+    // - deprecations: a member that warns `[deprecated]` at each use,
+    //   naming what to write instead.
+    class REFLECTED_MEMBER_TABLES is
+        _renames: MAP[(string, string), REFLECTED_MEMBER_RENAME] static
+        _deprecations: MAP[(string, string), string] static
+
+        init() static is
+            _renames = MAP[(string, string), REFLECTED_MEMBER_RENAME]()
+
+            _renames[("System.Double", "IsNaN")] = REFLECTED_MEMBER_RENAME("is_nan", true)
+            _renames[("System.Single", "IsNaN")] = REFLECTED_MEMBER_RENAME("is_nan", true)
+            _renames[("System.String", "Length")] = REFLECTED_MEMBER_RENAME("count", true)
+
+            _deprecations = MAP[(string, string), string]()
+
+            let list = "System.Collections.Generic.List`1"
+
+            _deprecations[(list, "Find")] = "use '|>' find, which returns an optional rather than a default value on a miss"
+            _deprecations[(list, "Exists")] = "use '|>' any"
+            _deprecations[(list, "TrueForAll")] = "use '|>' all"
+            _deprecations[(list, "ForEach")] = "use '|>' each"
+            _deprecations[(list, "ConvertAll")] = "use '|>' map"
+        si
+
+        // The rename for a member, or null where it keeps its de-camelled
+        // name.
+        //
+        // - declaring_type: the type that declares the member
+        // - member_name: the member's metadata name
+        rename_for(declaring_type: System.Type?, member_name: string) -> REFLECTED_MEMBER_RENAME? static is
+            if let key = _key(declaring_type, member_name) then
+                let found: REFLECTED_MEMBER_RENAME mut = _
+
+                if _renames.try_get_value(key, found ref) then
+                    return found
+                fi
+            fi
+
+            return null
+        si
+
+        // The deprecation the table gives a member, or null where it gives
+        // none.
+        //
+        // - declaring_type: the type that declares the member
+        // - member_name: the member's metadata name
+        deprecation_for(declaring_type: System.Type?, member_name: string) -> Semantic.DEPRECATION? static is
+            if let key = _key(declaring_type, member_name) then
+                let found: string mut = _
+
+                if _deprecations.try_get_value(key, found ref) then
+                    return Semantic.DEPRECATION(found, false)
+                fi
+            fi
+
+            return null
+        si
+
+        _key(declaring_type: System.Type?, member_name: string) -> (string, string)? static is
+            if !declaring_type? then
+                return null
+            fi
+
+            let definition =
+                if declaring_type.is_generic_type /\ !declaring_type.is_generic_type_definition then
+                    declaring_type.get_generic_type_definition()
+                else
+                    declaring_type
+                fi
+
+            if let name = definition.full_name then
+                return (name, member_name)
+            fi
+
+            return null
+        si
+    si
+si
