@@ -955,9 +955,21 @@ namespace Semantic.DotNet is
             fi
 
             let result: Symbols.Property mut
-            let name =
+            let name mut =
                 _ghul_name_override(property) ??
                 _type_name_map.get_member_name(owner.qualified_name, property.name, false, property.is_special_name, property.declaring_type ?? type)
+
+            // As for a method: the rename table's name, and the
+            // de-camelled one beside it where the table keeps that.
+            let alias_name: string? mut = null
+
+            if let rename = REFLECTED_MEMBER_TABLES.rename_for(property.declaring_type ?? type, property.name) /\ !_ghul_name_override(property)? then
+                if rename.keeps_old_name then
+                    alias_name = name
+                fi
+
+                name = rename.name
+            fi
 
             let getter = property.get_method
             let setter = property.set_method
@@ -1001,7 +1013,9 @@ namespace Semantic.DotNet is
             result.il_name_override = property.name
 
             result.set_doc(_doc_attribute(property.get_custom_attributes_data()))
-            result.set_deprecation(_obsolete_attribute(property.get_custom_attributes_data()))
+            result.set_deprecation(
+                _obsolete_attribute(property.get_custom_attributes_data()) ??
+                REFLECTED_MEMBER_TABLES.deprecation_for(property.declaring_type ?? type, property.name))
 
             // Not CompilerGeneratedAttribute here: the C# compiler puts it
             // on a record's public surface too (EqualityContract is
@@ -1018,6 +1032,30 @@ namespace Semantic.DotNet is
             owner.add_member(result)
 
             let property_details = PROPERTY_DETAILS(result, property.get_get_method(), property.get_set_method())
+
+            // The second name is a second property over the same
+            // accessors, bound to them where the first one is.
+            if let alias = alias_name then
+                let second: Symbols.Property =
+                    if is_static then
+                        if let globals_namespace = _globals_owner_namespace(owner) then
+                            Symbols.GLOBAL_PROPERTY(Source.LOCATION.reflected, Source.LOCATION.reflected, globals_namespace, alias, setter?)
+                        else
+                            Symbols.STATIC_PROPERTY(Source.LOCATION.reflected, Source.LOCATION.reflected, owner, alias, setter?, false)
+                        fi
+                    else
+                        Symbols.INSTANCE_PROPERTY(Source.LOCATION.reflected, Source.LOCATION.reflected, owner, alias, setter?, false)
+                    fi
+
+                second.set_type(result.type!)
+                second.il_name_override = property.name
+                second.set_doc(result.doc)
+                second.set_deprecation(result.deprecation)
+
+                owner.add_member(second)
+
+                property_details.alias_property = second
+            fi
 
             if getter? then
                 properties[getter] = property_details
@@ -1143,6 +1181,17 @@ namespace Semantic.DotNet is
                 name = _generic_math_operator_name(method.name)!
             else
                 name = _plain_member_name(owner, type, indexers, method)
+
+                // A member the rename table gives a better name is
+                // declared under it, and under its de-camelled name too
+                // where the table keeps that while callers move.
+                if let rename = REFLECTED_MEMBER_TABLES.rename_for(method.declaring_type ?? type, method.name) /\ !_ghul_name_override(method)? then
+                    if rename.keeps_old_name then
+                        alias_name = name
+                    fi
+
+                    name = rename.name
+                fi
 
                 // A .NET special name - an operator, an event accessor -
                 // is reached through its dedicated syntax, never under
@@ -1312,7 +1361,9 @@ namespace Semantic.DotNet is
             fi
 
             result.set_doc(_doc_attribute(method.get_custom_attributes_data()))
-            result.set_deprecation(_obsolete_attribute(method.get_custom_attributes_data()))
+            result.set_deprecation(
+                _obsolete_attribute(method.get_custom_attributes_data()) ??
+                REFLECTED_MEMBER_TABLES.deprecation_for(method.declaring_type ?? type, method.name))
 
             let argument_names = LIST()
             let argument_types = LIST()
@@ -1433,13 +1484,15 @@ namespace Semantic.DotNet is
             if property_details? then
                 let accessor_method_name = method.name
 
-                if method.equals(property_details.dotnet_get_method) then
-                    property_details.ghul_property.read_function = result
-                    property_details.ghul_property.read_function_il_name_override = method.name
-                elif method.equals(property_details.dotnet_set_method) then
-                    property_details.ghul_property.assign_function = result
-                    property_details.ghul_property.assign_function_il_name_override = method.name
-                fi
+                for bound in property_details.properties do
+                    if method.equals(property_details.dotnet_get_method) then
+                        bound.read_function = result
+                        bound.read_function_il_name_override = method.name
+                    elif method.equals(property_details.dotnet_set_method) then
+                        bound.assign_function = result
+                        bound.assign_function_il_name_override = method.name
+                    fi
+                od
             fi
 
             methods.add((result, method))
