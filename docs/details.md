@@ -456,6 +456,7 @@ Code that references the assembly then sees `is_vowel` and `twice` as members of
 - The member is not virtual. It cannot override a member of the type, and nothing can override it.
 - A value-type receiver is passed by value, so the member cannot change it.
 - A member with the same name and parameter types as one the type already has is an error, and so is the same member added by two blocks.
+- The compiler names a few of an imported type's own members that a member added under the same name replaces: on `char`, the static classification predicates, such as `is_digit` and `is_white_space`, and `to_upper` and `to_lower`. Where the replacement is added, the type's own member is not imported, so `char.is_digit(c)` is not found and `c.is_digit` is.
 - A generic imported type is refused as not supported.
 
 Without the flag, or outside `Ghul.Internal`, a `partial` block naming an imported type is an error.
