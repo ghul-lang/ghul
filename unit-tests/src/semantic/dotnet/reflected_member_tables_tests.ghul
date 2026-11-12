@@ -3,6 +3,8 @@
 namespace Semantic.DotNet.UnitTests is
     use Microsoft.VisualStudio.TestTools.UnitTesting.Assert
 
+    use Ghul.Pipes
+
     use Semantic.DotNet.REFLECTED_MEMBER_TABLES
 
     use TestClass = Microsoft.VisualStudio.TestTools.UnitTesting.TestClassAttribute
@@ -56,6 +58,52 @@ namespace Semantic.DotNet.UnitTests is
         @Test()
         Calling__deprecation_for__no_declaring_type__returns_null() is
             is_null(REFLECTED_MEMBER_TABLES.deprecation_for(null, "Find"))
+        si
+
+        @Test()
+        Calling__replacement_for__char_IsDigit__gives_is_digit() is
+            let replacement = REFLECTED_MEMBER_TABLES.replacement_for(typeof char, "IsDigit")
+
+            is_true(replacement?)
+            is_true(replacement! =~ "is_digit")
+        si
+
+        @Test()
+        Calling__replacement_for__a_member_with_no_entry__returns_null() is
+            is_null(REFLECTED_MEMBER_TABLES.replacement_for(typeof char, "IsBetween"))
+        si
+
+        // A hide entry can only take effect where its member exists, its
+        // type is one members can be added to, and nothing else the type
+        // imports already has the replacement's name.
+        @Test()
+        Every_hide_entry__names_a_member_that_exists_and_a_replacement_that_can_be_added() is
+            let entries = Collections.LIST(REFLECTED_MEMBER_TABLES.hides)
+
+            is_true(entries.count > 0)
+
+            for entry in entries do
+                let type = System.Type.get_type(entry.type_name)
+
+                is_true(type?, "{entry.type_name} is a type")
+                is_false(type!.is_generic_type_definition, "{entry.type_name} is not generic")
+
+                let members = type!.get_members()
+
+                is_true(members |> any(m => m.name =~ entry.member_name), "{entry.type_name}.{entry.member_name} exists")
+
+                for member in members do
+                    if member.name =~ entry.member_name then
+                        continue
+                    fi
+
+                    let hidden_too = entries |> any(e => e.type_name =~ entry.type_name /\ e.member_name =~ member.name)
+
+                    is_false(
+                        !hidden_too /\ Semantic.DotNet.TYPE_NAME_MAP.de_camel(member.name) =~ entry.replacement,
+                        "{entry.type_name}.{member.name} already has the name {entry.replacement}")
+                od
+            od
         si
     si
 si

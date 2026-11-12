@@ -90,6 +90,8 @@ namespace Semantic is
                 return _refused(location, "a static member", name)
             fi
 
+            HIDEABLE_MEMBERS.hide_replaced_by(target, name)
+
             let result = Symbols.INJECTED_METHOD(location, span, target, name, enclosing, _home)
 
             target.declare_function_group(location, result, symbol_definition_listener)
@@ -150,6 +152,8 @@ namespace Semantic is
             if is_static then
                 return _refused_property(location, "a static property cannot be added to imported type {target.name}", name)
             fi
+
+            HIDEABLE_MEMBERS.hide_replaced_by(target, name)
 
             if target.find_direct(name)? then
                 return _refused_property(location, "{name} is already a member of imported type {target.name}", name)
@@ -259,9 +263,57 @@ namespace Semantic is
                 m.owner.remove_injected(m.name, m.member)
             od
 
+            HIDEABLE_MEMBERS.restore()
+
             _members.clear()
 
             is_checked = false
+        si
+    si
+
+    // Reflected members a table hides where the runtime adds a
+    // replacement for them. A replacement in a referenced assembly hides
+    // the member as it is imported; one declared in this compilation
+    // finds the member already imported, so it is taken out here as the
+    // replacement is declared, and put back when the injected members are.
+    class HIDEABLE_MEMBERS is
+        _members: Collections.LIST[(owner: Symbols.Scoped, name: string, replacement: string, function: Symbols.Function)] static
+        _hidden: Collections.LIST[(owner: Symbols.Scoped, name: string, replacement: string, function: Symbols.Function)] static
+
+        init() static is
+            _members = Collections.LIST[(owner: Symbols.Scoped, name: string, replacement: string, function: Symbols.Function)]()
+            _hidden = Collections.LIST[(owner: Symbols.Scoped, name: string, replacement: string, function: Symbols.Function)]()
+        si
+
+        // Records an imported member that a member named `replacement`,
+        // added to the same type, hides.
+        //
+        // - owner: the imported type
+        // - name: the member's ghūl name
+        // - replacement: the name of the member that replaces it
+        // - function: the member
+        add(owner: Symbols.Scoped, name: string, replacement: string, function: Symbols.Function) static is
+            _members.add((owner = owner, name = name, replacement = replacement, function = function))
+        si
+
+        // Takes out of `owner` every member that a member named
+        // `replacement` hides.
+        hide_replaced_by(owner: Symbols.Scoped, replacement: string) static is
+            for m in _members do
+                if m.owner == owner /\ m.replacement =~ replacement /\ !_hidden.contains(m) then
+                    owner.remove_injected(m.name, m.function)
+                    _hidden.add(m)
+                fi
+            od
+        si
+
+        // Puts every hidden member back.
+        restore() static is
+            for h in _hidden do
+                h.owner.add_member(h.function)
+            od
+
+            _hidden.clear()
         si
     si
 si
