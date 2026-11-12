@@ -3,44 +3,53 @@ namespace Syntax.Process is
 
     use Logging
 
-    // Reports a sequence that holds a resource being read in a way that
-    // can stop before it ends, with nothing holding it to dispose. A
-    // read to the end lets the sequence close itself, so only a read
-    // that can stop early is reported: an early-exit `Ghul.Pipes`
-    // function (first, find, any, take, ...), or a `for` loop whose body
-    // can leave it. The call producing the sequence has to be written
-    // directly as that read's source, or reached from it through other
-    // `Ghul.Pipes` stages; a result held by a `let use`, or anywhere
-    // else first, is not seen.
+    // Reports a sequence that holds a resource being read by a `for` loop
+    // whose body can leave it, with nothing holding it to dispose. A read
+    // to the end lets the sequence close itself, and a `Ghul.Pipes`
+    // terminal disposes what it reads however it finishes, so only the
+    // loop is reported. The call producing the sequence has to be written
+    // directly as the loop's source, or reached from it through
+    // `Ghul.Pipes` stages; a result held by a `let use`, or anywhere else
+    // first, is not seen.
     class UNDISPOSED_SOURCE_CHECK(
         _logger: Logger,
         _innate_symbol_lookup: Semantic.Lookups.InnateSymbolLookup
     ) is
-        check_call(call: Trees.Expressions.CALL, value: Value?) is
-            if
-                let pipes_call: IR.Values.Call.GLOBAL = value /\
-                _innate_symbol_lookup.stops_early(pipes_call.function) /\
-                call.arguments.count > 0
-            then
-                _check_source(call.arguments.expressions[0])
-            fi
-        si
-
         check_loop(source: Trees.Expressions.Expression, loop: Trees.Statements.Statement, body: Trees.Statements.LIST) is
             let finder = LOOP_EXIT_FINDER(loop)
 
             body.walk(finder)
 
-            if finder.found then
+            if finder.found \/ _stops_early(source) then
                 _check_source(source)
             fi
+        si
+
+        // Whether a `Ghul.Pipes` stage between `expression` and the
+        // sequence at the bottom of it ends the read early.
+        _stops_early(expression: Trees.Expressions.Expression) -> bool is
+            let source mut = expression
+
+            while
+                let
+                    call: Trees.Expressions.CALL = source /\ call.arguments.count > 0,
+                    stage: IR.Values.Call.GLOBAL = call.value /\ _innate_symbol_lookup.is_pipes_function(stage.function)
+            do
+                if _innate_symbol_lookup.stops_early(stage.function) then
+                    return true
+                fi
+
+                source = call.arguments.expressions[0]
+            od
+
+            return false
         si
 
         // Follows `expression` down through the `Ghul.Pipes` stages built on
         // it to the call at the bottom. The walk stops without reporting at
         // a stage that reads all of its source, which lets the source close
-        // itself, and at an early-exit stage, which is reported where it is
-        // called.
+        // itself. An early-exit stage such as `take` is followed through:
+        // the loop disposes nothing, so the source is left open.
         _check_source(expression: Trees.Expressions.Expression) is
             let source mut = expression
 
@@ -49,10 +58,7 @@ namespace Syntax.Process is
                     call: Trees.Expressions.CALL = source /\ call.arguments.count > 0,
                     stage: IR.Values.Call.GLOBAL = call.value /\ _innate_symbol_lookup.is_pipes_function(stage.function)
             do
-                if
-                    _innate_symbol_lookup.stops_early(stage.function) \/
-                    _innate_symbol_lookup.reads_whole_source(stage.function)
-                then
+                if _innate_symbol_lookup.reads_whole_source(stage.function) then
                     return
                 fi
 

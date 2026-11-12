@@ -507,13 +507,13 @@ A built-in operator that mentions a type parameter of the enclosing function is 
 
 ## collections and pipes
 
-GHUL.md describes how to dispose a sequence that holds a resource, by taking its iterator with `use`. `cursor` builds a pipe over the held iterator. `cursor` reads the iterator it is given, and does not ask the source for a new one. So an early-exit terminal on the pipe leaves the disposal to `use`:
+GHUL.md describes how to dispose a sequence that holds a resource, by taking its iterator with `use`. A terminal disposes the iterator it reads, and a stage passes that on to its source, so `File.read_lines(path) |> first()` closes the file, fused or not. What a terminal doesn't cover is an exception that ends the read, and a `for` loop, which disposes nothing. `cursor` builds a pipe over an iterator held with `use`. `cursor` reads the iterator it is given, and does not ask the source for a new one, and a terminal reading it leaves the disposal to `use`:
 
 ```ghul
 return cursor(use IO.File.read_lines(path).iterator) |> skip(wanted - 1) |> first()
 ```
 
-The `undisposed-source` warning reports a read that can stop before the end of a resource-holding source when nothing holds the source. Such a read is an early-exit terminal or stage, such as `first`, `find`, `any`, `all`, `only` or `take`, or a `for` loop whose body can `break` out of the loop or `return`. The call to the source must be the read's source, or be reached from the read's source through other pipe stages. A read to the end lets the source close itself, and gives no warning. A stage that reads all of its source before it passes anything on, such as `sort` or `reverse`, gives no warning either. The warning does not follow a sequence that is first stored in a local variable, a field or anywhere else.
+The `undisposed-source` warning reports a `for` loop that can stop before the end of a resource-holding source when nothing holds the source: a loop whose body can `break` out of the loop or `return`, or one over an early-exit stage such as `take`. A terminal disposes what it reads, so it draws no warning. The call to the source must be the read's source, or be reached from the read's source through other pipe stages. A read to the end lets the source close itself, and gives no warning. A stage that reads all of its source before it passes anything on, such as `sort` or `reverse`, gives no warning either. The warning does not follow a sequence that is first stored in a local variable, a field or anywhere else.
 
 ## displaying values
 
