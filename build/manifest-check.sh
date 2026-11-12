@@ -32,7 +32,8 @@ if [ -z "$runtime" ]; then
 fi
 
 # The options that change what is built, one a line with its value: from
-# the native build's command line, less its outputs, and from the response
+# the native build's command line, less its outputs and the version it is
+# stamped with, and from the response
 # file, less what changes only what is reported.
 build_line=$(grep -m 1 -- '--target llvm' "$root/build/llvm-build-pass.sh")
 
@@ -43,7 +44,7 @@ done | awk '
     option != "" && $0 !~ /^[@"]/ { print option " " $0; option = ""; next }
     { if (option != "") print option; option = "" }
     END { if (option != "") print option }
-' | grep -v -e '^--llvm-output' -e '^-o' | sort > "$work/build-options.txt"
+' | grep -v -e '^--llvm-output' -e '^-o' -e '^--version' | sort > "$work/build-options.txt"
 
 grep -e '^--target' -e '^--rtti' -e '^--llvm-parallel-gc' -e '^--underscore-access' -e '^--global-namespace' -e '^--define' -e '^--default-use' \
     "$work/manifest.rsp" | sort > "$work/manifest-options.txt"
