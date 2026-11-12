@@ -1,0 +1,107 @@
+// Disposing a generator's iterator ends its stream. A generator suspended
+// at a yield runs the `finally` clauses and `use` regions it is inside,
+// innermost first, and disposes the iterator an active `yield in` is
+// reading. One not yet started, or already ended, runs nothing, and
+// disposing twice runs the cleanup once.
+use IO.Std.write_line
+
+class LOGGED: Ghul.Disposable is
+    _name: string
+
+    init(name: string) is
+        _name = name
+        write_line("  open {name}")
+    si
+
+    dispose() is
+        write_line("  dispose {_name}")
+    si
+si
+
+class INNER: Collections.Iterable[int] is
+    init() is si
+
+    iterator: Collections.Iterator[int] => INNER_ITERATOR()
+si
+
+class INNER_ITERATOR: Collections.Iterator[int] is
+    _next: int
+
+    init() is
+        write_line("  open inner")
+    si
+
+    current: int => _next
+
+    move_next() -> bool is
+        _next = _next + 1
+
+        return _next <= 3
+    si
+
+    dispose() is
+        write_line("  dispose inner")
+    si
+si
+
+nested() -> int{} is
+    try
+        yield 1
+
+        try
+            yield 2
+            yield 3
+        finally
+            write_line("  inner finally")
+        yrt
+    finally
+        write_line("  outer finally")
+    yrt
+si
+
+with_use() -> int{} is
+    let held = use LOGGED("held")
+
+    yield 1
+    yield 2
+si
+
+over_inner() -> int{} is
+    try
+        yield in INNER()
+    finally
+        write_line("  finally around yield in")
+    yrt
+si
+
+take(name: string, source: int{}, count: int) is
+    write_line("{name}:")
+
+    let it = source.iterator
+    let read mut = 0
+
+    while read < count /\ it.move_next() do
+        write_line("  read {it.current}")
+        read = read + 1
+    od
+
+    it.dispose()
+    write_line("  move_next after dispose: {it.move_next()}")
+si
+
+entry() is
+    take("early exit inside two finally clauses", nested(), 2)
+    take("early exit inside one finally clause", nested(), 1)
+    take("early exit with use", with_use(), 1)
+    take("early exit inside yield in", over_inner(), 2)
+    take("disposed before the first move_next", nested(), 0)
+    take("disposed after the end", nested(), 5)
+
+    write_line("disposed twice:")
+    let it = nested().iterator
+    it.move_next()
+    it.move_next()
+    it.dispose()
+    it.dispose()
+    write_line("  move_next after dispose: {it.move_next()}")
+si
