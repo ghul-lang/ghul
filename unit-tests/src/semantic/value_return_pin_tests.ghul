@@ -13,6 +13,8 @@ namespace Semantic.UnitTests is
     use Semantic.Types.Type
     use Semantic.VALUE_RETURN_PIN
 
+    use NSubstitute.SubstituteExtensions.returns
+
     use TestClass = Microsoft.VisualStudio.TestTools.UnitTesting.TestClassAttribute
     use Test = Microsoft.VisualStudio.TestTools.UnitTesting.TestMethodAttribute
     use Assertions
@@ -38,6 +40,9 @@ namespace Semantic.UnitTests is
         si
 
         loc() -> LOCATION => LOCATION("test.ghul", 1, 1, 1, 1)
+
+        lookup() -> Semantic.Lookups.InnateSymbolLookup =>
+            IoC.CONTAINER.instance.innate_symbol_lookup
 
         namespace_owner() -> NAMESPACE => NAMESPACE(loc(), "Test", null, ".Test", false)
 
@@ -69,12 +74,37 @@ namespace Semantic.UnitTests is
             let produced = a_struct("PRODUCED")
             let slot = nullable_over(produced)
 
-            are_same(slot, VALUE_RETURN_PIN.of(slot, produced))
+            are_same(slot, VALUE_RETURN_PIN.of(slot, produced, lookup()))
         si
 
         @Test()
         Calling__of__for_a_value_body_into_another_types_optional__returns_null() is
-            is_null(VALUE_RETURN_PIN.of(nullable_over(a_struct("OTHER")), a_struct("PRODUCED")))
+            is_null(VALUE_RETURN_PIN.of(nullable_over(a_struct("OTHER")), a_struct("PRODUCED"), lookup()))
+        si
+
+        @Test()
+        Calling__of__for_a_value_body_into_an_optional_whose_type_arguments_are_open__returns_the_optional_of_the_body() is
+            // A slot `BOXED[v]?` with `v` still being inferred compares as
+            // equivalent to any BOXED, so pinning at it would give the
+            // literal an unbound return. The return is the optional of
+            // what the body produced instead, which the call binds from.
+            let boxed = STRUCT(loc(), loc(), Semantic.BLOCK_SCOPE(), "BOXED", ["T"], Semantic.BLOCK_SCOPE())
+
+            let open_arguments = Collections.LIST[Type]()
+            open_arguments.add(INFERRED_VARIABLE_TYPE(LOCAL_VARIABLE(loc(), namespace_owner(), "v")))
+
+            let produced_arguments = Collections.LIST[Type]()
+            produced_arguments.add(a_struct("PRODUCED"))
+
+            let slot = nullable_over(Semantic.Types.GENERIC(loc(), boxed, open_arguments))
+            let produced = Semantic.Types.GENERIC(loc(), boxed, produced_arguments)
+
+            let expected = nullable_over(produced)
+
+            let lookup = NSubstitute.Substitute.`for`[Semantic.Lookups.InnateSymbolLookup](System.Array.empty`[object]())
+            lookup.get_optional_type(produced) |> returns(expected, null)
+
+            are_same(expected, VALUE_RETURN_PIN.of(slot, produced, lookup))
         si
 
         @Test()
@@ -83,7 +113,7 @@ namespace Semantic.UnitTests is
             let produced = a_struct("PRODUCED")
             let slot = nullable_over(produced)
 
-            is_null(VALUE_RETURN_PIN.of(slot, nullable_over(produced)))
+            is_null(VALUE_RETURN_PIN.of(slot, nullable_over(produced), lookup()))
         si
 
         @Test()
@@ -105,26 +135,26 @@ namespace Semantic.UnitTests is
 
         @Test()
         Calling__of__with_no_slot__returns_null() is
-            is_null(VALUE_RETURN_PIN.of(null, a_struct("PRODUCED")))
+            is_null(VALUE_RETURN_PIN.of(null, a_struct("PRODUCED"), lookup()))
         si
 
         @Test()
         Calling__of__with_no_produced_type__returns_null() is
-            is_null(VALUE_RETURN_PIN.of(a_class("SLOT"), null))
+            is_null(VALUE_RETURN_PIN.of(a_class("SLOT"), null, lookup()))
         si
 
         @Test()
         Calling__of__for_a_reference_body__returns_null() is
             // The body's own type is the more precise one and converts to
             // the slot's by assignment, which is sound for a reference.
-            is_null(VALUE_RETURN_PIN.of(a_class("SLOT"), a_class("PRODUCED")))
+            is_null(VALUE_RETURN_PIN.of(a_class("SLOT"), a_class("PRODUCED"), lookup()))
         si
 
         @Test()
         Calling__of__for_a_value_body_that_does_not_implement_the_slot__returns_null() is
             // Nothing to settle at: the question of how to convert is the
             // assignability check's, and it reports where it always did.
-            is_null(VALUE_RETURN_PIN.of(a_class("SLOT"), a_struct("PRODUCED")))
+            is_null(VALUE_RETURN_PIN.of(a_class("SLOT"), a_struct("PRODUCED"), lookup()))
         si
 
         // A struct implementing the slot's type, which is the shape the
@@ -143,7 +173,7 @@ namespace Semantic.UnitTests is
             let slot = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "SLOT", System.Array.empty[string](), Semantic.BLOCK_SCOPE())
             let produced = implementing_struct(slot)
 
-            are_same(slot.type, VALUE_RETURN_PIN.of(slot.type, produced.type))
+            are_same(slot.type, VALUE_RETURN_PIN.of(slot.type, produced.type, lookup()))
         si
 
         @Test()
@@ -163,7 +193,7 @@ namespace Semantic.UnitTests is
             let unsettled = Semantic.Types.GENERIC(loc(), boxed, arguments)
 
             is_false(unsettled.is_settled)
-            is_null(VALUE_RETURN_PIN.of(slot.type, unsettled))
+            is_null(VALUE_RETURN_PIN.of(slot.type, unsettled, lookup()))
         si
     si
 si
