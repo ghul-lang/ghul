@@ -1,0 +1,95 @@
+namespace Semantic.UnitTests is
+    use Microsoft.VisualStudio.TestTools.UnitTesting.Assert
+
+    use Source.LOCATION
+
+    use Semantic.Symbols.LOCAL_VARIABLE
+    use Semantic.Symbols.NAMESPACE
+    use Semantic.Symbols.STRUCT
+    use Semantic.Types.INFERRED_VARIABLE_TYPE
+    use Semantic.Types.NULLABLE
+    use Semantic.Types.Type
+    use Semantic.EXPECTED_TYPE_SETTLEMENT
+
+    use TestClass = Microsoft.VisualStudio.TestTools.UnitTesting.TestClassAttribute
+    use Test = Microsoft.VisualStudio.TestTools.UnitTesting.TestMethodAttribute
+    use Assertions
+
+    // Pins when an expected type is settled enough to type a construct
+    // by: an `if` joins its own arms with no expected type or one still
+    // holding a placeholder, and a `null` becomes the empty value of a
+    // value-type optional only once that optional is settled.
+    @TestClass()
+    class EXPECTED_TYPE_SETTLEMENT_TESTS is
+        init() is
+            // LOCAL_VARIABLE's init reads the local id generator; the
+            // placeholder fixture needs one.
+            if !IoC.CONTAINER.instance.local_id_generator? then
+                IoC.CONTAINER.instance.local_id_generator = IR.LOCAL_ID_GENERATOR()
+            fi
+            IoC.CONTAINER.instance.local_id_generator.enter_function()
+        si
+
+        loc() -> LOCATION => LOCATION("test.ghul", 1, 1, 1, 1)
+
+        a_struct(name: string) -> Type =>
+            STRUCT(loc(), loc(), Semantic.BLOCK_SCOPE(), name, System.Array.empty[string](), Semantic.BLOCK_SCOPE()).type!
+
+        optional_of(inner: Type) -> Type =>
+            NULLABLE(loc(), STRUCT(loc(), loc(), Semantic.BLOCK_SCOPE(), "Nullable", ["T"], Semantic.BLOCK_SCOPE()), Collections.LIST[Type]([inner]))
+
+        // `PAIR[v]` with v still being inferred: the shape of `(T, int)`
+        // while a call infers T.
+        open_pair() -> Type is
+            let pair = STRUCT(loc(), loc(), Semantic.BLOCK_SCOPE(), "PAIR", ["T"], Semantic.BLOCK_SCOPE())
+
+            let arguments = Collections.LIST[Type]()
+            arguments.add(INFERRED_VARIABLE_TYPE(LOCAL_VARIABLE(loc(), NAMESPACE(loc(), "Test", null, ".Test", false), "v")))
+
+            return Semantic.Types.GENERIC(loc(), pair, arguments)
+        si
+
+        @Test()
+        Calling__joins_own_arms__with_no_expected_type__returns_true() is
+            is_true(EXPECTED_TYPE_SETTLEMENT.joins_own_arms(null))
+        si
+
+        @Test()
+        Calling__joins_own_arms__for_a_settled_value_type_optional__returns_false() is
+            is_false(EXPECTED_TYPE_SETTLEMENT.joins_own_arms(optional_of(a_struct("PAIR"))))
+        si
+
+        @Test()
+        Calling__joins_own_arms__for_an_optional_holding_a_placeholder__returns_true() is
+            let open = optional_of(open_pair())
+
+            is_false(open.is_settled)
+            is_true(EXPECTED_TYPE_SETTLEMENT.joins_own_arms(open))
+        si
+
+        @Test()
+        Calling__joins_own_arms__for_a_non_optional_holding_a_placeholder__returns_true() is
+            is_true(EXPECTED_TYPE_SETTLEMENT.joins_own_arms(open_pair()))
+        si
+
+        @Test()
+        Calling__null_is_empty_value_optional__for_a_settled_value_type_optional__returns_true() is
+            is_true(EXPECTED_TYPE_SETTLEMENT.null_is_empty_value_optional(optional_of(a_struct("PAIR"))))
+        si
+
+        @Test()
+        Calling__null_is_empty_value_optional__for_an_optional_holding_a_placeholder__returns_false() is
+            is_false(EXPECTED_TYPE_SETTLEMENT.null_is_empty_value_optional(optional_of(open_pair())))
+        si
+
+        @Test()
+        Calling__null_is_empty_value_optional__with_no_expected_type__returns_false() is
+            is_false(EXPECTED_TYPE_SETTLEMENT.null_is_empty_value_optional(null))
+        si
+
+        @Test()
+        Calling__null_is_empty_value_optional__for_a_non_optional__returns_false() is
+            is_false(EXPECTED_TYPE_SETTLEMENT.null_is_empty_value_optional(a_struct("PAIR")))
+        si
+    si
+si
