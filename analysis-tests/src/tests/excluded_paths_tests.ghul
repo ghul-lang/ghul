@@ -1,0 +1,59 @@
+namespace Analysis.Tests is
+    use Collections.LIST
+
+    use Analysis.Protocol.ANALYSER_PROCESS
+    use Analysis.Protocol.Response
+
+    use Ghul
+    use Ghul.Pipes
+
+    use TestClass = Microsoft.VisualStudio.TestTools.UnitTesting.TestClassAttribute
+    use Test = Microsoft.VisualStudio.TestTools.UnitTesting.TestMethodAttribute
+    use Assertions
+
+    // A file a whole-file @@IF leaves out of the target being analysed is
+    // named in the diagnostics frame's excluded_paths, so a client can say
+    // it was not analysed rather than present it as clean.
+    @TestClass()
+    class EXCLUDED_PATHS_TESTS is
+        init() is si
+
+        fixture(name: string) -> string => fixture_path("excluded-paths/{name}")
+
+        @Test()
+        a_file_left_out_of_the_target_is_named_as_excluded() is
+            let excluded = fixture("wasm_only.ghul")
+            let included = fixture("everywhere.ghul")
+
+            let use analyser = ANALYSER_PROCESS([excluded, included])
+
+            analyser.send_edit(included, "everywhere() -> int => 4\n")
+            let edit = analyser.read_response()
+            assert isa Response.DIAGNOSTICS(edit) else "expected DIAGNOSTICS after EDIT"
+
+            analyser.send_compile()
+            let compile = analyser.read_response()
+            assert isa Response.DIAGNOSTICS(compile) else "expected DIAGNOSTICS after COMPILE"
+
+            let paths = compile.excluded_paths ?? LIST[string]()
+
+            is_true(paths |> any(p => p.ends_with("wasm_only.ghul")), "expected wasm_only.ghul excluded, got: {paths |> string(", ")}")
+            is_true(!(paths |> any(p => p.ends_with("everywhere.ghul"))), "expected everywhere.ghul not excluded, got: {paths |> string(", ")}")
+        si
+
+        @Test()
+        an_edit_reports_the_excluded_file_too() is
+            let excluded = fixture("wasm_only.ghul")
+
+            let use analyser = ANALYSER_PROCESS([excluded])
+
+            analyser.send_edit(excluded, "@@IF.wasm()\n\nonly_on_wasm() -> int => 3\n")
+            let edit = analyser.read_response()
+            assert isa Response.DIAGNOSTICS(edit) else "expected DIAGNOSTICS after EDIT"
+
+            let paths = edit.excluded_paths ?? LIST[string]()
+
+            is_true(paths |> any(p => p.ends_with("wasm_only.ghul")), "expected wasm_only.ghul excluded after an edit, got: {paths |> string(", ")}")
+        si
+    si
+si
