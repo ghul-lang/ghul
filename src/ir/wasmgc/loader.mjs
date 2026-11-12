@@ -77,6 +77,11 @@ const TERMINAL_STREAMS = ["stdin", "stdout", "stderr"];
 //   terminal when run by Node and the process's own stream is one, and is not
 //   a terminal anywhere else: a page has no terminal, so an embedder whose
 //   input box and output pane stand in for one says so here
+// - options.stdout_buffer: how many characters of standard output to hold
+//   before passing them to options.stdout in one piece; what is held is
+//   passed on before a read from standard input, a write to standard error,
+//   a process start or a flush, and when the program ends. By default, 0,
+//   each piece is passed on as it is written
 //
 // Answers the program's exit status.
 export async function run(options = {}) {
@@ -85,10 +90,51 @@ export async function run(options = {}) {
     const stdout = options.stdout ?? (() => {});
     const stderr = options.stderr ?? (() => {});
 
-    const sinks = [null, stdout, stderr];
-    const onfile = options.onfile ?? (is_node ? node_file_writer(stderr) : () => {});
+    // Standard output is held and written in pieces of at least
+    // stdout_buffer characters where the embedder asks for that, as the
+    // command line does when standard output is not a terminal. What is
+    // held is written before a read from standard input, so a prompt is
+    // seen first; before a write to standard error, so the two keep their
+    // order; before a process starts; when the program flushes; and as the
+    // program ends, however it ends. Standard error is never held.
+    const stdout_buffer = options.stdout_buffer ?? 0;
+    let held = [];
+    let held_length = 0;
+
+    const write_stdout = (text) => {
+        if (stdout_buffer <= 0) {
+            stdout(text);
+            return;
+        }
+
+        held.push(text);
+        held_length += text.length;
+
+        if (held_length >= stdout_buffer) {
+            flush_stdout();
+        }
+    };
+
+    const flush_stdout = () => {
+        if (held_length === 0) return;
+
+        const text = held.join("");
+
+        held = [];
+        held_length = 0;
+
+        stdout(text);
+    };
+
+    const write_stderr = (text) => {
+        flush_stdout();
+        stderr(text);
+    };
+
+    const sinks = [null, write_stdout, write_stderr];
+    const onfile = options.onfile ?? (is_node ? node_file_writer(write_stderr) : () => {});
     const input = input_reader(options.stdin);
-    const pump = stdin_pump(input, options.stdin, stderr);
+    const pump = stdin_pump(input, options.stdin, write_stderr);
     const input_files = Object.entries(options.files ?? {}).map(([path, content]) => [path, file_bytes(content)]);
     const files = (options.file_system ?? (options.files === undefined && options.onfile === undefined)) && is_node ? node_files() : no_files;
     const processes = is_node ? node_processes() : no_processes;
@@ -107,9 +153,9 @@ export async function run(options = {}) {
     const host = {
         // A null string writes nothing, as it does on .NET.
         write(text, stream) {
-            (sinks[stream] ?? stdout)(text === null ? "" : String(text));
+            (sinks[stream] ?? write_stdout)(text === null ? "" : String(text));
         },
-        flush(_stream) {},
+        flush: () => flush_stdout(),
 
         // Whether standard stream 0, 1 or 2 is a terminal: what the embedder
         // said, else the process's own stream under Node, else no.
@@ -152,17 +198,20 @@ export async function run(options = {}) {
         ...files,
         ...processes,
 
+        // A process shares the terminal, so what the program wrote comes first.
+        process_run: () => (flush_stdout(), processes.process_run()),
+
         input_file_count: () => input_files.length,
         input_file_path: (index) => input_files[index][0],
         input_file_content: (index) => byte_text(input_files[index][1]),
 
-        stdin_read_line: () => pump.reader().read_line(),
-        stdin_read: () => pump.reader().read(),
-        stdin_peek: () => pump.reader().peek(),
-        stdin_read_to_end: () => pump.reader().read_to_end(),
+        stdin_read_line: () => (flush_stdout(), pump.reader().read_line()),
+        stdin_read: () => (flush_stdout(), pump.reader().read()),
+        stdin_peek: () => (flush_stdout(), pump.reader().peek()),
+        stdin_read_to_end: () => (flush_stdout(), pump.reader().read_to_end()),
 
-        stdin_pending: () => pump.pending(),
-        stdin_wait: (ms) => pump.wait(ms),
+        stdin_pending: () => (flush_stdout(), pump.pending()),
+        stdin_wait: (ms) => (flush_stdout(), pump.wait(ms)),
 
         heap_bytes: (force) => heap_bytes(force),
 
@@ -297,19 +346,43 @@ export async function run(options = {}) {
     const source = await load(options.module ?? sibling_module());
     ({ instance } = await WebAssembly.instantiate(source, imports, compile_options));
 
-    try {
-        instance.exports._start();
-
-        return instance.exports._exit_code();
-    } catch (error) {
-        if (error instanceof Exit) {
-            return error.code;
-        }
-
+    const unhandled = (error) => {
         stderr(`Unhandled exception. ${describe(error, instance)}\n${frames(error)}`);
 
         return UNHANDLED_EXCEPTION_EXIT_CODE;
+    };
+
+    let code;
+
+    try {
+        instance.exports._start();
+
+        code = instance.exports._exit_code();
+    } catch (error) {
+        if (!(error instanceof Exit)) {
+            // What the program wrote before it failed comes before the
+            // report, if it can still be written.
+            try {
+                flush_stdout();
+            } catch {
+            }
+
+            return unhandled(error);
+        }
+
+        code = error.code;
     }
+
+    // A return and an exit both end here, and what is still held is
+    // written; a write that fails now fails the program, as it would have
+    // had it been written straight away.
+    try {
+        flush_stdout();
+    } catch (error) {
+        return unhandled(error);
+    }
+
+    return code;
 }
 
 // Standard input, read as the program asks for it: a line, a character,
@@ -1571,5 +1644,6 @@ if (is_node && process.argv[1] && import.meta.url === (await import("node:url"))
         stdin: node_stdin(readSync),
         stdout: node_output(writeSync, 1),
         stderr: node_output(writeSync, 2),
+        stdout_buffer: node_tty.isatty(1) ? 0 : 64 * 1024,
     });
 }

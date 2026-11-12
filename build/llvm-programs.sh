@@ -35,6 +35,12 @@ collect() {
         dir="$(dirname "$program")"
         name="$(printf '%s' "${dir#"$root"/}" | tr '/' '_')"
 
+        # A session is answered as the program prompts, which only the test
+        # runner does; the suite has already run it.
+        if [ -f "$dir/run.session" ]; then
+            continue
+        fi
+
         mkdir -p "$out/$name"
         cp "$program" "$out/$name/program"
 
