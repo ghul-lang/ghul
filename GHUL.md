@@ -702,6 +702,20 @@ paths(r: int, c: int) -> long memo =>
 
 Each value a literal makes has a cache of its own: evaluating the literal again makes a function with an empty cache, and the cache is collected with the function. `memo` is an error on a literal that returns nothing or a task, a generator literal and an async literal. The cache is not a store the compiler sees, so a `memo` function whose body stores nothing is still store-free.
 
+### members or global functions
+
+Which form an operation takes follows one rule:
+
+- An operation that belongs to one type is a member of that type: `s.trim()`, `xs.add(x)`, `m.contains_key(k)`.
+- A member that takes no arguments, is cheap and allocates nothing is a property: `s.length`, `xs.count`.
+- An operation defined over a family of types is a global function, written with `|>` where it reads well. The families are the numeric types (`Ghul.Math`: `sqrt(x)`, `abs(n)`, `min(a, b)`), any sequence (`Ghul.Pipes`: `xs |> filter(f)`, `xs |> sort()`, `xs |> join(", ")`) and any parsable type (`parse[int](s)`).
+- A collection is built from a sequence by its constructor: `xs |> LIST()`, `SET(xs)`.
+- A static member is not the form to write. Write `sqrt(x)`, not `double.sqrt(x)`, and `xs |> join(", ")`, not `string.join(", ", xs)`. The exceptions are constants such as `int.max_value`, and `string.compare_ordinal`.
+
+`words`, `runes` and `graphemes` are global functions although each reads one string: they produce sequences, and read best in a pipe. The character tests are statics for now: `char.is_digit(c)`.
+
+On .NET a `LIST` also has members .NET gives it that work over any sequence, such as `find`, `exists` and `for_each`. Write `|> find`, `|> any` and `|> each`, which work on every target. .NET's `LIST.find` returns the type's default value when nothing matches, where `|> find` returns an absent value.
+
 *More detail on this section: [language details](docs/details.md#functions).*
 
 ## type definitions
@@ -2163,6 +2177,8 @@ The core types have ghūl names in ghūl namespaces:
 
 - `System.Exception` is `Ghul.Exception`. The common exceptions in `System` are also in `Ghul`: `Ghul.InvalidOperationException`, `Ghul.NotImplementedException`, `Ghul.ArgumentException` and the others.
 - `System.Text.StringBuilder` is `Text.STRING_BUILDER`.
+- `System.Globalization.UnicodeCategory` is `Text.UnicodeCategory`.
+- The regular expression types in `System.Text.RegularExpressions` are `Text.REGEX`, `Text.MATCH`, `Text.GROUP`, `Text.MATCH_COLLECTION`, `Text.GROUP_COLLECTION` and `Text.RegexOptions`.
 - `System.Random` is `Ghul.RANDOM`.
 - `System.Type` is `Ghul.Type`.
 - `System.StringSplitOptions` and `System.StringComparison` are `Ghul.StringSplitOptions` and `Ghul.StringComparison`.
