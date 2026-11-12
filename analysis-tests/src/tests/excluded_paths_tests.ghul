@@ -55,5 +55,41 @@ namespace Analysis.Tests is
 
             is_true(paths |> any(p => p.ends_with("wasm_only.ghul")), "expected wasm_only.ghul excluded after an edit, got: {paths |> string(", ")}")
         si
+
+        @Test()
+        an_edit_that_removes_the_condition_stops_excluding_the_file() is
+            let excluded = fixture("wasm_only.ghul")
+            let included = fixture("everywhere.ghul")
+
+            let use analyser = ANALYSER_PROCESS([excluded, included])
+
+            analyser.send_edit(excluded, "@@IF.wasm()\n\nonly_on_wasm() -> int => 3\n")
+            let gated = analyser.read_response()
+            assert isa Response.DIAGNOSTICS(gated) else "expected DIAGNOSTICS after the first EDIT"
+
+            analyser.send_edit(excluded, "only_on_wasm() -> int => 3\n")
+            let ungated = analyser.read_response()
+            assert isa Response.DIAGNOSTICS(ungated) else "expected DIAGNOSTICS after the second EDIT"
+
+            let after_ungating = ungated.excluded_paths ?? LIST[string]()
+
+            is_true(!(after_ungating |> any(p => p.ends_with("wasm_only.ghul"))), "expected wasm_only.ghul no longer excluded, got: {after_ungating |> string(", ")}")
+
+            analyser.send_edit(included, "everywhere() -> int => 5\n")
+            let other = analyser.read_response()
+            assert isa Response.DIAGNOSTICS(other) else "expected DIAGNOSTICS after an edit to another file"
+
+            let after_other = other.excluded_paths ?? LIST[string]()
+
+            is_true(!(after_other |> any(p => p.ends_with("wasm_only.ghul"))), "expected wasm_only.ghul still not excluded, got: {after_other |> string(", ")}")
+
+            analyser.send_edit(excluded, "@@IF.wasm()\n\nonly_on_wasm() -> int => 3\n")
+            let regated = analyser.read_response()
+            assert isa Response.DIAGNOSTICS(regated) else "expected DIAGNOSTICS after the third EDIT"
+
+            let after_regating = regated.excluded_paths ?? LIST[string]()
+
+            is_true(after_regating |> any(p => p.ends_with("wasm_only.ghul")), "expected wasm_only.ghul excluded again, got: {after_regating |> string(", ")}")
+        si
     si
 si
