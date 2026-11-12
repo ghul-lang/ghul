@@ -1,0 +1,97 @@
+namespace Semantic.UnitTests is
+    use Microsoft.VisualStudio.TestTools.UnitTesting.Assert
+
+    use Source.LOCATION
+
+    use Semantic.Symbols.CLASS
+    use Semantic.Symbols.FUNCTION_GROUP
+    use Semantic.Symbols.INJECTED_METHOD
+    use Semantic.Symbols.INSTANCE_METHOD
+    use Semantic.Symbols.INSTANCE_PROPERTY
+    use Semantic.Symbols.NAMESPACE
+    use Semantic.INJECTED_MEMBERS
+
+    use TestClass = Microsoft.VisualStudio.TestTools.UnitTesting.TestClassAttribute
+    use Test = Microsoft.VisualStudio.TestTools.UnitTesting.TestMethodAttribute
+    use Assertions
+
+    // Pins how the members a runtime `partial` added to an imported type
+    // are taken back out before a rebuild declares them again: an imported
+    // type outlives the rebuild, so anything left behind would be declared
+    // twice. Only the added members go; the type's own stay.
+    @TestClass()
+    class INJECTED_MEMBERS_TESTS is
+        init() is
+            INJECTED_MEMBERS.clear()
+        si
+
+        loc() -> LOCATION => LOCATION("test.ghul", 1, 1, 1, 1)
+
+        home() -> NAMESPACE => NAMESPACE(loc(), "Internal", null, ".Ghul.Internal", false)
+
+        imported() -> CLASS => CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "STRING", System.Array.empty[string](), Semantic.BLOCK_SCOPE())
+
+        added(owner: CLASS, name: string) -> INJECTED_METHOD is
+            let method = INJECTED_METHOD(loc(), loc(), owner, name, owner, home())
+
+            owner.declare_function_group(loc(), method, null)
+            INJECTED_MEMBERS.add(owner, name, method)
+
+            return method
+        si
+
+        @Test()
+        Calling__clear__takes_an_added_member_out_of_a_group_and_leaves_the_types_own() is
+            let owner = imported()
+
+            let own = INSTANCE_METHOD(loc(), loc(), owner, "to_upper", owner)
+            owner.declare_function_group(loc(), own, null)
+
+            added(owner, "to_upper")
+
+            are_equal(2, cast FUNCTION_GROUP(owner.find_direct("to_upper")).count)
+
+            INJECTED_MEMBERS.clear()
+
+            let group = cast FUNCTION_GROUP(owner.find_direct("to_upper"))
+
+            are_equal(1, group.count)
+            are_same(own, group.functions[0])
+        si
+
+        @Test()
+        Calling__clear__removes_a_group_holding_only_added_members() is
+            let owner = imported()
+
+            added(owner, "shout")
+
+            INJECTED_MEMBERS.clear()
+
+            is_null(owner.find_direct("shout"))
+        si
+
+        @Test()
+        Calling__clear__removes_an_added_property() is
+            let owner = imported()
+
+            let property = INSTANCE_PROPERTY(loc(), loc(), owner, "doubled", false, false)
+            owner.declare(loc(), property, null)
+            INJECTED_MEMBERS.add(owner, "doubled", property)
+
+            INJECTED_MEMBERS.clear()
+
+            is_null(owner.find_direct("doubled"))
+        si
+
+        @Test()
+        Calling__add__marks_the_members_as_not_yet_checked() is
+            let owner = imported()
+
+            INJECTED_MEMBERS.is_checked = true
+
+            added(owner, "shout")
+
+            is_false(INJECTED_MEMBERS.is_checked)
+        si
+    si
+si
