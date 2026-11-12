@@ -1092,6 +1092,8 @@ Enum values support the relational operators and equality (`=~` and `==`). They 
 
 A separate block, which can be in a separate file, can add members to a type that is already declared. The type must be declared in the same assembly. The added members are real members of the type. They have full private access and normal virtual dispatch, and they behave exactly like members declared in the type's own body.
 
+The runtime library is built with one exception: with `--allow-member-injection`, a `partial` block inside `namespace Ghul.Internal` can add instance methods and read-only properties to a non-generic imported type. Each such member is compiled as a static that takes the receiver as its first argument. It is not virtual, so it can neither override nor be overridden. A value-type receiver is passed by value, so the member cannot change it.
+
 *More detail on this section: [language details](docs/details.md#partial-and-impl-blocks).*
 
 ### properties, methods, and visibility
