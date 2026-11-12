@@ -1,0 +1,84 @@
+namespace Analysis.Tests is
+    use Collections.LIST
+
+    use IO.File
+
+    use Analysis.Protocol.ANALYSER_PROCESS
+    use Analysis.Protocol.Response
+
+    use TestClass = Microsoft.VisualStudio.TestTools.UnitTesting.TestClassAttribute
+    use Test = Microsoft.VisualStudio.TestTools.UnitTesting.TestMethodAttribute
+    use Assertions
+
+    use Ghul.Pipes.join
+
+    // A partial application's `*` written as a receiver, `* .name`, takes
+    // its type from the function the context expects, so hover on the
+    // member and completion after `* .` both answer for that type.
+    @TestClass()
+    class PLACEHOLDER_RECEIVER_TESTS is
+        init() is si
+
+        load_fixture() -> string is
+            let path = fixture_path("placeholder-receiver/placeholder-receiver.ghul")
+
+            assert File.exists(path) else "fixture missing: {path}"
+
+            return File.read_all_text(path)
+        si
+
+        // Line 6 is "    people |> map(* .name)"; column 23 is on `name`.
+        @Test()
+        hover_on_a_member_of_a_placeholder_receiver_describes_the_member() is
+            let use analyser = ANALYSER_PROCESS()
+
+            analyser.send_edit("placeholder-receiver.ghul", load_fixture())
+
+            let diagnostics = analyser.read_response()
+            assert isa Response.DIAGNOSTICS(diagnostics) else "expected DIAGNOSTICS response"
+
+            let user_diagnostics = LIST(user_diagnostics_of(diagnostics))
+            are_equal(0, user_diagnostics.count, diagnostics_summary("EDIT had unexpected diagnostics", user_diagnostics))
+
+            analyser.send_hover("placeholder-receiver.ghul", 6, 23)
+
+            let response = analyser.read_query_response()
+            assert isa Response.HOVER(response) else "expected HOVER response"
+
+            let signature = response.signature ?? ""
+
+            is_true(
+                signature.contains("name") /\ signature.contains("string"),
+                "expected hover on `name` to describe the property, got '{signature}'.\n"
+                "--- analyser stderr ---\n{analyser.stderr_capture}"
+            )
+        si
+
+        // With the member not yet written, "    people |> map(* .)", column 22
+        // follows the `.`.
+        @Test()
+        completion_after_a_placeholder_receiver_offers_the_members_of_its_type() is
+            let use analyser = ANALYSER_PROCESS()
+
+            analyser.send_edit("placeholder-receiver.ghul", load_fixture().replace("map(* .name)", "map(* .)"))
+            analyser.read_response()
+
+            analyser.send_completion("placeholder-receiver.ghul", 6, 22)
+
+            let response = analyser.read_query_response()
+            assert isa Response.COMPLETION(response) else "expected COMPLETION response"
+
+            let names = LIST[string]()
+
+            for item in response.items do
+                names.add(item.name)
+            od
+
+            is_true(
+                names.contains("name") /\ names.contains("age"),
+                "expected `name` and `age` among the completions, got {names |> join(", ")}.\n"
+                "--- analyser stderr ---\n{analyser.stderr_capture}"
+            )
+        si
+    si
+si

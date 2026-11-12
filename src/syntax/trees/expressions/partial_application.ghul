@@ -12,6 +12,10 @@ namespace Syntax.Trees.Expressions is
     // operator expression is a call of the operator, `a + *` being
     // `+(a, *)`, so it is taken apart the same way.
     //
+    // A chain of member accesses, calls and indexes whose receiver is a
+    // `*`, written `* .name`, is a function of the receiver too: its `*`
+    // arguments follow the receiver as parameters, in order.
+    //
     // `body` is the call or operator expression as written. It is
     // resolved and typed as any call is, with each `*` typed from its
     // formal; the value this expression stands for is built from the
@@ -48,18 +52,100 @@ namespace Syntax.Trees.Expressions is
             fi
         si
 
+        // Whether the body is a chain whose receiver is a `*`.
+        is_chain: bool => receiver_placeholder(body)?
+
         // The body's written arguments in order: a call's argument list,
-        // or an operator's operands.
+        // an operator's operands, or a chain's receiver followed by the
+        // arguments and indexes along it.
         operands: Expression[] =>
-            if let call: CALL = body then
+            if receiver_placeholder(body)? then
+                chain_operands(body)
+            elif let call: CALL = body then
                 call.arguments.expressions
             elif let binary: BINARY = body then
-                Collections.LIST[Expression]([binary.left, binary.right])
+                _flattened(Collections.LIST[Expression]([binary.left, binary.right]))
             elif let unary: UNARY = body then
-                Collections.LIST[Expression]([unary.right])
+                _flattened(Collections.LIST[Expression]([unary.right]))
             else
                 Collections.LIST[Expression]()
             fi
+
+        // Whether `expression` is an operand that makes the operator it is
+        // an operand of a partial application: a `*`, or a chain on one.
+        is_placeholder_operand(expression: Expression) -> bool static =>
+            isa PLACEHOLDER(expression) \/ receiver_placeholder(expression)?
+
+        // `operands` with each `* .name` chain among them replaced by its
+        // own operands, so an operator over a chain takes the chain's `*`s.
+        _flattened(operands: Collections.LIST[Expression]) -> Collections.LIST[Expression] static is
+            let result = Collections.LIST[Expression]()
+
+            for operand in operands do
+                if receiver_placeholder(operand)? then
+                    for o in chain_operands(operand) do
+                        result.add(o)
+                    od
+                else
+                    result.add(operand)
+                fi
+            od
+
+            return result
+        si
+
+        // The `*` at the root of `expression` when it is a chain of member
+        // accesses, calls and indexes on a `*`; otherwise null.
+        receiver_placeholder(expression: Expression) -> PLACEHOLDER? static is
+            let current mut = expression
+
+            while true do
+                if let placeholder: PLACEHOLDER = current then
+                    if current == expression then
+                        return null
+                    fi
+
+                    return placeholder
+                elif let member: MEMBER = current then
+                    current = member.left
+                elif let call: CALL = current then
+                    current = call.function
+                elif let index: INDEX = current then
+                    current = index.left
+                else
+                    return null
+                fi
+            od
+
+            return null
+        si
+
+        // The receiver of a chain, then the arguments and indexes along it,
+        // in the order they are written.
+        chain_operands(expression: Expression) -> Collections.LIST[Expression] static is
+            let result: Collections.LIST[Expression] mut
+
+            if let member: MEMBER = expression then
+                result = chain_operands(member.left)
+            elif let call: CALL = expression then
+                result = chain_operands(call.function)
+
+                for argument in call.arguments.expressions do
+                    result.add(argument)
+                od
+            elif let index: INDEX = expression then
+                result = chain_operands(index.left)
+
+                for i in index.indexes do
+                    result.add(i)
+                od
+            else
+                result = Collections.LIST[Expression]()
+                result.add(expression)
+            fi
+
+            return result
+        si
 
         // Whether `arguments` has a `*` among its elements: what makes a
         // call a partial application.

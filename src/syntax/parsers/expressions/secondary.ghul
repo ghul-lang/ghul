@@ -24,6 +24,20 @@ namespace Syntax.Parsers.Expressions is
         // line guard matters: a `.` at the end of a line followed
         // by a structural keyword on the next (`namespace Foo.\n is`)
         // must not eat that keyword.
+        // Whether the current token is a `*` with a `.` after it: the
+        // receiver of a chain in a partial application.
+        is_placeholder_receiver(context: CONTEXT) -> bool static is
+            if context.current.token != Lexical.TOKEN.OPERATOR \/ context.current.value_string !~ "*" then
+                return false
+            fi
+
+            use context.tokenizer_speculate_then_backtrack_bounded()
+
+            context.next_token()
+
+            return context.current.token == Lexical.TOKEN.DOT
+        si
+
         looks_like_partial_member_keyword(context: CONTEXT, dot_location: LOCATION) -> bool is
             if context.current.token == Lexical.TOKEN.IDENTIFIER then
                 return false
@@ -120,6 +134,15 @@ namespace Syntax.Parsers.Expressions is
             let use tokenizer_state = context.tokenizer_speculate_then_commit()
 
             let start = context.location
+
+            // `* .name` makes a partial application's `*` the receiver of
+            // the chain that follows it.
+            if is_placeholder_receiver(context) then
+                context.next_token()
+
+                return _parse_trailers(context, start, Trees.Expressions.PLACEHOLDER(start), tokenizer_state)
+            fi
+
             let result = expression_primary_parser.parse(context)!
 
             return _parse_trailers(context, start, result, tokenizer_state)
@@ -459,7 +482,12 @@ namespace Syntax.Parsers.Expressions is
                     let call_expression = Trees.Expressions.CALL(start::context.location, result, arguments)
                     call_expression.rewrite_named_arguments(context.logger)
 
-                    if Trees.Expressions.PARTIAL_APPLICATION.has_placeholder(arguments) then
+                    // A call on a `*` receiver's chain is part of that
+                    // chain's partial application, `*` arguments and all.
+                    if
+                        Trees.Expressions.PARTIAL_APPLICATION.has_placeholder(arguments) /\
+                        !Trees.Expressions.PARTIAL_APPLICATION.receiver_placeholder(call_expression)?
+                    then
                         result = Trees.Expressions.PARTIAL_APPLICATION(start::context.location, call_expression)
                     else
                         result = call_expression
