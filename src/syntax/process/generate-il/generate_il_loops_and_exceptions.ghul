@@ -405,6 +405,13 @@ namespace Syntax.Process is
             let variable = `for.variable!
             let body = `for.body!
 
+            // Walked before its value is used, and once, ahead of the
+            // loop: a `use` or a spill inside the source stores what it
+            // holds as it is walked, and the iterator reads it. Walking
+            // also emits the bodies of any function literals the source
+            // holds.
+            expression.walk(self)
+
             let iterator: Value mut
 
             if `for.read_iterator? then
@@ -476,10 +483,6 @@ namespace Syntax.Process is
             fi
 
             gen_destructuring_initialize(variable.left, current)
-
-            // not to generate code for the expression itself, but to capture IL for any anonymous function bodies:
-            // TODO check that if expressions within the expression are emitted correctly
-            expression.walk(self)
 
             body.walk(self)
 
@@ -873,6 +876,11 @@ namespace Syntax.Process is
 
             let loop = _loops.enter_loop(`for)
 
+            // Walked ahead of the loop, before its value is used, as in
+            // visit(FOR): what a `use` or a spill in the source stores has
+            // to be in place when the iterator is taken.
+            source.walk(self)
+
             // Iterate the source directly - the wrapping pipe objects are
             // never built. read_iterator is null when the source is its
             // own iterator (e.g. a range).
@@ -945,12 +953,9 @@ namespace Syntax.Process is
 
             gen_destructuring_initialize(variable.left, current_value)
 
-            // Emit any anonymous-function bodies in the chain (the
-            // map/filter lambdas, plus anything inside the source).
-            // Walking these nodes emits the nested closure method bodies
-            // without emitting the pipe-construction IL itself.
-            source.walk(self)
-
+            // Emit the bodies of the stages' function literals. Walking
+            // these nodes emits the nested closure method bodies without
+            // emitting the pipe-construction IL itself.
             for stage in fusion.stages_outermost_first do
                 if stage.argument? then
                     stage.argument.walk(self)
