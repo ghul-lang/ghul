@@ -1990,7 +1990,7 @@ parse_port(s: string) -> int?;
 clamp_port(n: int) -> int?;
 label(n: int) -> string;
 
-let port = text |> trim() |> parse_port() ~> clamp_port() ~> label() ?? "closed";
+let port = text.trim() |> parse_port() ~> clamp_port() ~> label() ?? "closed";
 ```
 
 `|>` and `~>` can be mixed in one chain. A `|>` stage always runs. A `~>` stage propagates absence. `~>` works with every kind of optional, including an unconstrained `T?` in a generic. `~>` has the same diagnostics as `?.`:
@@ -2164,6 +2164,7 @@ The core types have ghūl names in ghūl namespaces:
 - `System.Exception` is `Ghul.Exception`. The common exceptions in `System` are also in `Ghul`: `Ghul.InvalidOperationException`, `Ghul.NotImplementedException`, `Ghul.ArgumentException` and the others.
 - `System.Text.StringBuilder` is `Text.STRING_BUILDER`.
 - `System.Random` is `Ghul.RANDOM`.
+- `System.Type` is `Ghul.Type`.
 - `System.StringSplitOptions` and `System.StringComparison` are `Ghul.StringSplitOptions` and `Ghul.StringComparison`.
 - `System.Lazy<T>` is `Ghul.LAZY[T]`.
 - `System.FlagsAttribute` is `Ghul.FlagsAttribute`.
