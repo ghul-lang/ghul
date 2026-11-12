@@ -10,7 +10,7 @@ This file is a condensed reference in one file. The full documentation is at <ht
 
 These mistakes cost the most rework. A section below explains each one. The last one is explained in the targets file.
 
-- **.NET members are `snake_case`.** Write `s.length`, `list.count` and `builder.append(x)`. `s.Length`, `list.Count` and `builder.Append(x)` are errors. The compiler converts .NET names.
+- **.NET members are `snake_case`.** Write `s.length`, `list.count` and `builder.append(x)`. `s.Length`, `list.Count` and `builder.Append(x)` are errors. The compiler converts .NET names, and renames a few whose converted spelling reads badly: `double.is_nan`, with `is_na_n` still accepted for now.
 - **The maths functions are in `Ghul.Math`, imported by `use default`.** Write `sqrt(x)`, `floor(x)` and `pi`. `System.Math.sqrt(x)` still compiles, as .NET interop.
 - **`write_line` must be imported.** Write `use IO.Std.write_line` before the code that calls it. Or start the file with `use default`, which imports `write_line`, the pipes, the collections and the maths functions.
 - **Strings have no `+` operator.** Join strings with interpolation: `"{a}{b}"`.
@@ -707,14 +707,14 @@ Each value a literal makes has a cache of its own: evaluating the literal again 
 Which form an operation takes follows one rule:
 
 - An operation that belongs to one type is a member of that type: `s.trim()`, `xs.add(x)`, `m.contains_key(k)`.
-- A member that takes no arguments, is cheap and allocates nothing is a property: `s.length`, `xs.count`.
+- A member that takes no arguments, is cheap and allocates nothing is a property: `s.length`, `xs.count`. A string's `count` is its `length`, in UTF-16 code units.
 - An operation defined over a family of types is a global function, written with `|>` where it reads well. The families are the numeric types (`Ghul.Math`: `sqrt(x)`, `abs(n)`, `min(a, b)`), any sequence (`Ghul.Pipes`: `xs |> filter(f)`, `xs |> sort()`, `xs |> join(", ")`) and any parsable type (`parse[int](s)`).
 - A collection is built from a sequence by its constructor: `xs |> LIST()`, `SET(xs)`.
 - A static member is not the form to write. Write `sqrt(x)`, not `double.sqrt(x)`, and `xs |> join(", ")`, not `string.join(", ", xs)`. The exceptions are constants such as `int.max_value`, and `string.compare_ordinal`.
 
 `words`, `runes` and `graphemes` are global functions although each reads one string: they produce sequences, and read best in a pipe. The character tests are statics for now: `char.is_digit(c)`.
 
-On .NET a `LIST` also has members .NET gives it that work over any sequence, such as `find`, `exists` and `for_each`. Write `|> find`, `|> any` and `|> each`, which work on every target. .NET's `LIST.find` returns the type's default value when nothing matches, where `|> find` returns an absent value.
+On .NET a `LIST` also has members .NET gives it that work over any sequence: `find`, `exists`, `true_for_all`, `for_each` and `convert_all`. Each warns `[deprecated]` and names its replacement. Write `|> find`, `|> any`, `|> all`, `|> each` and `|> map`, which work on every target. .NET's `LIST.find` returns the type's default value when nothing matches, where `|> find` returns an absent value.
 
 *More detail on this section: [language details](docs/details.md#functions).*
 
