@@ -181,6 +181,15 @@ namespace IR.Emitter is
                 _collect_frames(`namespace, result)
             od
 
+            // A member a runtime `partial` added to an imported type is in
+            // that type's table, not its namespace's, but its closures'
+            // frames are emitted here all the same.
+            for member in Semantic.INJECTED_MEMBERS.all do
+                if let function: Function = member then
+                    _collect_frames_from_function(function, result)
+                fi
+            od
+
             // Closures that share a frame each lead to it, and a frame is
             // one type however many closures reach it.
             let seen = Collections.SET[Classy]()
@@ -431,6 +440,17 @@ namespace IR.Emitter is
                 fi
             od
 
+            // A member a runtime `partial` added to an imported type lives
+            // in that type's table but is emitted here, on the carrier of
+            // the namespace that declared it.
+            if let home = type.globals_of then
+                for member in Semantic.INJECTED_MEMBERS.all do
+                    if let function: Function = member /\ function.injection_home == home /\ _is_emitted(function) then
+                        result.add(function)
+                    fi
+                od
+            fi
+
             _collect_anonymous_functions(type, result)
 
             _sort_by_declaration(result)
@@ -484,7 +504,9 @@ namespace IR.Emitter is
             _emitted_home(member.owner) == _emitted_home(type.scope)
 
         _emitted_home(scope: Scope?) -> Scope? static =>
-            if let injection: Semantic.INJECTION_SCOPE = scope then
+            if let reflected_injection: Semantic.REFLECTED_INJECTION_SCOPE = scope then
+                reflected_injection.home
+            elif let injection: Semantic.INJECTION_SCOPE = scope then
                 injection.target
             else
                 _as_namespace(scope) ?? scope

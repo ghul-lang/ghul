@@ -41,6 +41,7 @@ namespace Semantic.DotNet is
         // an array, which the language's own ARRAY type answers for.
         _constructor_intrinsics: MutableMap[TYPE, MutableList[System.Reflection.MethodInfo]]
         _array_constructor_intrinsics: MutableList[System.Reflection.MethodInfo]
+        _injected_members: MutableMap[TYPE, MutableList[(method: System.Reflection.MethodInfo, operation: string)]]
 
         // Old names of renamed types, which resolve to the type under its
         // new name.
@@ -58,6 +59,7 @@ namespace Semantic.DotNet is
             _namespaces_with_globals_carrier = SET[string]()
             _constructor_intrinsics = MAP[TYPE, MutableList[System.Reflection.MethodInfo]]()
             _array_constructor_intrinsics = LIST[System.Reflection.MethodInfo]()
+            _injected_members = MAP[TYPE, MutableList[(method: System.Reflection.MethodInfo, operation: string)]]()
             aliases = TYPE_NAME_ALIASES()
         si
 
@@ -79,6 +81,41 @@ namespace Semantic.DotNet is
             fi
 
             list.add(method)
+        si
+
+        // A static an assembly marks as a member injected into the type its
+        // first parameter names (a generic type by its definition).
+        register_injected_member(method: System.Reflection.MethodInfo, operation: string) is
+            let parameters = method.get_parameters()
+
+            if parameters.count == 0 then
+                return
+            fi
+
+            let receiver = parameters[0].parameter_type
+            let key = if receiver.is_generic_type then receiver.get_generic_type_definition() else receiver fi
+
+            let list: MutableList[(method: System.Reflection.MethodInfo, operation: string)] mut
+
+            if !_injected_members.try_get_value(key, list ref) then
+                list = LIST[(method: System.Reflection.MethodInfo, operation: string)]()
+
+                _injected_members.add(key, list)
+            fi
+
+            list.add((method = method, operation = operation))
+        si
+
+        // The members injected into `type`, as the statics that implement
+        // them and their markers' operations.
+        injected_members_for(type: TYPE) -> Iterable[(method: System.Reflection.MethodInfo, operation: string)] is
+            let result: MutableList[(method: System.Reflection.MethodInfo, operation: string)] mut
+
+            if _injected_members.try_get_value(type, result ref) then
+                return result
+            fi
+
+            return LIST[(method: System.Reflection.MethodInfo, operation: string)]()
         si
 
         constructor_intrinsics_for(type: TYPE) -> Iterable[System.Reflection.MethodInfo] is

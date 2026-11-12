@@ -437,6 +437,29 @@ The target of an `impl` block, and of a `partial` block, can be a qualified name
 
 Inside the block, the target's own members, inherited members and type parameters are in scope first, exactly as inside the target's declaration body. Every other name resolves where the block is written: in the block's enclosing namespace and that namespace's `use` imports. This includes the target name after `for`, the interface name, the types in member headers and every name in the bodies. Names that are in scope only where the target is declared (the target's namespace siblings, and the imports of the target's own file) are not visible, unless they are also visible where the block is written. Declaration order does not matter. The block can come before its target in the same file, or be in a file compiled earlier.
 
+### Adding members to an imported type
+
+An imported type cannot be reopened, with one exception, which the runtime library uses. In a build with `--allow-member-injection`, a `partial` block written inside `namespace Ghul.Internal` can name a non-generic imported type:
+
+```ghul
+namespace Ghul.Internal is
+    partial char is
+        is_vowel: bool => "aeiou".contains(self);
+        twice() -> string => "{self}{self}";
+    si
+si
+```
+
+Code that references the assembly then sees `is_vowel` and `twice` as members of `char`. Such a member is not stored in the imported type. It is a static of `Ghul.Internal` that takes the receiver as its first argument, named `self`. So it differs from an ordinary member:
+
+- The block can declare only instance methods and read-only properties. A field, a stored or assignable property, a static, a constructor or a nested declaration is an error.
+- The member is not virtual. It cannot override a member of the type, and nothing can override it.
+- A value-type receiver is passed by value, so the member cannot change it.
+- A member with the same name and parameter types as one the type already has is an error, and so is the same member added by two blocks.
+- A generic imported type is refused as not supported.
+
+Without the flag, or outside `Ghul.Internal`, a `partial` block naming an imported type is an error.
+
 ## operators
 
 These rules add to GHUL.md's precedence table. The thread-first row lists two operators, not a first character (see [collections and pipes](../GHUL.md#collections-and-pipes)). An operator that starts with `?` has lower precedence than every level in the table. Every operator that the table does not list has precedence between shift and bitwise. Operators are left-associative, except an operator that starts with `?`, which is right-associative, so that a chain of such operators stays open to the next operator.

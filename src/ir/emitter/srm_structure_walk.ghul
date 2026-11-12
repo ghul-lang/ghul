@@ -969,9 +969,19 @@ namespace IR.Emitter is
 
             let names = method.argument_names
 
+            // A member added to an imported type takes its receiver as
+            // parameter 1, ahead of the parameters the source declared.
+            let first_declared =
+                if SRM_SIGNATURE_ENCODER.injected_receiver(method)? then
+                    _assembly.add_parameter(_assembly.get_or_add_string("self"), 1)
+                    2
+                else
+                    1
+                fi
+
             for i in 0..names.count do
                 let parameter =
-                    _assembly.add_parameter(_assembly.get_or_add_string(names[i]), i + 1)
+                    _assembly.add_parameter(_assembly.get_or_add_string(names[i]), i + first_declared)
 
                 _write_slot(cast EntityHandle(parameter), _slot_attributes(method.arguments[i]))
                 _write_slot(cast EntityHandle(parameter), _pack_attributes(method, i))
@@ -1075,6 +1085,18 @@ namespace IR.Emitter is
                 _mark(cast EntityHandle(handle), STABLE_ATTRIBUTE_NAME)
             fi
 
+            // A member a runtime `partial` added to an imported type is a
+            // static here; the marker tells an importer to present it as a
+            // member of the type its first parameter names.
+            if method.injection_home? then
+                _attach(
+                    cast EntityHandle(handle),
+                    "ghul-runtime",
+                    INTRINSIC_ATTRIBUTE_NAME,
+                    _string_constructor_types(),
+                    SRM_ATTRIBUTE_BLOB_ENCODER.encode_string_argument(_injected_operation(method)))
+            fi
+
             // What a pack-marked declared return type asks of a caller
             // in another assembly - the same convention the formal
             // markers use, argumentless at depth zero.
@@ -1133,6 +1155,17 @@ namespace IR.Emitter is
                 fi
             fi
         si
+
+        INTRINSIC_ATTRIBUTE_NAME: string static => "Ghul.Internal.INTRINSIC_ATTRIBUTE"
+
+        // How an importer presents an injected member: an instance method,
+        // or the getter of the named property.
+        _injected_operation(method: Semantic.Symbols.Function) -> string static =>
+            if let property = Semantic.INJECTED_MEMBERS.property_read_by(method) then
+                "injected.property.{property.name}"
+            else
+                "injected.method"
+            fi
 
         PURE_ATTRIBUTE_NAME: string static => "Ghul.Internal.PURE_ATTRIBUTE"
         TRUSTED_STORE_FREE_ATTRIBUTE_NAME: string static => "Ghul.Internal.TRUSTED_STORE_FREE_ATTRIBUTE"

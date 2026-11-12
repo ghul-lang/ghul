@@ -281,6 +281,19 @@ namespace Syntax.Process is
             if !target? then
                 _logger.error(block.name.location, cannot_find_message)
                 associate_and_enter_scope(block, _rejecting_scope())
+            elif let home = _injection_home() /\ target.is_reflected /\ isa Definitions.PARTIAL(block) /\ target.is_generic then
+                // Its members would be generic statics whose own type
+                // parameters stand for the type's, which isn't built.
+                _logger.error(block.name.location, "adding members to generic imported type {target.name} is not supported")
+                associate_and_enter_scope(block, _rejecting_scope())
+            elif let home = _injection_home() /\ target.is_reflected /\ isa Definitions.PARTIAL(block) then
+                // The runtime library's own build adds members to an imported
+                // type: they are emitted as statics of the enclosing
+                // namespace's globals carrier, which importers find (see
+                // REFLECTED_INJECTION_SCOPE).
+                _symbol_use_locations.add_symbol_use(block.name.right_location, cast Semantic.Symbols.Symbol(target))
+
+                associate_and_enter_scope(block, Semantic.REFLECTED_INJECTION_SCOPE(target, current_scope, home))
             elif target.is_reflected then
                 // The CLR fixes a compiled type's members and interfaces at
                 // its definition, so only a type declared in this compilation
@@ -302,6 +315,21 @@ namespace Syntax.Process is
 
                 associate_and_enter_scope(block, Semantic.INJECTION_SCOPE(target, current_scope))
             fi
+        si
+
+        // The namespace a `partial` of an imported type emits its members
+        // into: the enclosing `Ghul.Internal`, where importers look for
+        // them, in a build that allows it. Null otherwise.
+        _injection_home() -> Semantic.Symbols.NAMESPACE? is
+            if !IoC.CONTAINER.instance.build_flags.allow_member_injection then
+                return null
+            fi
+
+            if let block = _symbol_table.current_namespace_block, home = block.containing_namespace /\ home.qualified_name =~ ".Ghul.Internal" then
+                return home
+            fi
+
+            return null
         si
 
         // When a block's target cannot be resolved to a same-assembly type,
@@ -400,9 +428,10 @@ namespace Syntax.Process is
                 let symbol = symbol_for(function.for_property)
 
                 assert symbol? else "function is accessor for property but no property found: {function.location}"
-                assert isa Semantic.Symbols.Property(symbol) else "function is accessor for property but associated symbol is not a property: {function.location}"
 
-                property = cast Semantic.Symbols.Property(symbol)
+                // A property a block refused, already reported, was declared
+                // as something else, and its accessor accesses nothing.
+                property = cast Semantic.Symbols.Property?(symbol)
             fi
 
             if is_innate then
@@ -843,7 +872,9 @@ namespace Syntax.Process is
 
                 symbol.set_doc(property.doc)
 
-                if property.read_body == null /\ property.assign_body == null then
+                // A refused block's property is declared nowhere, and neither
+                // is a backing field for it.
+                if property.read_body == null /\ property.assign_body == null /\ !isa Semantic.REJECTED_BLOCK_SCOPE(current_declaration_context) then
                     current_declaration_context.declare_variable(
                         name.location,
                         "${name.name}",

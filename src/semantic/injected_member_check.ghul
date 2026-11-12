@@ -1,0 +1,83 @@
+namespace Semantic is
+    use Logging.Logger
+
+    use Symbols.Function
+    use Symbols.FUNCTION_GROUP
+
+    // The checks on the members a runtime `partial` adds to an imported
+    // type, once their signatures are resolved. A member can't take the
+    // place of one the type already has: the type's own wins wherever the
+    // two would be the same call, so the added one could never be reached.
+    // It can't override either, since it is a static rather than a slot in
+    // the type.
+    class INJECTED_MEMBER_CHECK is
+        check(logger: Logger) static is
+            if INJECTED_MEMBERS.is_checked then
+                return
+            fi
+
+            INJECTED_MEMBERS.is_checked = true
+
+            for member in INJECTED_MEMBERS.all do
+                let owner = cast Symbols.Classy?(member.owner)
+
+                if !owner? then
+                    continue
+                fi
+
+                let existing = owner.find_member(member.name)
+
+                if let function: Function = member then
+                    if let group: FUNCTION_GROUP = existing then
+                        for other in group.functions do
+                            if other == function \/ !_has_same_parameters(other, function) then
+                                continue
+                            fi
+
+                            if other.injection_home? then
+                                // Reported at the later of the two.
+                                if _is_declared_before(other, function) then
+                                    logger.error(function.location, "{function.name} is added to imported type {owner.name} more than once", other.location, "also added here")
+                                fi
+                            elif other.is_virtual /\ !(cast Symbols.Method?(other)?.cannot_be_overridden ?? false) then
+                                logger.error(function.location, "a member added to imported type {owner.name} cannot override {other}")
+                            else
+                                logger.error(function.location, "{function.name} is already a member of imported type {owner.name}")
+                            fi
+                        od
+                    elif existing? /\ existing != member then
+                        logger.error(function.location, "{function.name} is already a member of imported type {owner.name}")
+                    fi
+                elif existing? /\ existing != member then
+                    logger.error(member.location, "{member.name} is already a member of imported type {owner.name}")
+                fi
+            od
+        si
+
+        _is_declared_before(first: Symbols.Symbol, second: Symbols.Symbol) -> bool static is
+            for member in INJECTED_MEMBERS.all do
+                if member == first then
+                    return true
+                elif member == second then
+                    return false
+                fi
+            od
+
+            return false
+        si
+
+        _has_same_parameters(left: Function, right: Function) -> bool static is
+            if left.arguments.count != right.arguments.count then
+                return false
+            fi
+
+            for i in 0..left.arguments.count do
+                if left.arguments[i].compare(right.arguments[i]) != Types.MATCH.SAME then
+                    return false
+                fi
+            od
+
+            return true
+        si
+    si
+si

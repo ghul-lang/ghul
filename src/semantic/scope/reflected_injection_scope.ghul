@@ -1,0 +1,267 @@
+namespace Semantic is
+    use Source.LOCATION
+
+    use Types.Type
+    use Symbols.Symbol
+
+    // Scope for the body of a `partial` block that adds members to an
+    // imported type, allowed only for the runtime library's own build
+    // (`--allow-member-injection`) and only inside `namespace Ghul.Internal`.
+    // The CLR fixes an imported type's members at its definition, so each
+    // member is emitted instead as a static of the namespace's globals
+    // carrier, taking the receiver as its first argument, and is declared
+    // into the imported type's own table, so that in this compilation, and
+    // in every one that references it, it is reached as a member of the
+    // imported type.
+    //
+    // A member that has to live in the imported type itself is refused:
+    // storage, a constructor, an operator, a nested declaration.
+    class REFLECTED_INJECTION_SCOPE: INJECTION_SCOPE, DeclarationContext is
+        _home: Symbols.NAMESPACE
+        _refuse: REJECTED_BLOCK_SCOPE
+
+        // The properties refused so far, whose accessors and backing field
+        // the rewriter declares after them, under the property's name.
+        _refused_properties: Collections.SET[string]
+
+        // What was refused but declared nowhere, by name: still found from
+        // inside the block, so a use of it is not reported again.
+        _detached: Collections.MAP[string, Symbol]
+
+        // The namespace whose globals carrier emits the members.
+        home: Symbols.NAMESPACE => _home
+
+        underlying_scope: Scope => self
+
+        init(target: Symbols.Classy, lexical: Scope, home: Symbols.NAMESPACE) is
+            super.init(target, lexical)
+
+            _home = home
+            _refuse = REJECTED_BLOCK_SCOPE(lexical)
+            _refused_properties = Collections.SET[string]()
+            _detached = Collections.MAP[string, Symbol]()
+        si
+
+        _refused(location: LOCATION, what: string, name: string) -> Symbol is
+            IoC.CONTAINER.instance.logger.error(location, "{what} cannot be added to imported type {target.name}")
+
+            return Symbols.UNDEFINED(location, _refuse, name)
+        si
+
+        // A refused property is declared nowhere, so its accessors, which
+        // are declared after it, still have a property to belong to.
+        _refused_property(location: LOCATION, message: string, name: string) -> Symbol is
+            IoC.CONTAINER.instance.logger.error(location, message)
+
+            _refused_properties.add(name)
+
+            return _detach(Symbols.INSTANCE_PROPERTY(location, location, _refuse, name, false, false))
+        si
+
+        // Whether `name` is the accessor or backing field of a refused
+        // property: those go where the property went, with nothing more
+        // reported.
+        _is_part_of_refused_property(name: string) -> bool is
+            for property in _refused_properties do
+                if name =~ "$get_{property}" \/ name =~ "$set_{property}" \/ name =~ "${property}" then
+                    return true
+                fi
+            od
+
+            return false
+        si
+
+        declare_function(location: LOCATION, span: LOCATION, name: string, is_static: bool, is_private: bool, has_body: bool, is_property_accessor: bool, enclosing: Scope, symbol_definition_listener: SymbolDefinitionListener?) -> Symbol is
+            if _is_part_of_refused_property(name) then
+                return _refuse.declare_function(location, span, name, is_static, is_private, has_body, is_property_accessor, enclosing, symbol_definition_listener)
+            fi
+
+            if name =~ "init" then
+                return _refused(location, "a constructor", name)
+            fi
+
+            if !has_body /\ !is_property_accessor then
+                return _refused(location, "a member with no body", name)
+            fi
+
+            // An importer finds an injected member by the type its first
+            // parameter names, which a static doesn't have.
+            if is_static then
+                return _refused(location, "a static member", name)
+            fi
+
+            let result = Symbols.INJECTED_METHOD(location, span, target, name, enclosing, _home)
+
+            target.declare_function_group(location, result, symbol_definition_listener)
+
+            INJECTED_MEMBERS.add(target, name, result)
+
+            return result
+        si
+
+        declare_generator_function(location: LOCATION, span: LOCATION, name: string, is_static: bool, is_private: bool, has_body: bool, enclosing: Scope, symbol_definition_listener: SymbolDefinitionListener?) -> Symbol =>
+            _refused(location, "a generator", name)
+
+        declare_async_function(location: LOCATION, span: LOCATION, name: string, is_static: bool, is_private: bool, has_body: bool, enclosing: Scope, symbol_definition_listener: SymbolDefinitionListener?) -> Symbol =>
+            _refused(location, "an async function", name)
+
+        // A field is refused; it, and the backing field of a refused
+        // property, are declared nowhere, but are still fields, which later
+        // passes find typed.
+        declare_variable(location: LOCATION, name: string, is_static: bool, symbol_definition_listener: SymbolDefinitionListener?) -> Symbol is
+            if !_is_part_of_refused_property(name) then
+                IoC.CONTAINER.instance.logger.error(location, "a field cannot be added to imported type {target.name}")
+            fi
+
+            return _detach(Symbols.INSTANCE_FIELD(location, _refuse, name))
+        si
+
+        _detach(symbol: Symbol) -> Symbol is
+            _detached[symbol.name] = symbol
+
+            return symbol
+        si
+
+        find_direct(name: string) -> Symbol? is
+            let detached: Symbol mut = _
+
+            if _detached.try_get_value(name, detached ref) then
+                return detached
+            fi
+
+            return super.find_direct(name)
+        si
+
+        find_enclosing(name: string) -> Symbol? is
+            let detached: Symbol mut = _
+
+            if _detached.try_get_value(name, detached ref) then
+                return detached
+            fi
+
+            return super.find_enclosing(name)
+        si
+
+        declare_property(location: LOCATION, span: LOCATION, name: string, is_static: bool, is_private: bool, is_assignable: bool, symbol_definition_listener: SymbolDefinitionListener?) -> Symbol is
+            if is_assignable then
+                return _refused_property(location, "an assignable property cannot be added to imported type {target.name}", name)
+            fi
+
+            if is_static then
+                return _refused_property(location, "a static property cannot be added to imported type {target.name}", name)
+            fi
+
+            if target.find_direct(name)? then
+                return _refused_property(location, "{name} is already a member of imported type {target.name}", name)
+            fi
+
+            let result = Symbols.INSTANCE_PROPERTY(location, span, target, name, false, is_private)
+
+            target.declare(location, result, symbol_definition_listener)
+
+            INJECTED_MEMBERS.add(target, name, result)
+
+            return result
+        si
+
+        declare_class(location: LOCATION, span: LOCATION, name: string, arguments: string[], enclosing: Scope, symbol_definition_listener: SymbolDefinitionListener?) -> Symbol =>
+            _refused(location, "a class", name)
+
+        declare_trait(location: LOCATION, span: LOCATION, name: string, arguments: string[], enclosing: Scope, symbol_definition_listener: SymbolDefinitionListener?) -> Symbol =>
+            _refused(location, "a trait", name)
+
+        declare_struct(location: LOCATION, span: LOCATION, name: string, arguments: string[], enclosing: Scope, symbol_definition_listener: SymbolDefinitionListener?) -> Symbol =>
+            _refused(location, "a struct", name)
+
+        declare_union(location: LOCATION, span: LOCATION, name: string, arguments: string[], enclosing: Scope, symbol_definition_listener: SymbolDefinitionListener?) -> Symbol =>
+            _refused(location, "a union", name)
+
+        declare_variant(location: LOCATION, span: LOCATION, name: string, enclosing: Scope, symbol_definition_listener: SymbolDefinitionListener?) -> Symbol =>
+            _refused(location, "a variant", name)
+
+        declare_type(location: LOCATION, name: string, index: int, symbol_definition_listener: SymbolDefinitionListener?) -> Symbol =>
+            _refused(location, "a type parameter", name)
+
+        declare_enum(location: LOCATION, span: LOCATION, name: string, enclosing: Scope, symbol_definition_listener: SymbolDefinitionListener?) -> Symbol =>
+            _refused(location, "an enum", name)
+
+        declare_enum_member(location: LOCATION, name: string, value: string?, symbol_definition_listener: SymbolDefinitionListener?) is
+            _refused(location, "an enum member", name)
+        si
+
+        declare_closure(location: LOCATION, name: string, owner: Scope, enclosing: Scope, is_recursive: bool, symbol_definition_listener: SymbolDefinitionListener?) -> Symbol =>
+            _home.declare_closure(location, name, owner, enclosing, is_recursive, symbol_definition_listener)
+
+        declare_async_closure(location: LOCATION, name: string, owner: Scope, enclosing: Scope, is_recursive: bool, symbol_definition_listener: SymbolDefinitionListener?) -> Symbol =>
+            _home.declare_async_closure(location, name, owner, enclosing, is_recursive, symbol_definition_listener)
+
+        declare_generator_closure(location: LOCATION, name: string, owner: Scope, enclosing: Scope, is_recursive: bool, symbol_definition_listener: SymbolDefinitionListener?) -> Symbol =>
+            _home.declare_generator_closure(location, name, owner, enclosing, is_recursive, symbol_definition_listener)
+
+        declare_innate(location: LOCATION, name: string, innate_name: string, enclosing: Scope, symbol_definition_listener: SymbolDefinitionListener?) -> Symbol =>
+            _refused(location, "an innate", name)
+
+        declare_label(location: LOCATION, name: string, symbol_definition_listener: SymbolDefinitionListener?) is
+            _refused(location, "a label", name)
+        si
+
+        to_string() -> string => "injection scope for imported type: {target.qualified_name}"
+    si
+
+    // The members injected into imported types in this compilation. An
+    // imported type lives for the whole analyser session, so a rebuild that
+    // declares the members again has to take the old ones out first.
+    class INJECTED_MEMBERS is
+        _members: Collections.LIST[(owner: Symbols.Classy, name: string, member: Symbol)] static
+
+        init() static is
+            _members = Collections.LIST[(owner: Symbols.Classy, name: string, member: Symbol)]()
+        si
+
+        // Every member injected so far, in declaration order.
+        all: Collections.Iterable[Symbol] static is
+            let result = Collections.LIST[Symbol]()
+
+            for m in _members do
+                result.add(m.member)
+            od
+
+            return result
+        si
+
+        // The injected property `function` reads, or null where it reads
+        // none: an accessor is emitted as a static like any other injected
+        // member, and importers rebuild the property from its marker.
+        property_read_by(function: Symbols.Function) -> Symbols.Property? static is
+            for m in _members do
+                if let property: Symbols.Property = m.member /\ property.read_function == function then
+                    return property
+                fi
+            od
+
+            return null
+        si
+
+        add(owner: Symbols.Classy, name: string, member: Symbol) static is
+            _members.add((owner = owner, name = name, member = member))
+
+            is_checked = false
+        si
+
+        // Whether the members declared so far have been checked: the check
+        // runs once per build however many files call for it.
+        is_checked: bool static public
+
+        // Takes every injected member back out of the imported type it was
+        // declared into.
+        clear() static is
+            for m in _members do
+                m.owner.remove_injected(m.name, m.member)
+            od
+
+            _members.clear()
+
+            is_checked = false
+        si
+    si
+si
