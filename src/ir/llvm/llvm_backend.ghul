@@ -335,6 +335,11 @@ namespace IR.LLVMTarget is
                     declare(FUNCTION_INSTANCE.of(getter))
                 fi
 
+                // The runtime sweeps what the program left open as it ends.
+                if let sweep = IR.Program.CORE_LIBRARY.exit_sweep_function() /\ _bodies.contains_key(sweep) then
+                    declare(FUNCTION_INSTANCE.of(sweep))
+                fi
+
                 // A cell shows the value it ends on, as text the runtime writes.
                 if CELL_LINK.is_active then
                     if let inspect = IR.Program.CORE_LIBRARY.inspect_function() /\ _bodies.contains_key(inspect) then
@@ -517,6 +522,12 @@ namespace IR.LLVMTarget is
 
                 LLVM_EXCEPTIONS.add_report_unhandled(module, strings, if let g = getter then callee(FUNCTION_INSTANCE.of(g)) else null fi)
 
+                if let sweep = IR.Program.CORE_LIBRARY.exit_sweep_function() /\ _bodies.contains_key(sweep) then
+                    if let compiled = callee(FUNCTION_INSTANCE.of(sweep)) then
+                        _add_exit_sweep(module, compiled)
+                    fi
+                fi
+
                 if let c = LLVM_EXCEPTIONS.null_reference_constructor,
                     type = objects.class_of(IR.Program.CORE_LIBRARY.exception_class(Semantic.Lookups.RuntimeException.NULL_REFERENCE)!, MAP[Semantic.Symbols.Symbol, Semantic.Types.Type]()),
                     constructor = callee(FUNCTION_INSTANCE.of(c))
@@ -616,6 +627,19 @@ namespace IR.LLVMTarget is
                 LLVM_LOWERING(module, copy, instance, instance.specialize(instance.definition.return_type), declare, strings, arrays, objects)
                     .lower(_bodies[instance.definition])
             fi
+        si
+
+        // Exports `$ghul_exit_sweep`, which calls the runtime's exit sweep.
+        // The native runtime calls it as the program ends: on return from
+        // the entry, on exit, and on an exception nothing caught.
+        _add_exit_sweep(module: MODULE, sweep: FUNCTION) is
+            let function = FUNCTION(LLVM_STRINGS.EXIT_SWEEP_NAME, LLVM.Type.VOID, LIST[PARAMETER]().to_array())
+            let entry = function.add_block("entry")
+
+            entry.call(sweep, LIST[LLVM.Value]().to_array())
+            entry.return_void()
+
+            module.add_function(function)
         si
 
         /// The name of the function the runtime starts the program at, which
