@@ -1990,7 +1990,7 @@ parse_port(s: string) -> int?;
 clamp_port(n: int) -> int?;
 label(n: int) -> string;
 
-let port = text |> trim() |> parse_port() ~> clamp_port() ~> label() ?? "closed";
+let port = text.trim() |> parse_port() ~> clamp_port() ~> label() ?? "closed";
 ```
 
 `|>` and `~>` can be mixed in one chain. A `|>` stage always runs. A `~>` stage propagates absence. `~>` works with every kind of optional, including an unconstrained `T?` in a generic. `~>` has the same diagnostics as `?.`:
