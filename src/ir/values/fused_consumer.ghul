@@ -230,13 +230,15 @@ namespace IR.Values is
         source_init: Value? public
 
         // A source walked by position rather than through its iterator:
-        // `index` steps from 0 while it is below the count, read once
-        // into `index_count`, and `index_read` reads the element at it,
-        // both pre-built over the source local. Absent, the iterator
-        // drives the loop.
+        // `index` steps from 0 while it is below the count, and
+        // `index_read` reads the element at it, pre-built over the source
+        // local. An array's length is read once into `index_count`; a
+        // list's count is `index_count_reread`, read again before each
+        // element. Absent, the iterator drives the loop.
         index: IR.LOCAL? public
         index_count: IR.LOCAL? public
         index_count_init: Value? public
+        index_count_reread: Value? public
         index_read: Value? public
 
         // A collect over a source whose count is known before the loop,
@@ -342,10 +344,13 @@ namespace IR.Values is
             // the source's iterator member or the source is itself an
             // iterator (a value-type range), move_next / current drive it
             // through the local (by address for a value-type iterator).
-            let indexed = index? /\ index_count? /\ index_count_init? /\ index_read?
+            let indexed = index? /\ index_read? /\ ((index_count? /\ index_count_init?) \/ index_count_reread?)
 
             if indexed then
-                expansion.store(expansion.declare(index_count!), index_count_init!)
+                if let count = index_count, init = index_count_init then
+                    expansion.store(expansion.declare(count), init)
+                fi
+
                 expansion.store(expansion.declare(index!), Literal.NUMBER(0, int_type))
             else
                 expansion.store(expansion.declare(iterator), iterator_init)
@@ -370,7 +375,7 @@ namespace IR.Values is
                 // The element is read before the index moves on, and the
                 // index moves on before any stage runs, so a stage that
                 // passes the element over goes on to the next one.
-                expansion.exit_if(loop, IR.BRANCH.GE, index!.load(), index_count!.load())
+                expansion.exit_if(loop, IR.BRANCH.GE, index!.load(), if let count = index_count then cast Value(count.load()) else index_count_reread! fi)
                 expansion.store(expansion.declare(element), index_read!)
                 expansion.store(
                     index!,

@@ -1,10 +1,12 @@
 use default
 
-// A loop or fused chain over an array walks it by position, and must behave
-// as the iterator would: the same elements in the same order, the source
-// evaluated once and before any stage's arguments, `break` and `continue`
-// as usual. Each scenario runs over the array, over the same array seen as a
-// sequence (which takes the iterator), and with fusion suppressed.
+// A loop or fused chain over an array or a list walks it by position, and
+// must behave as the iterator would: the same elements in the same order,
+// the source evaluated once and before any stage's arguments, `break` and
+// `continue` as usual. Each scenario runs over the collection, over the same
+// collection seen as a sequence (which takes the iterator), and with fusion
+// suppressed. A list's count is read before each element, so a list that
+// shrinks while a loop reads it ends the loop.
 
 class LOG is
     entries: LIST[string]
@@ -42,6 +44,49 @@ sequence_loop(xs: Iterable[int]) -> string is
         if x == 3 then continue fi
         if x == 6 then break fi
         seen.add(x)
+    od
+
+    return seen |> join(",")
+si
+
+list_loop(xs: LIST[int]) -> string is
+    let seen = LIST[int]()
+
+    for x in xs do
+        if x == 3 then continue fi
+        if x == 6 then break fi
+        seen.add(x)
+    od
+
+    return seen |> join(",")
+si
+
+list_consumers(xs: LIST[int]) -> string =>
+    "{xs |> map(x => x * 2) |> sum()} {xs |> filter(x => x > 2) |> reduce(0, (a, x) => a + x)} {xs |> skip(1) |> take(3) |> join(",")}"
+
+list_consumers_unfused(xs: LIST[int]) -> string is
+    @suppress("pipe-fusion")
+    let text = "{xs |> map(x => x * 2) |> sum()} {xs |> filter(x => x > 2) |> reduce(0, (a, x) => a + x)} {xs |> skip(1) |> take(3) |> join(",")}"
+
+    return text
+si
+
+list_fused_for(xs: LIST[int]) -> string is
+    let seen = LIST[int]()
+
+    for x in xs |> filter(x => x % 2 == 1) |> map(x => x * 10) do
+        seen.add(x)
+    od
+
+    return seen |> join(",")
+si
+
+shrinking(xs: LIST[int]) -> string is
+    let seen = LIST[int]()
+
+    for x in xs do
+        seen.add(x)
+        xs.remove_at(xs.count - 1)
     od
 
     return seen |> join(",")
@@ -107,6 +152,12 @@ let empty = LIST[int]() |> ARRAY()
 
 write_line("plain {plain_loop(xs)} | {sequence_loop(xs)}")
 write_line("empty {plain_loop(empty)} | {sequence_loop(empty)} | {empty |> map(x => x * 2) |> sum()}")
+let ys = LIST[int]([1, 2, 3, 4, 5, 6, 7])
+
+write_line("list {list_loop(ys)} | {sequence_loop(ys)} | {list_loop(LIST[int]())}")
+write_line("list consumers {list_consumers(ys)} | {list_consumers_unfused(ys)}")
+write_line("list fused for {list_fused_for(ys)}")
+write_line("shrinking {shrinking(LIST[int]([1, 2, 3, 4, 5, 6]))}")
 write_line("pairs {pairs_loop([("a", 1), ("b", 2)])}")
 write_line("literal {[4, 5, 6] |> map(x => x - 1) |> sum()} comprehension {[x * x for x in 1::3] |> map(x => x + 1) |> sum()}")
 write_line("fused for {fused_for(xs)} | {fused_for_unfused(xs)}")
