@@ -1156,12 +1156,31 @@ namespace Driver is
             try
                 container.backend.write(output_file)
             catch e: IR.LLVMTarget.LinkFailedException
-                Std.error.write_line("internal error: {e.message}")
-
-                return 2
+                return _report_link_failure(e.message)
             yrt
 
             return 0
+        si
+
+        // A symbol an `@extern` names and no linked library defines is the
+        // program's error, reported at the declaration; anything else the
+        // link says is reported as it said it.
+        _report_link_failure(message: string) -> int is
+            let undefined = IR.LLVMTarget.EXTERN_SYMBOLS.undefined_in(message)
+            let reported mut = 0
+
+            for name in undefined do
+                if let location = IR.LLVMTarget.EXTERN_SYMBOLS.declaration_of(name) then
+                    Std.error.write_line("{location.file_name}: {location.start_line},{location.start_column}..{location.end_line},{location.end_column}: error: {name} not defined by any library the program links")
+                    reported = reported + 1
+                fi
+            od
+
+            if reported == 0 \/ reported < undefined.count then
+                Std.error.write_line("error: {message}")
+            fi
+
+            return if reported > 0 then 1 else 2 fi
         si
 
         finish_build_wasm() -> int is

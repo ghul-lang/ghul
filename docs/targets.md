@@ -115,20 +115,22 @@ On .NET, an `@extern` is the `DllImport` it stands for, with the platform's defa
 - `--native-library <name>` links `lib<name>.a`.
 - `--native-library-path <dir>` adds a directory to search for libraries.
 
-A symbol that the link cannot find is a link error, not a compile error. A library that is named but that no call reaches is not linked.
+A symbol that the link cannot find is reported at the `@extern` declaration that names it. A library that is named but that no call reaches is not linked.
 
 Only values that the machine lays out in the same way on both sides can cross:
 
-- The scalars `bool`, `char`, `byte`, `ubyte`, `short`, `ushort`, `int`, `uint`, `long`, `ulong`, `word`, `uword`, `single` and `double` cross as the C types of the same width.
+- The scalars `bool`, `char`, `byte`, `ubyte`, `short`, `ushort`, `int`, `uint`, `long`, `ulong`, `word`, `uword`, `single` and `double` cross as the C types of the same width. A C pointer that ghūl only holds and passes back, such as a handle, is a `word`.
 - A `string` argument crosses as a NUL-terminated UTF-8 copy, made for the call and released after it.
-- Pointers and `ref` arguments cross on .NET only.
+- On .NET and llvm, a reference to a scalar, such as `int ref` or `word ref`, crosses as the address of the slot, so a C out-parameter such as `int *` or `sqlite3 **` writes into a local, a field or an array element. The address is valid for the call only.
+- On .NET and llvm, an `ARRAY[ubyte]` crosses as the address of its first byte, so the foreign function reads or writes the array's own bytes. The length is a separate argument that the declaration has and the caller passes, as in C. A length greater than the array's count is the caller's bug, and nothing checks it. The address is valid for the call only, and the callee must not keep it.
+- Pointers cross on .NET only.
 
-Any other type, such as a class, a tuple, an array or a function, is an error at the declaration. A foreign function that keeps the pointer it was given after it returns has undefined behaviour, as with any marshalled call.
+Any other type, such as a class, a tuple, another kind of array or a function, is an error at the parameter. A foreign function that keeps the pointer it was given after it returns has undefined behaviour, as with any marshalled call.
 
 A function that returns a string must say who owns the text, on llvm, with a named argument. A string return is an error on .NET. On wasm, a string return needs no named argument. The two values are:
 
 - `result = "copy"` copies text that the callee keeps, as `getenv` returns it.
-- `result = "take"` copies text that the callee allocated with the C library's `malloc`, and then releases it with `free`.
+- `result = "take"` copies text that the callee allocated, and then releases it: with the C library's `free`, or with the function that `free = "name"` names, for a library that has its own deallocator.
 
 A null return is the absent string, so the return type is `string?`.
 
@@ -138,11 +140,37 @@ environment_variable(name: string) -> string?
 
 @extern("libc", "strdup", result = "take")
 duplicate(text: string) -> string?
+
+@extern("", "sqlite3_mprintf", result = "take", free = "sqlite3_free")
+format(text: string) -> string?
+```
+
+On llvm, `errno = <value>` makes the function answer `Result[T, int]`, where `T` is what the C function returns. The value names the result that signals failure, and the error that the `ERROR` variant carries is the C library's `errno`, read straight after the call. So `errno = 0` means that a zero result is a failure, not that `errno` is tested for zero. `errno = "negative"` takes any negative result as failure. `errno = "set"` zeroes `errno` before the call and takes a nonzero `errno` after it as failure, whatever the result. That form is only correct for a function documented to be used that way, such as `strtol`, `readdir` or `getpriority`, because C allows a function to set `errno` when it succeeds. `errno` is an error on .NET and on wasm.
+
+```ghul
+@extern("libc", "close", errno = -1)
+close(fd: int) -> Result[int, int]
+
+@extern("libc", "opendir", errno = 0)
+open_directory(path: string) -> Result[word, int]
+
+@extern("libc", "strtol", errno = "set")
+parse(text: string, end: word, base: int) -> Result[long, int]
+```
+
+On llvm, `variadic = n` calls a C variadic function, such as `printf` or `open`, with the parameters from the `n`th on passed as C passes variadic arguments: a `single` as a `double`, and anything narrower than an `int` as an `int`. The declaration is an ordinary one with a fixed list of parameters, so a call that passes different types is a different declaration of the same symbol. Two declarations of one symbol must have the same first `n` parameters and the same result. `variadic` is an error on .NET and on wasm.
+
+```ghul
+@extern("libc", "open", variadic = 2)
+open(path: string, flags: int) -> int
+
+@extern("libc", "open", variadic = 2)
+open_creating(path: string, flags: int, mode: uint) -> int
 ```
 
 Foreign code allocates with the C library's own `malloc` and `free`. The garbage collector does not see or scan that memory. A ghūl object can hold a pointer into it, and the program that does so must release it. The reverse is not true: memory that a foreign library allocated cannot reliably keep a ghūl object alive. So no object or array crosses, and nothing can be registered for the library to call back into.
 
-On wasm, the module must be empty, and the name is looked up in `options.externs`, the object that the loader's `run` takes. Each declared name must be a function in that object. A program that declares a name the caller does not supply fails to start, and the error names the missing function. Numbers cross as JavaScript numbers, except `long` and `ulong`, which cross as BigInts. A string crosses as a string, as a result and as an argument. Every `@extern` function that the program declares is imported, whether or not it is called.
+On wasm, the module must be empty, and the name is looked up in `options.externs`, the object that the loader's `run` takes. Each declared name must be a function in that object. A program that declares a name the caller does not supply fails to start, and the error names the missing function. Numbers cross as JavaScript numbers, except `long`, `ulong`, `word` and `uword`, which cross as BigInts. A string crosses as a string, as a result and as an argument. A reference or an array cannot cross, because the host cannot write through a reference or read a WasmGC array. Every `@extern` function that the program declares is imported, whether or not it is called.
 
 ## what differs on the wasm target
 

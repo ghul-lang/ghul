@@ -3432,7 +3432,9 @@ namespace IR.LLVMTarget is
                 return
             fi
 
-            let result = _specialize(function.return_type)
+            // with `errno =`, the C function answers the T of the Result[T, int]
+            // the declaration answers
+            let result = _specialize(import.answered ?? function.return_type)
             let formals = function.arguments
             let parameter_types = LIST[LLVM.Type]()
             let parameter_attributes = LIST[LLVM.Attribute?]()
@@ -3447,10 +3449,33 @@ namespace IR.LLVMTarget is
                     return
                 fi
 
-                if let scalar = _scalar(formal) then
+                if let scalar = _scalar(formal) /\ import.is_variadic /\ i >= import.fixed_parameters then
+                    // a variadic argument is passed as C promotes it: a single
+                    // as a double, anything narrower than an int as an int
+                    let (promoted, type) = _promoted_for_variadic(_to_c(value, scalar), scalar)
+
+                    parameter_types.add(type)
+                    parameter_attributes.add(null)
+                    values.add(promoted)
+                elif let scalar = _scalar(formal) then
                     parameter_types.add(_c_type(scalar))
                     parameter_attributes.add(_c_extension(scalar))
                     values.add(_to_c(value, scalar))
+                elif _specialize(formal)?.is_ref ?? false then
+                    // the slot's address, which the scanned stack keeps live
+                    // for the call
+                    parameter_types.add(Types.pointer)
+                    parameter_attributes.add(null)
+                    values.add(value)
+                elif let arrays = _arrays, array = arrays.array_of(_specialize(formal)) /\ LLVM_TYPES.scalar(arrays.element_of(array)) =~ Scalar.UINT8 then
+                    // the address of the first element, or null for an absent
+                    // array, valid for the call
+                    let first = arrays.element_address(_current, array, value, _i32(0))
+                    let is_null = _current.compare(IntegerPredicate.EQ, value, LLVM.Values.null_pointer)
+
+                    parameter_types.add(Types.pointer)
+                    parameter_attributes.add(null)
+                    values.add(_current.select(is_null, LLVM.Values.null_pointer, first))
                 elif _is_string(_specialize(formal)) then
                     let text = _current.select(_current.compare(IntegerPredicate.EQ, value, LLVM.Values.null_pointer), strings.literal(""), value)
                     let buffer = _c_string(strings, text)
@@ -3484,7 +3509,24 @@ namespace IR.LLVMTarget is
                 return
             fi
 
-            let callee = strings.runtime(import.name, result_type, parameter_types.to_array())
+            EXTERN_SYMBOLS.note(import.name, function.location)
+
+            if let deallocator = import.deallocator then
+                EXTERN_SYMBOLS.note(deallocator, function.location)
+            fi
+
+            let declared_parameters =
+                if import.is_variadic then
+                    parameter_types |> Ghul.Pipes.take(import.fixed_parameters) |> ARRAY()
+                else
+                    parameter_types.to_array()
+                fi
+
+            let callee = strings.runtime(import.name, result_type, declared_parameters)
+
+            if import.is_variadic then
+                callee.is_variadic = true
+            fi
 
             // A small argument is extended to a register, as clang does for
             // the callee that relies on it. A small result is not marked
@@ -3497,7 +3539,23 @@ namespace IR.LLVMTarget is
                 fi
             od
 
+            // errno is the thread's, so its address is taken once; it is zeroed
+            // so a function that signals failure only by setting it can be read
+            let errno_location =
+                if import.failure? then
+                    _current.call(strings.runtime("__errno_location", Types.pointer, []), [])
+                else
+                    null
+                fi
+
+            if let location = errno_location then
+                _current.store(LLVM.Values.i32(0), location, 4)
+            fi
+
             let answer = _current.call(callee, values.to_array())
+
+            // read before anything else here can call into the C library
+            let errno = if let location = errno_location then _current.load(Types.i32, location, 4) else null fi
 
             for buffer in buffers do
                 _current.call(strings.runtime("free", LLVM.Type.VOID, [Types.pointer]), [buffer])
@@ -3507,11 +3565,69 @@ namespace IR.LLVMTarget is
                 return
             fi
 
+            if let failure = import.failure, e = errno then
+                _push_extern_result(import, failure, answer, e, result_scalar, answers_string)
+            else
+                _push_extern_answer(import, answer, result_scalar, answers_string)
+            fi
+        si
+
+        // The answer of a foreign function, as the ghūl value it stands for.
+        _push_extern_answer(import: Semantic.EXTERN_IMPORT, answer: LLVM.Value, result_scalar: Scalar?, answers_string: bool) is
             if let scalar = result_scalar then
                 _push(_from_c(answer, scalar))
             elif answers_string then
-                _push(_string_from_c(strings, answer, import.result == Semantic.ExternResult.TAKE))
+                let release = if import.result == Semantic.ExternResult.TAKE then import.deallocator ?? "free" else null fi
+
+                _push(_string_from_c(_strings!, answer, release))
             fi
+        si
+
+        // The Result[T, int] an `errno =` declaration answers: ERROR with the
+        // errno where the answer, or for `errno = "set"` the errno, says the
+        // call failed, and OK with the answer otherwise.
+        _push_extern_result(import: Semantic.EXTERN_IMPORT, failure: Semantic.EXTERN_FAILURE, answer: LLVM.Value, errno: LLVM.Value, result_scalar: Scalar?, answers_string: bool) is
+            let failed =
+                case failure.kind
+                when Semantic.ExternFailureKind.SET then
+                    _current.compare(IntegerPredicate.NE, errno, LLVM.Values.i32(0))
+                when Semantic.ExternFailureKind.NEGATIVE then
+                    _current.compare(IntegerPredicate.SLT, answer, LLVM.Values.integer(answer.type, 0n))
+                else
+                    if answers_string then
+                        _current.compare(IntegerPredicate.EQ, answer, LLVM.Values.null_pointer)
+                    else
+                        _current.compare(IntegerPredicate.EQ, answer, LLVM.Values.integer(answer.type, bigint(failure.value)))
+                    fi
+                esac
+
+            let slot = _slot(Types.pointer)
+            let on_failure = _new_block()
+            let on_success = _new_block()
+            let join = _new_block()
+
+            _current.branch(failed, on_failure, on_success)
+
+            _start(on_failure)
+            _push(errno)
+
+            if let error = _construct(import.error_constructor!, [Values.STACK_TOP(IoC.CONTAINER.instance.innate_symbol_lookup.get_int_type())], "Result.ERROR") then
+                _current.store(error, slot, 0)
+            fi
+
+            _current.branch(join)
+
+            _start(on_success)
+            _push_extern_answer(import, answer, result_scalar, answers_string)
+
+            if let ok = _construct(import.ok_constructor!, [Values.STACK_TOP(import.answered!)], "Result.OK") then
+                _current.store(ok, slot, 0)
+            fi
+
+            _current.branch(join)
+
+            _start(join)
+            _push(_current.load(Types.pointer, slot, 0))
         si
 
         // `text` as NUL-terminated UTF-8 in memory from the C library's
@@ -3534,9 +3650,9 @@ namespace IR.LLVMTarget is
         si
 
         // A string made from the NUL-terminated UTF-8 at `address`, or the
-        // absent string for a null address; `release` frees the original
-        // with the C library's free once it is copied.
-        _string_from_c(strings: LLVM_STRINGS, address: LLVM.Value, release: bool) -> LLVM.Value is
+        // absent string for a null address; `release` names the function
+        // that frees the original once it is copied, or is null to keep it.
+        _string_from_c(strings: LLVM_STRINGS, address: LLVM.Value, release: string?) -> LLVM.Value is
             let slot = _slot(Types.pointer)
             let present = _new_block()
             let join = _new_block()
@@ -3555,8 +3671,8 @@ namespace IR.LLVMTarget is
 
             _current.store(_current.call(strings.runtime("$libghul_utf16_make_string", Types.pointer, [Types.pointer]), [text])!, slot, 0)
 
-            if release then
-                _current.call(strings.runtime("free", LLVM.Type.VOID, [Types.pointer]), [address])
+            if let deallocator = release then
+                _current.call(strings.runtime(deallocator, LLVM.Type.VOID, [Types.pointer]), [address])
             fi
 
             _current.branch(join)
@@ -3570,6 +3686,26 @@ namespace IR.LLVMTarget is
         // `i1`, a small integer at its width, anything else as it is held.
         _c_type(scalar: Scalar) -> LLVM.Type =>
             if scalar == Scalar.BOOL then Types.i1 else LLVM_TYPES.stored_type(scalar) fi
+
+        // `value`, a C scalar, as C passes it to a variadic function, with the
+        // type it is passed as: the default argument promotions turn a float
+        // into a double and anything narrower than an int into an int.
+        _promoted_for_variadic(value: LLVM.Value, scalar: Scalar) -> (LLVM.Value, LLVM.Type) is
+            if scalar == Scalar.FLOAT32 then
+                let double = _c_type(Scalar.FLOAT64)
+
+                return (_current.convert(Conversion.FLOAT_EXTEND, value, double), double)
+            fi
+
+            if scalar == Scalar.BOOL \/ LLVM_TYPES.is_narrow(scalar) then
+                let int = _c_type(Scalar.INT32)
+                let extend = if scalar == Scalar.BOOL \/ LLVM_TYPES.is_unsigned(scalar) then Conversion.ZERO_EXTEND else Conversion.SIGN_EXTEND fi
+
+                return (_current.convert(extend, value, int), int)
+            fi
+
+            return (value, _c_type(scalar))
+        si
 
         // How C extends a value of the kind to a register: `zeroext` for a
         // bool or an unsigned small kind, `signext` for a signed one.

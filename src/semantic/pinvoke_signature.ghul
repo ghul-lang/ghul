@@ -21,15 +21,55 @@ namespace Semantic is
         si
 
         // Whether an `@extern` parameter may be declared at this type when
-        // building for `target`. Only .NET can carry a pointer or a `ref`;
-        // the other targets take the scalars and strings.
-        can_take_on(type: Type?, target: Compiler.Target) -> bool is
-            if target == Compiler.Target.DOTNET then
-                return can_take(type)
+        // building for `target`. Every target takes the scalars and strings.
+        // .NET and llvm also take a reference to a scalar, which crosses as
+        // the slot's address, and an ARRAY[ubyte], which crosses as the
+        // address of its first element, each valid for the call. Only .NET
+        // takes a pointer.
+        can_take_on(type: Type?, target: Compiler.Target) -> bool =>
+            !refusal_on(type, target)?
+
+        // Why a parameter of this type cannot cross to foreign code when
+        // building for `target`, or null where it can.
+        refusal_on(type: Type?, target: Compiler.Target) -> ExternRefusal? is
+            if !type? then
+                return ExternRefusal.OTHER
             fi
 
-            return is_scalar(type) \/ (type? /\ type.matches(_innate_symbol_lookup.get_string_type()))
+            if is_scalar(type) \/ is_string(type) then
+                return null
+            fi
+
+            if type.is_ref then
+                if !is_scalar(type.get_element_type()) then
+                    return ExternRefusal.REFERENCE_TO_NON_SCALAR
+                fi
+
+                return if target == Compiler.Target.WASM then ExternRefusal.REFERENCE_ON_WASM else null fi
+            fi
+
+            if is_byte_array(type) then
+                return if target == Compiler.Target.WASM then ExternRefusal.ARRAY_ON_WASM else null fi
+            fi
+
+            if type.is_pointer then
+                return if target == Compiler.Target.DOTNET then null else ExternRefusal.POINTER fi
+            fi
+
+            if isa Types.ARRAY(type) then
+                return ExternRefusal.ARRAY_OF_NON_BYTE
+            fi
+
+            return ExternRefusal.OTHER
         si
+
+        // Whether this is ARRAY[ubyte], the array that crosses as a buffer.
+        is_byte_array(type: Type?) -> bool =>
+            if let array: Types.ARRAY = type then
+                array.arguments.count == 1 /\ array.arguments[0].matches(_innate_symbol_lookup.get_ubyte_type())
+            else
+                false
+            fi
 
         // Whether an `@extern` may answer this type when building for
         // `target`. A string is only offered where it can be copied out and
@@ -120,5 +160,17 @@ namespace Semantic is
                 _innate_symbol_lookup.get_single_type(),
                 _innate_symbol_lookup.get_double_type()
             ]
+    si
+si
+
+namespace Semantic is
+    // Why a type cannot be an `@extern` parameter on the target being built.
+    enum ExternRefusal is
+        REFERENCE_TO_NON_SCALAR,
+        REFERENCE_ON_WASM,
+        ARRAY_ON_WASM,
+        ARRAY_OF_NON_BYTE,
+        POINTER,
+        OTHER
     si
 si
