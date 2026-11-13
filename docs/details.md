@@ -155,7 +155,7 @@ let b: BOX[int] = _(42);
 
 The type comes from the same places as for a bare `_`: the annotation on a `let`, the left side of an assignment, or the parameter type of a call argument. An untyped immutable `let` initialized with `_()` takes its type from how the local is used later in the body, as a local initialized with `[]` does. So `let result = _()` followed by `return result` builds the declared return type. An optional context is unwrapped first: `let b: BOX? = _(1)` constructs a `BOX`, which then widens to the optional. With nothing to infer the type from, `_(...)` is an error (`cannot infer the type to construct here`). `_[T](...)` is not valid, because `T(...)` already does the same with the type written.
 
-`use E` evaluates `E`, and disposes the value when the innermost enclosing block ends, on every path out of the block, including an exception. The value of `use E` is the value of `E`, so `use E` can be written wherever `E` can: as an initializer, an argument or an operand. The value's type must be `Ghul.Disposable`. An absent value is not disposed. Values are disposed in the reverse of the order in which their `use` ran:
+`use E` evaluates `E`, and disposes the value when the innermost enclosing block ends, on every path out of the block, including an exception. A control construct owns a `use` in its header instead: one in a `for` source is disposed when the loop ends, one in an `if` or `elif` condition after the whole `if`, and one in a `case` subject or a `when` guard after the whole `case`, each on every path out, including an exception. A loop used as a value, such as `let v = for x in use E do break x od`, has its source disposed when the statement holding it ends. The value of `use E` is the value of `E`, so `use E` can be written wherever `E` can: as an initializer, an argument or an operand. The value's type must be `Ghul.Disposable`. An absent value is not disposed. Values are disposed in the reverse of the order in which their `use` ran:
 
 ```ghul
 let file = use IO.File.open_read(path)
@@ -164,7 +164,7 @@ let reader = use IO.StreamReader(file)
 return reader.read_line()
 ```
 
-`use` disposes the value it evaluated. So reassigning a `mut` local initialized from a `use` does not change what is disposed. Inside a body, a statement can start with `use`: `use R()` alone holds a value for the rest of the block. At file or namespace level, a `use` is an import, so a top-level statement that starts with the operator is written in parentheses: `(use E)`. Disposal belongs to the block, not to the expression. So `for x in use f().iterator do ... od` disposes the iterator when the block that contains the loop ends, not when the loop ends. `return use E` returns a value that is already disposed.
+`use` disposes the value it evaluated. So reassigning a `mut` local initialized from a `use` does not change what is disposed. Inside a body, a statement can start with `use`: `use R()` alone holds a value for the rest of the block. At file or namespace level, a `use` is an import, so a top-level statement that starts with the operator is written in parentheses: `(use E)`. Disposal belongs to the block or the construct, not to the expression. So `f(use R())` disposes `R()` when the block ends, not when the call returns, and `for x in use f().iterator do ... od` disposes the iterator when the loop ends. `return use E` returns a value that is already disposed.
 
 `let use x = E` is the old spelling of `let x = use E`. It cannot be combined with `mut`.
 
