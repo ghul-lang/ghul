@@ -123,10 +123,32 @@ namespace IR.Emitter is
         _linearise_loop(loop: LOOP, into: Collections.MutableList[FLAT_VALUE]) static is
             into.add(FLAT_VALUE(MARK_LABEL(loop.start), loop.position))
 
+            // A `continue` branches to the loop's start. Where the body
+            // begins with a protected region, the start would otherwise be
+            // the region's first instruction, and a `leave` to it would stay
+            // inside the region, so its finally would not run.
+            if _begins_with_try(loop) then
+                into.add(FLAT_VALUE(INSTRUCTION(ILOpCode.NOP), loop.position))
+            fi
+
             _linearise_body(loop, into)
 
             into.add(FLAT_VALUE(BRANCH_TO(ILOpCode.BR, loop.start), loop.position))
             into.add(FLAT_VALUE(MARK_LABEL(loop.end), loop.position))
+        si
+
+        // Whether the first instruction `loop`'s body emits begins a
+        // protected region: declarations ahead of it emit nothing.
+        _begins_with_try(loop: LOOP) -> bool static is
+            for value in loop.body.values do
+                if isa TRY(value) then
+                    return true
+                elif !isa Values.DECLARE_LOCAL(value) then
+                    return false
+                fi
+            od
+
+            return false
         si
 
         _linearise_region(region: REGION, into: Collections.MutableList[FLAT_VALUE]) static is

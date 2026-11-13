@@ -295,38 +295,53 @@ namespace Syntax.Process is
 
             let structured = _open_structured_loop(loop)
 
+            // A `use` in the condition or binding belongs to one iteration:
+            // the region around the condition and the body disposes it at
+            // the end of each iteration, and when a break, a return, an
+            // exception or a false condition leaves the loop.
+            let iteration_disposals = `do.iteration.let_in_disposals
+            let iteration = if let disposals = iteration_disposals then _open_disposal_region(disposals) else null fi
+
+            // Inside the iteration's region a false condition can't leave the
+            // loop by a conditional branch, which may not cross a protected
+            // region's edge: it branches to the end of `failed`, which leaves
+            // the loop unconditionally, and a true one jumps past that.
+            let passed = if iteration? then _open_region(LABEL()) else null fi
+            let failed = if iteration? then _open_region(LABEL()) else null fi
+            let exit: Values.Breakable = failed ?? structured
+
             if let `do.binding? then
                 // `while let` clauses: emit the same per-clause
                 // test / bind sequence as `if let`, but a failure
                 // leaves the loop instead of the arm. Each iteration re-evaluates
                 // every clause's scrutinee and re-binds — the
                 // bound names are freshly stored on each pass.
-                let first = _emit_if_let_clause_test(binding.clauses[0], structured)
+                let first = _emit_if_let_clause_test(binding.clauses[0], exit)
 
                 self.pre(binding)
 
                 if first? then
-                    _emit_if_let_clause_bind(binding.clauses[0], first, structured)
+                    _emit_if_let_clause_bind(binding.clauses[0], first, exit)
                 fi
 
                 if binding.clauses[0].guard? then
                     binding.clauses[0].guard!.walk(self)
-                    add(Values.BREAK(structured, BRANCH.Z, binding.clauses[0].guard!.value!))
+                    add(Values.BREAK(exit, BRANCH.Z, binding.clauses[0].guard!.value!))
                 fi
 
                 let i mut = 1
                 while i < binding.clauses.count do
                     let clause = binding.clauses[i]
 
-                    let temp = _emit_if_let_clause_test(clause, structured)
+                    let temp = _emit_if_let_clause_test(clause, exit)
 
                     if temp? then
-                        _emit_if_let_clause_bind(clause, temp, structured)
+                        _emit_if_let_clause_bind(clause, temp, exit)
                     fi
 
                     if clause.guard? then
                         clause.guard.walk(self)
-                        add(Values.BREAK(structured, BRANCH.Z, clause.guard!.value!))
+                        add(Values.BREAK(exit, BRANCH.Z, clause.guard!.value!))
                     fi
 
                     i = i + 1
@@ -334,10 +349,21 @@ namespace Syntax.Process is
             elif `do.condition? then
                 `do.condition.walk(self)
 
-                add(Values.BREAK(structured, BRANCH.Z, `do.condition!.value!))
+                add(Values.BREAK(exit, BRANCH.Z, `do.condition!.value!))
+            fi
+
+            if let f = failed, p = passed then
+                add(Values.BREAK(p))
+                _close_structured(f)
+                add(Values.BREAK(structured))
+                _close_structured(p)
             fi
 
             `do.body.walk(self)
+
+            if let region = iteration, disposals = iteration_disposals then
+                _close_disposal_region(region, disposals, `do.location)
+            fi
 
             _close_structured_loop(structured)
 
