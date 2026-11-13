@@ -1,0 +1,73 @@
+namespace Semantic is
+    /// The member of `Ghul.BOX[T]` that holds the boxed value: the box's one
+    /// instance field or property whose type is the box's own type
+    /// parameter. A box that holds its value in a field has an address for
+    /// it, so a `ref` to a captured local can name the value in place; one
+    /// that holds it in a property is read and written through its
+    /// accessors.
+    class BOX_STORAGE is
+        /// The member of `box_type`, a box type or one of its
+        /// specializations, that holds the value, or null where there is
+        /// none.
+        ///
+        /// - box_type: the box type the member belongs to
+        member_of(box_type: Types.Type?) -> Symbols.Symbol? static is
+            let box = box_type?.symbol
+
+            if !box? then
+                return null
+            fi
+
+            return _member_of_symbol(box)
+        si
+
+        _member_of_symbol(box: Symbols.Symbol) -> Symbols.Symbol? static is
+            let unspecialized = box.unspecialized_symbol
+
+            // A box compiled from source with the value in an auto-property
+            // also has the property's hidden backing field, of the same
+            // type: the property is what holds the value, and the field is
+            // its implementation.
+            let found: Symbols.Symbol? mut = null
+
+            for member in unspecialized.symbols do
+                if isa Symbols.Property(member) /\ member.is_instance /\ _holds_type_parameter(member) then
+                    found = member
+                    break
+                elif !found? /\ isa Symbols.Field(member) /\ member.is_instance /\ _holds_type_parameter(member) then
+                    found = member
+                fi
+            od
+
+            if !found? \/ box == unspecialized then
+                return found
+            fi
+
+            return box.find_direct(found.name)
+        si
+
+        /// Whether the box the compilation stores captured locals in holds
+        /// its value in a field. False where there is no box to ask.
+        runtime_box_holds_field() -> bool static is
+            let lookup = IoC.CONTAINER.instance.innate_symbol_lookup
+
+            return is_field(lookup.find_box_type(lookup.get_int_type()))
+        si
+
+        /// Whether `box_type` holds its value in a field.
+        ///
+        /// - box_type: the box type to ask about
+        is_field(box_type: Types.Type?) -> bool static =>
+            isa Symbols.Field(member_of(box_type))
+
+        _holds_type_parameter(member: Symbols.Symbol) -> bool static is
+            if let data: Symbols.Field = member then
+                return data.type?.is_type_variable ?? false
+            elif let property: Symbols.Property = member then
+                return property.type?.is_type_variable ?? false
+            fi
+
+            return false
+        si
+    si
+si

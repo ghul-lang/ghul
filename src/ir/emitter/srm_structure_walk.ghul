@@ -108,6 +108,11 @@ namespace IR.Emitter is
         // attribute on the same member.
         _doc_attribute_assembly: string?
 
+        // The assembly declaring the marker for a field declared `field
+        // public`, or null when the referenced runtime is too old to have
+        // one, for the same reason.
+        _assignable_attribute_assembly: string?
+
         init(..) is
             _signatures = SRM_SIGNATURE_ENCODER(_assembly)
             _blobs =
@@ -119,6 +124,10 @@ namespace IR.Emitter is
 
             if let doc_type = IoC.CONTAINER.instance.assemblies.find_type(DOC_ATTRIBUTE_NAME) then
                 _doc_attribute_assembly = doc_type.assembly.get_name().name
+            fi
+
+            if let assignable_type = IoC.CONTAINER.instance.assemblies.find_type(ASSIGNABLE_ATTRIBUTE_NAME) then
+                _assignable_attribute_assembly = assignable_type.assembly.get_name().name
             fi
         si
 
@@ -430,6 +439,17 @@ namespace IR.Emitter is
             // member names that already arrived in ghūl's own case
             // convention.
             _mark(_assembly.assembly_handle, "Ghul.Internal.GHUL_COMPILED_ATTRIBUTE")
+
+            // The runtime declares the marker, so when the runtime itself is
+            // being compiled the marker is one of the types this assembly
+            // emits rather than one a referenced assembly declares.
+            if !_assignable_attribute_assembly? then
+                for planned in _handles.emission_plan.types do
+                    if planned.type.declared?.qualified_name =~ ASSIGNABLE_ATTRIBUTE_NAME then
+                        _assignable_attribute_assembly = "ghul-runtime"
+                    fi
+                od
+            fi
 
             for planned in _handles.emission_plan.types do
                 let type = planned.type
@@ -856,6 +876,19 @@ namespace IR.Emitter is
 
             _write_doc(cast EntityHandle(handle), `field)
 
+            // A field declared `field public` is assignable from outside its
+            // type; the marker carries that to an importing assembly, which
+            // otherwise sees every field without a leading underscore as
+            // public and can't tell the two apart.
+            if let assembly_name = _assignable_attribute_assembly /\ `field.is_publicly_assignable then
+                _attach(
+                    cast EntityHandle(handle),
+                    assembly_name,
+                    ASSIGNABLE_ATTRIBUTE_NAME,
+                    Collections.LIST[Semantic.Types.Type](),
+                    SRM_ASSEMBLY_EMITTER.NO_ARGUMENT_ATTRIBUTE_VALUE)
+            fi
+
             if let attributes = `field.custom_attributes then
                 _write_attributes(cast EntityHandle(handle), attributes)
             fi
@@ -1176,6 +1209,8 @@ namespace IR.Emitter is
         TRUSTED_STORE_FREE_ATTRIBUTE_NAME: string static => "Ghul.Internal.TRUSTED_STORE_FREE_ATTRIBUTE"
 
         DOC_ATTRIBUTE_NAME: string static => "Ghul.Internal.DOC_ATTRIBUTE"
+
+        ASSIGNABLE_ATTRIBUTE_NAME: string static => "Ghul.Internal.ASSIGNABLE_ATTRIBUTE"
 
         ARGUMENT_PACK_ATTRIBUTE_NAME: string static =>
             "Ghul.Internal.ARGUMENT_PACK_ATTRIBUTE"

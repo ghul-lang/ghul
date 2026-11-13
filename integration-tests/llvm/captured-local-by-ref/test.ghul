@@ -1,0 +1,74 @@
+// A `ref` to a mutable local that a closure captures names the value in
+// its box, so the callee's write is the closures' write while the call is
+// running, and a method that changes a struct changes the captured one.
+// The exit status is the number of the first check that fails, or 0.
+namespace Test is
+    struct POINT is
+        x: int field
+        y: int field
+
+        init(x: int, y: int) is
+            self.x = x
+            self.y = y
+        si
+
+        step() is
+            x = x + 1
+        si
+    si
+
+    set_then_read(value: int ref, read: () -> int) -> int is
+        value! = 5
+        return read()
+    si
+
+    add_one_then_ten(first: int ref, second: int ref) is
+        first! = first! + 1
+        second! = second! + 10
+    si
+
+    bump_then(value: int ref, after: () -> void) is
+        value! = value! + 1
+        after()
+    si
+
+    // The callee calls the closure after writing through the ref.
+    stale_read() -> bool is
+        let n mut = 1
+        let read = () => n
+        return set_then_read(n ref, read) == 5
+    si
+
+    // Both refs name the one variable.
+    same_local_twice() -> bool is
+        let n mut = 1
+        let read = () => n
+        add_one_then_ten(n ref, n ref)
+        return read() == 12
+    si
+
+    // The closure reassigns the struct while the callee holds a ref to a
+    // field of it.
+    struct_field() -> bool is
+        let p mut = POINT(1, 10)
+        let replace = () is p = POINT(p.x, 99) si
+        bump_then(p.x ref, replace)
+        return p.x == 2 /\ p.y == 99
+    si
+
+    // A method that changes the struct, called on the captured local.
+    struct_receiver() -> bool is
+        let p mut = POINT(1, 10)
+        let read = () => p.x
+        p.step()
+        return read() == 2
+    si
+
+    entry() -> int is
+        if !stale_read() then return 1 fi
+        if !same_local_twice() then return 2 fi
+        if !struct_field() then return 3 fi
+        if !struct_receiver() then return 4 fi
+        return 0
+    si
+si
