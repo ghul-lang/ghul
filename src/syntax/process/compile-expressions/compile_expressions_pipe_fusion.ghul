@@ -559,11 +559,12 @@ namespace Syntax.Process is
         // and the chain expression feeding it, which is the call's
         // first argument.
         _consumer_call_shape(call: Trees.Expressions.CALL) -> (name: string, chain_before: Trees.Expressions.Expression)? is
-            if !isa IR.Values.Call.GLOBAL(call.value) then
+            let function = _consumer_function(call.value)
+
+            if !function? then
                 return null
             fi
 
-            let function = (cast IR.Values.Call.GLOBAL(call.value)).function
             let role: string mut
 
             if !_innate_symbol_lookup.get_pipes_fusion_functions().try_get_value(function.root_specialized_from, role ref) then
@@ -575,6 +576,22 @@ namespace Syntax.Process is
             fi
 
             return (role, call.arguments.expressions[0])
+        si
+
+        // The function a consumer-shaped call binds: a combinator's global
+        // call, or a collection type's constructor from a sequence, whether
+        // its own (a construction) or one the runtime offers as an overload
+        // of it (a static call).
+        _consumer_function(value: IR.Values.Value?) -> Semantic.Symbols.Function? is
+            if let global: IR.Values.Call.GLOBAL = value then
+                return global.function
+            elif let construction: IR.Values.NEW = value then
+                return construction.constructor
+            elif let static_call: IR.Values.Call.STATIC = value then
+                return static_call.function
+            fi
+
+            return null
         si
 
         // Recognise a terminal Pipe consumer (`chain |> count()`, or the
@@ -598,19 +615,15 @@ namespace Syntax.Process is
                 return null
             fi
 
-            let name = shape.name
             let chain_before = shape.chain_before
-            let arg_count = call.arguments.expressions.count - 1
 
-            let recognized_kind = PIPE_CONSUMER_KIND.of(name, arg_count)
-
-            if !recognized_kind? then
+            if PIPE_CONSUMER_KIND.is_stage_role(shape.name) then
                 _note_unfusible_consumer(call)
 
                 return null
             fi
 
-            let consumer_kind = recognized_kind
+            let consumer_kind = shape.name
 
             if !call.value? \/ !call.value.type? then
                 return null
@@ -964,14 +977,14 @@ namespace Syntax.Process is
                     _function_caller)
             fi
 
-            if consumer_kind =~ "join" then
+            if consumer_kind =~ "join" \/ consumer_kind =~ "join_with" then
                 // The form that supplies a separator passes its value; the
                 // one without reads `Ghul.Pipes.JOIN_SEPARATOR` from the
                 // referenced runtime, so the fused text and the runtime's
                 // own join agree whatever runtime is linked. A runtime
                 // without the constant keeps its own loop.
                 let separator: IR.Values.Value? =
-                    if call.arguments.expressions.count >= 2 then
+                    if consumer_kind =~ "join_with" then
                         call.arguments.expressions[1].value
                     else
                         let read = _innate_symbol_lookup.get_join_separator()
