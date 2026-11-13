@@ -2193,6 +2193,7 @@ The core types have ghūl names in ghūl namespaces:
 - `System.Text.StringBuilder` is `Text.STRING_BUILDER`.
 - `System.Globalization.UnicodeCategory` is `Text.UnicodeCategory`.
 - The regular expression types in `System.Text.RegularExpressions` are `Text.REGEX`, `Text.MATCH`, `Text.GROUP`, `Text.MATCH_COLLECTION`, `Text.GROUP_COLLECTION` and `Text.RegexOptions`.
+- The date and time types are in `Time`: `System.DateTime`, `System.DateTimeOffset` and `System.TimeSpan` are `Time.DATE_TIME`, `Time.DATE_TIME_OFFSET` and `Time.TIME_SPAN`, `System.DayOfWeek` and `System.DateTimeKind` are `Time.DayOfWeek` and `Time.DateTimeKind`, `System.Diagnostics.Stopwatch` is `Time.STOPWATCH`, and `System.Globalization.ISOWeek` is `Time.ISO_WEEK`.
 - `System.Random` is `Ghul.RANDOM`.
 - `System.Type` is `Ghul.Type`.
 - `System.StringSplitOptions` and `System.StringComparison` are `Ghul.StringSplitOptions` and `Ghul.StringComparison`.
