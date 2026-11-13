@@ -355,6 +355,111 @@ namespace Semantic.Symbols is
             return _entries
         si
 
+        // Readers trusted only in the overloads named here, each pinned by
+        // its exact parameter types: an overload of the same name added
+        // later, or one taking a callback, is not covered. A property
+        // getter is listed under each spelling of its accessor.
+        _pinned: Collections.MAP[string, Collections.LIST[PINNED_READER]]? static
+
+        pinned() -> Collections.MAP[string, Collections.LIST[PINNED_READER]] static is
+            if !_pinned? then
+                let result = Collections.MAP[string, Collections.LIST[PINNED_READER]]()
+
+                let add = (owner: string, name: string, parameters: PinnedParameter[]) is
+                    let key = "{owner}.{name}"
+
+                    if !result.contains_key(key) then
+                        result[key] = Collections.LIST[PINNED_READER]()
+                    fi
+
+                    result[key].add(PINNED_READER(parameters))
+                si
+
+                let getter = (owner: string, property: string) is
+                    add(owner, property, [])
+                    add(owner, "get_{property}", [])
+                    add(owner, "$get_{property}", [])
+                si
+
+                // Regular-expression results: a match, its groups and
+                // captures are read-only records of one search, and their
+                // getters return what the search found.
+                for owner in [
+                    "Text.MATCH",
+                    "Text.GROUP",
+                    "System.Text.RegularExpressions.Capture"
+                ] do
+                    getter(owner, "value")
+                    getter(owner, "index")
+                    getter(owner, "length")
+                    getter(owner, "success")
+                    getter(owner, "name")
+                od
+
+                getter("Text.MATCH", "groups")
+                getter("Text.GROUP", "captures")
+
+                for owner in [
+                    "Text.GROUP_COLLECTION",
+                    "Text.MATCH_COLLECTION",
+                    "System.Text.RegularExpressions.CaptureCollection"
+                ] do
+                    getter(owner, "count")
+                    add(owner, "get_Item", [PinnedParameter.INT])
+                od
+
+                add("Text.GROUP_COLLECTION", "get_Item", [PinnedParameter.STRING])
+
+                // A regex search: it reads the input and returns a fresh
+                // result, writing only the expression's own internal
+                // cache, which no ghul code can see.
+                add("Text.REGEX", "is_match", [PinnedParameter.STRING])
+                add("Text.REGEX", "match", [PinnedParameter.STRING])
+                add("Text.REGEX", "matches", [PinnedParameter.STRING])
+
+                // An enum value's name, and a rune's code point: a sealed
+                // value type read and formatted by the value alone.
+                add("System.Enum", "to_string", [])
+                getter("Text.RUNE", "value")
+
+                // JSON document reads: the parsed document is immutable, and
+                // each read returns a value or a further view of it.
+                getter("System.Text.Json.JsonProperty", "name")
+                getter("System.Text.Json.JsonProperty", "value")
+                getter("System.Text.Json.JsonElement", "value_kind")
+                add("System.Text.Json.JsonElement", "get_string", [])
+                add("System.Text.Json.JsonElement", "get_int32", [])
+                add("System.Text.Json.JsonElement", "get_int64", [])
+                add("System.Text.Json.JsonElement", "get_double", [])
+                add("System.Text.Json.JsonElement", "get_boolean", [])
+                add("System.Text.Json.JsonElement", "get_array_length", [])
+                add("System.Text.Json.JsonElement", "get_raw_text", [])
+                add("System.Text.Json.JsonElement", "get_property", [PinnedParameter.STRING])
+                add("System.Text.Json.JsonElement", "to_string", [])
+
+                // A date and time is a sealed value type: its parts are
+                // read from the value alone, and its text carries the same
+                // culture caveat as the scalar to_string entries.
+                for part in ["year", "month", "day", "hour", "minute", "second", "millisecond", "day_of_week", "day_of_year", "date", "ticks"] do
+                    getter("Time.DATE_TIME", part)
+                od
+
+                add("Time.DATE_TIME", "to_string", [])
+
+                // Reflected member and parameter metadata: the same reads,
+                // and the same accepted override risk, as the Type name
+                // reads in the table above.
+                getter("System.Reflection.MemberInfo", "name")
+                getter("System.Reflection.MemberInfo", "declaring_type")
+                getter("System.Reflection.ParameterInfo", "parameter_type")
+                getter("System.Reflection.ParameterInfo", "name")
+
+                _pinned = result
+            fi
+
+            return _pinned
+        si
+
         is_store_free(function: Function?) -> bool static is
             if !function? \/ !function.is_reflected then
                 return false
@@ -367,7 +472,56 @@ namespace Semantic.Symbols is
             fi
 
             let key = "{owner.qualified_name}.{function.name}"
-            return entries().contains(key)
+
+            if entries().contains(key) then
+                return true
+            fi
+
+            let readers: Collections.LIST[PINNED_READER] mut
+
+            if !pinned().try_get_value(key, readers ref) then
+                return false
+            fi
+
+            for reader in readers do
+                if reader.matches(function) then
+                    return true
+                fi
+            od
+
+            return false
+        si
+    si
+
+    // The parameter types a pinned reader takes.
+    enum PinnedParameter is
+        INT,
+        STRING
+    si
+
+    // One overload of a trusted reader, by its exact parameter types.
+    class PINNED_READER is
+        _parameters: PinnedParameter[]
+
+        init(parameters: PinnedParameter[]) is
+            _parameters = parameters
+        si
+
+        matches(function: Function) -> bool is
+            let lookup = IoC.CONTAINER.instance.innate_symbol_lookup
+
+            let types = Collections.LIST[Semantic.Types.Type?]()
+
+            for parameter in _parameters do
+                types.add(
+                    if parameter == PinnedParameter.INT then
+                        lookup.get_int_type()
+                    else
+                        lookup.get_string_type()
+                    fi)
+            od
+
+            return Semantic.KNOWN_SIGNATURE(types).matches(function)
         si
     si
 si
