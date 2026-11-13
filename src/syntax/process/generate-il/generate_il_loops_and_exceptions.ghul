@@ -530,10 +530,9 @@ namespace Syntax.Process is
         si
 
         // A `for` over an array or a list, walked by position: the source
-        // is read once before the loop, and so is an array's length; a
-        // list's count is read again before each element. Each step reads
-        // the element at the index, then moves the index on, before the
-        // body runs, so a `continue` goes on to the next element.
+        // and its count are each read once before the loop, and each step
+        // reads the element at the index, then moves the index on, before
+        // the body runs, so a `continue` goes on to the next element.
         _gen_indexed_for(
             loop: LOOP_LABELS,
             indexed: INDEXED_SOURCE,
@@ -545,15 +544,14 @@ namespace Syntax.Process is
             let int_type = _innate_symbol_lookup.get_int_type()
 
             let source = TEMP(current_block, "indexed_source", expression.value!)
-            let read_count = () => indexed.count.call(location, source.load(), Collections.LIST[Value](0), null, _function_caller)
-            let count: TEMP? = if !indexed.rereads_count then TEMP(current_block, "indexed_count", read_count()) else null fi
+            let count = TEMP(current_block, "indexed_count", indexed.count.call(location, source.load(), Collections.LIST[Value](0), null, _function_caller))
             let index = TEMP(current_block, "indexed_index", cast Value(IR.Values.Literal.NUMBER(0, int_type)))
 
             variable.walk(self)
 
             let structured = _open_structured_loop(loop)
 
-            add(Values.BREAK(structured, BRANCH.GE, index.load(), if let c = count then cast Value(c.load()) else read_count() fi))
+            add(Values.BREAK(structured, BRANCH.GE, index.load(), count.load()))
 
             let element = TEMP(current_block, "indexed_element", indexed.read.call(location, source.load(), Collections.LIST[Value]([cast Value(index.load())]), null, _function_caller))
 
@@ -959,7 +957,7 @@ namespace Syntax.Process is
 
             let indexed_source: TEMP? = if indexed? then TEMP(current_block, "fused_source", source.value!) else null fi
             let indexed_count: TEMP? =
-                if let i = indexed, s = indexed_source /\ !i.rereads_count then
+                if let i = indexed, s = indexed_source then
                     TEMP(current_block, "fused_count", i.count.call(source.location, s.load(), Collections.LIST[Value](0), null, _function_caller))
                 else
                     null
@@ -1027,19 +1025,11 @@ namespace Syntax.Process is
 
             let element: Value mut
 
-            if let i = indexed, s = indexed_source, x = indexed_index then
+            if let i = indexed, s = indexed_source, c = indexed_count, x = indexed_index then
                 // The element is read before the index moves on, and the
                 // index moves on before any stage runs, so a stage that
-                // passes the element over goes on to the next one. A list's
-                // count is read again before each element.
-                let count =
-                    if let c = indexed_count then
-                        cast Value(c.load())
-                    else
-                        i.count.call(source.location, s.load(), Collections.LIST[Value](0), null, _function_caller)
-                    fi
-
-                add(Values.BREAK(structured, BRANCH.GE, x.load(), count))
+                // passes the element over goes on to the next one.
+                add(Values.BREAK(structured, BRANCH.GE, x.load(), c.load()))
 
                 let read = TEMP(current_block, "fused_element", i.read.call(source.location, s.load(), Collections.LIST[Value]([cast Value(x.load())]), null, _function_caller))
 

@@ -1486,7 +1486,7 @@ for (key, value) in dictionary do
 od
 ```
 
-Some values are both a sequence and their own iterator, such as a generator. A `for` loop reads such a value through the iterator the value returns, so each loop over the value starts at its beginning. A `for` loop reads a struct iterator, such as a range, directly. Every loop supports `break`, which ends the loop, and `continue`, which goes to the next iteration. A loop disposes nothing that it iterates. For a sequence that holds a resource, see [collections and pipes](#collections-and-pipes).
+Some values are both a sequence and their own iterator, such as a generator. A `for` loop reads such a value through the iterator the value returns, so each loop over the value starts at its beginning. A `for` loop reads a struct iterator, such as a range, directly. Every loop supports `break`, which ends the loop, and `continue`, which goes to the next iteration. A loop disposes nothing that it iterates. For a sequence that holds a resource, see [collections and pipes](#collections-and-pipes). A list changed while a loop reads it gives unspecified elements or an index-out-of-range exception, never an unsafe memory read.
 
 The range operators work in any expression. `..` includes its start and excludes its end: `0..3` is 0, 1, 2. `::` includes both: `1::5` is 1 to 5. The from-the-end forms (`..<`, `::<`, `..<<`, `::<<`) are for indexing, not iteration (see [arrays](#types-and-literals)).
 

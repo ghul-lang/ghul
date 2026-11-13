@@ -5,22 +5,20 @@ namespace Syntax.Process is
     use Semantic.Types.Type
 
     // A loop source walked by position rather than through its iterator:
-    // its count, and the read of the element at an index. An array's
-    // length cannot change while the loop runs, so it is read once
-    // before the loop. A list's count can, so it is read again before
-    // each element: a list that shrinks ends the loop rather than having
-    // an element read past its end. What a list changed while a loop
-    // reads it gives is otherwise unspecified, as it is through the
-    // iterator on targets that do not check.
+    // its count, read once before the loop, and the read of the element
+    // at an index. An array's length cannot change while the loop runs.
+    // A list's count can, and what a list changed while a loop reads it
+    // gives is unspecified: its element read is bounds-checked, so a
+    // list that shrinks ends the loop with an exception, never a read
+    // past its storage. Reading the count before each element instead
+    // was measured at up to twice the cost per element.
     class INDEXED_SOURCE is
         count: Function
         read: Function
-        rereads_count: bool
 
-        init(count: Function, read: Function, rereads_count: bool) is
+        init(count: Function, read: Function) is
             self.count = count
             self.read = read
-            self.rereads_count = rereads_count
         si
 
         // How to walk a source of `type` by position, or null where it
@@ -31,14 +29,9 @@ namespace Syntax.Process is
                 return null
             fi
 
-            let rereads_count =
-                if isa Semantic.Types.ARRAY(type) then
-                    false
-                elif _is_instance_of(type, lookup.get_unspecialized_mutable_list_type()) then
-                    true
-                else
-                    return null
-                fi
+            if !isa Semantic.Types.ARRAY(type) /\ !_is_instance_of(type, lookup.get_unspecialized_mutable_list_type()) then
+                return null
+            fi
 
             let int_type = lookup.get_int_type()
 
@@ -46,7 +39,7 @@ namespace Syntax.Process is
             let read = KNOWN_MEMBERS.find(type, Semantic.Symbols.INDEXER_NAMES.read, KNOWN_SIGNATURE([int_type], true))
 
             if count? /\ read? then
-                return INDEXED_SOURCE(count, read, rereads_count)
+                return INDEXED_SOURCE(count, read)
             fi
 
             return null
