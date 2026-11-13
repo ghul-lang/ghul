@@ -155,7 +155,7 @@ let f = double;                      // (int) -> int pure
 let g = (n: int) -> int => n * 2;    // (int) -> int pure — proved store-free
 ```
 
-A literal written `pure` has a pure function type whatever its body does: `(n: int) -> int pure => …`. The compiler trusts it, as it trusts a function declared `pure`. The marker goes with the literal's `rec` and `memo` markers, in any order.
+A literal written `pure` has a pure function type: `(n: int) -> int pure => …`. Its value is trusted wherever it goes, so its body is checked against the marker. A body the compiler cannot prove store-free gets the `impure-function-value` warning, as a value stored into a pure function-typed variable does. The marker goes with the literal's `rec` and `memo` markers, in any order.
 
 The compiler trusts a variable of a pure function type to hold a store-free value wherever it is read. So the warning is on the store into such a variable, and the trust is only as good as the values stored. A pure function type is a declaration in the same sense as `pure` on a function. The compiler verifies neither, and both mislead the compiler when they are false. Reassigning such a variable is fine, as long as the new value is also store-free. Purity declarations and pure function types are kept in a compiled assembly, and the compiler honours them when it imports the assembly.
 
@@ -169,4 +169,4 @@ A pure type cannot make a write public. Declaring a property `public` makes its 
 
 A member with no body in a pure type is implicitly declared `pure`. It is a contract, not an implementation, so implementations inherit the requirement through the ordinary override rules. A class that implements a pure trait cannot supply a method that stores, in the same way that it cannot override a member declared `pure` with one.
 
-The type-level `pure` marker is a rule for the declaring assembly and its readers. It is not a separate contract across assemblies. Members that are declared or proved pure cross assemblies one by one and keep their guarantees there. The override contract binds implementations in exactly the same way.
+The type-level `pure` marker is a rule for the declaring assembly and its readers. It is not a separate contract across assemblies. Members that are declared pure cross assemblies one by one and keep their guarantees there. A member that is only proved pure does not: an importer sees what is declared. The one exception is the getter of an auto-property that nothing can override, in a closed class or a struct. It reads its backing field and nothing else, so it crosses as if declared both `pure` and `stable`, and a fact through it is backed in the importing assembly. The override contract binds implementations in exactly the same way.
