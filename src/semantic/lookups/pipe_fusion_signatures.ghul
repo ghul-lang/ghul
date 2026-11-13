@@ -93,15 +93,43 @@ namespace Semantic.Lookups is
         si
 
         // The collection constructors a chain can end in, by the name each
-        // collection type is declared under in `Collections`, or among the
-        // innate shapes for the array: each type's constructor from a
-        // sequence fuses as the `collect` that builds the same collection.
+        // collection type is declared under in `Collections`: each type's
+        // own constructor from a sequence fuses as the `collect` that builds
+        // the same collection. The array's constructor is the runtime's,
+        // offered as an overload of the innate array's, and is found with
+        // the combinators.
         constructor_kinds: Collections.List[(type_name: string, kind: string)] static =>
             Collections.LIST[(type_name: string, kind: string)]([
-                (type_name = "ARRAY", kind = "collect_array"),
                 (type_name = "Collections.LIST", kind = "collect"),
                 (type_name = "Collections.SET", kind = "collect_set")
             ])
+
+        // The fusion kind of a construction through `constructor`, where it
+        // takes one sequence and builds one of `constructor_kinds`' types;
+        // null otherwise. Each type is asked for only until one matches, so
+        // the set type is not loaded for a list.
+        //
+        // - constructor: the constructor a construction binds
+        // - types: the shapes' types
+        // - type_named: the unspecialized type a `constructor_kinds` name
+        //   names, or null where the core library doesn't declare it
+        constructor_kind(constructor: Function, types: PIPE_FUSION_TYPES, type_named: (string) -> Type?) -> string? static is
+            let root = cast Function?(constructor.root_specialized_from)
+
+            if !root? \/ !matches(root, [PipeFusionParameter.SEQUENCE], types) then
+                return null
+            fi
+
+            let owner = root.owner
+
+            for entry in constructor_kinds do
+                if let type = type_named(entry.type_name) /\ type.symbol?.unspecialized_symbol == owner then
+                    return entry.kind
+                fi
+            od
+
+            return null
+        si
 
         // Whether `function` has exactly the parameters `parameters`
         // describes: the same number, each of the shape given.
@@ -185,7 +213,7 @@ namespace Semantic.Lookups is
     si
 
     // The types the fusible overloads' parameter shapes are read against,
-    // and the collection types whose constructors fuse.
+    // and the array type, whose runtime constructor fuses.
     class PIPE_FUSION_TYPES(
         iterable: Symbols.Symbol? public,
         bool_type: Type public,
