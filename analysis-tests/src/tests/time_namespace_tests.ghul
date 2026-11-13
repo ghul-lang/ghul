@@ -1,0 +1,113 @@
+namespace Analysis.Tests is
+    use IO.File;
+
+    use Analysis.Protocol.ANALYSER_PROCESS;
+    use Analysis.Protocol.Response;
+
+    use TestClass = Microsoft.VisualStudio.TestTools.UnitTesting.TestClassAttribute;
+    use Test = Microsoft.VisualStudio.TestTools.UnitTesting.TestMethodAttribute;
+    use Assertions;
+
+    // The time types are named in Time: completion after `Time.` offers
+    // them, and a value declared with an old `System` spelling shows its
+    // Time name. Completion after `System.` does not offer the old
+    // spellings, which steers new code to the Time names; the old names
+    // still compile.
+    //
+    // The fixture is, by line:
+    //
+    //   3   let started = System.DateTime.now;
+    //   4   let a = Time.
+    //   8   let b = System.
+    @TestClass()
+    class TIME_NAMESPACE_TESTS is
+        init() is si
+
+        load() -> string is
+            let path = fixture_path("time-namespace/time-namespace.ghul");
+            assert File.exists(path) else "fixture not copied to test output: {path}";
+            return File.read_all_text(path);
+        si
+
+        opened() -> ANALYSER_PROCESS is
+            let analyser = ANALYSER_PROCESS();
+
+            analyser.send_edit("time-namespace.ghul", load());
+
+            let diagnostics = analyser.read_response();
+            assert isa Response.DIAGNOSTICS(diagnostics) else "expected DIAGNOSTICS response";
+
+            return analyser;
+        si
+
+        complete(analyser: ANALYSER_PROCESS, line: int, column: int) -> Collections.SET[string] is
+            analyser.send_completion("time-namespace.ghul", line, column);
+
+            let response = analyser.read_query_response();
+
+            assert isa Response.COMPLETION(response) else "expected COMPLETION response";
+
+            let names = Collections.SET[string]();
+
+            for item in response.items do
+                names.add(item.name);
+            od
+
+            return names;
+        si
+
+        @Test()
+        completion_after_time_offers_the_seven_types() is
+            let use analyser = opened();
+
+            let names = complete(analyser, 4, 22);
+
+            for name in ["DATE_TIME", "DATE_TIME_OFFSET", "TIME_SPAN", "STOPWATCH", "ISO_WEEK", "DayOfWeek", "DateTimeKind"] do
+                is_true(
+                    names.contains(name),
+                    "expected `{name}` among the completions after `Time.`, got {names |> Ghul.Pipes.join(", ")}\n"
+                    "--- analyser stderr ---\n{analyser.stderr_capture}"
+                );
+            od
+        si
+
+        @Test()
+        completion_after_system_does_not_offer_the_old_spellings() is
+            let use analyser = opened();
+
+            let names = complete(analyser, 8, 24);
+
+            is_true(
+                names.contains("Environment"),
+                "expected completion after `System.` to offer its other members, such as Environment, got {names |> Ghul.Pipes.join(", ")}"
+            );
+
+            for name in ["DateTime", "DateTimeOffset", "TimeSpan", "DayOfWeek", "DateTimeKind"] do
+                is_false(
+                    names.contains(name),
+                    "expected no `{name}` among the completions after `System.`\n"
+                    "--- analyser stderr ---\n{analyser.stderr_capture}"
+                );
+            od
+        si
+
+        @Test()
+        a_value_named_with_an_old_spelling_shows_the_time_name() is
+            let use analyser = opened();
+
+            analyser.send_hover("time-namespace.ghul", 3, 14);
+
+            let response = analyser.read_query_response();
+
+            assert isa Response.HOVER(response) else "expected HOVER response";
+
+            let signature = response.signature ?? "";
+
+            is_true(
+                signature.contains("Time.DATE_TIME"),
+                "expected the hover on `started` to name Time.DATE_TIME, got '{signature}'\n"
+                "--- analyser stderr ---\n{analyser.stderr_capture}"
+            );
+        si
+    si
+si
