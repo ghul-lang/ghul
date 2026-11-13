@@ -3451,6 +3451,21 @@ namespace IR.LLVMTarget is
                     parameter_types.add(_c_type(scalar))
                     parameter_attributes.add(_c_extension(scalar))
                     values.add(_to_c(value, scalar))
+                elif _specialize(formal)?.is_ref ?? false then
+                    // the slot's address, which the scanned stack keeps live
+                    // for the call
+                    parameter_types.add(Types.pointer)
+                    parameter_attributes.add(null)
+                    values.add(value)
+                elif let arrays = _arrays, array = arrays.array_of(_specialize(formal)) /\ LLVM_TYPES.scalar(arrays.element_of(array)) =~ Scalar.UINT8 then
+                    // the address of the first element, or null for an absent
+                    // array, valid for the call
+                    let first = arrays.element_address(_current, array, value, _i32(0))
+                    let is_null = _current.compare(IntegerPredicate.EQ, value, LLVM.Values.null_pointer)
+
+                    parameter_types.add(Types.pointer)
+                    parameter_attributes.add(null)
+                    values.add(_current.select(is_null, LLVM.Values.null_pointer, first))
                 elif _is_string(_specialize(formal)) then
                     let text = _current.select(_current.compare(IntegerPredicate.EQ, value, LLVM.Values.null_pointer), strings.literal(""), value)
                     let buffer = _c_string(strings, text)
@@ -3484,6 +3499,12 @@ namespace IR.LLVMTarget is
                 return
             fi
 
+            EXTERN_SYMBOLS.note(import.name, function.location)
+
+            if let deallocator = import.deallocator then
+                EXTERN_SYMBOLS.note(deallocator, function.location)
+            fi
+
             let callee = strings.runtime(import.name, result_type, parameter_types.to_array())
 
             // A small argument is extended to a register, as clang does for
@@ -3510,7 +3531,9 @@ namespace IR.LLVMTarget is
             if let scalar = result_scalar then
                 _push(_from_c(answer, scalar))
             elif answers_string then
-                _push(_string_from_c(strings, answer, import.result == Semantic.ExternResult.TAKE))
+                let release = if import.result == Semantic.ExternResult.TAKE then import.deallocator ?? "free" else null fi
+
+                _push(_string_from_c(strings, answer, release))
             fi
         si
 
@@ -3534,9 +3557,9 @@ namespace IR.LLVMTarget is
         si
 
         // A string made from the NUL-terminated UTF-8 at `address`, or the
-        // absent string for a null address; `release` frees the original
-        // with the C library's free once it is copied.
-        _string_from_c(strings: LLVM_STRINGS, address: LLVM.Value, release: bool) -> LLVM.Value is
+        // absent string for a null address; `release` names the function
+        // that frees the original once it is copied, or is null to keep it.
+        _string_from_c(strings: LLVM_STRINGS, address: LLVM.Value, release: string?) -> LLVM.Value is
             let slot = _slot(Types.pointer)
             let present = _new_block()
             let join = _new_block()
@@ -3555,8 +3578,8 @@ namespace IR.LLVMTarget is
 
             _current.store(_current.call(strings.runtime("$libghul_utf16_make_string", Types.pointer, [Types.pointer]), [text])!, slot, 0)
 
-            if release then
-                _current.call(strings.runtime("free", LLVM.Type.VOID, [Types.pointer]), [address])
+            if let deallocator = release then
+                _current.call(strings.runtime(deallocator, LLVM.Type.VOID, [Types.pointer]), [address])
             fi
 
             _current.branch(join)
