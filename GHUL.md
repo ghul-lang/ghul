@@ -2194,9 +2194,10 @@ The core types have ghūl names in ghūl namespaces:
 - `System.Globalization.UnicodeCategory` is `Text.UnicodeCategory`.
 - The regular expression types in `System.Text.RegularExpressions` are `Text.REGEX`, `Text.MATCH`, `Text.GROUP`, `Text.MATCH_COLLECTION`, `Text.GROUP_COLLECTION` and `Text.RegexOptions`.
 - The date and time types are in `Time`: `System.DateTime`, `System.DateTimeOffset` and `System.TimeSpan` are `Time.DATE_TIME`, `Time.DATE_TIME_OFFSET` and `Time.TIME_SPAN`, `System.DayOfWeek` and `System.DateTimeKind` are `Time.DayOfWeek` and `Time.DateTimeKind`, `System.Diagnostics.Stopwatch` is `Time.STOPWATCH`, and `System.Globalization.ISOWeek` is `Time.ISO_WEEK`.
+- The rest of the text family is in `Text`, beside `Text.STRING_BUILDER` and `Text.REGEX`: `System.Text.Encoding` is `Text.Encoding`, `System.Text.Rune` is `Text.RUNE`, `System.Globalization.CultureInfo` is `Text.CULTURE`, `System.Globalization.NumberStyles` is `Text.NumberStyles`, and `Ghul.StringComparison` and `Ghul.StringSplitOptions` are `Text.StringComparison` and `Text.StringSplitOptions`. On wasm and llvm the only culture is the invariant one: `Text.CULTURE.invariant_culture` and `current_culture` are the same culture, and formatting, parsing and changing case work the same whichever culture is passed.
+- `Text` has functions for numbers in a base and bytes as text: `to_base(value, base)` writes an integer in base 2, 8, 10 or 16, and `from_base(text, base)` reads one back as a `long?`; `to_hex`, `to_hex_lower` and `from_hex` write and read bytes as hexadecimal; `to_base64` and `from_base64` do the same in Base64. Each `from_` function answers null for text it can't read. `System.Convert` is still there and still throws.
 - `System.Random` is `Ghul.RANDOM`.
 - `System.Type` is `Ghul.Type`.
-- `System.StringSplitOptions` and `System.StringComparison` are `Ghul.StringSplitOptions` and `Ghul.StringComparison`.
 - `System.Lazy<T>` is `Ghul.LAZY[T]`.
 - `System.FlagsAttribute` is `Ghul.FlagsAttribute`.
 - `KeyValuePair<K, V>` is `Collections.KEY_VALUE_PAIR[K, V]`.
