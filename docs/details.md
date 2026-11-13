@@ -518,7 +518,7 @@ The `undisposed-source` warning reports a read that can stop before the end of a
 
 `undisposed-source` also reports a reader, a stream or a writer made in the argument list of a `Ghul.Pipes` function that borrows it, such as `lines`, `chars`, `bytes`, `chunks` or `write_lines`: `IO.File.open_text(path) |> lines()` with no `use`. The function never disposes what it borrows. A reader that arrives as a parameter, or is held in a local, gives no warning.
 
-`use-escapes` reports a lazy sequence that reads a value `use` holds, where the sequence leaves the block that disposes the value: a `return` operand, an expression body, or a `yield`. The sequence is a pipe, a bare `T{}` or the `T[]` that `list()` gives. Its root is a `use E`, or a local declared with `let use`, reached through the `Ghul.Pipes` stages built on it. Read the sequence where it is made, with a terminal or a constructor such as `LIST()`, or move the `use` to the caller. The warning does not follow a sequence stored in a field or captured by a function literal.
+`use-escapes` reports a lazy sequence that reads a value `use` holds, where the sequence leaves the block that disposes the value: a `return` operand, an expression body, or a `yield`. The sequence is a pipe, a bare `T{}` or the `T[]` that `list()` gives. Its root is a `use E`, or a local declared with `let use`, reached through the `Ghul.Pipes` stages built on it. Read the sequence where it is made, into a collection with a constructor such as `LIST()` or `ARRAY()`, or move the `use` to the caller. `list()` does not read the sequence there: its `T[]` is filled as it is read. The warning does not follow a sequence stored in a field or captured by a function literal.
 
 ## displaying values
 
