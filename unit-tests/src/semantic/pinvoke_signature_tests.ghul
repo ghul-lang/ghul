@@ -155,6 +155,61 @@ namespace Semantic.UnitTests is
             od
         si
 
+        a_wrapper(name: string, argument: Type) -> Semantic.Symbols.Classy is
+            let loc = LOCATION("test.ghul", 1, 1, 1, 1)
+
+            return CLASS(loc, loc, Semantic.BLOCK_SCOPE(), name, LIST[string](["T"]), Semantic.BLOCK_SCOPE())
+        si
+
+        a_ref(pointee: Type) -> Type =>
+            Semantic.Types.REFERENCE(LOCATION("test.ghul", 1, 1, 1, 1), a_wrapper("REFERENCE", pointee), LIST[Type]([pointee]))
+
+        an_array(element: Type) -> Type =>
+            Semantic.Types.ARRAY(LOCATION("test.ghul", 1, 1, 1, 1), a_wrapper("Array", element), [element])
+
+        @Test()
+        refusal_on__a_reference_to_a_scalar__crosses_on_dotnet_and_llvm_but_not_wasm() is
+            let l = lookup()
+            let signature = PINVOKE_SIGNATURE(l)
+            let reference = a_ref(l.get_int_type())
+
+            is_true(!signature.refusal_on(reference, Compiler.Target.DOTNET)?)
+            is_true(!signature.refusal_on(reference, Compiler.Target.LLVM)?)
+            is_true(signature.refusal_on(reference, Compiler.Target.WASM) =~ Semantic.ExternRefusal.REFERENCE_ON_WASM)
+        si
+
+        @Test()
+        refusal_on__a_reference_to_a_class__is_refused_on_every_target() is
+            let signature = signature()
+            let reference = a_ref(a_class("BOX"))
+
+            for target in [Compiler.Target.DOTNET, Compiler.Target.WASM, Compiler.Target.LLVM] do
+                is_true(signature.refusal_on(reference, target) =~ Semantic.ExternRefusal.REFERENCE_TO_NON_SCALAR, "on {target}")
+            od
+        si
+
+        @Test()
+        refusal_on__a_byte_array__crosses_on_dotnet_and_llvm_but_not_wasm() is
+            let l = lookup()
+            let signature = PINVOKE_SIGNATURE(l)
+            let bytes = an_array(l.get_ubyte_type())
+
+            is_true(!signature.refusal_on(bytes, Compiler.Target.DOTNET)?)
+            is_true(!signature.refusal_on(bytes, Compiler.Target.LLVM)?)
+            is_true(signature.refusal_on(bytes, Compiler.Target.WASM) =~ Semantic.ExternRefusal.ARRAY_ON_WASM)
+        si
+
+        @Test()
+        refusal_on__an_array_of_ints__is_refused_as_not_bytes() is
+            let l = lookup()
+            let signature = PINVOKE_SIGNATURE(l)
+            let ints = an_array(l.get_int_type())
+
+            for target in [Compiler.Target.DOTNET, Compiler.Target.WASM, Compiler.Target.LLVM] do
+                is_true(signature.refusal_on(ints, target) =~ Semantic.ExternRefusal.ARRAY_OF_NON_BYTE, "on {target}")
+            od
+        si
+
         @Test()
         Calling__can_take_on__with_a_class__should_return_false_on_every_target() is
             let signature = signature()
