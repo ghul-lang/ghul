@@ -3432,7 +3432,9 @@ namespace IR.LLVMTarget is
                 return
             fi
 
-            let result = _specialize(function.return_type)
+            // with `errno =`, the C function answers the T of the Result[T, int]
+            // the declaration answers
+            let result = _specialize(import.answered ?? function.return_type)
             let formals = function.arguments
             let parameter_types = LIST[LLVM.Type]()
             let parameter_attributes = LIST[LLVM.Attribute?]()
@@ -3537,7 +3539,23 @@ namespace IR.LLVMTarget is
                 fi
             od
 
+            // errno is the thread's, so its address is taken once; it is zeroed
+            // so a function that signals failure only by setting it can be read
+            let errno_location =
+                if import.failure? then
+                    _current.call(strings.runtime("__errno_location", Types.pointer, []), [])
+                else
+                    null
+                fi
+
+            if let location = errno_location then
+                _current.store(LLVM.Values.i32(0), location, 4)
+            fi
+
             let answer = _current.call(callee, values.to_array())
+
+            // read before anything else here can call into the C library
+            let errno = if let location = errno_location then _current.load(Types.i32, location, 4) else null fi
 
             for buffer in buffers do
                 _current.call(strings.runtime("free", LLVM.Type.VOID, [Types.pointer]), [buffer])
@@ -3547,13 +3565,69 @@ namespace IR.LLVMTarget is
                 return
             fi
 
+            if let failure = import.failure, e = errno then
+                _push_extern_result(import, failure, answer, e, result_scalar, answers_string)
+            else
+                _push_extern_answer(import, answer, result_scalar, answers_string)
+            fi
+        si
+
+        // The answer of a foreign function, as the ghūl value it stands for.
+        _push_extern_answer(import: Semantic.EXTERN_IMPORT, answer: LLVM.Value, result_scalar: Scalar?, answers_string: bool) is
             if let scalar = result_scalar then
                 _push(_from_c(answer, scalar))
             elif answers_string then
                 let release = if import.result == Semantic.ExternResult.TAKE then import.deallocator ?? "free" else null fi
 
-                _push(_string_from_c(strings, answer, release))
+                _push(_string_from_c(_strings!, answer, release))
             fi
+        si
+
+        // The Result[T, int] an `errno =` declaration answers: ERROR with the
+        // errno where the answer, or for `errno = "set"` the errno, says the
+        // call failed, and OK with the answer otherwise.
+        _push_extern_result(import: Semantic.EXTERN_IMPORT, failure: Semantic.EXTERN_FAILURE, answer: LLVM.Value, errno: LLVM.Value, result_scalar: Scalar?, answers_string: bool) is
+            let failed =
+                case failure.kind
+                when Semantic.ExternFailureKind.SET then
+                    _current.compare(IntegerPredicate.NE, errno, LLVM.Values.i32(0))
+                when Semantic.ExternFailureKind.NEGATIVE then
+                    _current.compare(IntegerPredicate.SLT, answer, LLVM.Values.integer(answer.type, 0n))
+                else
+                    if answers_string then
+                        _current.compare(IntegerPredicate.EQ, answer, LLVM.Values.null_pointer)
+                    else
+                        _current.compare(IntegerPredicate.EQ, answer, LLVM.Values.integer(answer.type, bigint(failure.value)))
+                    fi
+                esac
+
+            let slot = _slot(Types.pointer)
+            let on_failure = _new_block()
+            let on_success = _new_block()
+            let join = _new_block()
+
+            _current.branch(failed, on_failure, on_success)
+
+            _start(on_failure)
+            _push(errno)
+
+            if let error = _construct(import.error_constructor!, [Values.STACK_TOP(IoC.CONTAINER.instance.innate_symbol_lookup.get_int_type())], "Result.ERROR") then
+                _current.store(error, slot, 0)
+            fi
+
+            _current.branch(join)
+
+            _start(on_success)
+            _push_extern_answer(import, answer, result_scalar, answers_string)
+
+            if let ok = _construct(import.ok_constructor!, [Values.STACK_TOP(import.answered!)], "Result.OK") then
+                _current.store(ok, slot, 0)
+            fi
+
+            _current.branch(join)
+
+            _start(join)
+            _push(_current.load(Types.pointer, slot, 0))
         si
 
         // `text` as NUL-terminated UTF-8 in memory from the C library's

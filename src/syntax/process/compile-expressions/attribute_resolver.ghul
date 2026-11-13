@@ -506,26 +506,24 @@ namespace Syntax.Process is
                 return
             fi
 
+            if options.failure? then
+                import.answered = answered
+
+                if !_find_result_constructors(cast Semantic.Types.NAMED(function.return_type), answered!, import, result_location) then
+                    return
+                fi
+            fi
+
             function.extern_import = import
 
             _pin_extern_to_import(function, module, name)
         si
 
         // What the foreign function itself answers, where its declaration
-        // adds the errno: the OK type of Result[T, int], or the first element
-        // of the (T, int) tuple `errno = "always"` answers. Reports and
-        // answers null where the declared type is neither.
+        // adds the errno: the OK type of Result[T, int]. Reports and answers
+        // null where the declared type is anything else.
         _answered_beside_errno(declared: Semantic.Types.Type?, failure: Semantic.EXTERN_FAILURE, signature: Semantic.PINVOKE_SIGNATURE, location: Source.LOCATION) -> Semantic.Types.Type? is
             let int_type = _innate_symbol_lookup.get_int_type()
-
-            if failure.kind == Semantic.ExternFailureKind.ALWAYS then
-                if let tuple: Semantic.Types.TUPLE = declared /\ tuple.arguments.count == 2 /\ tuple.arguments[1].matches(int_type) then
-                    return tuple.arguments[0]
-                fi
-
-                _logger.error(location, "{declared} cannot carry an errno: with errno always an extern answers a tuple of its result and an int")
-                return null
-            fi
 
             let result_union = _innate_symbol_lookup.find_result_type()
 
@@ -548,6 +546,39 @@ namespace Syntax.Process is
 
             _logger.error(location, "{declared} cannot carry an errno: an extern that declares errno answers Result[T, int]")
             return null
+        si
+
+        // Records the constructors of `declared`'s OK and ERROR variants, each
+        // taking the one field it holds: the answer, and the errno.
+        _find_result_constructors(declared: Semantic.Types.NAMED, ok: Semantic.Types.Type, import: Semantic.EXTERN_IMPORT, location: Source.LOCATION) -> bool is
+            if let result_union: Semantic.Symbols.UNION = _innate_symbol_lookup.find_result_type() then
+                let ok_variant = result_union.default_variant
+
+                for symbol in result_union.symbols do
+                    if let variant: Semantic.Symbols.VARIANT = symbol /\ variant != ok_variant then
+                        let error_type = Semantic.Types.ONE_OF.build_singleton_subtype(declared, variant)
+
+                        if let t = error_type then
+                            import.error_constructor = Semantic.KNOWN_MEMBERS.find(t, "init", [_innate_symbol_lookup.get_int_type()])
+                        fi
+                    fi
+                od
+
+                if let variant = ok_variant then
+                    let ok_type = Semantic.Types.ONE_OF.build_singleton_subtype(declared, variant)
+
+                    if let t = ok_type then
+                        import.ok_constructor = Semantic.KNOWN_MEMBERS.find(t, "init", [ok])
+                    fi
+                fi
+            fi
+
+            if !import.ok_constructor? \/ !import.error_constructor? then
+                _logger.error(location, "{declared} has no OK and ERROR constructors for an extern to answer with")
+                return false
+            fi
+
+            return true
         si
 
         _is_signed_integer(type: Semantic.Types.Type) -> bool =>
@@ -588,8 +619,8 @@ namespace Syntax.Process is
         // - `free = "name"`, the function that releases text handed over,
         //   instead of the C library's free;
         // - `errno = <value>`, the answer that signals failure, a number,
-        //   "negative" or "always", after which the C library's errno is
-        //   answered.
+        //   "negative", or "set" for a function that signals failure only by
+        //   setting errno; the C library's errno is answered on failure.
         _extern_options(pragma: Trees.Pragmas.PRAGMA, target: Compiler.Target) -> EXTERN_OPTIONS? is
             let result mut = Semantic.ExternResult.NONE
             let deallocator: string? mut = null
@@ -653,7 +684,7 @@ namespace Syntax.Process is
                         failure = _extern_failure(argument.value)
 
                         if !failure? then
-                            _logger.error(argument.name.location, "extern errno must be a number, negative or always")
+                            _logger.error(argument.name.location, "extern errno must be a number, negative or set")
                             return null
                         fi
                     else
@@ -725,13 +756,13 @@ namespace Syntax.Process is
         EXTERN_ERRNO_ARGUMENT: string static => "errno"
 
         // The failure an `errno =` value names: an integer, which may be
-        // negated, or the words negative and always.
+        // negated, or the words negative and set.
         _extern_failure(value: Trees.Expressions.Expression) -> Semantic.EXTERN_FAILURE? is
             if let text = value.try_get_string_literal() then
                 if text =~ "negative" then
                     return Semantic.EXTERN_FAILURE(Semantic.ExternFailureKind.NEGATIVE, 0L)
-                elif text =~ "always" then
-                    return Semantic.EXTERN_FAILURE(Semantic.ExternFailureKind.ALWAYS, 0L)
+                elif text =~ "set" then
+                    return Semantic.EXTERN_FAILURE(Semantic.ExternFailureKind.SET, 0L)
                 fi
 
                 return null

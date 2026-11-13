@@ -1,0 +1,72 @@
+namespace Test is
+    use IO.Std.write_line;
+    use Ghul.Result;
+
+    // Tests: an extern declared with errno answers Result[T, int]: ERROR
+    // holding errno where the call failed, OK holding the answer otherwise.
+    // The value names the answer that signals failure; "negative" takes any
+    // negative answer; "set" zeroes errno before the call and takes a
+    // nonzero errno after it, for functions that signal failure only that way.
+
+    @extern("libc", "close", errno = -1)
+    close(fd: int) -> Result[int, int];
+
+    @extern("libc", "dup", errno = "negative")
+    duplicate(fd: int) -> Result[int, int];
+
+    @extern("libc", "opendir", errno = 0)
+    open_directory(path: string) -> Result[word, int];
+
+    @extern("libc", "closedir")
+    close_directory(directory: word) -> int;
+
+    @extern("libc", "readdir", errno = "set")
+    read_directory(directory: word) -> Result[word, int];
+
+    @extern("libc", "strtol", errno = "set")
+    parse(text: string, end: word, base: int) -> Result[long, int];
+
+    @extern("libc", "realpath", result = "take", errno = 0)
+    real_path(path: string, buffer: word) -> Result[string, int];
+
+    show[T](result: Result[T, int]) -> string =>
+        case result
+        when ok: Result.OK then "ok {ok.value}"
+        when failed: Result.ERROR then "error {failed.error}"
+        esac;
+
+    entry() is
+        write_line("close(-1): {show(close(-1))}");
+        write_line("dup(-1): {show(duplicate(-1))}");
+        write_line("parse 12: {show(parse("12", 0w, 10))}");
+        write_line("parse too big: {show(parse("99999999999999999999", 0w, 10))}");
+        write_line("real path of /: {show(real_path("/", 0w))}");
+        write_line("real path of a missing file: {show(real_path("/no/such/file", 0w))}");
+
+        if let missing: Result.ERROR = open_directory("/no/such/directory") then
+            write_line("open a missing directory: error {missing.error}");
+        fi
+
+        if let opened: Result.OK = open_directory("/") then
+            let entries mut = 0;
+            let ended mut = false;
+
+            while !ended do
+                case read_directory(opened.value)
+                when entry: Result.OK then
+                    if entry.value == 0w then
+                        ended = true;
+                    else
+                        entries = entries + 1;
+                    fi
+                when failed: Result.ERROR then
+                    write_line("readdir failed: {failed.error}");
+                    ended = true;
+                esac
+            od
+
+            close_directory(opened.value);
+            write_line("read the root directory to its end: {entries > 2}");
+        fi
+    si
+si
