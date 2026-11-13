@@ -743,7 +743,7 @@ jobs:
     - name: Restore local .NET tools
       run: dotnet tool restore
 
-    # The runtime release a user of this compiler would get, as llvm_tests
+    # The runtime release a user of this compiler would get, as llvm_test_shards
     # chooses it; a scheduled run takes the head.
     - name: Choose the runtime release
       id: libraries
@@ -804,7 +804,7 @@ jobs:
     - name: Restore local .NET tools
       run: dotnet tool restore
 
-    # The runtime release a user of this compiler would get, as llvm_tests
+    # The runtime release a user of this compiler would get, as llvm_test_shards
     # chooses it; a scheduled run takes the head.
     - name: Choose the runtime release
       id: libraries
@@ -1244,7 +1244,7 @@ jobs:
     - name: Restore local .NET tools
       run: dotnet tool restore
 
-    # The runtime release a user of this compiler would get, as llvm_tests
+    # The runtime release a user of this compiler would get, as llvm_test_shards
     # chooses it; a scheduled run takes the head.
     - name: Choose the runtime release
       id: libraries
@@ -1339,8 +1339,10 @@ jobs:
   # missing check. The programs are then run again in an empty image by
   # llvm_static. Each level runs in two shards, striped by discovery order as
   # the .NET integration shards are: one job ran close to its fifteen minutes
-  # under load, and the limit stays where it is.
-  llvm_tests:
+  # under load, and the limit stays where it is. llvm_tests below judges the
+  # shards and the cell scenarios under one name that does not change with
+  # the shard count, as integration_tests does for the .NET shards.
+  llvm_test_shards:
     needs: [version, bootstrap]
     if: needs.version.outputs.build == 'true'
     name: Run llvm tests (${{ matrix.optimisation }}, ${{ matrix.shard }}/2)
@@ -1485,7 +1487,7 @@ jobs:
     - name: Restore local .NET tools
       run: dotnet tool restore
 
-    # The same runtime release llvm_tests chooses.
+    # The same runtime release llvm_test_shards chooses.
     - name: Choose the runtime release
       id: libraries
       shell: bash
@@ -1516,6 +1518,31 @@ jobs:
         host="$(build/ghul-llvm-host.sh "$RUNNER_TEMP/ghul-llvm-host")"
         ghul_llvm="$(dirname "$(dirname "$(command -v ghul-llvm)")")"
         build/llvm-cells.sh publish/ghul.dll "$ghul_llvm" "$host"
+
+  # The llvm tests' one name: every shard and the cell scenarios passed. As
+  # for integration_tests, `always()` makes a failed build fail this job
+  # rather than skip it.
+  llvm_tests:
+    needs: [version, llvm_test_shards, llvm_cells]
+    name: Run llvm tests
+
+    if: always()
+
+    runs-on: ubuntu-latest
+
+    timeout-minutes: 5
+
+    steps:
+    - name: Check every shard and the cell scenarios passed
+      env:
+        SHARDS: ${{ needs.llvm_test_shards.result }}
+        CELLS: ${{ needs.llvm_cells.result }}
+        BUILD: ${{ needs.version.outputs.build }}
+      run: |
+        echo "shards: $SHARDS, cells: $CELLS"
+        for result in "$SHARDS" "$CELLS"; do
+          [ "$result" = success ] || { [ "$result" = skipped ] && [ "$BUILD" != true ]; } || exit 1
+        done
 
   # The llvm integration tests at -O0 on an arm64 runner, with ghul-llvm's
   # aarch64 release: what a native compiler for aarch64 would build. Not part
@@ -1583,12 +1610,12 @@ jobs:
     - name: Run the llvm integration tests
       run: bash -c "set -o pipefail ; dotnet ghul-test --config llvm integration-tests | tee test-results.txt"
 
-  # Runs the programs llvm_tests built in a `FROM scratch` image, which holds
+  # Runs the programs llvm_test_shards built in a `FROM scratch` image, which holds
   # nothing but the programs themselves: no loader, no shared libraries, no
   # files. A program that is not fully static fails to start there. This is
-  # a separate job because the SDK image llvm_tests runs in has no docker.
+  # a separate job because the SDK image llvm_test_shards runs in has no docker.
   llvm_static:
-    needs: [version, llvm_tests]
+    needs: [version, llvm_test_shards]
     if: needs.version.outputs.build == 'true'
     name: Run llvm programs in an empty image (${{ matrix.optimisation }})
 
@@ -2308,7 +2335,7 @@ jobs:
   # then a skipped job satisfies it. This job runs regardless and checks
   # that nothing was skipped that should have run.
   gate:
-    needs: [version, bootstrap, unit_tests, analysis_tests, llvm_self_type_check, llvm_bootstrap, wasm_bootstrap, integration_tests, wasm_validation, llvm_tests, llvm_cells, llvm_static, cross_assembly_tests, bare_invocation_test, native_aot_test, runtime_tests, examples_tests, format_round_trip, rosetta_tests]
+    needs: [version, bootstrap, unit_tests, analysis_tests, llvm_self_type_check, llvm_bootstrap, wasm_bootstrap, integration_tests, wasm_validation, llvm_tests, llvm_static, cross_assembly_tests, bare_invocation_test, native_aot_test, runtime_tests, examples_tests, format_round_trip, rosetta_tests]
     name: Gate
 
     if: always()
