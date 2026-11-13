@@ -285,15 +285,17 @@ namespace Syntax.Process is
         // by `visit_call`'s constraint-push retry: when the first
         // overload resolution fails, having exactly one candidate to
         // push formal arg types from disambiguates the constraint
-        // direction. Multi-candidate disambiguation under constraint
-        // push is bigger work tracked under #1174.
+        // direction. Where several match the arity, those that reject
+        // an argument whose type is already settled are set aside
+        // first; this never chooses among candidates that remain.
+        // Multi-candidate disambiguation under constraint push is
+        // bigger work tracked under #1174.
         _try_find_single_arity_candidate(
             group: Semantic.Symbols.FUNCTION_GROUP,
-            arg_count: int,
+            argument_types: Collections.LIST[Type],
             want_instance: bool
         ) -> Semantic.Symbols.Function? is
-            let result: Semantic.Symbols.Function? mut = null
-            let count mut = 0
+            let matching = Collections.LIST[Semantic.Symbols.Function]()
 
             for f in group.functions do
                 if !want_instance /\ f.is_instance then
@@ -304,12 +306,39 @@ namespace Syntax.Process is
                     continue
                 fi
 
-                if f.arguments.count != arg_count then
+                if f.arguments.count != argument_types.count then
                     continue
                 fi
 
-                result = f
-                count = count + 1
+                matching.add(f)
+            od
+
+            return single_candidate_accepting_settled_arguments(matching, argument_types)
+        si
+
+        // The only one of `candidates` left once those rejecting a
+        // settled argument are set aside, or null if none or several
+        // are left. With a single candidate, that candidate, whatever
+        // its arguments: the caller pushes its formals because nothing
+        // else fits the count. A formal naming one of the candidate's
+        // own type parameters rejects nothing, since it is not yet the
+        // type it will take; the candidate's other formals still can.
+        single_candidate_accepting_settled_arguments(
+            candidates: Collections.List[Semantic.Symbols.Function],
+            argument_types: Collections.List[Type]
+        ) -> Semantic.Symbols.Function? static is
+            if candidates.count == 1 then
+                return candidates[0]
+            fi
+
+            let result: Semantic.Symbols.Function? mut = null
+            let count mut = 0
+
+            for f in candidates do
+                if !_rejects_settled_argument(f, argument_types) then
+                    result = f
+                    count = count + 1
+                fi
             od
 
             if count == 1 then
@@ -317,6 +346,26 @@ namespace Syntax.Process is
             fi
 
             return null
+        si
+
+        _rejects_settled_argument(
+            f: Semantic.Symbols.Function,
+            argument_types: Collections.List[Type]
+        ) -> bool static is
+            for index in 0..argument_types.count do
+                let actual = argument_types[index]
+                let formal = f.arguments[index]
+
+                if formal.contains_function_generic_argument \/ formal.is_wild then
+                    continue
+                fi
+
+                if actual.is_settled /\ !formal.is_assignable_from(actual) then
+                    return true
+                fi
+            od
+
+            return false
         si
 
         // should be called with logger speculating
@@ -843,7 +892,7 @@ namespace Syntax.Process is
 
             if !overload_result? then
                 if
-                    let candidate = _try_find_single_arity_candidate(function_group, argument_types.count, true) /\
+                    let candidate = _try_find_single_arity_candidate(function_group, argument_types, true) /\
                     _type_sequence_arguments_from_formals(candidate, argument_expressions.expressions, argument_types)
                 then
                     return (cast Value(Load.SYMBOL(null, function_group)), _unresolved_construction(cache_key, location, type, argument_types))
@@ -869,7 +918,7 @@ namespace Syntax.Process is
             // LIST[int] don't unify for T) and the user-facing
             // diagnostic is correct as-is.
             if overload_result == null /\ argument_types |> any(a => a.is_function_with_any_implicit_argument_types) then
-                let candidate = _try_find_single_arity_candidate(function_group, argument_types.count, true)
+                let candidate = _try_find_single_arity_candidate(function_group, argument_types, true)
 
                 if candidate? then
                     let specialized_candidate = _specialise_candidate_from_concrete_siblings(candidate, argument_types, cache_key, location)
@@ -1676,7 +1725,7 @@ namespace Syntax.Process is
             let argument_expressions = slots.expressions
 
             let candidate =
-                _try_find_single_arity_candidate(function_group, argument_types.count, want_instance) ??
+                _try_find_single_arity_candidate(function_group, argument_types, want_instance) ??
                 _async_literal_candidates.find(function_group, argument_expressions, want_instance)
             let earlier_candidate =
                 candidate ??
@@ -2932,7 +2981,7 @@ namespace Syntax.Process is
                 _partial_arguments_contain_error(push_function) \/
                 _partial_arguments_contain_unbound_function_type_variable(push_function)
             then
-                let candidate = _try_find_single_arity_candidate(function_group, argument_types.count, want_instance)
+                let candidate = _try_find_single_arity_candidate(function_group, argument_types, want_instance)
 
                 if candidate? /\ candidate.is_generic then
                     let phantom_origins = _type_arg_placeholder_registry.get_or_create_for_function(cache_key, argument_location, candidate)
@@ -3284,7 +3333,7 @@ namespace Syntax.Process is
 
                     if !overload_result? then
                         if
-                            let candidate = _try_find_single_arity_candidate(function_group, argument_types.count, want_instance) /\
+                            let candidate = _try_find_single_arity_candidate(function_group, argument_types, want_instance) /\
                             _type_sequence_arguments_from_formals(candidate, slots.expressions, argument_types)
                         then
                             call.compile_expressions_state.value = DUMMY(Semantic.Types.ERROR(), call.location)
