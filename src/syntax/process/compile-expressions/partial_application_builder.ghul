@@ -218,7 +218,10 @@ namespace Syntax.Process is
                     fixed_values.add(value)
                 od
             elif !arguments? then
-                return null
+                // A chain ending in a field read has no call at its end.
+                if !_roots_at_placeholder(body, placeholder_values) \/ !_take_apart_chain(body, placeholder_values, fixed_locals, fixed_types, fixed_values) then
+                    return null
+                fi
             elif !_take_apart(call, arguments, placeholder_values, fixed_locals, fixed_types, fixed_values) then
                 return null
             fi
@@ -233,7 +236,9 @@ namespace Syntax.Process is
         // Replaces each written-out argument of `call` - its receiver
         // included - by a load of a fresh local of the thunk, collecting
         // the moved values, and checks that every `*` reached the call
-        // exactly once.
+        // exactly once. A receiver or argument that is a chain on a `*`
+        // (`* .name.length`) is taken apart along the chain instead of
+        // moved, since its value depends on the thunk's parameter.
         _take_apart(
             call: Value,
             arguments: Collections.LIST[Value],
@@ -248,6 +253,55 @@ namespace Syntax.Process is
                 matched.add(false)
             od
 
+            if !_take_apart_call(call, arguments, placeholder_values, matched, fixed_locals, fixed_types, fixed_values) then
+                return false
+            fi
+
+            for m in matched do
+                if !m then
+                    return false
+                fi
+            od
+
+            return true
+        si
+
+        // `_take_apart` for a body that is a chain link other than a call.
+        _take_apart_chain(
+            body: Value,
+            placeholder_values: Value[],
+            fixed_locals: Collections.LIST[IR.LOCAL],
+            fixed_types: Collections.LIST[Type],
+            fixed_values: Collections.LIST[Value]
+        ) -> bool is
+            let matched = Collections.LIST[bool]()
+
+            for _ in placeholder_values do
+                matched.add(false)
+            od
+
+            if !_take_apart_link(body, placeholder_values, matched, fixed_locals, fixed_types, fixed_values) then
+                return false
+            fi
+
+            for m in matched do
+                if !m then
+                    return false
+                fi
+            od
+
+            return true
+        si
+
+        _take_apart_call(
+            call: Value,
+            arguments: Collections.LIST[Value],
+            placeholder_values: Value[],
+            matched: Collections.LIST[bool],
+            fixed_locals: Collections.LIST[IR.LOCAL],
+            fixed_types: Collections.LIST[Type],
+            fixed_values: Collections.LIST[Value]
+        ) -> bool is
             let receiver = _receiver_of(call)
 
             if receiver? /\ !receiver.is_type_expression then
@@ -257,10 +311,10 @@ namespace Syntax.Process is
                 let receiver_value =
                     if let address: IR.Values.ADDRESS = receiver then address.value else receiver fi
 
-                let receiver_placeholder = _placeholder_index(receiver_value, placeholder_values)
-
-                if receiver_placeholder >= 0 then
-                    matched[receiver_placeholder] = true
+                if _roots_at_placeholder(receiver_value, placeholder_values) then
+                    if !_take_apart_link(receiver_value, placeholder_values, matched, fixed_locals, fixed_types, fixed_values) then
+                        return false
+                    fi
                 else
                     let moved = _move_fixed(receiver, fixed_locals, fixed_types, fixed_values)
 
@@ -275,14 +329,10 @@ namespace Syntax.Process is
             for i in 0..arguments.count do
                 let argument = arguments[i]
 
-                let placeholder_index = _placeholder_index(argument, placeholder_values)
-
-                if placeholder_index >= 0 then
-                    if matched[placeholder_index] then
+                if _roots_at_placeholder(argument, placeholder_values) then
+                    if !_take_apart_link(argument, placeholder_values, matched, fixed_locals, fixed_types, fixed_values) then
                         return false
                     fi
-
-                    matched[placeholder_index] = true
                 else
                     let moved = _move_fixed(argument, fixed_locals, fixed_types, fixed_values)
 
@@ -294,14 +344,73 @@ namespace Syntax.Process is
                 fi
             od
 
-            for m in matched do
-                if !m then
-                    return false
-                fi
-            od
-
             return true
         si
+
+        // Takes apart one link of a chain on a `*`: the `*` itself, a call
+        // made on the chain so far, or a field read from it.
+        _take_apart_link(
+            value: Value,
+            placeholder_values: Value[],
+            matched: Collections.LIST[bool],
+            fixed_locals: Collections.LIST[IR.LOCAL],
+            fixed_types: Collections.LIST[Type],
+            fixed_values: Collections.LIST[Value]
+        ) -> bool is
+            let placeholder_index = _placeholder_index(value, placeholder_values)
+
+            if placeholder_index >= 0 then
+                if matched[placeholder_index] then
+                    return false
+                fi
+
+                matched[placeholder_index] = true
+                return true
+            fi
+
+            if let load: IR.Values.Load.INSTANCE_FIELD = value then
+                return _take_apart_link(_unaddressed(load.from!), placeholder_values, matched, fixed_locals, fixed_types, fixed_values)
+            fi
+
+            let call = _call_of(value)
+            let arguments = cast Collections.LIST[Value]?(_arguments_of(call))
+
+            if !arguments? then
+                return false
+            fi
+
+            return _take_apart_call(call, arguments, placeholder_values, matched, fixed_locals, fixed_types, fixed_values)
+        si
+
+        // Whether `value` is a `*`, or a chain of calls and field reads
+        // that ends at one.
+        _roots_at_placeholder(value: Value, placeholder_values: Value[]) -> bool is
+            let current mut = _unaddressed(value)
+
+            while true do
+                if _placeholder_index(current, placeholder_values) >= 0 then
+                    return true
+                fi
+
+                if let load: IR.Values.Load.INSTANCE_FIELD = current then
+                    current = _unaddressed(load.from!)
+                    continue
+                fi
+
+                let receiver = _receiver_of(_call_of(current))
+
+                if !receiver? \/ receiver.is_type_expression then
+                    return false
+                fi
+
+                current = _unaddressed(receiver)
+            od
+
+            return false
+        si
+
+        _unaddressed(value: Value) -> Value =>
+            if let address: IR.Values.ADDRESS = value then address.value else value fi
 
         // The thunk's declaration and the value standing for it, from the
         // body and the fixed values it reads through `fixed_locals`.
