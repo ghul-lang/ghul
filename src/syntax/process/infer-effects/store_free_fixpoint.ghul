@@ -360,49 +360,47 @@ namespace Syntax.Process is
         // async one the async state machine interface, with members the
         // backend emits from the function's body. No function stands for
         // those members, so nothing records them as overriders, and a call
-        // through any of those traits or the traits they extend can reach code this
-        // solve never judged.
-        is_implemented_by_synthesis(owner: Semantic.Symbols.Classy) -> bool static is
+        // through any of those traits, or a trait they extend, can reach
+        // code this solve never judged.
+        is_implemented_by_synthesis(owner: Semantic.Symbols.Classy) -> bool is
             if !owner.is_trait then
                 return false
             fi
 
-            let lookup = IoC.CONTAINER.instance.innate_symbol_lookup
-            let target = owner.unspecialized_symbol
-
-            for implemented in [
-                lookup.get_unspecialized_iterable_type(),
-                lookup.get_unspecialized_iterator_type(),
-                lookup.get_async_state_machine_interface_type()
-            ] do
-                if implemented? /\ _is_self_or_ancestor(target, implemented) then
-                    return true
-                fi
-            od
-
-            return false
+            return _synthesised_traits.contains(owner.unspecialized_symbol)
         si
 
-        _is_self_or_ancestor(target: Semantic.Symbols.Symbol, type: Semantic.Types.Type) -> bool static is
-            let symbol = type.symbol
+        _synthesised_traits_cache: Collections.SET[Semantic.Symbols.Symbol]?
 
-            if !symbol? then
-                return false
+        _synthesised_traits: Collections.SET[Semantic.Symbols.Symbol] is
+            if let cached = _synthesised_traits_cache then
+                return cached
             fi
 
-            if symbol.unspecialized_symbol == target then
-                return true
-            fi
+            let lookup = IoC.CONTAINER.instance.innate_symbol_lookup
+            let traits = Collections.SET[Semantic.Symbols.Symbol]()
 
-            if let classy: Semantic.Symbols.Classy = symbol then
-                for ancestor in classy.ancestors do
-                    if _is_self_or_ancestor(target, ancestor) then
-                        return true
-                    fi
-                od
-            fi
+            _add_self_and_ancestors(traits, lookup.find_unspecialized_iterable_type())
+            _add_self_and_ancestors(traits, lookup.get_unspecialized_iterator_type())
+            _add_self_and_ancestors(traits, lookup.get_async_state_machine_interface_type())
 
-            return false
+            _synthesised_traits_cache = traits
+
+            return traits
+        si
+
+        _add_self_and_ancestors(traits: Collections.SET[Semantic.Symbols.Symbol], type: Semantic.Types.Type?) is
+            if let symbol = type?.symbol then
+                if !traits.add(symbol.unspecialized_symbol) then
+                    return
+                fi
+
+                if let classy: Semantic.Symbols.Classy = symbol then
+                    for ancestor in classy.ancestors do
+                        _add_self_and_ancestors(traits, ancestor)
+                    od
+                fi
+            fi
         si
     si
 si
