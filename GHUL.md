@@ -505,6 +505,8 @@ In a refutable context (`if let`, or a `case` `when` pattern), a literal on the 
 
 Postfix `!` on a `T ref` dereferences it: `p!` reads the value, and `p! = v` writes the value. On a `T?`, postfix `!` asserts that the value is present and returns the value (see [optional types](#optional-types)). The parser produces the same node for both, and the operand type decides the meaning. Outside a `deconstruct` body, the dereference form is rarely needed: ghūl code usually takes a `ref` only to pass it to a .NET method that follows the try pattern.
 
+A `ref` to a mutable local that a closure captures passes a copy of the local, which is stored back into the local when the call returns, so the callee's write reaches the closure. If the call throws, nothing is stored back, so a write the callee made before throwing is lost. An argument after the `ref` in the same call that changes the same local is not seen by the callee.
+
 *More detail on this section: [language details](docs/details.md#types-and-literals).*
 
 ## functions
