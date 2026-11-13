@@ -436,19 +436,6 @@ namespace Syntax.Process is
 
                         return false
                     fi
-
-                    // The fused loop evaluates the count before the source,
-                    // where the unfused chain evaluates the source first: a
-                    // source that reads eagerly when called, as sort does,
-                    // runs its stages' functions before the count. A count
-                    // that is itself a state-changing call would see their
-                    // effects in one order and not the other, so the chain
-                    // runs unfused.
-                    if count_value.is_state_changing_call then
-                        _chain_resolve_reason = "count-has-effects"
-
-                        return false
-                    fi
                 elif stage.is_index then
                     // The INDEXED_VALUE the stage builds is the element
                     // type of the `index` call's own return, so it is read
@@ -1021,7 +1008,7 @@ namespace Syntax.Process is
                 fi
             fi
 
-            _note_fused_iteration(fused, plan.source.value!, plan.reversed_iterator_function?)
+            _spill_source(fused, plan)
 
             if consumer_kind =~ "collect" \/ consumer_kind =~ "collect_array" then
                 _try_presize(fused, plan, call, consumer_kind, built.final.type)
@@ -1042,6 +1029,34 @@ namespace Syntax.Process is
                 fused.consumer_param?)
 
             return fused
+        si
+
+        // Evaluate the chain's source once, first, into a local, and take
+        // the iterator from that: the unfused chain evaluates its source
+        // before any stage's arguments, and a source can run code as it is
+        // called (`sort` reads all of its own source then), so the fused
+        // loop has to as well. The stages' arguments and the consumer's
+        // follow in FUSED_CONSUMER.expand, in the order the unfused calls
+        // take them.
+        _spill_source(fused: IR.Values.FUSED_CONSUMER, plan: PIPE_FUSION) is
+            let source_value = plan.source.value!
+
+            let source = IR.LOCAL(".fc_source.{_next_fused_local_id()}", source_value.type!)
+            let source_load = source.load()
+
+            fused.source = source
+            fused.source_init = source_value
+
+            fused.iterator_init =
+                if let reversed_fn = plan.reversed_iterator_function then
+                    reversed_fn.call(plan.source.location, null, Collections.LIST[IR.Values.Value]([source_load]), null, _function_caller)
+                elif let read_iterator = plan.source_read_iterator then
+                    read_iterator.call(plan.source.location, source_load, Collections.LIST[IR.Values.Value](0), null, _function_caller)
+                else
+                    source_load
+                fi
+
+            _note_fused_iteration(fused, source_load, plan.reversed_iterator_function?)
         si
 
         // Say what the fused loop's iterator local iterates and the calls
@@ -1065,9 +1080,8 @@ namespace Syntax.Process is
         si
 
         // Size a fused collect's result up front where the source's count
-        // is known before the loop and every stage keeps it. The source is
-        // then read twice - for its iterator and for its count - so it is
-        // evaluated once into a local and the iterator rebuilt over that.
+        // is known before the loop and every stage keeps it. The count is
+        // read from the source's local, which the iterator is built over too.
         // A list result is constructed at the count as its capacity; an
         // array result is allocated at the count and written by index,
         // with no list and no copy. Nothing changes where the count is not
@@ -1083,31 +1097,13 @@ namespace Syntax.Process is
                 return
             fi
 
-            let source_value = plan.source.value!
-            let source_type = source_value.type!
+            let source_load = fused.source!.load()
 
-            let source = IR.LOCAL(".fc_source.{_next_fused_local_id()}", source_type)
-            let source_load = source.load()
-
-            let count = known_counts.count_of(plan.source, source_load, source_type, call.location)
+            let count = known_counts.count_of(plan.source, source_load, plan.source.value!.type!, call.location)
 
             if !count? then
                 return
             fi
-
-            fused.source = source
-            fused.source_init = source_value
-
-            fused.iterator_init =
-                if let reversed_fn = plan.reversed_iterator_function then
-                    reversed_fn.call(plan.source.location, null, Collections.LIST[IR.Values.Value]([source_load]), null, _function_caller)
-                elif let read_iterator = plan.source_read_iterator then
-                    read_iterator.call(plan.source.location, source_load, Collections.LIST[IR.Values.Value](0), null, _function_caller)
-                else
-                    source_load
-                fi
-
-            _note_fused_iteration(fused, source_load, plan.reversed_iterator_function?)
 
             if consumer_kind =~ "collect_array" then
                 fused.presize_array = true
