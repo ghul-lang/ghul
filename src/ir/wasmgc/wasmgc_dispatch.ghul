@@ -54,6 +54,11 @@ namespace IR.WasmGC is
         _next_type: int
 
         _thunk_indices: MAP[int, MAP[FUNCTION_INSTANCE, int]]
+
+        // The slot and selector signatures that answer nothing. A method
+        // that answers a value can fill one, as `add -> bool` fills the
+        // `add` a set inherits from a bag, and its thunk drops the value.
+        _void_signatures: SET[int]
         _box_hashes: MAP[CLASS_INSTANCE, int]
         _box_equalities: MAP[CLASS_INSTANCE, int]
         _generic_calls: LIST[(method: Function, arguments: Type[])]
@@ -72,6 +77,7 @@ namespace IR.WasmGC is
             _types = LIST[SUB_TYPE]()
 
             _thunk_indices = MAP[int, MAP[FUNCTION_INSTANCE, int]]()
+            _void_signatures = SET[int]()
             _box_hashes = MAP[CLASS_INSTANCE, int]()
             _box_equalities = MAP[CLASS_INSTANCE, int]()
             _generic_calls = LIST[(method: Function, arguments: Type[])]()
@@ -157,7 +163,13 @@ namespace IR.WasmGC is
                 fi
             fi
 
-            return _add_type(SUB_TYPE(FUNC_TYPE(parameters.to_array(), results.to_array()), true, []))
+            let signature = _add_type(SUB_TYPE(FUNC_TYPE(parameters.to_array(), results.to_array()), true, []))
+
+            if results.count == 0 then
+                _void_signatures.add(signature)
+            fi
+
+            return signature
         si
 
         /// Asks the registry, while it is discovering, for the cells and
@@ -417,6 +429,10 @@ namespace IR.WasmGC is
                 od
 
                 body.add(INDEX_INSTRUCTION(Opcode.CALL, numbering.indexed(implementation)!))
+
+                if _void_signatures.contains(signature) /\ !WASMGC_TYPES.is_void(implementation.specialize(implementation.definition.return_type)) then
+                    body.add(Wasm.SIMPLE_INSTRUCTION(Opcode.DROP))
+                fi
 
                 return FUNCTION(signature, [], body)
             si)
