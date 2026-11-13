@@ -23,6 +23,10 @@ namespace Syntax.Process is
         _overload_resolver: Semantic.OVERLOAD_RESOLVER
         _visitor: ScopedVisitor
 
+        // The extern declarations seen so far, by the symbol each names, so a
+        // second declaration of one symbol can be checked against the first.
+        _externs_by_symbol: Collections.MAP[string, Semantic.Symbols.Function]
+
         init(
             logger: Logger,
             innate_symbol_lookup: Semantic.Lookups.InnateSymbolLookup,
@@ -36,6 +40,7 @@ namespace Syntax.Process is
             _overload_resolver = overload_resolver
             _visitor = visitor
             _unsettled_offsets = Collections.MAP[Semantic.Symbols.Field, Source.LOCATION]()
+            _externs_by_symbol = Collections.MAP[string, Semantic.Symbols.Function]()
         si
 
         // A built-in pragma is handled by the compiler itself; anything
@@ -458,32 +463,101 @@ namespace Syntax.Process is
             od
 
             let result = options.result
-            let answers_string = signature.is_string(function.return_type)
             let result_location = function.location
+            let answered mut = function.return_type
+
+            if let failure = options.failure then
+                answered = _answered_beside_errno(function.return_type, failure, signature, result_location)
+
+                if !answered? then
+                    return
+                fi
+            fi
+
+            let answers_string = signature.is_string(answered)
 
             if result != Semantic.ExternResult.NONE /\ !answers_string then
                 _logger.error(pragma.name.location, "extern result applies only to a function answering a string")
                 return
             fi
 
-            if !signature.can_return_on(function.return_type, build_target, result != Semantic.ExternResult.NONE) then
+            if !signature.can_return_on(answered, build_target, result != Semantic.ExternResult.NONE) then
                 if answers_string /\ build_target == Compiler.Target.DOTNET then
-                    _logger.error(result_location, "{function.return_type} cannot be returned from foreign code on .NET")
+                    _logger.error(result_location, "{answered} cannot be returned from foreign code on .NET")
                     _logger.hint(result_location, "a word result read with Marshal.ptr_to_string_u_t_f8 gives the text")
                 elif answers_string then
-                    _logger.error(result_location, "{function.return_type} returned from foreign code without saying who owns the text")
+                    _logger.error(result_location, "{answered} returned from foreign code without saying who owns the text")
                     _logger.hint(result_location, "result = \"copy\" copies text the library keeps; result = \"take\" also releases it")
                 else
-                    _logger.error(result_location, "{function.return_type} cannot be returned from foreign code")
+                    _logger.error(result_location, "{answered} cannot be returned from foreign code")
                 fi
 
                 return
             fi
 
-            function.extern_import = Semantic.EXTERN_IMPORT(module, name, result, options.deallocator, options.keeps_errno)
+            if options.fixed_parameters > function.arguments.count then
+                _logger.error(pragma.name.location, "extern variadic names {options.fixed_parameters} fixed parameters, but {function.name} has {function.arguments.count}")
+                return
+            fi
 
-            _pin_extern_to_import(function, module, name, options.keeps_errno)
+            let import = Semantic.EXTERN_IMPORT(module, name, result, options.deallocator, options.failure, options.fixed_parameters)
+
+            if !_agrees_with_earlier_extern(function, import, pragma) then
+                return
+            fi
+
+            function.extern_import = import
+
+            _pin_extern_to_import(function, module, name)
         si
+
+        // What the foreign function itself answers, where its declaration
+        // adds the errno: the OK type of Result[T, int], or the first element
+        // of the (T, int) tuple `errno = "always"` answers. Reports and
+        // answers null where the declared type is neither.
+        _answered_beside_errno(declared: Semantic.Types.Type?, failure: Semantic.EXTERN_FAILURE, signature: Semantic.PINVOKE_SIGNATURE, location: Source.LOCATION) -> Semantic.Types.Type? is
+            let int_type = _innate_symbol_lookup.get_int_type()
+
+            if failure.kind == Semantic.ExternFailureKind.ALWAYS then
+                if let tuple: Semantic.Types.TUPLE = declared /\ tuple.arguments.count == 2 /\ tuple.arguments[1].matches(int_type) then
+                    return tuple.arguments[0]
+                fi
+
+                _logger.error(location, "{declared} cannot carry an errno: with errno always an extern answers a tuple of its result and an int")
+                return null
+            fi
+
+            let result_union = _innate_symbol_lookup.find_result_type()
+
+            if
+                let generic: Semantic.Types.GENERIC = declared /\
+                result_union? /\
+                generic.symbol.unspecialized_symbol == result_union /\
+                generic.arguments.count == 2 /\
+                generic.arguments[1].matches(int_type)
+            then
+                let ok = generic.arguments[0]
+
+                if failure.kind == Semantic.ExternFailureKind.NEGATIVE /\ !_is_signed_integer(ok) then
+                    _logger.error(location, "{ok} cannot be negative, so errno negative cannot signal failure")
+                    return null
+                fi
+
+                return ok
+            fi
+
+            _logger.error(location, "{declared} cannot carry an errno: an extern that declares errno answers Result[T, int]")
+            return null
+        si
+
+        _is_signed_integer(type: Semantic.Types.Type) -> bool =>
+            [
+                _innate_symbol_lookup.get_byte_type(),
+                _innate_symbol_lookup.get_short_type(),
+                _innate_symbol_lookup.get_int_type(),
+                _innate_symbol_lookup.get_long_type(),
+                _innate_symbol_lookup.get_word_type()
+            ] |> Ghul.Pipes.any(t => type.matches(t))
 
         // Why a parameter cannot cross, after its name and type.
         _refused_parameter(refusal: Semantic.ExternRefusal) -> string =>
@@ -513,11 +587,14 @@ namespace Syntax.Process is
         //   text the callee hands over;
         // - `free = "name"`, the function that releases text handed over,
         //   instead of the C library's free;
-        // - `errno = true`, to keep the C library's errno after each call.
+        // - `errno = <value>`, the answer that signals failure, a number,
+        //   "negative" or "always", after which the C library's errno is
+        //   answered.
         _extern_options(pragma: Trees.Pragmas.PRAGMA, target: Compiler.Target) -> EXTERN_OPTIONS? is
             let result mut = Semantic.ExternResult.NONE
             let deallocator: string? mut = null
-            let keeps_errno mut = false
+            let failure: Semantic.EXTERN_FAILURE? mut = null
+            let fixed_parameters mut = -1
 
             if pragma.named_arguments? then
                 for argument in pragma.named_arguments do
@@ -548,16 +625,35 @@ namespace Syntax.Process is
                         fi
 
                         deallocator = text
-                    elif name =~ "errno" then
-                        if let literal: Trees.Expressions.Literals.BOOLEAN = argument.value then
-                            keeps_errno = literal.value_string =~ "true"
-                        else
-                            _logger.error(argument.name.location, "extern errno must be true or false")
+                    elif name =~ "variadic" then
+                        if target != Compiler.Target.LLVM then
+                            _logger.error(argument.name.location, "extern variadic not supported on the {_target_name(target)} target")
                             return null
                         fi
 
-                        if keeps_errno /\ target == Compiler.Target.WASM then
-                            _logger.error(argument.name.location, "extern errno not supported on the wasm target")
+                        let count = if let literal: Trees.Expressions.Literals.INTEGER = argument.value then Ghul.parse[int](literal.value_string) else null fi
+
+                        if let c = count /\ c >= 0 then
+                            fixed_parameters = c
+                        else
+                            _logger.error(argument.name.location, "extern variadic must be the number of fixed parameters")
+                            return null
+                        fi
+                    elif name =~ EXTERN_ERRNO_ARGUMENT then
+                        if target == Compiler.Target.WASM then
+                            _logger.error(argument.name.location, "wasm has no errno, so an extern cannot report one")
+                            return null
+                        fi
+
+                        if target == Compiler.Target.DOTNET then
+                            _logger.error(argument.name.location, "extern errno not supported on the .NET target")
+                            return null
+                        fi
+
+                        failure = _extern_failure(argument.value)
+
+                        if !failure? then
+                            _logger.error(argument.name.location, "extern errno must be a number, negative or always")
                             return null
                         fi
                     else
@@ -572,19 +668,101 @@ namespace Syntax.Process is
                 return null
             fi
 
-            return EXTERN_OPTIONS(result, deallocator, keeps_errno)
+            return EXTERN_OPTIONS(result, deallocator, failure, fixed_parameters)
+        si
+
+        // Whether this extern agrees with an earlier one naming the same
+        // symbol. Two variadic declarations agree when their fixed parameters
+        // and results are the same; a symbol called both as variadic and not
+        // cannot agree. Reported at the later declaration.
+        _agrees_with_earlier_extern(function: Semantic.Symbols.Function, import: Semantic.EXTERN_IMPORT, pragma: Trees.Pragmas.PRAGMA) -> bool is
+            if !_externs_by_symbol.contains_key(import.name) then
+                _externs_by_symbol[import.name] = function
+                return true
+            fi
+
+            let earlier = _externs_by_symbol[import.name]
+
+            if let earlier_import = earlier.extern_import then
+                if !import.is_variadic /\ !earlier_import.is_variadic then
+                    return true
+                fi
+
+                let agrees mut = import.fixed_parameters == earlier_import.fixed_parameters
+
+                if let result = function.return_type, earlier_result = earlier.return_type then
+                    agrees = agrees /\ result.matches(earlier_result)
+                fi
+
+                if agrees then
+                    for i in 0..import.fixed_parameters do
+                        if !function.arguments[i].matches(earlier.arguments[i]) then
+                            agrees = false
+                        fi
+                    od
+                fi
+
+                if !agrees then
+                    _logger.error(
+                        pragma.name.location,
+                        "extern {import.name} does not match its declaration at {earlier.location}: the fixed parameters and the result must be the same")
+                fi
+
+                return agrees
+            fi
+
+            return true
+        si
+
+        _target_name(target: Compiler.Target) -> string =>
+            case target
+            when Compiler.Target.DOTNET then ".NET"
+            when Compiler.Target.WASM then "wasm"
+            else "llvm"
+            esac
+
+        // The argument named for the answer that signals failure.
+        EXTERN_ERRNO_ARGUMENT: string static => "errno"
+
+        // The failure an `errno =` value names: an integer, which may be
+        // negated, or the words negative and always.
+        _extern_failure(value: Trees.Expressions.Expression) -> Semantic.EXTERN_FAILURE? is
+            if let text = value.try_get_string_literal() then
+                if text =~ "negative" then
+                    return Semantic.EXTERN_FAILURE(Semantic.ExternFailureKind.NEGATIVE, 0L)
+                elif text =~ "always" then
+                    return Semantic.EXTERN_FAILURE(Semantic.ExternFailureKind.ALWAYS, 0L)
+                fi
+
+                return null
+            fi
+
+            let negated mut = false
+            let operand mut = value
+
+            if let unary: Trees.Expressions.UNARY = value /\ unary.operation.name =~ "-" then
+                negated = true
+                operand = unary.right
+            fi
+
+            if let literal: Trees.Expressions.Literals.INTEGER = operand then
+                if let parsed = Ghul.parse[long](literal.value_string.replace("_", "")) then
+                    return Semantic.EXTERN_FAILURE(Semantic.ExternFailureKind.EQUALS, if negated then -parsed else parsed fi)
+                fi
+            fi
+
+            return null
         si
 
         // On .NET the declaration is the call `DllImport` names, so it is
         // emitted as one.
         @IF.dotnet()
-        _pin_extern_to_import(function: Semantic.Symbols.Function, module: string, name: string, keeps_errno: bool) is
-            let flags = if keeps_errno then System.Reflection.MethodImportAttributes.SET_LAST_ERROR else cast System.Reflection.MethodImportAttributes(0) fi
-            function.pinvoke = Semantic.PINVOKE_IMPORT(module, name, flags)
+        _pin_extern_to_import(function: Semantic.Symbols.Function, module: string, name: string) is
+            function.pinvoke = Semantic.PINVOKE_IMPORT(module, name, cast System.Reflection.MethodImportAttributes(0))
         si
 
         @IF.not.dotnet()
-        _pin_extern_to_import(function: Semantic.Symbols.Function, module: string, name: string, keeps_errno: bool) is si
+        _pin_extern_to_import(function: Semantic.Symbols.Function, module: string, name: string) is si
 
         // ObsoleteAttribute's arguments, in constructor order: a message,
         // then whether a use is an error. Either can be left out.
@@ -1840,6 +2018,7 @@ namespace Syntax.Process is
     class EXTERN_OPTIONS(
         result: Semantic.ExternResult public,
         deallocator: string? public,
-        keeps_errno: bool public
+        failure: Semantic.EXTERN_FAILURE? public,
+        fixed_parameters: int public
     ) is si
 si
