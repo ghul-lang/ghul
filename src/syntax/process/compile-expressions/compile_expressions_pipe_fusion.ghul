@@ -87,6 +87,10 @@ namespace Syntax.Process is
             fi
         si
 
+        // Whether an iterator of `type` can read its current element.
+        _has_current(type: Type) -> bool =>
+            get_zero_argument_function(type, "$get_current")? \/ get_zero_argument_function(type, "$get_Current")?
+
         set_iterator_for(carrier: Trees.IteratorCarrier, type: Type, recursing: bool) -> bool is
             let expression = carrier.iterated!
 
@@ -102,6 +106,16 @@ namespace Syntax.Process is
             // directly: asking it would copy it, and box the copy.
             if !recursing /\ !type.is_value_type then
                 if let read_iterator = get_zero_argument_function(type, "$get_iterator") then
+                    // A .NET collection can expose a non-generic enumerator
+                    // publicly and implement `IEnumerable<T>` explicitly, as
+                    // `MatchCollection` does: its own iterator has no
+                    // `current`, so it is read through its `Iterable[T]`.
+                    if !_has_current(read_iterator.return_type!) then
+                        if let iterable = _innate_symbol_lookup.find_unspecialized_iterable_type(), ancestor = type.find_ancestor(iterable) /\ ancestor != type then
+                            return set_iterator_for(carrier, ancestor, false)
+                        fi
+                    fi
+
                     carrier.read_iterator = read_iterator
 
                     return set_iterator_for(carrier, read_iterator.return_type!, true)
