@@ -341,6 +341,10 @@ namespace Syntax.Process is
 
             let owner_classy = cast Semantic.Symbols.Classy(owner)
 
+            if is_implemented_by_synthesis(owner_classy) then
+                return true
+            fi
+
             // A closed owner's dispatch is bounded by the recorded
             // override and implementation edges, for traits and
             // unions as much as classes: closed-to-assembly means
@@ -349,6 +353,56 @@ namespace Syntax.Process is
             // session is the exception: a later cell can extend a
             // closed in-compilation type, so its dispatch is open.
             return owner_classy.is_open \/ owner_classy.open_to_a_later_cell
+        si
+
+        // Whether a class the compiler synthesises can implement `owner`. A
+        // generator's state machine implements Iterable and Iterator, and an
+        // async one the async state machine interface, with members the
+        // backend emits from the function's body. No function stands for
+        // those members, so nothing records them as overriders, and a call
+        // through any of those traits or the traits they extend can reach code this
+        // solve never judged.
+        is_implemented_by_synthesis(owner: Semantic.Symbols.Classy) -> bool static is
+            if !owner.is_trait then
+                return false
+            fi
+
+            let lookup = IoC.CONTAINER.instance.innate_symbol_lookup
+            let target = owner.unspecialized_symbol
+
+            for implemented in [
+                lookup.get_unspecialized_iterable_type(),
+                lookup.get_unspecialized_iterator_type(),
+                lookup.get_async_state_machine_interface_type()
+            ] do
+                if implemented? /\ _is_self_or_ancestor(target, implemented) then
+                    return true
+                fi
+            od
+
+            return false
+        si
+
+        _is_self_or_ancestor(target: Semantic.Symbols.Symbol, type: Semantic.Types.Type) -> bool static is
+            let symbol = type.symbol
+
+            if !symbol? then
+                return false
+            fi
+
+            if symbol.unspecialized_symbol == target then
+                return true
+            fi
+
+            if let classy: Semantic.Symbols.Classy = symbol then
+                for ancestor in classy.ancestors do
+                    if _is_self_or_ancestor(target, ancestor) then
+                        return true
+                    fi
+                od
+            fi
+
+            return false
         si
     si
 si
