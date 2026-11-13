@@ -743,7 +743,7 @@ jobs:
     - name: Restore local .NET tools
       run: dotnet tool restore
 
-    # The runtime release a user of this compiler would get, as llvm_tests
+    # The runtime release a user of this compiler would get, as llvm_test_shards
     # chooses it; a scheduled run takes the head.
     - name: Choose the runtime release
       id: libraries
@@ -804,7 +804,7 @@ jobs:
     - name: Restore local .NET tools
       run: dotnet tool restore
 
-    # The runtime release a user of this compiler would get, as llvm_tests
+    # The runtime release a user of this compiler would get, as llvm_test_shards
     # chooses it; a scheduled run takes the head.
     - name: Choose the runtime release
       id: libraries
@@ -1244,7 +1244,7 @@ jobs:
     - name: Restore local .NET tools
       run: dotnet tool restore
 
-    # The runtime release a user of this compiler would get, as llvm_tests
+    # The runtime release a user of this compiler would get, as llvm_test_shards
     # chooses it; a scheduled run takes the head.
     - name: Choose the runtime release
       id: libraries
@@ -1337,11 +1337,15 @@ jobs:
   # anything from the machine fails here. Run at both optimisation levels,
   # since a test that passes at one and not the other is a backend bug or a
   # missing check. The programs are then run again in an empty image by
-  # llvm_static.
-  llvm_tests:
+  # llvm_static. Each level runs in two shards, striped by discovery order as
+  # the .NET integration shards are: one job ran close to its fifteen minutes
+  # under load, and the limit stays where it is. llvm_tests below judges the
+  # shards and the cell scenarios under one name that does not change with
+  # the shard count, as integration_tests does for the .NET shards.
+  llvm_test_shards:
     needs: [version, bootstrap]
     if: needs.version.outputs.build == 'true'
-    name: Run llvm tests (${{ matrix.optimisation }})
+    name: Run llvm tests (${{ matrix.optimisation }}, ${{ matrix.shard }}/2)
 
     runs-on: ubuntu-latest
 
@@ -1353,6 +1357,7 @@ jobs:
       fail-fast: false
       matrix:
         optimisation: [O2, O0]
+        shard: [1, 2]
 
     steps:
     - uses: actions/checkout@v7
@@ -1427,16 +1432,7 @@ jobs:
     - name: Run the llvm integration tests
       env:
         GHUL_TEST_KEEP_ARTIFACTS: 1
-      run: bash -c "set -o pipefail ; dotnet ghul-test --config llvm integration-tests | tee test-results.txt"
-
-    # Cells compiled one after another, each against the ones before it, and
-    # loaded into one process by the cell host from the same ghul-llvm release.
-    - name: Run the cell scenarios
-      if: matrix.optimisation == 'O2'
-      run: |
-        host="$(build/ghul-llvm-host.sh "$RUNNER_TEMP/ghul-llvm-host")"
-        ghul_llvm="$(dirname "$(dirname "$(command -v ghul-llvm)")")"
-        build/llvm-cells.sh publish/ghul.dll "$ghul_llvm" "$host"
+      run: bash -c "set -o pipefail ; dotnet ghul-test --config llvm --shard ${{ matrix.shard }}/2 integration-tests | tee test-results.txt"
 
     - name: Validate the llvm test modules
       if: matrix.optimisation == 'O2'
@@ -1447,8 +1443,106 @@ jobs:
 
     - uses: actions/upload-artifact@v7
       with:
-        name: llvm-programs-${{ matrix.optimisation }}
+        name: llvm-programs-${{ matrix.optimisation }}-${{ matrix.shard }}
         path: llvm-programs
+
+  # Cells compiled one after another, each against the ones before it, and
+  # loaded into one process by the cell host from the same ghul-llvm release.
+  # A job of its own, so neither it nor the llvm integration tests run close
+  # to the fifteen-minute limit.
+  llvm_cells:
+    needs: [version, bootstrap]
+    if: needs.version.outputs.build == 'true'
+    name: Run the llvm cell scenarios
+
+    runs-on: ubuntu-latest
+
+    container: mcr.microsoft.com/dotnet/sdk:10.0
+
+    timeout-minutes: 15
+
+    steps:
+    - uses: actions/checkout@v7
+
+    - name: Check the image cannot build C
+      run: |
+        for tool in cc gcc clang ld ld.lld as opt llc; do
+          if command -v "$tool"; then
+            echo "::error::$tool is installed"
+            exit 1
+          fi
+        done
+
+        if [ -e /usr/include/stdio.h ]; then
+          echo "::error::the C library's headers are installed"
+          exit 1
+        fi
+
+    - name: Download bootstrap compiler tool tree
+      uses: actions/download-artifact@v8
+      with:
+        name: ghul-compiler-tool
+        path: publish
+
+    - name: Restore local .NET tools
+      run: dotnet tool restore
+
+    # The same runtime release llvm_test_shards chooses.
+    - name: Choose the runtime release
+      id: libraries
+      shell: bash
+      run: |
+        set -euo pipefail
+        if [ "${{ github.event_name }}" = schedule ]; then
+          echo "runtime=" >> "$GITHUB_OUTPUT"
+        else
+          runtime=$(build/library-tag.sh ghul-runtime)
+          echo "runtime=$runtime" >> "$GITHUB_OUTPUT"
+        fi
+
+    - name: Checkout ghul-runtime
+      uses: actions/checkout@v7
+      with:
+        repository: ghul-lang/ghul-runtime
+        path: libraries/ghul-runtime
+        ref: ${{ steps.libraries.outputs.runtime }}
+
+    - name: Fetch ghul-llvm
+      run: |
+        ghul_llvm="$(build/ghul-llvm.sh "$RUNNER_TEMP/ghul-llvm")"
+        test -x "$ghul_llvm"
+        dirname "$ghul_llvm" >> "$GITHUB_PATH"
+
+    - name: Run the cell scenarios
+      run: |
+        host="$(build/ghul-llvm-host.sh "$RUNNER_TEMP/ghul-llvm-host")"
+        ghul_llvm="$(dirname "$(dirname "$(command -v ghul-llvm)")")"
+        build/llvm-cells.sh publish/ghul.dll "$ghul_llvm" "$host"
+
+  # The llvm tests' one name: every shard and the cell scenarios passed. As
+  # for integration_tests, `always()` makes a failed build fail this job
+  # rather than skip it.
+  llvm_tests:
+    needs: [version, llvm_test_shards, llvm_cells]
+    name: Run llvm tests
+
+    if: always()
+
+    runs-on: ubuntu-latest
+
+    timeout-minutes: 5
+
+    steps:
+    - name: Check every shard and the cell scenarios passed
+      env:
+        SHARDS: ${{ needs.llvm_test_shards.result }}
+        CELLS: ${{ needs.llvm_cells.result }}
+        BUILD: ${{ needs.version.outputs.build }}
+      run: |
+        echo "shards: $SHARDS, cells: $CELLS"
+        for result in "$SHARDS" "$CELLS"; do
+          [ "$result" = success ] || { [ "$result" = skipped ] && [ "$BUILD" != true ]; } || exit 1
+        done
 
   # The llvm integration tests at -O0 on an arm64 runner, with ghul-llvm's
   # aarch64 release: what a native compiler for aarch64 would build. Not part
@@ -1516,12 +1610,12 @@ jobs:
     - name: Run the llvm integration tests
       run: bash -c "set -o pipefail ; dotnet ghul-test --config llvm integration-tests | tee test-results.txt"
 
-  # Runs the programs llvm_tests built in a `FROM scratch` image, which holds
+  # Runs the programs llvm_test_shards built in a `FROM scratch` image, which holds
   # nothing but the programs themselves: no loader, no shared libraries, no
   # files. A program that is not fully static fails to start there. This is
-  # a separate job because the SDK image llvm_tests runs in has no docker.
+  # a separate job because the SDK image llvm_test_shards runs in has no docker.
   llvm_static:
-    needs: [version, llvm_tests]
+    needs: [version, llvm_test_shards]
     if: needs.version.outputs.build == 'true'
     name: Run llvm programs in an empty image (${{ matrix.optimisation }})
 
@@ -1537,10 +1631,13 @@ jobs:
     steps:
     - uses: actions/checkout@v7
 
+    # Each shard uploads its own programs, every one in a directory named
+    # after its test, so the shards merge into one.
     - name: Download the programs
       uses: actions/download-artifact@v8
       with:
-        name: llvm-programs-${{ matrix.optimisation }}
+        pattern: llvm-programs-${{ matrix.optimisation }}-*
+        merge-multiple: true
         path: llvm-programs
 
     # Artifacts do not keep the execute bit.
