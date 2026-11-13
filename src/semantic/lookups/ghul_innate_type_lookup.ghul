@@ -39,7 +39,6 @@ namespace Semantic.Lookups is
         // this same failure with the sides swapped.
         HELD_SHAPES: Collections.SET[string] static
 
-        FUSION_COMBINATOR_ROLES: Collections.LIST[string] static
         EARLY_EXIT_NAMES: Collections.LIST[string] static
         WHOLE_READ_NAMES: Collections.LIST[string] static
 
@@ -64,12 +63,6 @@ namespace Semantic.Lookups is
             WHOLE_READ_NAMES = Collections.LIST[string]([
                 "sort", "sort_descending", "sort_by", "sort_by_descending",
                 "reverse", "group", "group_by", "transpose", "permutations"
-            ])
-            FUSION_COMBINATOR_ROLES = Collections.LIST[string]([
-                "map", "filter", "take", "skip", "memo", "index", "take_while", "skip_while", "reverse",
-                "count", "any", "all", "each", "reduce", "find", "first", "collect_list", "collect_mutable",
-                "collect", "collect_array", "sum", "sum_by", "product", "collect_set", "join",
-                "min", "max", "min_by", "max_by"
             ])
         si
 
@@ -245,13 +238,13 @@ namespace Semantic.Lookups is
             return null
         si
 
-        // The `Ghul.Pipes` combinators pipe fusion recognises, keyed by
-        // the resolved root Function with the combinator's fusion role
-        // as the value - the one place a runtime rename changes what
-        // fuses. Keys go through `root_specialized_from` so a call that
-        // resolved to a specialization matches its declaration. Empty
-        // when the runtime namespace is absent, leaving fusion declining
-        // to fire.
+        // The functions pipe fusion recognises, keyed by the resolved root
+        // Function with its fusion kind as the value: each `Ghul.Pipes`
+        // combinator overload PIPE_FUSION_SIGNATURES pins by its
+        // parameters, and each collection constructor from a sequence.
+        // Keys go through `root_specialized_from` so a call that resolved
+        // to a specialization matches its declaration. Empty when the
+        // runtime namespace is absent, leaving fusion declining to fire.
         //
         // Held against the `Ghul.Pipes` namespace symbol it was resolved
         // from. Reflected symbols are stable for the process, but the
@@ -261,7 +254,7 @@ namespace Semantic.Lookups is
         // match nothing. A rebuild replaces the namespace symbol too, so
         // the map is rebuilt exactly when that symbol is no longer the
         // one it was resolved from.
-        fusion_functions: Collections.MAP[Semantic.Symbols.Symbol, string] is
+        fusion_functions(types: PIPE_FUSION_TYPES) -> Collections.MAP[Semantic.Symbols.Symbol, string] is
             let pipes = cast Scope?(namespace_scope.find_direct("Pipes"))
 
             if _fusion_functions? /\ _fusion_functions_pipes == pipes then
@@ -271,21 +264,49 @@ namespace Semantic.Lookups is
             let result = Collections.MAP[Semantic.Symbols.Symbol, string]()
 
             if pipes? then
-                for name in FUSION_COMBINATOR_ROLES do
-                    let found = pipes.find_direct(name)
-
-                    if let group: Semantic.Symbols.FUNCTION_GROUP = found then
-                        for f in group.functions do
-                            result[f.root_specialized_from] = name
-                        od
-                    elif let f: Semantic.Symbols.Function = found then
-                        result[f.root_specialized_from] = name
-                    fi
+                for signature in PIPE_FUSION_SIGNATURES.all do
+                    for f in _functions_named(pipes, signature.name) do
+                        if PIPE_FUSION_SIGNATURES.matches(f, signature.parameters, types) then
+                            result[f.root_specialized_from] = signature.kind
+                        fi
+                    od
                 od
             fi
 
+            // The array's constructor from a sequence, which the runtime
+            // offers as an overload of the innate array's, fuses as
+            // `collect` does.
+            for constructor in types.constructors do
+                if let classy: Semantic.Symbols.Classy = constructor.type.symbol?.unspecialized_symbol then
+                    for f in _functions_named(classy, "init") do
+                        if PIPE_FUSION_SIGNATURES.matches(f, [PipeFusionParameter.SEQUENCE], types) then
+                            // A constructor the runtime offers is called as
+                            // the static that implements it.
+                            let called = f.constructor_target ?? f
+
+                            result[called.root_specialized_from] = constructor.kind
+                        fi
+                    od
+                fi
+            od
+
             _fusion_functions = result
             _fusion_functions_pipes = pipes
+
+            return result
+        si
+
+        _functions_named(scope: Scope, name: string) -> Collections.List[Semantic.Symbols.Function] is
+            let result = Collections.LIST[Semantic.Symbols.Function]()
+            let found = scope.find_direct(name)
+
+            if let group: Semantic.Symbols.FUNCTION_GROUP = found then
+                for f in group.functions do
+                    result.add(f)
+                od
+            elif let f: Semantic.Symbols.Function = found then
+                result.add(f)
+            fi
 
             return result
         si

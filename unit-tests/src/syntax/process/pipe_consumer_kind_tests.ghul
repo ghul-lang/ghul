@@ -2,32 +2,33 @@ namespace Syntax.Process.UnitTests is
     use Microsoft.VisualStudio.TestTools.UnitTesting.Assert
 
     use Syntax.Process.PIPE_CONSUMER_KIND
+    use Ghul.Pipes
+
+    use Semantic.Lookups.PIPE_FUSION_SIGNATURES
+    use Semantic.Lookups.PipeFusionParameter
     use TestClass = Microsoft.VisualStudio.TestTools.UnitTesting.TestClassAttribute
     use Test = Microsoft.VisualStudio.TestTools.UnitTesting.TestMethodAttribute
     use Assertions
 
-    // The fusible consumers are matched by their source-level name, so
-    // renaming one in the runtime library takes it out of the fused
-    // lowering without breaking anything visible: the chain still
-    // compiles, and still produces identical results through the
-    // unfused Pipe objects. These pin the names themselves, so that
-    // drift fails here rather than going unnoticed as lost fusion.
+    // The fusible combinators are found by name and pinned by their
+    // parameters, so renaming one in the runtime library, or changing
+    // its parameters, takes it out of the fused lowering without breaking
+    // anything visible: the chain still compiles, and still produces
+    // identical results through the unfused Pipe objects. These pin the
+    // table itself, so that drift fails here rather than going unnoticed
+    // as lost fusion.
     @TestClass()
     class PIPE_CONSUMER_KIND_TESTS is
         init() is si
 
         @Test()
         Each_is_the_void_consumer() is
-            are_equal("each", PIPE_CONSUMER_KIND.of("each", 1))
             is_true(PIPE_CONSUMER_KIND.is_void("each"))
             is_true(PIPE_CONSUMER_KIND.takes_function("each"))
         si
 
         @Test()
         Consumers_taking_a_function_are_recognized() is
-            are_equal("any", PIPE_CONSUMER_KIND.of("any", 1))
-            are_equal("all", PIPE_CONSUMER_KIND.of("all", 1))
-            are_equal("find", PIPE_CONSUMER_KIND.of("find", 1))
 
             is_true(PIPE_CONSUMER_KIND.takes_function("any"))
             is_true(PIPE_CONSUMER_KIND.takes_function("all"))
@@ -36,36 +37,9 @@ namespace Syntax.Process.UnitTests is
 
         @Test()
         Consumers_taking_no_function_are_recognized() is
-            are_equal("count", PIPE_CONSUMER_KIND.of("count", 0))
-            are_equal("first", PIPE_CONSUMER_KIND.of("first", 0))
-            are_equal("reduce", PIPE_CONSUMER_KIND.of("reduce", 2))
 
             is_false(PIPE_CONSUMER_KIND.takes_function("count"))
             is_false(PIPE_CONSUMER_KIND.takes_function("reduce"))
-        si
-
-        @Test()
-        Collect_list_fuses_under_a_different_kind() is
-            are_equal("collect", PIPE_CONSUMER_KIND.of("collect_list", 0))
-        si
-
-        @Test()
-        Collect_mutable_fuses_under_a_different_kind() is
-            are_equal("collect", PIPE_CONSUMER_KIND.of("collect_mutable", 0))
-        si
-
-        @Test()
-        Only_the_declared_argument_count_matches() is
-            is_null(PIPE_CONSUMER_KIND.of("each", 0))
-            is_null(PIPE_CONSUMER_KIND.of("count", 1))
-            is_null(PIPE_CONSUMER_KIND.of("reduce", 1))
-        si
-
-        @Test()
-        An_unrelated_name_is_not_a_consumer() is
-            is_null(PIPE_CONSUMER_KIND.of("map", 1))
-            is_null(PIPE_CONSUMER_KIND.of("for_each", 1))
-            is_null(PIPE_CONSUMER_KIND.of(null, 1))
         si
 
         @Test()
@@ -76,6 +50,7 @@ namespace Syntax.Process.UnitTests is
             is_true(PIPE_CONSUMER_KIND.is_stage_role("skip"))
             is_true(PIPE_CONSUMER_KIND.is_stage_role("memo"))
             is_true(PIPE_CONSUMER_KIND.is_stage_role("index"))
+            is_true(PIPE_CONSUMER_KIND.is_stage_role("index_from"))
         si
 
         @Test()
@@ -91,6 +66,60 @@ namespace Syntax.Process.UnitTests is
             is_false(PIPE_CONSUMER_KIND.is_void("count"))
             is_false(PIPE_CONSUMER_KIND.is_void("collect"))
             is_false(PIPE_CONSUMER_KIND.is_void(null))
+        si
+        @Test()
+        The_collect_variants_fuse_as_the_collection_they_build() is
+            are_equal("collect", _kind_of("collect_list", [PipeFusionParameter.SEQUENCE]))
+            are_equal("collect", _kind_of("collect_mutable", [PipeFusionParameter.SEQUENCE]))
+            are_equal("collect_array", _kind_of("collect", [PipeFusionParameter.SEQUENCE]))
+        si
+
+        @Test()
+        A_combinator_with_two_forms_fuses_as_two_kinds() is
+            are_equal("index", _kind_of("index", [PipeFusionParameter.SEQUENCE]))
+            are_equal("index_from", _kind_of("index", [PipeFusionParameter.SEQUENCE, PipeFusionParameter.INT]))
+            are_equal("join", _kind_of("join", [PipeFusionParameter.SEQUENCE]))
+            are_equal("join_with", _kind_of("join", [PipeFusionParameter.SEQUENCE, PipeFusionParameter.STRING]))
+        si
+
+        @Test()
+        Only_the_forms_that_fuse_are_pinned() is
+            // `count` with a predicate, and `reduce` without a seed or with
+            // a mapper, run through their own pipes.
+            is_null(_kind_of("count", [PipeFusionParameter.SEQUENCE, PipeFusionParameter.PREDICATE]))
+            is_null(_kind_of("reduce", [PipeFusionParameter.SEQUENCE, PipeFusionParameter.FUNCTION]))
+            is_null(_kind_of("each", [PipeFusionParameter.SEQUENCE]))
+        si
+
+        @Test()
+        The_collection_constructors_fuse_as_the_collect_that_builds_the_same_collection() is
+            let kinds = PIPE_FUSION_SIGNATURES.constructor_kinds
+
+            // The array's constructor is the runtime's, found with the
+            // combinators rather than by its type.
+            are_equal(2, kinds.count)
+            is_true(kinds |> any(k => k.type_name =~ "Collections.LIST" /\ k.kind =~ "collect"))
+            is_true(kinds |> any(k => k.type_name =~ "Collections.SET" /\ k.kind =~ "collect_set"))
+        si
+
+        _kind_of(name: string, parameters: ARRAY[PipeFusionParameter]) -> string? is
+            for signature in PIPE_FUSION_SIGNATURES.all do
+                if signature.name =~ name /\ signature.parameters.count == parameters.count then
+                    let same mut = true
+
+                    for i in 0..parameters.count do
+                        if signature.parameters[i] != parameters[i] then
+                            same = false
+                        fi
+                    od
+
+                    if same then
+                        return signature.kind
+                    fi
+                fi
+            od
+
+            return null
         si
     si
 si

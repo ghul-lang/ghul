@@ -1,0 +1,224 @@
+namespace Semantic.Lookups is
+    use Types.Type
+    use Symbols.Function
+
+    // What one parameter of a fusible combinator overload has to be for the
+    // overload to fuse. The combinators are generic, so their parameter
+    // types are written in their own type parameters, and an overload is
+    // pinned by the shape of each parameter rather than by an exact type.
+    enum PipeFusionParameter is
+        // `Iterable[T]`, with `T` a type parameter of the member or of its
+        // class.
+        SEQUENCE,
+
+        // `Iterable[T]`, with `T` a concrete type: the typed `sum` and
+        // `product` overloads the core library declares. The .NET runtime
+        // declares one generic overload of each instead.
+        TYPED_SEQUENCE,
+
+        // A function type that returns `bool`.
+        PREDICATE,
+
+        // Any function type.
+        FUNCTION,
+
+        // `int`.
+        INT,
+
+        // `string`.
+        STRING,
+
+        // A type parameter of the member itself, as `reduce`'s seed.
+        OWN_TYPE
+    si
+
+    // One fusible overload: the name it is declared under, the fusion kind
+    // a call to it fuses as, and the parameters it is pinned by.
+    class PIPE_FUSION_SIGNATURE(name: string public, kind: string public, parameters: ARRAY[PipeFusionParameter] public)
+
+    // The overloads pipe fusion recognises, each found by its signature.
+    // The kind is what the recogniser and the fused consumer switch on, so
+    // a combinator's two forms fuse as two kinds where they lower
+    // differently: `index` from zero and `index_from` a start the caller
+    // gives, `join` with the runtime's separator and `join_with` the
+    // caller's.
+    class PIPE_FUSION_SIGNATURES is
+        all: Collections.List[PIPE_FUSION_SIGNATURE] static
+
+        init() static is
+            let sequence = PipeFusionParameter.SEQUENCE
+            let typed_sequence = PipeFusionParameter.TYPED_SEQUENCE
+            let predicate = PipeFusionParameter.PREDICATE
+            let function = PipeFusionParameter.FUNCTION
+            let int = PipeFusionParameter.INT
+            let string = PipeFusionParameter.STRING
+            let own = PipeFusionParameter.OWN_TYPE
+
+            all = Collections.LIST[PIPE_FUSION_SIGNATURE]([
+                PIPE_FUSION_SIGNATURE("map", "map", [sequence, function]),
+                PIPE_FUSION_SIGNATURE("filter", "filter", [sequence, predicate]),
+                PIPE_FUSION_SIGNATURE("take", "take", [sequence, int]),
+                PIPE_FUSION_SIGNATURE("skip", "skip", [sequence, int]),
+                PIPE_FUSION_SIGNATURE("memo", "memo", [sequence]),
+                PIPE_FUSION_SIGNATURE("index", "index", [sequence]),
+                PIPE_FUSION_SIGNATURE("index", "index_from", [sequence, int]),
+                PIPE_FUSION_SIGNATURE("take_while", "take_while", [sequence, predicate]),
+                PIPE_FUSION_SIGNATURE("skip_while", "skip_while", [sequence, predicate]),
+                PIPE_FUSION_SIGNATURE("reverse", "reverse", [sequence]),
+
+                PIPE_FUSION_SIGNATURE("count", "count", [sequence]),
+                PIPE_FUSION_SIGNATURE("any", "any", [sequence, predicate]),
+                PIPE_FUSION_SIGNATURE("all", "all", [sequence, predicate]),
+                PIPE_FUSION_SIGNATURE("each", "each", [sequence, function]),
+                PIPE_FUSION_SIGNATURE("reduce", "reduce", [sequence, own, function]),
+                PIPE_FUSION_SIGNATURE("find", "find", [sequence, predicate]),
+                PIPE_FUSION_SIGNATURE("first", "first", [sequence]),
+                PIPE_FUSION_SIGNATURE("collect_list", "collect", [sequence]),
+                PIPE_FUSION_SIGNATURE("collect_mutable", "collect", [sequence]),
+                PIPE_FUSION_SIGNATURE("collect", "collect_array", [sequence]),
+                PIPE_FUSION_SIGNATURE("collect_array", "collect_array", [sequence]),
+                PIPE_FUSION_SIGNATURE("sum", "sum", [typed_sequence]),
+                PIPE_FUSION_SIGNATURE("sum", "sum", [sequence]),
+                PIPE_FUSION_SIGNATURE("sum_by", "sum_by", [sequence, function]),
+                PIPE_FUSION_SIGNATURE("product", "product", [typed_sequence]),
+                PIPE_FUSION_SIGNATURE("product", "product", [sequence]),
+                PIPE_FUSION_SIGNATURE("collect_set", "collect_set", [sequence]),
+                PIPE_FUSION_SIGNATURE("join", "join", [sequence]),
+                PIPE_FUSION_SIGNATURE("join", "join_with", [sequence, string]),
+                PIPE_FUSION_SIGNATURE("min", "min", [sequence]),
+                PIPE_FUSION_SIGNATURE("max", "max", [sequence]),
+                PIPE_FUSION_SIGNATURE("min_by", "min_by", [sequence, function]),
+                PIPE_FUSION_SIGNATURE("max_by", "max_by", [sequence, function])
+            ])
+        si
+
+        // The collection constructors a chain can end in, by the name each
+        // collection type is declared under in `Collections`: each type's
+        // own constructor from a sequence fuses as the `collect` that builds
+        // the same collection. The array's constructor is the runtime's,
+        // offered as an overload of the innate array's, and is found with
+        // the combinators.
+        constructor_kinds: Collections.List[(type_name: string, kind: string)] static =>
+            Collections.LIST[(type_name: string, kind: string)]([
+                (type_name = "Collections.LIST", kind = "collect"),
+                (type_name = "Collections.SET", kind = "collect_set")
+            ])
+
+        // The fusion kind of a construction through `constructor`, where it
+        // takes one sequence and builds one of `constructor_kinds`' types;
+        // null otherwise. Each type is asked for only until one matches, so
+        // the set type is not loaded for a list.
+        //
+        // - constructor: the constructor a construction binds
+        // - types: the shapes' types
+        // - type_named: the unspecialized type a `constructor_kinds` name
+        //   names, or null where the core library doesn't declare it
+        constructor_kind(constructor: Function, types: PIPE_FUSION_TYPES, type_named: (string) -> Type?) -> string? static is
+            let root = cast Function?(constructor.root_specialized_from)
+
+            if !root? \/ !matches(root, [PipeFusionParameter.SEQUENCE], types) then
+                return null
+            fi
+
+            let owner = root.owner
+
+            for entry in constructor_kinds do
+                if let type = type_named(entry.type_name) /\ type.symbol?.unspecialized_symbol == owner then
+                    return entry.kind
+                fi
+            od
+
+            return null
+        si
+
+        // Whether `function` has exactly the parameters `parameters`
+        // describes: the same number, each of the shape given.
+        //
+        // - function: the overload
+        // - parameters: the shapes its parameters must have
+        // - types: the types the shapes are read against
+        matches(function: Function, parameters: ARRAY[PipeFusionParameter], types: PIPE_FUSION_TYPES) -> bool static is
+            if !function.are_arguments_declared \/ function.arguments.count != parameters.count then
+                return false
+            fi
+
+            for i in 0..parameters.count do
+                if !_matches(function, function.arguments[i], parameters[i], types) then
+                    return false
+                fi
+            od
+
+            return true
+        si
+
+        _matches(function: Function, type: Type?, parameter: PipeFusionParameter, types: PIPE_FUSION_TYPES) -> bool static is
+            if !type? then
+                return false
+            fi
+
+            if parameter == PipeFusionParameter.SEQUENCE \/ parameter == PipeFusionParameter.TYPED_SEQUENCE then
+                let element = _iterable_element(type, types)
+
+                if !element? then
+                    return false
+                fi
+
+                let is_parameter = isa Types.GenericArgument(element)
+
+                return if parameter == PipeFusionParameter.SEQUENCE then is_parameter else !is_parameter fi
+            elif parameter == PipeFusionParameter.PREDICATE then
+                if !type.is_function \/ type.arguments.count == 0 then
+                    return false
+                fi
+
+                return type.arguments[type.arguments.count - 1].compare(types.bool_type) == Types.MATCH.SAME
+            elif parameter == PipeFusionParameter.FUNCTION then
+                return type.is_function
+            elif parameter == PipeFusionParameter.INT then
+                return type.compare(types.int_type) == Types.MATCH.SAME
+            elif parameter == PipeFusionParameter.STRING then
+                return type.compare(types.string_type) == Types.MATCH.SAME
+            elif parameter == PipeFusionParameter.OWN_TYPE then
+                return _is_own_type_parameter(function, type)
+            fi
+
+            return false
+        si
+
+        // The element type of `type` where it is `Iterable[T]` itself, not
+        // a type deriving from it; null otherwise.
+        _iterable_element(type: Type, types: PIPE_FUSION_TYPES) -> Type? static is
+            if let generic: Types.GENERIC = type /\ generic.arguments.count == 1 then
+                if let symbol: Symbols.GENERIC = generic.symbol /\ symbol.symbol == types.iterable then
+                    return generic.arguments[0]
+                fi
+            fi
+
+            return null
+        si
+
+        _is_own_type_parameter(function: Function, type: Type) -> bool static is
+            if !function.is_generic then
+                return false
+            fi
+
+            for argument in function.generic_arguments do
+                if argument.compare(type) == Types.MATCH.SAME then
+                    return true
+                fi
+            od
+
+            return false
+        si
+    si
+
+    // The types the fusible overloads' parameter shapes are read against,
+    // and the array type, whose runtime constructor fuses.
+    class PIPE_FUSION_TYPES(
+        iterable: Symbols.Symbol? public,
+        bool_type: Type public,
+        int_type: Type public,
+        string_type: Type public,
+        constructors: Collections.List[(type: Type, kind: string)] public
+    )
+si
