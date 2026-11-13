@@ -1,0 +1,101 @@
+use default
+
+// Every lowering a fused chain's source can take keeps the elements in
+// order: a reversed string is read last element first however the chain
+// is lowered, or not fused, and an array is read first element first. Each
+// line runs fused, then with fusion suppressed, and the two must match.
+
+LOG(xs: Iterable[string]) -> string => xs |> join("")
+
+for_loop(s: string) -> string is
+    let seen = LIST[string]()
+    for c in s |> reverse() |> map(c => "{c}") do seen.add(c) od
+    seen |> join("")
+si
+
+for_loop_unfused(s: string) -> string is
+    let seen = LIST[string]()
+    @suppress("pipe-fusion")
+    let chain = s |> reverse() |> map(c => "{c}")
+    for c in chain do seen.add(c) od
+    seen |> join("")
+si
+
+in_generator(s: string) -> string{} is
+    for c in s |> reverse() do yield "{c}" od
+si
+
+in_generator_unfused(s: string) -> string{} is
+    @suppress("pipe-fusion")
+    let chain = s |> reverse()
+    for c in chain do yield "{c}" od
+si
+
+in_async(s: string) -> Tasks.TASK[string] is
+    let seen = LIST[string]()
+    for c in s |> reverse() do
+        await Tasks.TASK.from_result(0)
+        seen.add("{c}")
+    od
+    return seen |> join("")
+si
+
+consumers(s: string) -> string =>
+    "{s |> reverse() |> map(c => "{c}") |> join("")} {s |> reverse() |> reduce("", (a, c) => "{a}{c}")} {s |> reverse() |> first()} {s |> reverse() |> find(c => c != 'a')} {s |> reverse() |> skip(1) |> take(2) |> map(c => "{c}") |> join("")} {s |> reverse() |> index() |> map(p => "{p.index}{p.value}") |> join("")} {s |> reverse() |> ARRAY() |> join("")} {s |> reverse() |> LIST() |> join("")} {each_order(s)}"
+
+consumers_unfused(s: string) -> string is
+    @suppress("pipe-fusion")
+    let text = "{s |> reverse() |> map(c => "{c}") |> join("")} {s |> reverse() |> reduce("", (a, c) => "{a}{c}")} {s |> reverse() |> first()} {s |> reverse() |> find(c => c != 'a')} {s |> reverse() |> skip(1) |> take(2) |> map(c => "{c}") |> join("")} {s |> reverse() |> index() |> map(p => "{p.index}{p.value}") |> join("")} {s |> reverse() |> ARRAY() |> join("")} {s |> reverse() |> LIST() |> join("")} {each_order_unfused(s)}"
+    return text
+si
+
+each_order(s: string) -> string is
+    let seen = LIST[string]()
+    s |> reverse() |> each(c => seen.add("{c}"))
+    seen |> join("")
+si
+
+each_order_unfused(s: string) -> string is
+    let seen = LIST[string]()
+    @suppress("pipe-fusion")
+    let _ = (s |> reverse() |> each(c => seen.add("{c}")); 0)
+    seen |> join("")
+si
+
+returned(s: string) -> string{} => s |> reverse() |> map(c => "{c}")
+
+returned_unfused(s: string) -> string{} is
+    @suppress("pipe-fusion")
+    let chain = s |> reverse() |> map(c => "{c}")
+    chain
+si
+
+chain_roots(s: string) -> string is
+    let stored = s |> reverse() |> map(c => "{c}")
+    "{s |> reverse() |> map(c => "{c}") |> list() |> join("")} {s |> reverse() |> map(c => "{c}") |> chunk(2) |> map(g => g |> join("")) |> join("|")} {s |> reverse() |> map(c => "{c}") |> cat(["!"]) |> join("")} {LOG(stored)} {LOG(returned(s))} {LOG(s |> reverse() |> map(c => "{c}"))}"
+si
+
+chain_roots_unfused(s: string) -> string is
+    @suppress("pipe-fusion")
+    let text = "{s |> reverse() |> map(c => "{c}") |> list() |> join("")} {s |> reverse() |> map(c => "{c}") |> chunk(2) |> map(g => g |> join("")) |> join("|")} {s |> reverse() |> map(c => "{c}") |> cat(["!"]) |> join("")} {LOG(s |> reverse() |> map(c => "{c}"))} {LOG(returned_unfused(s))} {LOG(s |> reverse() |> map(c => "{c}"))}"
+    return text
+si
+
+forward(xs: ARRAY[int]) -> string is
+    gen() -> string{} is
+        for x in xs |> map(x => x * 10) do yield "{x}" od
+    si
+
+    "{xs |> map(x => "{x}") |> list() |> join(",")} {gen() |> join(",")} {xs |> map(x => "{x}") |> chunk(2) |> map(g => g |> join(",")) |> join("|")}"
+si
+
+let s = "abcde"
+
+write_line("for       {for_loop(s)} | {for_loop_unfused(s)}")
+write_line("generator {in_generator(s) |> join("")} | {in_generator_unfused(s) |> join("")}")
+write_line("async     {in_async(s).result}")
+write_line("consumers {consumers(s)}")
+write_line("unfused   {consumers_unfused(s)}")
+write_line("roots     {chain_roots(s)}")
+write_line("unfused   {chain_roots_unfused(s)}")
+write_line("forward   {forward([1, 2, 3] |> ARRAY())}")

@@ -176,18 +176,10 @@ namespace Syntax.Process is
             let recognizer = PIPE_FUSION_RECOGNIZER(_innate_symbol_lookup.get_pipes_fusion_functions())
             let fusion = recognizer.recognize(`for)
 
-            if !_resolve_chain_fusion(fusion) then
-                _note_fusion_site(`for.location, "for", true, recognizer, false)
-
-                return null
-            fi
-
-            // In a generator or an asynchronous body the loop walks its
-            // source through the iterator kept in its frame field, never by
-            // position, and a source read backwards by position has no
-            // reverse iterator to walk instead, so the chain is not fused.
-            if `for.iterator_field? /\ (fusion!.indexed_source?.is_reversed ?? false) then
-                _chain_resolve_reason = "reversed-position-walk-in-state-machine"
+            // In a generator or an asynchronous body the loop keeps its
+            // source's iterator in a frame field across each suspension, so
+            // it walks that iterator rather than reading by position.
+            if !_resolve_chain_fusion(fusion, true, !`for.iterator_field?) then
                 _note_fusion_site(`for.location, "for", true, recognizer, false)
 
                 return null
@@ -400,15 +392,21 @@ namespace Syntax.Process is
         // Finish a recognised chain plan: resolve the source's own iterator
         // members, and resolve each stage (index constructor, or inline a
         // literal lambda). Returns false when any of that fails, in which case the
-        // chain must not be fused. Shared by the `for` and consumer paths.
-        _resolve_chain_fusion(fusion: PIPE_FUSION?) -> bool =>
-            _resolve_chain_fusion(fusion, true)
-
+        // chain must not be fused. Shared by every fused lowering.
+        //
         // `inline_stages` false skips the inline re-walk of map/filter lambda
         // bodies - consumer fusion calls the stage delegates rather than
         // inlining them, and the re-walk can disturb a stage lambda whose
         // body nests a capturing closure.
-        _resolve_chain_fusion(fusion: PIPE_FUSION?, inline_stages: bool) -> bool is
+        //
+        // `reads_by_position` says whether the lowering the plan is for can
+        // read its source by position. Only then is the plan given an indexed
+        // source; and a source that can only be read backwards by position
+        // fuses only then. A lowering that walks the source's iterator - the
+        // state machine of a generator or asynchronous body, the generated
+        // generator a chain becomes when nothing consumes it - passes false,
+        // so it never sees a plan it would read in the wrong order.
+        _resolve_chain_fusion(fusion: PIPE_FUSION?, inline_stages: bool, reads_by_position: bool) -> bool is
             _chain_resolve_reason = null
 
             if !fusion? then
@@ -429,12 +427,13 @@ namespace Syntax.Process is
                 return false
             fi
 
-            if !_resolve_reversed_source(fusion) then
+            if !_resolve_reversed_source(fusion, reads_by_position) then
                 return false
             fi
 
-            // A reversed source is read backwards through its own iterator.
-            if !fusion.reversed_source then
+            // A reversed source is read backwards through its own iterator,
+            // or, where it has none, by position from the end.
+            if reads_by_position /\ !fusion.reversed_source then
                 fusion.indexed_source = INDEXED_SOURCE.of(source_value.type, _innate_symbol_lookup)
             fi
 
@@ -511,7 +510,7 @@ namespace Syntax.Process is
         // overload and the chain does not fuse, however list-backed it is
         // at run time; the unfused `reverse` still avoids collecting it
         // then. Sets `_chain_resolve_reason` and returns false on decline.
-        _resolve_reversed_source(fusion: PIPE_FUSION) -> bool is
+        _resolve_reversed_source(fusion: PIPE_FUSION, reads_by_position: bool) -> bool is
             if !fusion.reversed_source then
                 return true
             fi
@@ -534,9 +533,9 @@ namespace Syntax.Process is
                 fi
 
             // A source no reverse iterator takes, such as a string, is still
-            // read backwards where it can be read by position.
+            // read backwards where the lowering reads by position.
             if !resolved? then
-                if let indexed = INDEXED_SOURCE.of(fusion.source.value!.type, _innate_symbol_lookup) then
+                if let indexed = INDEXED_SOURCE.of(fusion.source.value!.type, _innate_symbol_lookup) /\ reads_by_position then
                     fusion.indexed_source = indexed.reversed()
 
                     return true
@@ -660,7 +659,9 @@ namespace Syntax.Process is
             let recognizer = PIPE_FUSION_RECOGNIZER(_innate_symbol_lookup.get_pipes_fusion_functions())
             let fusion = recognizer.recognize_any(chain_before)
 
-            if !_resolve_chain_fusion(fusion) then
+            // A consumer's loop runs to its end within the expression, with
+            // its state in locals, so it reads its source by position.
+            if !_resolve_chain_fusion(fusion, true, true) then
                 _note_fusion_site(call.location, _pipes_function_name(call) ?? consumer_kind, true, recognizer, false)
 
                 return null
