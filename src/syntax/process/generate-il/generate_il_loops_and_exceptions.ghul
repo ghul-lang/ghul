@@ -438,81 +438,85 @@ namespace Syntax.Process is
             // holds.
             expression.walk(self)
 
-            let iterator: Value mut
-
-            if `for.read_iterator? then
-                iterator = `for.read_iterator.call(expression.location, expression.value!, Collections.LIST[Value](0), null, _function_caller)
+            if let indexed = `for.indexed_source then
+                _gen_indexed_for(loop, indexed, expression, variable, body)
             else
-                iterator = expression.value!
-            fi
-
-            variable.walk(self)
-
-            // Generator / async FOR: the iterator value has to survive
-            // every yield / await in the body, so it is read and written
-            // through the frame field compile-expressions allocated for
-            // it. The regular CLR-local TEMP path would reset on every
-            // MoveNext re-entry.
-            let iterator_field = `for.iterator_field
-            let iterator_frame = _current_state_machine_frame()
-
-            if iterator_field? /\ iterator_frame? then
-                add(_build_frame_field_store(iterator_frame, iterator_field, iterator))
-            fi
-
-            let temp: TEMP? mut = null
-            let iteration: IR.FOR_ITERATION? mut = null
-
-            if !iterator_field? then
-                temp = TEMP(current_block, "iterator", iterator)
+                let iterator: Value mut
 
                 if `for.read_iterator? then
-                    iteration = IR.FOR_ITERATION(expression.value!, iterator)
-                    temp.local.iteration = iteration
-                fi
-            fi
-
-            let structured = _open_structured_loop(loop)
-
-            let load_iter_a =
-                if iterator_field? then
-                    cast Value(IR.Values.Load.INSTANCE_FIELD(
-                        IR.Values.Load.REFERENCE_SELF(iterator_frame!, iterator_frame.type),
-                        iterator_field
-                    ))
+                    iterator = `for.read_iterator.call(expression.location, expression.value!, Collections.LIST[Value](0), null, _function_caller)
                 else
-                    cast Value(temp!.load())
+                    iterator = expression.value!
                 fi
 
-            let has_next = `for.move_next!.call(expression.location, load_iter_a, Collections.LIST[Value](0), null, _function_caller)
+                variable.walk(self)
 
-            add(Values.BREAK(structured, BRANCH.Z, has_next))
+                // Generator / async FOR: the iterator value has to survive
+                // every yield / await in the body, so it is read and written
+                // through the frame field compile-expressions allocated for
+                // it. The regular CLR-local TEMP path would reset on every
+                // MoveNext re-entry.
+                let iterator_field = `for.iterator_field
+                let iterator_frame = _current_state_machine_frame()
 
-            if let i = iteration then
-                i.move_next = has_next
-            fi
-
-            let load_iter_b =
-                if iterator_field? then
-                    cast Value(IR.Values.Load.INSTANCE_FIELD(
-                        IR.Values.Load.REFERENCE_SELF(iterator_frame!, iterator_frame.type),
-                        iterator_field
-                    ))
-                else
-                    cast Value(temp!.load())
+                if iterator_field? /\ iterator_frame? then
+                    add(_build_frame_field_store(iterator_frame, iterator_field, iterator))
                 fi
 
-            let current = `for.read_current!.call(expression.location, load_iter_b, Collections.LIST[Value](0), null, _function_caller)
+                let temp: TEMP? mut = null
+                let iteration: IR.FOR_ITERATION? mut = null
 
-            if let i = iteration then
-                i.current = current
+                if !iterator_field? then
+                    temp = TEMP(current_block, "iterator", iterator)
+
+                    if `for.read_iterator? then
+                        iteration = IR.FOR_ITERATION(expression.value!, iterator)
+                        temp.local.iteration = iteration
+                    fi
+                fi
+
+                let structured = _open_structured_loop(loop)
+
+                let load_iter_a =
+                    if iterator_field? then
+                        cast Value(IR.Values.Load.INSTANCE_FIELD(
+                            IR.Values.Load.REFERENCE_SELF(iterator_frame!, iterator_frame.type),
+                            iterator_field
+                        ))
+                    else
+                        cast Value(temp!.load())
+                    fi
+
+                let has_next = `for.move_next!.call(expression.location, load_iter_a, Collections.LIST[Value](0), null, _function_caller)
+
+                add(Values.BREAK(structured, BRANCH.Z, has_next))
+
+                if let i = iteration then
+                    i.move_next = has_next
+                fi
+
+                let load_iter_b =
+                    if iterator_field? then
+                        cast Value(IR.Values.Load.INSTANCE_FIELD(
+                            IR.Values.Load.REFERENCE_SELF(iterator_frame!, iterator_frame.type),
+                            iterator_field
+                        ))
+                    else
+                        cast Value(temp!.load())
+                    fi
+
+                let current = `for.read_current!.call(expression.location, load_iter_b, Collections.LIST[Value](0), null, _function_caller)
+
+                if let i = iteration then
+                    i.current = current
+                fi
+
+                gen_destructuring_initialize(variable.left, current)
+
+                body.walk(self)
+
+                _close_structured_loop(structured)
             fi
-
-            gen_destructuring_initialize(variable.left, current)
-
-            body.walk(self)
-
-            _close_structured_loop(structured)
 
             if let vb = value_block, rt = loop.result_type then
                 _gen_loop_result(loop, rt, spiller)
@@ -523,6 +527,42 @@ namespace Syntax.Process is
             spiller.leave()
 
             _loops.leave_loop()
+        si
+
+        // A `for` over an array or a list, walked by position: the source
+        // and its count are each read once before the loop, and each step
+        // reads the element at the index, then moves the index on, before
+        // the body runs, so a `continue` goes on to the next element.
+        _gen_indexed_for(
+            loop: LOOP_LABELS,
+            indexed: INDEXED_SOURCE,
+            expression: Trees.Expressions.Expression,
+            variable: Trees.Variables.VARIABLE,
+            body: Trees.Statements.LIST
+        ) is
+            let location = expression.location
+            let int_type = _innate_symbol_lookup.get_int_type()
+
+            let source = TEMP(current_block, "indexed_source", expression.value!)
+            let count = TEMP(current_block, "indexed_count", indexed.count.call(location, source.load(), Collections.LIST[Value](0), null, _function_caller))
+            let index = TEMP(current_block, "indexed_index", cast Value(IR.Values.Literal.NUMBER(0, int_type)))
+
+            variable.walk(self)
+
+            let structured = _open_structured_loop(loop)
+
+            add(Values.BREAK(structured, BRANCH.GE, index.load(), count.load()))
+
+            let element = TEMP(current_block, "indexed_element", indexed.read.call(location, source.load(), Collections.LIST[Value]([cast Value(index.load())]), null, _function_caller))
+
+            add(IR.Values.ARITHMETIC(IR.ArithmeticOperation.ADD, index.load(), IR.Values.Literal.NUMBER(1, int_type), int_type).unmarked())
+            add(Values.STORE_TEMP(index.local))
+
+            gen_destructuring_initialize(variable.left, element.load())
+
+            body.walk(self)
+
+            _close_structured_loop(structured)
         si
 
         // Declare the per-stage state a fused chain needs before its loop,
@@ -907,12 +947,31 @@ namespace Syntax.Process is
             // to be in place when the iterator is taken.
             source.walk(self)
 
+            // An array outside a state machine is walked by position: the
+            // source and its count are read once, here, before any stage's
+            // arguments, as the iterator would be.
+            let indexed =
+                if !(_current_state_machine_frame()? /\ `for.iterator_field?) then fusion.indexed_source else null fi
+
+            let int_type = _innate_symbol_lookup.get_int_type()
+
+            let indexed_source: TEMP? = if indexed? then TEMP(current_block, "fused_source", source.value!) else null fi
+            let indexed_count: TEMP? =
+                if let i = indexed, s = indexed_source then
+                    TEMP(current_block, "fused_count", i.count.call(source.location, s.load(), Collections.LIST[Value](0), null, _function_caller))
+                else
+                    null
+                fi
+            let indexed_index: TEMP? = if indexed? then TEMP(current_block, "fused_index", cast Value(IR.Values.Literal.NUMBER(0, int_type))) else null fi
+
             // Iterate the source directly - the wrapping pipe objects are
             // never built. read_iterator is null when the source is its
             // own iterator (e.g. a range).
             let iterator: Value mut
 
-            if let reversed_fn = fusion.reversed_iterator_function then
+            if indexed? then
+                iterator = source.value!
+            elif let reversed_fn = fusion.reversed_iterator_function then
                 iterator = reversed_fn.call(source.location, null, Collections.LIST[Value]([source.value!]), null, _function_caller)
             elif fusion.source_read_iterator? then
                 iterator = fusion.source_read_iterator.call(source.location, source.value!, Collections.LIST[Value](0), null, _function_caller)
@@ -934,7 +993,7 @@ namespace Syntax.Process is
                     null
                 fi
 
-            let temp: TEMP? = if !state? then TEMP(current_block, "fused_iterator", iterator) else null fi
+            let temp: TEMP? = if !state? /\ !indexed? then TEMP(current_block, "fused_iterator", iterator) else null fi
 
             if let s = state then
                 add(_build_frame_field_store(s.frame, s.iterator_field, iterator))
@@ -964,15 +1023,31 @@ namespace Syntax.Process is
 
             _gen_fused_take_guards(fusion, temps, structured, state)
 
-            let has_next = fusion.source_move_next!.call(source.location, load_iterator(), Collections.LIST[Value](0), null, _function_caller)
+            let element: Value mut
 
-            add(Values.BREAK(structured, BRANCH.Z, has_next))
+            if let i = indexed, s = indexed_source, c = indexed_count, x = indexed_index then
+                // The element is read before the index moves on, and the
+                // index moves on before any stage runs, so a stage that
+                // passes the element over goes on to the next one.
+                add(Values.BREAK(structured, BRANCH.GE, x.load(), c.load()))
 
-            let element = fusion.source_read_current!.call(source.location, load_iterator(), Collections.LIST[Value](0), null, _function_caller)
+                let read = TEMP(current_block, "fused_element", i.read.call(source.location, s.load(), Collections.LIST[Value]([cast Value(x.load())]), null, _function_caller))
 
-            if let i = iteration then
-                i.move_next = has_next
-                i.current = element
+                add(IR.Values.ARITHMETIC(IR.ArithmeticOperation.ADD, x.load(), IR.Values.Literal.NUMBER(1, int_type), int_type).unmarked())
+                add(Values.STORE_TEMP(x.local))
+
+                element = read.load()
+            else
+                let has_next = fusion.source_move_next!.call(source.location, load_iterator(), Collections.LIST[Value](0), null, _function_caller)
+
+                add(Values.BREAK(structured, BRANCH.Z, has_next))
+
+                element = fusion.source_read_current!.call(source.location, load_iterator(), Collections.LIST[Value](0), null, _function_caller)
+
+                if let i = iteration then
+                    i.move_next = has_next
+                    i.current = element
+                fi
             fi
 
             let current_value = _apply_fused_stages(fusion, element, temps, structured, state)

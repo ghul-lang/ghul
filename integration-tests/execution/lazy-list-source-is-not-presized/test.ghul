@@ -1,0 +1,52 @@
+use default
+
+// A collect over a value typed as the list trait is not sized from its
+// count before the loop: the value can be a lazy list, whose count reads its
+// whole source, which would run every source element before the first stage.
+// The fused chain and the comprehension must log in the unfused order.
+
+class LOG is
+    entries: LIST[string]
+    init() is entries = LIST[string](); si
+
+    note(tag: string, value: int) -> int is
+        entries.add("{tag}{value}")
+        return value
+    si
+
+    text: string => entries |> join(" ")
+si
+
+lazy(log: LOG) -> int[] => 0..3 |> map(n => log.note("s", n)) |> list()
+
+fused(log: LOG) -> string =>
+    let xs = lazy(log) in "{xs |> map(x => log.note("m", x)) |> ARRAY() |> join(",")}"
+
+fused_list(log: LOG) -> string =>
+    let xs = lazy(log) in "{xs |> map(x => log.note("m", x)) |> LIST() |> join(",")}"
+
+unfused(log: LOG) -> string is
+    let xs = lazy(log)
+
+    @suppress("pipe-fusion")
+    let text = "{xs |> map(x => log.note("m", x)) |> ARRAY() |> join(",")}"
+
+    return text
+si
+
+comprehension(log: LOG) -> string =>
+    let xs = lazy(log) in "{[log.note("c", x) for x in xs] |> join(",")}"
+
+let f = LOG()
+let rf = fused(f)
+let l = LOG()
+let rl = fused_list(l)
+let u = LOG()
+let ru = unfused(u)
+let c = LOG()
+let rc = comprehension(c)
+
+write_line("fused         {rf} : {f.text}")
+write_line("fused list    {rl} : {l.text}")
+write_line("unfused       {ru} : {u.text}")
+write_line("comprehension {rc} : {c.text}")
