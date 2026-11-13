@@ -286,27 +286,12 @@ namespace IR.Values is
             let expansion = IR.EXPANSION(_result_type)
             let int_type = IoC.CONTAINER.instance.innate_symbol_lookup.get_int_type()
 
-            // A source read more than once - for its iterator and for its
-            // count - is evaluated once, first, and everything below reads
-            // the local.
+            // Evaluated in the order the unfused chain evaluates them: the
+            // source first, then each stage's arguments from the stage
+            // nearest the source outwards, then the consumer's own (a
+            // reduce's seed before its function, a join's separator).
             if let local = source, init = source_init then
                 expansion.store(expansion.declare(local), init)
-            fi
-
-            result.type = result_local_type ?? _result_type
-
-            if !is_void then
-                expansion.declare(result)
-                _expand_result_init(expansion, result, int_type)
-            fi
-
-            // A consumer's function argument is built once into a local.
-            if let local = consumer_arg, arg_init = consumer_arg_init then
-                expansion.store(expansion.declare(local), arg_init)
-            fi
-
-            if let param = consumer_param then
-                expansion.declare(param)
             fi
 
             // Each stage's lambda delegate is built once before the loop; a
@@ -326,6 +311,22 @@ namespace IR.Values is
                     expansion.store(expansion.declare(flag), Literal.NUMBER(1, flag.type))
                 fi
             od
+
+            result.type = result_local_type ?? _result_type
+
+            if !is_void then
+                expansion.declare(result)
+                _expand_result_init(expansion, result, int_type)
+            fi
+
+            // A consumer's function argument is built once into a local.
+            if let local = consumer_arg, arg_init = consumer_arg_init then
+                expansion.store(expansion.declare(local), arg_init)
+            fi
+
+            if let param = consumer_param then
+                expansion.declare(param)
+            fi
 
             // The iterator always lives in a local - whether it came from
             // the source's iterator member or the source is itself an

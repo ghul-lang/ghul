@@ -1,0 +1,139 @@
+use default
+
+// A fused chain evaluates its source and its stages' arguments in the order
+// the unfused chain does: the source first, then each stage's arguments from
+// the stage nearest the source outwards, then the consumer's own. Each
+// scenario runs fused and then with fusion suppressed, and the two logs and
+// results must agree.
+
+class LOG is
+    entries: LIST[string]
+    init() is entries = LIST[string](); si
+
+    note(tag: string, value: int) -> int is
+        entries.add("{tag}:{value}")
+        return value
+    si
+
+    text: string => entries |> join(" ")
+si
+
+class STATE is
+    value: int public
+    init() is value = 0; si
+
+    bump(n: int) -> int is
+        value = value + 1
+        return n
+    si
+si
+
+// An effectful source, an eager stage after it, and an effectful count.
+source_then_count(log: LOG) -> int =>
+    0..4
+        |> map(n => log.note("map", n))
+        |> sort((a, b) => b <> a)
+        |> take(log.note("count", 2))
+        |> sum()
+
+source_then_count_unfused(log: LOG) -> int is
+    @suppress("pipe-fusion")
+    let total = 0..4 |> map(n => log.note("map", n)) |> sort((a, b) => b <> a) |> take(log.note("count", 2)) |> sum()
+
+    return total
+si
+
+// A count that reads what the source writes.
+count_reads_source(state: STATE) -> int =>
+    0..5
+        |> map(n => state.bump(n))
+        |> sort((a, b) => a <> b)
+        |> take(state.value - 2)
+        |> sum()
+
+count_reads_source_unfused(state: STATE) -> int is
+    @suppress("pipe-fusion")
+    let total = 0..5 |> map(n => state.bump(n)) |> sort((a, b) => a <> b) |> take(state.value - 2) |> sum()
+
+    return total
+si
+
+// Several stages, each with an effectful argument, and a consumer with two.
+many_arguments(log: LOG) -> int =>
+    [5, 6, 7, 8, 9]
+        |> skip(log.note("skip", 1))
+        |> take(log.note("take", 3))
+        |> index(log.note("start", 10))
+        |> reduce(log.note("seed", 100), (sum, iv) => sum + iv.index * iv.value)
+
+many_arguments_unfused(log: LOG) -> int is
+    @suppress("pipe-fusion")
+    let total = [5, 6, 7, 8, 9] |> skip(log.note("skip", 1)) |> take(log.note("take", 3)) |> index(log.note("start", 10)) |> reduce(log.note("seed", 100), (sum, iv) => sum + iv.index * iv.value)
+
+    return total
+si
+
+// A constructor ending, as the Rosetta minesweeper task places its mines.
+constructor_ending(log: LOG) -> int =>
+    (0..6
+        |> map(n => log.note("draw", n))
+        |> sort((a, b) => b <> a)
+        |> take(log.note("count", 3))
+        |> SET()).count
+
+constructor_ending_unfused(log: LOG) -> int is
+    @suppress("pipe-fusion")
+    let set = 0..6 |> map(n => log.note("draw", n)) |> sort((a, b) => b <> a) |> take(log.note("count", 3)) |> SET()
+
+    return set.count
+si
+
+// A chain nothing consumes where it is written, returned as a sequence:
+// its arguments are passed to a generated generator.
+returned_chain(log: LOG) -> int{} =>
+    [5, 6, 7, 8, 9]
+        |> skip(log.note("skip", 1))
+        |> take(log.note("take", 3))
+        |> index(log.note("start", 10))
+        |> map(iv => iv.index * iv.value)
+
+returned_chain_unfused(log: LOG) -> int{} is
+    @suppress("pipe-fusion")
+    let chain = [5, 6, 7, 8, 9] |> skip(log.note("skip", 1)) |> take(log.note("take", 3)) |> index(log.note("start", 10)) |> map(iv => iv.index * iv.value)
+
+    return chain
+si
+
+let a = LOG()
+let a_result = source_then_count(a)
+let b = LOG()
+let b_result = source_then_count_unfused(b)
+write_line("source then count: {a_result} {b_result} same-order={a.text =~ b.text}")
+write_line("  {a.text}")
+
+let s = STATE()
+let s_result = count_reads_source(s)
+let t = STATE()
+let t_result = count_reads_source_unfused(t)
+write_line("count reads source: {s_result} {t_result}")
+
+let c = LOG()
+let c_result = many_arguments(c)
+let d = LOG()
+let d_result = many_arguments_unfused(d)
+write_line("many arguments: {c_result} {d_result} same-order={c.text =~ d.text}")
+write_line("  {c.text}")
+
+let e = LOG()
+let e_result = constructor_ending(e)
+let f = LOG()
+let f_result = constructor_ending_unfused(f)
+write_line("constructor ending: {e_result} {f_result} same-order={e.text =~ f.text}")
+write_line("  {e.text}")
+
+let g = LOG()
+let g_result = returned_chain(g) |> join()
+let h = LOG()
+let h_result = returned_chain_unfused(h) |> join()
+write_line("returned chain: {g_result} / {h_result} same-order={g.text =~ h.text}")
+write_line("  {g.text}")
