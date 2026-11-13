@@ -56,7 +56,10 @@ namespace Syntax.Process is
         // the body of a function, or yielded. The sequence is read later,
         // after the value is disposed, and the read fails.
         check_escape(expression: Trees.Expressions.Expression?) is
-            if let e = expression, value = e.value, type = value.type /\ _is_lazy(type) /\ _rooted_at_use(e) then
+            // The walk to the root reads only the tree and the calls it
+            // resolved to, so the type, which may still be settling, is
+            // looked at only for the few expressions rooted at a `use`.
+            if let e = expression /\ _rooted_at_use(e), value = e.value, type = value.type /\ _is_lazy(type) then
                 _logger.warn(e.location, "use-escapes", "this sequence is read after the value it reads is disposed: use disposes it when this block ends")
                 _logger.hint(e.location, "use-escapes", "read it here, with a terminal such as list(), or move the use to the caller")
             fi
@@ -67,9 +70,12 @@ namespace Syntax.Process is
         _is_lazy(type: Semantic.Types.Type) -> bool =>
             if let pipe = _innate_symbol_lookup.get_unspecialized_pipe_type() /\ _is(type, pipe) then
                 true
+            elif let iterable = _innate_symbol_lookup.find_unspecialized_iterable_type() /\ _definition(type) == _definition(iterable) then
+                true
+            elif let list = _innate_symbol_lookup.find_unspecialized_list_type() then
+                _definition(type) == _definition(list)
             else
-                _definition(type) == _definition(_innate_symbol_lookup.get_unspecialized_iterable_type()) \/
-                _definition(type) == _definition(_innate_symbol_lookup.get_unspecialized_list_type())
+                false
             fi
 
         // Whether `expression` reads, directly or through the `Ghul.Pipes`
@@ -115,10 +121,21 @@ namespace Syntax.Process is
         // Whether a parameter of type `type` borrows a value that has to be
         // disposed: a disposable that is not itself a sequence or an
         // iterator.
-        _borrows(type: Semantic.Types.Type) -> bool =>
-            _is(type, _innate_symbol_lookup.get_idisposable_type()) /\
-            !_is(type, _innate_symbol_lookup.get_unspecialized_iterator_type()) /\
-            !_is(type, _innate_symbol_lookup.get_unspecialized_iterable_type())
+        _borrows(type: Semantic.Types.Type) -> bool is
+            if !Semantic.KNOWN_MEMBERS.find(type, "dispose", Semantic.KNOWN_SIGNATURE(Collections.LIST[Semantic.Types.Type?](), true))? then
+                return false
+            fi
+
+            if _is(type, _innate_symbol_lookup.get_unspecialized_iterator_type()) then
+                return false
+            fi
+
+            if let iterable = _innate_symbol_lookup.find_unspecialized_iterable_type() /\ _is(type, iterable) then
+                return false
+            fi
+
+            return true
+        si
 
         // Whether `type` is `other`, or derives from it, whatever either is
         // instantiated with.
