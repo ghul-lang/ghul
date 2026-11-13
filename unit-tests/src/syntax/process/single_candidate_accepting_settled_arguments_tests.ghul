@@ -1,0 +1,98 @@
+namespace Syntax.Process.UnitTests is
+    use Collections.LIST
+
+    use Source.LOCATION
+
+    use Syntax.Process.COMPILE_CALLS
+
+    use Semantic.Symbols.CLASS
+    use Semantic.Symbols.Function
+    use Semantic.Symbols.STATIC_METHOD
+    use Semantic.Types.Type
+
+    use TestClass = Microsoft.VisualStudio.TestTools.UnitTesting.TestClassAttribute
+    use Test = Microsoft.VisualStudio.TestTools.UnitTesting.TestMethodAttribute
+    use Assertions
+
+    // Pins how the failed-resolution fallback narrows same-arity
+    // candidates before it pushes one's formals into untyped lambda
+    // arguments: by argument types alone, committing only to a single
+    // candidate left standing.
+    @TestClass()
+    class SINGLE_CANDIDATE_ACCEPTING_SETTLED_ARGUMENTS_TESTS is
+        _bytes: Type
+        _stream: Type
+        _other: Type
+        _lambda: Type
+
+        init() is
+            _bytes = new_class("BYTES").type!
+            _stream = new_class("STREAM").type!
+            _other = new_class("OTHER").type!
+            _lambda = Semantic.Types.ERROR()
+        si
+
+        loc() -> LOCATION => LOCATION("test.ghul", 1, 1, 1, 1)
+
+        new_class(name: string) -> CLASS =>
+            CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), name, LIST[string](), Semantic.BLOCK_SCOPE())
+
+        method(name: string, arguments: Type[], is_generic: bool) -> STATIC_METHOD is
+            let f = STATIC_METHOD(loc(), loc(), Semantic.BLOCK_SCOPE(), name, Semantic.BLOCK_SCOPE())
+            f.arguments = arguments
+            f.return_type = null
+            f.is_generic = is_generic
+            return f
+        si
+
+        pick(candidates: Function[], argument_types: Type[]) -> Function? =>
+            COMPILE_CALLS.single_candidate_accepting_settled_arguments(LIST[Function](candidates), LIST[Type](argument_types))
+
+        @Test()
+        A_settled_argument_one_candidate_rejects__leaves_the_other() is
+            let member = method("member", [_bytes, _other], false)
+            let global = method("global", [_stream, _other], false)
+
+            are_equal(member, pick([global, member], [_bytes, _lambda]))
+        si
+
+        @Test()
+        A_settled_argument_both_candidates_accept__chooses_neither() is
+            let first = method("first", [_bytes, _other], false)
+            let second = method("second", [_bytes, _stream], false)
+
+            is_null(pick([first, second], [_bytes, _lambda]))
+        si
+
+        @Test()
+        An_argument_not_yet_settled__sets_no_candidate_aside() is
+            let member = method("member", [_bytes, _other], false)
+            let global = method("global", [_stream, _other], false)
+
+            is_null(pick([global, member], [_lambda, _lambda]))
+        si
+
+        @Test()
+        A_generic_candidate__is_never_set_aside() is
+            let generic = method("generic", [_stream, _other], true)
+            let member = method("member", [_bytes, _other], false)
+
+            is_null(pick([generic, member], [_bytes, _lambda]))
+        si
+
+        @Test()
+        A_single_candidate__is_taken_even_when_it_rejects_an_argument() is
+            let only = method("only", [_stream, _other], false)
+
+            are_equal(only, pick([only], [_bytes, _lambda]))
+        si
+
+        @Test()
+        Every_candidate_rejecting__chooses_none() is
+            let first = method("first", [_stream, _other], false)
+            let second = method("second", [_other, _other], false)
+
+            is_null(pick([first, second], [_bytes, _lambda]))
+        si
+    si
+si
