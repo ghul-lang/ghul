@@ -229,6 +229,16 @@ namespace IR.Values is
         source: IR.LOCAL? public
         source_init: Value? public
 
+        // A source walked by position rather than through its iterator:
+        // `index` steps from 0 while it is below the count, read once
+        // into `index_count`, and `index_read` reads the element at it,
+        // both pre-built over the source local. Absent, the iterator
+        // drives the loop.
+        index: IR.LOCAL? public
+        index_count: IR.LOCAL? public
+        index_count_init: Value? public
+        index_read: Value? public
+
         // A collect over a source whose count is known before the loop,
         // through stages that keep it, sizes its result up front. For a
         // list result the count is the capacity `seed_init` was built
@@ -332,7 +342,14 @@ namespace IR.Values is
             // the source's iterator member or the source is itself an
             // iterator (a value-type range), move_next / current drive it
             // through the local (by address for a value-type iterator).
-            expansion.store(expansion.declare(iterator), iterator_init)
+            let indexed = index? /\ index_count? /\ index_count_init? /\ index_read?
+
+            if indexed then
+                expansion.store(expansion.declare(index_count!), index_count_init!)
+                expansion.store(expansion.declare(index!), Literal.NUMBER(0, int_type))
+            else
+                expansion.store(expansion.declare(iterator), iterator_init)
+            fi
 
             let loop = expansion.loop()
 
@@ -349,8 +366,23 @@ namespace IR.Values is
                 fi
             od
 
-            expansion.exit_if(loop, IR.BRANCH.Z, move_next)
-            expansion.store(expansion.declare(element), read_current)
+            if indexed then
+                // The element is read before the index moves on, and the
+                // index moves on before any stage runs, so a stage that
+                // passes the element over goes on to the next one.
+                expansion.exit_if(loop, IR.BRANCH.GE, index!.load(), index_count!.load())
+                expansion.store(expansion.declare(element), index_read!)
+                expansion.store(
+                    index!,
+                    ARITHMETIC(
+                        IR.ArithmeticOperation.ADD,
+                        index!.load(),
+                        Literal.NUMBER(1, int_type),
+                        int_type).unmarked())
+            else
+                expansion.exit_if(loop, IR.BRANCH.Z, move_next)
+                expansion.store(expansion.declare(element), read_current)
+            fi
 
             for stage in stages do
                 if stage.is_countdown then
