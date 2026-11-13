@@ -1,0 +1,107 @@
+// A `ref` argument naming a mutable local that a closure captures: the
+// callee's write reaches the local and every closure that reads it, as it
+// does for a local nothing captures.
+use IO.Std.write_line
+use Collections.MAP
+
+bump(value: int ref) is
+    value! = value! + 1
+si
+
+bump_and_get(value: int ref) -> int is
+    value! = value! * 10
+    return value! + 1
+si
+
+swap(left: int ref, right: int ref) is
+    let held = left!
+    left! = right!
+    right! = held
+si
+
+// Written only through the `ref`.
+written_only_by_ref() is
+    let n mut = 1
+    let read = () => n
+    bump(n ref)
+    write_line("only by ref: {n} {read()}")
+si
+
+// Also assigned directly, so the local lives in a box.
+also_assigned() is
+    let n mut = 0
+    let read = () => n
+    n = 1
+    bump(n ref)
+    write_line("also assigned: {n} {read()}")
+si
+
+// The call is made inside the closure that captures the local.
+call_in_closure() is
+    let n mut = 1
+    let step = () => bump(n ref)
+    step()
+    step()
+    write_line("in closure: {n}")
+si
+
+// The closure is made elsewhere and only reads the local.
+closure_elsewhere() is
+    let n mut = 5
+    let read = make_reader(() => n)
+    bump(n ref)
+    write_line("closure elsewhere: {read()}")
+si
+
+make_reader(read: () -> int) -> () -> int => read
+
+// try_get_value writes its out parameter through a `ref`.
+try_get_value() is
+    let found mut = 0
+    let read = () => found
+    let map = MAP[string, int]()
+    map["a"] = 42
+    let hit = map.try_get_value("a", found ref)
+    write_line("try_get_value: {hit} {found} {read()}")
+si
+
+// Two `ref` arguments are written back in argument order, and a call's
+// result is used after its write-back.
+several_and_result() is
+    let a mut = 1
+    let b mut = 2
+    let read = () => (a, b)
+    swap(a ref, b ref)
+    let r = bump_and_get(a ref)
+    write_line("several: {read()} result {r} a {a}")
+si
+
+// A generator's locals live on its frame.
+generated() -> int{} is
+    let n mut = 1
+    let read = () => n
+    bump(n ref)
+    yield read()
+    bump(n ref)
+    yield n
+si
+
+// An async function's locals live on its state machine across an await.
+counted_async() -> Tasks.TASK[int] is
+    let n mut = 1
+    let read = () => n
+    let step = await Tasks.TASK.from_result(1)
+    bump(n ref)
+    n = n + step
+    bump(n ref)
+    return read()
+si
+
+written_only_by_ref()
+also_assigned()
+call_in_closure()
+closure_elsewhere()
+try_get_value()
+several_and_result()
+write_line("generator: {generated() |> Ghul.Pipes.join()}")
+write_line("async: {counted_async().result}")

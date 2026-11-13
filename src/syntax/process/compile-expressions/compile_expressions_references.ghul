@@ -105,6 +105,8 @@ namespace Syntax.Process is
                 _check_pure_slots(call.location, as_written, call.arguments)
                 _note_call(call.location, as_written)
 
+                _wrap_copy_backs(call)
+
                 _logger.commit()
             catch e: Exception
                 call.compile_expressions_state.value = DUMMY(Semantic.Types.ERROR(), call.location)
@@ -243,6 +245,7 @@ namespace Syntax.Process is
         // assignment in `note_reference_arguments`.
         pre(reference: Trees.Expressions.REFERENCE) -> bool is
             reference.writes_target = false
+            reference.copy_back = null
             _reference_operand_target = try_get_narrowing_target(reference.left)
 
             return false
@@ -253,7 +256,100 @@ namespace Syntax.Process is
                 Semantic.Capability.REFERENCE, reference.location, "references")
 
             _reference_operand_target = null
+
+            if _copy_in_boxed_local(reference) then
+                return
+            fi
+
             _access.visit_reference(reference)
+        si
+
+        // A local that a closure captures and that is written lives in a
+        // box, and the box holds its value in a property, which has no
+        // address. The callee is given the address of a temporary that
+        // starts from the box's value - or of the field within it, for a
+        // field of a struct the local holds - and the call stores the
+        // temporary back once it returns (COPY_BACK_CALL).
+        _copy_in_boxed_local(reference: Trees.Expressions.REFERENCE) -> bool is
+            let root mut = reference.left
+
+            while let member: Trees.Expressions.MEMBER = root do
+                root = member.left
+            od
+
+            if !isa Trees.Expressions.IDENTIFIER(root) then
+                return false
+            fi
+
+            let local = cast Semantic.Symbols.LOCAL_VARIABLE?(try_get_narrowing_target(root))
+
+            if !local? \/ !local.is_boxed then
+                return false
+            fi
+
+            let initial = root.value
+            let addressed_in_box = reference.left.value
+
+            if !initial? \/ !initial.type? \/ !addressed_in_box? \/ !addressed_in_box.type? then
+                return false
+            fi
+
+            let temporary = IR.LOCAL(".copied_in.{IR.TEMP.get_next_id()}", initial.type!)
+            let addressed = _rebase_on(addressed_in_box, initial, temporary.load())
+
+            if !addressed? then
+                return false
+            fi
+
+            addressed_in_box.check_is_consumable(_logger, reference.left.location)
+
+            reference.compile_expressions_state.value =
+                COPY_IN_ADDRESS(temporary, initial, addressed, _innate_symbol_lookup.get_reference_type(addressed_in_box.type!))
+
+            reference.copy_back = _symbol_loader.store_local_variable(reference.location, local, temporary.load(), false)
+
+            return true
+        si
+
+        // `value` with the read `root` it starts from replaced by `rebased`:
+        // the root itself, or a field reached from it through struct values
+        // only, so the field lives in the copy. Null for any other shape.
+        _rebase_on(value: Value, root: Value, rebased: Value) -> Value? is
+            if value == root then
+                return rebased
+            fi
+
+            if let member: Load.INSTANCE_FIELD = value, inner = member.from /\ inner.is_value_type then
+                if let from = _rebase_on(inner, root, rebased) then
+                    return Load.INSTANCE_FIELD(from, member.symbol)
+                fi
+            fi
+
+            return null
+        si
+
+        // The stores the `ref` arguments of `call` need once it returns,
+        // in argument order: the call's value is wrapped to run them.
+        _wrap_copy_backs(call: Trees.Expressions.CALL) is
+            let value = call.value
+
+            if !value? then
+                return
+            fi
+
+            let copy_backs = Collections.LIST[Value]()
+
+            for argument in call.arguments.expressions do
+                if let reference: Trees.Expressions.REFERENCE = argument then
+                    if let copy_back = reference.copy_back then
+                        copy_backs.add(copy_back)
+                    fi
+                fi
+            od
+
+            if copy_backs.count > 0 then
+                call.compile_expressions_state.value = COPY_BACK_CALL(value, copy_backs)
+            fi
         si
 
         // True while walking the operand of the `ref` that writes to
