@@ -1947,15 +1947,23 @@ Every read of a pipe starts from the beginning. Two reads in progress at the sam
 
 The combinators return `T{}`. Each read of a combinator's result reads its source again from the beginning. A terminal does not dispose the iterator it reads, and neither does a `for` loop, whether or not it reads to the end (see below). Disposing a generator's iterator ends its stream. If the generator is suspended at a `yield`, `dispose()` first disposes the iterator that an active `yield in` reads, then runs the `finally` clauses and `use` disposals around that `yield`, innermost first. A generator that has not started, or has already ended, runs nothing. After `dispose()`, `move_next()` returns false, and a second `dispose()` does nothing. `memo` reads its source once. Every read of a `memo` result replays the cached elements, and asks the source for more elements only after the end of the cache.
 
-A `for` loop does not dispose the sequence it iterates. To dispose a sequence that holds a resource, take its iterator with `use`. Few sequences hold a resource: file and directory enumeration, a database reader, a PLINQ query, and a .NET iterator written with a `using`. Disposal matters when the loop can exit early, because the iterator is then still open.
+A `for` loop does not dispose the sequence it iterates. To read a file, open a reader and hold it with `use`. `lines()` and `chars()` read a `TextReader`, and `bytes()` and `chunks(n)` read a `Stream`:
 
 ```ghul
-for line in use IO.File.read_lines(path).iterator do
+for line in use IO.File.open_text(path) |> lines() do
     if line.starts_with(wanted) then
         return line
     fi
 od
+
+let total = use IO.File.open_text(path) |> lines() |> map(l => int.parse(l)) |> sum()
 ```
+
+`use` disposes the reader when the enclosing block ends, on every way out of the block, including an exception. A parenthesised block is a block, so it closes the reader as soon as its value is computed: `(let use reader = IO.File.open_text(path); reader |> lines() |> first())`. The adaptors borrow the reader: reading a pipe made by one never disposes the reader, and a second read carries on from where the first stopped, as `cursor` does. So a header and the lines after it are read with two pipes over one reader. `write_lines(writer)` writes each element and a line break to a `TextWriter`, then flushes it, and leaves it open: `(let use writer = IO.File.create_text(path); lines |> write_lines(writer))`.
+
+A reader or stream made in the call that reads it, with no `use`, is never disposed, and draws the `undisposed-source` warning. A pipe over a `use`d reader that leaves its block, by a `return`, an expression body or a `yield`, is read after the reader is closed and throws. It draws the `use-escapes` warning.
+
+Few sequences hold a resource themselves: .NET's `File.read_lines` and directory enumeration, a database reader, a PLINQ query, and a .NET iterator written with a `using`. To dispose one, take its iterator with `use`: `for line in use IO.File.read_lines(path).iterator do ... od`.
 
 `next` reads one element from an iterator. It advances the iterator and returns the element it reaches, or the absent value at the end. So `next` works as the condition of a `while let` loop: `while let cat: CAT = animals |> next() do ... od` runs until the iterator ends, or until it gives an element that is not a `CAT`.
 

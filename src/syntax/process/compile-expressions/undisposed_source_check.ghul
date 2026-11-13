@@ -26,6 +26,125 @@ namespace Syntax.Process is
             fi
         si
 
+        // Reports a reader, a stream or a writer made in a `Ghul.Pipes` call's
+        // argument list and handed to a parameter that borrows it, such as
+        // `lines`'s reader or `write_lines`'s writer: the function never
+        // disposes what it borrows, and nothing else holds it. An iterator
+        // or a sequence passed this way is the sequences' rule above, not
+        // this one.
+        check_borrowed(call: Trees.Expressions.CALL, value: Value?) is
+            if
+                let pipes_call: IR.Values.Call.GLOBAL = value /\
+                _innate_symbol_lookup.is_pipes_function(pipes_call.function)
+            then
+                let parameters = pipes_call.function.arguments
+                let arguments = call.arguments.expressions
+
+                for i in 0..arguments.count do
+                    if i < parameters.count then
+                        if let argument: Trees.Expressions.CALL = arguments[i], type = parameters[i].type /\ _borrows(type) then
+                            _logger.warn(argument.location, "undisposed-source", "the {type} made here is not disposed: {pipes_call.function.name} does not dispose it")
+                            _logger.hint(argument.location, "undisposed-source", "hold it with use")
+                        fi
+                    fi
+                od
+            fi
+        si
+
+        // Reports a lazy sequence built over a value `use` holds, where the
+        // sequence leaves the block that disposes the value: returned, made
+        // the body of a function, or yielded. The sequence is read later,
+        // after the value is disposed, and the read fails.
+        check_escape(expression: Trees.Expressions.Expression?) is
+            // The walk to the root reads only the tree and the calls it
+            // resolved to, so the type, which may still be settling, is
+            // looked at only for the few expressions rooted at a `use`.
+            if let e = expression /\ _rooted_at_use(e), value = e.value, type = value.type /\ _is_lazy(type) then
+                _logger.warn(e.location, "use-escapes", "this sequence is read after the value it reads is disposed: use disposes it when this block ends")
+                _logger.hint(e.location, "use-escapes", "read it here into a collection, such as with |> LIST(), or move the use to the caller")
+            fi
+        si
+
+        // Whether a value of type `type` is read only as it is asked for: a
+        // pipe, or a bare sequence or list that may be one.
+        _is_lazy(type: Semantic.Types.Type) -> bool =>
+            if let pipe = _innate_symbol_lookup.get_unspecialized_pipe_type() /\ _is(type, pipe) then
+                true
+            elif let iterable = _innate_symbol_lookup.find_unspecialized_iterable_type() /\ _definition(type) == _definition(iterable) then
+                true
+            elif let list = _innate_symbol_lookup.find_unspecialized_list_type() then
+                _definition(type) == _definition(list)
+            else
+                false
+            fi
+
+        // Whether `expression` reads, directly or through the `Ghul.Pipes`
+        // stages built on it, a value `use` holds: a `use E`, or a local
+        // declared with `let use`.
+        _rooted_at_use(expression: Trees.Expressions.Expression) -> bool is
+            let current mut = expression
+
+            while true do
+                if isa Trees.Expressions.USE(current) then
+                    return true
+                fi
+
+                // A `use` the stack has to be empty for is spilled first.
+                if let spill: Trees.Expressions.SPILL = current then
+                    current = spill.operand
+                    continue
+                fi
+
+                if let let_in: Trees.Expressions.LET_IN = current then
+                    current = let_in.expression
+                    continue
+                fi
+
+                if let load: IR.Values.Load.LOCAL_VARIABLE = current.value, variable: Semantic.Symbols.Variable = load.symbol then
+                    return variable.is_disposed
+                fi
+
+                if
+                    let call: Trees.Expressions.CALL = current /\ call.arguments.count > 0,
+                    stage: IR.Values.Call.GLOBAL = call.value /\ _innate_symbol_lookup.is_pipes_function(stage.function)
+                then
+                    current = call.arguments.expressions[0]
+                    continue
+                fi
+
+                return false
+            od
+
+            return false
+        si
+
+        // Whether a parameter of type `type` borrows a value that has to be
+        // disposed: a disposable that is not itself a sequence or an
+        // iterator.
+        _borrows(type: Semantic.Types.Type) -> bool is
+            if !Semantic.KNOWN_MEMBERS.find(type, "dispose", Semantic.KNOWN_SIGNATURE(Collections.LIST[Semantic.Types.Type?](), true))? then
+                return false
+            fi
+
+            if _is(type, _innate_symbol_lookup.get_unspecialized_iterator_type()) then
+                return false
+            fi
+
+            if let iterable = _innate_symbol_lookup.find_unspecialized_iterable_type() /\ _is(type, iterable) then
+                return false
+            fi
+
+            return true
+        si
+
+        // Whether `type` is `other`, or derives from it, whatever either is
+        // instantiated with.
+        _is(type: Semantic.Types.Type, other: Semantic.Types.Type) -> bool =>
+            _definition(type) == _definition(other) \/ type.find_ancestor(other)?
+
+        _definition(type: Semantic.Types.Type) -> Semantic.Symbols.Symbol =>
+            if let generic: Semantic.Symbols.GENERIC = type.symbol then generic.symbol else type.symbol fi
+
         check_loop(source: Trees.Expressions.Expression, loop: Trees.Statements.Statement, body: Trees.Statements.LIST) is
             let finder = LOOP_EXIT_FINDER(loop)
 
