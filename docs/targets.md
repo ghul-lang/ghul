@@ -178,6 +178,7 @@ On the `wasm` target, a .NET API exists only if the core library declares it. A 
 
 - a pointer type, as `pointer types not supported on the wasm target`
 - an `IL.` pragma, which states a fact about an assembly, as `pragma IL.name not supported on the wasm target`
+- a mutable local that a closure captures, passed by `ref`, as `on wasm, n cannot be passed by reference because a closure captures it`, and a method that can change a struct, called on a captured struct local, as `on wasm, a method that can change c cannot be called on it because a closure captures it`. Both are reported where the call is written, with a help message that says to use a local of its own or a copy and assign the result back. On `dotnet` and `llvm` the callee's write reaches the closures, with `ghul.runtime` 42 or later
 
 A construct that the target will support, but cannot generate code for yet, is reported at the function that contains it, as `code generation for <construct> is not supported on the wasm target`.
 
