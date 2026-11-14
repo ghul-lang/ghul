@@ -6,7 +6,8 @@ namespace Syntax.Process is
 
     // A loop source walked by position rather than through its iterator:
     // its count, read once before the loop, and the read of the element
-    // at an index. An array's length cannot change while the loop runs.
+    // at an index. An array's length cannot change while the loop runs, and
+    // neither can a string's, so a string is read by its length.
     // A list's count can, but what a list changed while a loop reads it
     // gives is undefined; its element read stays bounds-checked, so it
     // never reads past its storage. Reading the count before each
@@ -15,20 +16,49 @@ namespace Syntax.Process is
         count: Function
         read: Function
 
+        // Whether the loop reads the source last element first: the index
+        // still steps up from zero, and each element is read at `count - 1`
+        // less it.
+        is_reversed: bool
+
         init(count: Function, read: Function) is
             self.count = count
             self.read = read
         si
 
+        init(count: Function, read: Function, is_reversed: bool) is
+            self.count = count
+            self.read = read
+            self.is_reversed = is_reversed
+        si
+
+        // The same source, read last element first.
+        reversed() -> INDEXED_SOURCE => INDEXED_SOURCE(count, read, true)
+
+        // Where the element `index` stands for is: `index` itself, or,
+        // read last element first, `count - 1 - index`.
+        position(index: IR.Values.Value, count: IR.Values.Value, int_type: Type) -> IR.Values.Value =>
+            if is_reversed then
+                IR.Values.ARITHMETIC(
+                    IR.ArithmeticOperation.SUBTRACT,
+                    IR.Values.ARITHMETIC(IR.ArithmeticOperation.SUBTRACT, count, IR.Values.Literal.NUMBER(1, int_type), int_type).unmarked(),
+                    index,
+                    int_type).unmarked()
+            else
+                index
+            fi
+
         // How to walk a source of `type` by position, or null where it
-        // is neither an array nor the concrete list class, or its count
-        // and element read are not found.
+        // is not an array, the concrete list class or a string, or its
+        // count and element read are not found.
         of(type: Type?, lookup: Semantic.Lookups.InnateSymbolLookup) -> INDEXED_SOURCE? static is
             if !type? then
                 return null
             fi
 
-            if !isa Semantic.Types.ARRAY(type) then
+            let is_string = lookup.get_string_type().compare(type) == Semantic.Types.MATCH.SAME
+
+            if !is_string /\ !isa Semantic.Types.ARRAY(type) then
                 let list = lookup.find_unspecialized_mutable_list_type()
 
                 if !list? \/ !_is_instance_of(type, list) then
@@ -38,7 +68,7 @@ namespace Syntax.Process is
 
             let int_type = lookup.get_int_type()
 
-            let count = KNOWN_MEMBERS.find(type, "$get_count", KNOWN_SIGNATURE(Collections.LIST[Type?](), true))
+            let count = KNOWN_MEMBERS.find(type, if is_string then "$get_length" else "$get_count" fi, KNOWN_SIGNATURE(Collections.LIST[Type?](), true))
             let read = KNOWN_MEMBERS.find(type, Semantic.Symbols.INDEXER_NAMES.read, KNOWN_SIGNATURE([int_type], true))
 
             if count? /\ read? then
