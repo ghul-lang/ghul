@@ -437,7 +437,7 @@ namespace Syntax.Process is
                 fusion.indexed_source = INDEXED_SOURCE.of(source_value.type, _innate_symbol_lookup)
 
                 if !fusion.indexed_source? then
-                    fusion.counted_source = COUNTED_SOURCE.of(
+                    fusion.counted_source = LOOP_SOURCES.of(
                         source_value,
                         cast Semantic.Symbols.Symbol?(_pipes_owner_symbol),
                         _innate_symbol_lookup.get_int_type(),
@@ -1076,12 +1076,9 @@ namespace Syntax.Process is
             // A counted source has no sequence object to evaluate: its
             // arguments are evaluated in its place, first, by the loop.
             if let counted = plan.counted_source then
-                fused.counted = IR.COUNTED_SEQUENCE(
-                    counted.start,
-                    counted.step,
-                    counted.value_type,
-                    counted.is_long,
+                fused.counted = counted.sequence(
                     _innate_symbol_lookup.get_int_type(),
+                    plan.source_read_current!.return_type!,
                     _next_fused_local_id())
 
                 return
@@ -1155,13 +1152,22 @@ namespace Syntax.Process is
             consumer_kind: string,
             element_type: Type
         ) is
-            if !_stages_keep_count(plan) \/ fused.counted? then
+            if !_stages_keep_count(plan) then
                 return
             fi
 
-            let source_load = fused.source!.load()
-
-            let count = known_counts.count_of(plan.source, source_load, plan.source.value!.type!, call.location)
+            // A counted source has no source local; its own count, where
+            // it is known, is clamped at zero as a repeat's is.
+            let count: IR.Values.Value? =
+                if let counted = plan.counted_source then
+                    if let known = counted.known_count() then
+                        IR.Values.INT_MAX_ZERO(known, _innate_symbol_lookup.get_int_type())
+                    else
+                        null
+                    fi
+                else
+                    known_counts.count_of(plan.source, fused.source!.load(), plan.source.value!.type!, call.location)
+                fi
 
             if !count? then
                 return
@@ -1210,7 +1216,7 @@ namespace Syntax.Process is
                 _innate_symbol_lookup,
                 _function_caller,
                 (type, name) => get_zero_argument_function(type, name),
-                call => _pipes_function_name(call)
+                () => cast Semantic.Symbols.Symbol?(_pipes_owner_symbol)
             )
 
         // The constructor of `type` taking one int - a list's capacity.
