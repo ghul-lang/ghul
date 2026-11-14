@@ -1,0 +1,167 @@
+use default
+
+// A fused chain or loop over `from` counts through the sequence itself
+// instead of reading the pipe object. Each scenario runs fused and with
+// fusion suppressed, and the two must agree, including where the sequence
+// ends at the type's limit, counts down, or has a step that never moves.
+
+ascending() -> string => "{from(1) |> take(5) |> join(",")}"
+
+ascending_unfused() -> string is
+    @suppress("pipe-fusion")
+    let text = "{from(1) |> take(5) |> join(",")}"
+    return text
+si
+
+stepped() -> string => "{from(10, -3) |> take(5) |> join(",")}"
+
+stepped_unfused() -> string is
+    @suppress("pipe-fusion")
+    let text = "{from(10, -3) |> take(5) |> join(",")}"
+    return text
+si
+
+// The step is only known when the program runs.
+variable_step(step: int) -> string => "{from(100, step) |> take(4) |> join(",")}"
+
+variable_step_unfused(step: int) -> string is
+    @suppress("pipe-fusion")
+    let text = "{from(100, step) |> take(4) |> join(",")}"
+    return text
+si
+
+up_to_the_limit() -> string => "{from(2147483640) |> join(",")} {from(2147483640, 3) |> join(",")}"
+
+up_to_the_limit_unfused() -> string is
+    @suppress("pipe-fusion")
+    let text = "{from(2147483640) |> join(",")} {from(2147483640, 3) |> join(",")}"
+    return text
+si
+
+down_to_the_limit() -> string => "{from(-2147483645, -2) |> join(",")} {from(-2147483645, -2) |> count()}"
+
+down_to_the_limit_unfused() -> string is
+    @suppress("pipe-fusion")
+    let text = "{from(-2147483645, -2) |> join(",")} {from(-2147483645, -2) |> count()}"
+    return text
+si
+
+variable_step_to_the_limit(step: int) -> string => "{from(2147483640, step) |> join(",")} {from(-2147483640, -step) |> join(",")}"
+
+variable_step_to_the_limit_unfused(step: int) -> string is
+    @suppress("pipe-fusion")
+    let text = "{from(2147483640, step) |> join(",")} {from(-2147483640, -step) |> join(",")}"
+    return text
+si
+
+long_values() -> string => "{from(9223372036854775800L) |> join(",")} {from(0L, 5L) |> take(3) |> join(",")} {from(-9223372036854775800L, -3L) |> join(",")}"
+
+long_values_unfused() -> string is
+    @suppress("pipe-fusion")
+    let text = "{from(9223372036854775800L) |> join(",")} {from(0L, 5L) |> take(3) |> join(",")} {from(-9223372036854775800L, -3L) |> join(",")}"
+    return text
+si
+
+never_moves() -> string => "{from(7, 0) |> take(3) |> join(",")}"
+
+never_moves_unfused() -> string is
+    @suppress("pipe-fusion")
+    let text = "{from(7, 0) |> take(3) |> join(",")}"
+    return text
+si
+
+stages() -> string => "{from(0) |> filter(x => x % 7 == 6) |> map(x => x * 2) |> take(3) |> join(",")} {from(0) |> filter(x => x * x > 200) |> first()} {from(1) |> take_while(x => x < 5) |> sum()}"
+
+stages_unfused() -> string is
+    @suppress("pipe-fusion")
+    let text = "{from(0) |> filter(x => x % 7 == 6) |> map(x => x * 2) |> take(3) |> join(",")} {from(0) |> filter(x => x * x > 200) |> first()} {from(1) |> take_while(x => x < 5) |> sum()}"
+    return text
+si
+
+looped() -> string is
+    let seen = LIST[int]()
+
+    for x in from(5, 5) |> take(4) do
+        if x == 10 then continue fi
+        seen.add(x)
+    od
+
+    for x in from(-2147483647, -1) do
+        seen.add(x)
+    od
+
+    seen |> join(",")
+si
+
+looped_unfused() -> string is
+    let seen = LIST[int]()
+
+    @suppress("pipe-fusion")
+    for x in from(5, 5) |> take(4) do
+        if x == 10 then continue fi
+        seen.add(x)
+    od
+
+    @suppress("pipe-fusion")
+    for x in from(-2147483647, -1) do
+        seen.add(x)
+    od
+
+    seen |> join(",")
+si
+
+// The start and the step are evaluated once, start first, ahead of the
+// stages' arguments.
+order(log: LIST[string]) -> string is
+    let start = () => (log.add("start"); 3)
+    let step = () => (log.add("step"); 4)
+    let size = () => (log.add("take"); 3)
+
+    let text = "{from(start(), step()) |> take(size()) |> join(",")}"
+
+    return "{text} {log |> join(",")}"
+si
+
+order_unfused(log: LIST[string]) -> string is
+    let start = () => (log.add("start"); 3)
+    let step = () => (log.add("step"); 4)
+    let size = () => (log.add("take"); 3)
+
+    @suppress("pipe-fusion")
+    let text = "{from(start(), step()) |> take(size()) |> join(",")}"
+
+    return "{text} {log |> join(",")}"
+si
+
+// A generator reads the sequence through its iterator.
+generated() -> int{} is
+    for x in from(1) |> take(3) do
+        yield x * 10
+    od
+si
+
+write_line(ascending())
+write_line(ascending_unfused())
+write_line(stepped())
+write_line(stepped_unfused())
+write_line(variable_step(-7))
+write_line(variable_step_unfused(-7))
+write_line(variable_step(0))
+write_line(variable_step_unfused(0))
+write_line(up_to_the_limit())
+write_line(up_to_the_limit_unfused())
+write_line(down_to_the_limit())
+write_line(down_to_the_limit_unfused())
+write_line(variable_step_to_the_limit(4))
+write_line(variable_step_to_the_limit_unfused(4))
+write_line(long_values())
+write_line(long_values_unfused())
+write_line(never_moves())
+write_line(never_moves_unfused())
+write_line(stages())
+write_line(stages_unfused())
+write_line(looped())
+write_line(looped_unfused())
+write_line(order(LIST[string]()))
+write_line(order_unfused(LIST[string]()))
+write_line(generated() |> join(","))

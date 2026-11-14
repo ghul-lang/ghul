@@ -1,0 +1,73 @@
+namespace Syntax.Process is
+    use IR.Values.Value
+    use Semantic.KNOWN_MEMBERS
+    use Semantic.KNOWN_SIGNATURE
+    use Semantic.Types.Type
+
+    // A `Ghul.Pipes.from` call a loop counts through instead of reading
+    // the sequence it returns: the start, the step (absent for the
+    // overloads that take none), and the type counted. Its arguments are
+    // the values the call was compiled with, so a loop that counts
+    // evaluates them once, in the order the call would.
+    class COUNTED_SOURCE is
+        start: Value
+        step: Value?
+        value_type: Type
+        is_long: bool
+
+        init(start: Value, step: Value?, value_type: Type, is_long: bool) is
+            self.start = start
+            self.step = step
+            self.value_type = value_type
+            self.is_long = is_long
+        si
+
+        // The counted form of `source`, or null where it is not a call to
+        // one of the four `from` overloads in `owner`, `Ghul.Pipes`. Each
+        // is found by its exact parameter types, so an overload added
+        // later is never taken for one of these.
+        of(source: Value?, owner: Semantic.Symbols.Symbol?, int_type: Type, long_type: Type) -> COUNTED_SOURCE? static is
+            if !source? \/ !owner? then
+                return null
+            fi
+
+            if let call: IR.Values.Call.GLOBAL = source then
+                let function = call.function.root_specialized_from
+
+                if _is_overload(function, owner, [int_type]) then
+                    return _of_arguments(call, int_type, false, 1)
+                fi
+
+                if _is_overload(function, owner, [int_type, int_type]) then
+                    return _of_arguments(call, int_type, false, 2)
+                fi
+
+                if _is_overload(function, owner, [long_type]) then
+                    return _of_arguments(call, long_type, true, 1)
+                fi
+
+                if _is_overload(function, owner, [long_type, long_type]) then
+                    return _of_arguments(call, long_type, true, 2)
+                fi
+            fi
+
+            return null
+        si
+
+        _is_overload(function: Semantic.Symbols.Symbol, owner: Semantic.Symbols.Symbol, parameters: Type?[]) -> bool static is
+            if let pinned = KNOWN_MEMBERS.declared(owner, "from", KNOWN_SIGNATURE(parameters)) then
+                return pinned.root_specialized_from == function
+            fi
+
+            return false
+        si
+
+        _of_arguments(call: IR.Values.Call.GLOBAL, value_type: Type, is_long: bool, count: int) -> COUNTED_SOURCE? static is
+            if call.arguments.count != count then
+                return null
+            fi
+
+            return COUNTED_SOURCE(call.arguments[0], if count == 2 then call.arguments[1] else null fi, value_type, is_long)
+        si
+    si
+si
