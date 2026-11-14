@@ -1,0 +1,162 @@
+use default
+
+// A fused chain or loop over `repeat` takes the value, evaluated once, as
+// every element and counts the repetitions itself. Each scenario runs fused
+// and with fusion suppressed, and the two must agree.
+
+struct Cell(n: int public, tag: string public);
+
+class Box(n: int public);
+
+counted() -> string => "{repeat(7, 4) |> map(x => x + 1) |> join(",")} {repeat(7, 4) |> sum()} {repeat("ab", 3) |> join("")}"
+
+counted_unfused() -> string is
+    @suppress("pipe-fusion")
+    let text = "{repeat(7, 4) |> map(x => x + 1) |> join(",")} {repeat(7, 4) |> sum()} {repeat("ab", 3) |> join("")}"
+    return text
+si
+
+nothing(times: int) -> string => "[{repeat(1, 0) |> join(",")}] [{repeat(1, -5) |> join(",")}] [{repeat(1, times) |> join(",")}] {repeat(3, times) |> count()}"
+
+nothing_unfused(times: int) -> string is
+    @suppress("pipe-fusion")
+    let text = "[{repeat(1, 0) |> join(",")}] [{repeat(1, -5) |> join(",")}] [{repeat(1, times) |> join(",")}] {repeat(3, times) |> count()}"
+    return text
+si
+
+variable(times: int) -> string => "{repeat(2, times) |> sum()} {repeat(2, times) |> ARRAY() |> count()} {repeat(2, times) |> LIST() |> count()} {repeat(2, times) |> filter(x => x > 1) |> count()}"
+
+variable_unfused(times: int) -> string is
+    @suppress("pipe-fusion")
+    let text = "{repeat(2, times) |> sum()} {repeat(2, times) |> ARRAY() |> count()} {repeat(2, times) |> LIST() |> count()} {repeat(2, times) |> filter(x => x > 1) |> count()}"
+    return text
+si
+
+unbounded() -> string => "{repeat(5) |> take(3) |> join(",")} {repeat("x") |> take(2) |> join("")} {repeat(1) |> map(x => x * 2) |> take_while(x => x > 0) |> take(4) |> sum()}"
+
+unbounded_unfused() -> string is
+    @suppress("pipe-fusion")
+    let text = "{repeat(5) |> take(3) |> join(",")} {repeat("x") |> take(2) |> join("")} {repeat(1) |> map(x => x * 2) |> take_while(x => x > 0) |> take(4) |> sum()}"
+    return text
+si
+
+// The value is evaluated once, then the count, ahead of the stages' arguments.
+order(log: LIST[string]) -> string is
+    let value = () => (log.add("value"); 9)
+    let count = () => (log.add("count"); 2)
+    let size = () => (log.add("take"); 5)
+
+    let text = "{repeat(value(), count()) |> take(size()) |> join(",")}"
+
+    return "{text} {log |> join(",")}"
+si
+
+order_unfused(log: LIST[string]) -> string is
+    let value = () => (log.add("value"); 9)
+    let count = () => (log.add("count"); 2)
+    let size = () => (log.add("take"); 5)
+
+    @suppress("pipe-fusion")
+    let text = "{repeat(value(), count()) |> take(size()) |> join(",")}"
+
+    return "{text} {log |> join(",")}"
+si
+
+// A reference is shared by every element; a struct is copied into each.
+shared() -> string is
+    let box = Box(1)
+    let boxes = repeat(box, 3) |> LIST()
+
+    boxes[0].n = 5
+
+    let cells = repeat(Cell(1, "a"), 3) |> LIST()
+
+    return "{boxes |> map(b => b.n) |> join(",")} {boxes[0] == boxes[2]} {cells |> map(c => c.n) |> join(",")} {cells |> map(c => c.tag) |> join("")}"
+si
+
+shared_unfused() -> string is
+    let box = Box(1)
+
+    @suppress("pipe-fusion")
+    let boxes = repeat(box, 3) |> LIST()
+
+    boxes[0].n = 5
+
+    @suppress("pipe-fusion")
+    let cells = repeat(Cell(1, "a"), 3) |> LIST()
+
+    return "{boxes |> map(b => b.n) |> join(",")} {boxes[0] == boxes[2]} {cells |> map(c => c.n) |> join(",")} {cells |> map(c => c.tag) |> join("")}"
+si
+
+looped() -> string is
+    let seen = LIST[string]()
+
+    for x in repeat("a", 3) |> map(s => "{s}!") do
+        seen.add(x)
+    od
+
+    for x in repeat(1) |> take(2) do
+        seen.add("{x}")
+    od
+
+    for x in repeat(8, -1) |> map(n => n + 1) do
+        seen.add("{x}")
+    od
+
+    return seen |> join(",")
+si
+
+looped_unfused() -> string is
+    let seen = LIST[string]()
+
+    @suppress("pipe-fusion")
+    for x in repeat("a", 3) |> map(s => "{s}!") do
+        seen.add(x)
+    od
+
+    @suppress("pipe-fusion")
+    for x in repeat(1) |> take(2) do
+        seen.add("{x}")
+    od
+
+    @suppress("pipe-fusion")
+    for x in repeat(8, -1) |> map(n => n + 1) do
+        seen.add("{x}")
+    od
+
+    return seen |> join(",")
+si
+
+// A generator reads the sequence through its iterator.
+generated() -> string{} is
+    for x in repeat("g", 2) |> map(s => "{s}{s}") do
+        yield x
+    od
+
+    // a collect in a generator sizes its result from the count, as before
+    for s in repeat("s", 2) |> ARRAY() do
+        yield s
+    od
+si
+
+write_line(counted())
+write_line(counted_unfused())
+write_line(nothing(0))
+write_line(nothing_unfused(0))
+write_line(nothing(-3))
+write_line(nothing_unfused(-3))
+write_line(nothing(2))
+write_line(nothing_unfused(2))
+write_line(variable(4))
+write_line(variable_unfused(4))
+write_line(variable(-1))
+write_line(variable_unfused(-1))
+write_line(unbounded())
+write_line(unbounded_unfused())
+write_line(order(LIST[string]()))
+write_line(order_unfused(LIST[string]()))
+write_line(shared())
+write_line(shared_unfused())
+write_line(looped())
+write_line(looped_unfused())
+write_line(generated() |> join(","))

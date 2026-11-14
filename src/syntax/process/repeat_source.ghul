@@ -1,0 +1,65 @@
+namespace Syntax.Process is
+    use IR.Values.Value
+    use Semantic.KNOWN_MEMBERS
+    use Semantic.KNOWN_SIGNATURE
+    use Semantic.Types.Type
+
+    // A `Ghul.Pipes.repeat` call: the value, and the count where the
+    // overload takes one.
+    class REPEAT_SOURCE: LoopSource is
+        value: Value
+        count: Value?
+
+        init(value: Value, count: Value?) is
+            self.value = value
+            self.count = count
+        si
+
+        sequence(int_type: Type, element_type: Type, id: int) -> IR.LoopSequence =>
+            IR.REPEATED_SEQUENCE(value, count, element_type, int_type, id)
+
+        // Only a count that is a literal or a variable read can be read
+        // again without effect.
+        known_count() -> Value? is
+            if let given = count then
+                if isa IR.Values.Literal.NUMBER(given) \/ isa IR.Values.Load.SYMBOL(given) then
+                    return given
+                fi
+            fi
+
+            return null
+        si
+
+        // The repeat call `source` is, or null where it is not a call to
+        // one of the two `repeat` overloads in `owner`, `Ghul.Pipes`. Each
+        // is found by its exact parameter types, null standing for the
+        // overload's own type parameter.
+        of(source: Value?, owner: Semantic.Symbols.Symbol?, int_type: Type) -> REPEAT_SOURCE? static is
+            if !source? \/ !owner? then
+                return null
+            fi
+
+            if let call: IR.Values.Call.GLOBAL = source then
+                let function = call.function.root_specialized_from
+
+                if _is_overload(function, owner, [cast Type?(null)]) /\ call.arguments.count == 1 then
+                    return REPEAT_SOURCE(call.arguments[0], null)
+                fi
+
+                if _is_overload(function, owner, [cast Type?(null), cast Type?(int_type)]) /\ call.arguments.count == 2 then
+                    return REPEAT_SOURCE(call.arguments[0], call.arguments[1])
+                fi
+            fi
+
+            return null
+        si
+
+        _is_overload(function: Semantic.Symbols.Symbol, owner: Semantic.Symbols.Symbol, parameters: Type?[]) -> bool static is
+            if let pinned = KNOWN_MEMBERS.declared(owner, "repeat", KNOWN_SIGNATURE(parameters)) then
+                return pinned.root_specialized_from == function
+            fi
+
+            return false
+        si
+    si
+si
