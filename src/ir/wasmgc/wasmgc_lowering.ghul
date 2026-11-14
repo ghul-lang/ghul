@@ -2944,11 +2944,35 @@ namespace IR.WasmGC is
                 gen_address(address.value)
             elif _optional_inner(address.value.type)? then
                 gen(address.value)
+            elif let boxed = _boxed_scalar_receiver(address.value) then
+                // A `ref` to a captured scalar local is the box the local
+                // lives in: a scalar's cell is a box of the same type, so the
+                // callee writes the one the closures share.
+                gen(boxed)
             elif _has_cell(address.value.type) then
                 gen_address(address.value)
             else
                 _report("a reference")
             fi
+        si
+
+        // The box `value` is read out of, where `value` reads a box's value
+        // and that box is the cell a reference to a value of its type is.
+        _boxed_scalar_receiver(value: Values.Value) -> Values.Value? is
+            if let member: Values.Load.INSTANCE_FIELD = value, from = member.from then
+                let box_type = _specialize(from.type)
+
+                if let storage = Semantic.BOX_STORAGE.member_of(box_type), cell = _registry.box_type(_specialize(value.type)) then
+                    if
+                        storage.unspecialized_symbol == member.symbol.unspecialized_symbol /\
+                        _registry.class_of(box_type) == cell
+                    then
+                        return from
+                    fi
+                fi
+            fi
+
+            return null
         si
 
         visit_address(address: Values.ADDRESS) is

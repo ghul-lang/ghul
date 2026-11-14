@@ -105,6 +105,8 @@ namespace Syntax.Process is
                 _check_pure_slots(call.location, as_written, call.arguments)
                 _note_call(call.location, as_written)
 
+                _check_call_on_captured_struct(call)
+
                 _logger.commit()
             catch e: Exception
                 call.compile_expressions_state.value = DUMMY(Semantic.Types.ERROR(), call.location)
@@ -252,8 +254,55 @@ namespace Syntax.Process is
             IoC.CONTAINER.instance.capability_checker.check(
                 Semantic.Capability.REFERENCE, reference.location, "references")
 
+            let target = _reference_operand_target
+
             _reference_operand_target = null
             _access.visit_reference(reference)
+
+            _check_reference_to_captured_local(reference, target)
+        si
+
+        // On wasm a `ref` is the cell its target lives in, and a captured
+        // local lives in a box that is a different kind of cell, so the
+        // callee could not write the value the closures share.
+        _check_reference_to_captured_local(reference: Trees.Expressions.REFERENCE, target: Semantic.Symbols.Symbol?) is
+            if IoC.CONTAINER.instance.build_flags.target != Compiler.Target.WASM \/ !isa Trees.Expressions.IDENTIFIER(reference.left) then
+                return
+            fi
+
+            if let local: Semantic.Symbols.LOCAL_VARIABLE = target /\ local.is_boxed then
+                _logger.error(
+                    reference.location,
+                    "on wasm, {local.name} cannot be passed by reference because a closure captures it",
+                    local.location,
+                    "help: pass a local of its own, and assign the result back")
+            fi
+        si
+
+        // On wasm a method of a struct is called on a copy of a captured
+        // local's value, so a method that can write the struct would change
+        // the copy and not the value the closures share.
+        _check_call_on_captured_struct(call: Trees.Expressions.CALL) is
+            if IoC.CONTAINER.instance.build_flags.target != Compiler.Target.WASM then
+                return
+            fi
+
+            let member = cast Trees.Expressions.MEMBER?(call.function)
+            let receiver = cast Trees.Expressions.IDENTIFIER?(member?.left)
+            let local = cast Semantic.Symbols.LOCAL_VARIABLE?(if receiver? then try_get_narrowing_target(receiver) else null fi)
+            let called = cast IR.Values.Call.STRUCT?(call.value)
+
+            if !local? \/ !called? \/ !local.is_boxed \/ called.function.is_store_free then
+                return
+            fi
+
+            if local.type?.is_value_type ?? false then
+                _logger.error(
+                    call.location,
+                    "on wasm, a method that can change {local.name} cannot be called on it because a closure captures it",
+                    local.location,
+                    "help: call it on a copy, and assign the copy back")
+            fi
         si
 
         // True while walking the operand of the `ref` that writes to

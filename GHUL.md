@@ -839,6 +839,8 @@ class HOLDER is
 si
 ```
 
+Code outside the type can read a field but not assign it or pass it by `ref`, unless the field is declared `field public`: `count: int field public` can be assigned and passed by `ref` from anywhere.
+
 *More detail on this section: [language details](docs/details.md#structs).*
 
 ### primary constructors

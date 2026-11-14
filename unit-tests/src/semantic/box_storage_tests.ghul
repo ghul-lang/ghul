@@ -1,0 +1,101 @@
+namespace Semantic.UnitTests is
+    use Collections.LIST
+
+    use Source.LOCATION
+
+    use Semantic.BOX_STORAGE
+    use Semantic.Symbols.CLASS
+    use Semantic.Symbols.CLASSY_GENERIC_ARGUMENT
+    use Semantic.Symbols.INSTANCE_FIELD
+    use Semantic.Symbols.INSTANCE_PROPERTY
+    use Semantic.Symbols.Symbol
+    use Semantic.Types.Type
+    use TestClass = Microsoft.VisualStudio.TestTools.UnitTesting.TestClassAttribute
+    use Test = Microsoft.VisualStudio.TestTools.UnitTesting.TestMethodAttribute
+    use Assertions
+
+    // Which member of a box type holds the boxed value: the one instance
+    // field or property whose type is the box's own type parameter, a
+    // property in preference to the backing field it implies. Whether the
+    // value is held in a field decides if a reference to a captured local
+    // can name it in place.
+    @TestClass()
+    class BOX_STORAGE_TESTS is
+        init() is si
+
+        loc() -> LOCATION => LOCATION("test.ghul", 1, 1, 1, 1)
+
+        a_box() -> CLASS =>
+            CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "BOX", LIST[string](["T"]), Semantic.BLOCK_SCOPE())
+
+        the_parameter(box: CLASS) -> Type =>
+            CLASSY_GENERIC_ARGUMENT(loc(), box, "T", 0).type!
+
+        another_type() -> Type =>
+            CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "OTHER", LIST[string](), Semantic.BLOCK_SCOPE()).type!
+
+        a_field(box: CLASS, name: string, type: Type) -> INSTANCE_FIELD is
+            let result = INSTANCE_FIELD(loc(), box, name)
+            result.set_type(type)
+            box.add_member(result)
+            return result
+        si
+
+        a_property(box: CLASS, name: string, type: Type) -> INSTANCE_PROPERTY is
+            let result = INSTANCE_PROPERTY(loc(), loc(), box, name, true, false)
+            result.set_type(type)
+            box.add_member(result)
+            return result
+        si
+
+        @Test()
+        A_field_of_the_parameter_type__is_the_storage() is
+            let box = a_box()
+            let stored = a_field(box, "value", the_parameter(box))
+
+            is_true(BOX_STORAGE.member_of(box.type) == stored)
+            is_true(BOX_STORAGE.is_field(box.type))
+        si
+
+        @Test()
+        A_property_of_the_parameter_type__is_the_storage_but_not_a_field() is
+            let box = a_box()
+            let property = a_property(box, "value", the_parameter(box))
+
+            is_true(BOX_STORAGE.member_of(box.type) == property)
+            is_false(BOX_STORAGE.is_field(box.type))
+        si
+
+        @Test()
+        A_property_with_its_backing_field__is_the_storage_in_preference_to_the_field() is
+            let box = a_box()
+            a_field(box, "$value", the_parameter(box))
+            let property = a_property(box, "value", the_parameter(box))
+
+            is_true(BOX_STORAGE.member_of(box.type) == property)
+            is_false(BOX_STORAGE.is_field(box.type))
+        si
+
+        @Test()
+        A_member_of_another_type__is_not_the_storage() is
+            let box = a_box()
+            a_field(box, "value", another_type())
+
+            is_null(BOX_STORAGE.member_of(box.type))
+            is_false(BOX_STORAGE.is_field(box.type))
+        si
+
+        @Test()
+        A_box_with_no_members__has_no_storage() is
+            let box = a_box()
+
+            is_null(BOX_STORAGE.member_of(box.type))
+        si
+
+        @Test()
+        No_box_type__has_no_storage() is
+            is_null(BOX_STORAGE.member_of(null))
+            is_false(BOX_STORAGE.is_field(null))
+        si
+    si
+si

@@ -51,7 +51,17 @@ namespace Syntax.Process is
         // calling its `apply`, can bracket their own walk with it.
         begin_marking() is
             _touched.clear()
+
+            _box_holds_field = Semantic.BOX_STORAGE.runtime_box_holds_field()
         si
+
+        // Whether the runtime's box holds its value in a field. Only then
+        // can a write in place - through a `ref`, by a mutating method of
+        // a struct the local holds, or to a member of it - reach a box
+        // the closure shares, so only then do those writes count as
+        // reassignments. A box with a property gives such a write a copy
+        // either way.
+        _box_holds_field: bool
 
         end_marking(want_boxing: bool) is
             // Sweep: a local is boxed iff (a) it was declared
@@ -127,6 +137,39 @@ namespace Syntax.Process is
             fi
         si
 
+        // A `ref` to a local, or to a member reached from one, lets the
+        // callee write the local in place, so it is a reassignment for
+        // the purposes of capture: a captured local written only through
+        // a `ref` must share one cell with its closures as one assigned
+        // directly does.
+        visit(reference: Trees.Expressions.REFERENCE) is
+            if _box_holds_field then
+                _note_root_reassigned(reference.left)
+            fi
+        si
+
+        // A method called on a local, or on a member reached from one, can
+        // write it in place when it holds a struct.
+        visit(call: Trees.Expressions.CALL) is
+            if _box_holds_field then
+                if let member: Trees.Expressions.MEMBER = call.function then
+                    _note_root_reassigned(member.left)
+                fi
+            fi
+        si
+
+        _note_root_reassigned(path: Trees.Expressions.Expression) is
+            let root mut = path
+
+            while let member: Trees.Expressions.MEMBER = root do
+                root = member.left
+            od
+
+            if let identifier: Trees.Expressions.IDENTIFIER = root then
+                _note_reassigned(identifier)
+            fi
+        si
+
         // Reassignment of a local: LHS resolves to a
         // LOCAL_VARIABLE. Field assignments (`obj.field = v`)
         // and the like get filtered by the LOCAL_VARIABLE cast.
@@ -135,32 +178,35 @@ namespace Syntax.Process is
             assignment.left.get_names_into(targets)
 
             for target in targets do
-                if !isa Trees.Expressions.IDENTIFIER(target) then
-                    continue
-                fi
-
-                let symbol = try_find(target.identifier)
-
-                if !symbol? \/ !isa LOCAL_VARIABLE(symbol) then
-                    continue
-                fi
-
-                _touched.add(symbol)
-                symbol.is_reassigned = true
-
-                // The assignment sits inside a function literal
-                // that did not declare the local, so it writes the
-                // enclosing scope's variable rather than one of its
-                // own. Asking for the enclosing closure rather than
-                // the enclosing function keeps a property accessor
-                // body - whose scope shape differs from the one the
-                // local was declared into - out of the question.
-                let closure = current_closure
-
-                if closure? /\ symbol.owner != closure then
-                    symbol.is_closure_assigned = true
+                if let identifier: Trees.Expressions.IDENTIFIER = target then
+                    _note_reassigned(identifier)
+                elif let member: Trees.Expressions.MEMBER = target /\ _box_holds_field then
+                    _note_root_reassigned(member.left)
                 fi
             od
+        si
+
+        _note_reassigned(target: Trees.Expressions.IDENTIFIER) is
+            let symbol = try_find(target.identifier)
+
+            if !symbol? \/ !isa LOCAL_VARIABLE(symbol) then
+                return
+            fi
+
+            _touched.add(symbol)
+            symbol.is_reassigned = true
+
+            // The write sits inside a function literal that did not
+            // declare the local, so it writes the enclosing scope's
+            // variable rather than one of its own. Asking for the
+            // enclosing closure rather than the enclosing function keeps
+            // a property accessor body - whose scope shape differs from
+            // the one the local was declared into - out of the question.
+            let closure = current_closure
+
+            if closure? /\ symbol.owner != closure then
+                symbol.is_closure_assigned = true
+            fi
         si
     si
 si
