@@ -41,7 +41,7 @@ The `llvm` target's code generation is at an early stage. It compiles:
 - the host operations, such as writing to the console
 - an `entry` that takes the command-line arguments as a `string[]` or an `ARRAY[string]`
 
-It reports anything else as `code generation for <construct> is not supported on the llvm target`. It reports this only in code that the program reaches. An executable compiles only what its entry point calls, so an unsupported construct elsewhere in a library is not reported. A namespace named `llvm` at the root of the program is an error on this target, reported as `a namespace named llvm not supported on the llvm target`, because LLVM reserves the names that start with `llvm.` for its own intrinsics. A namespace with that name nested inside another namespace, such as `Outer.llvm`, is valid.
+It reports anything else as `code generation for <construct> is not supported on the llvm target`. It reports this only in code that the program reaches. An executable compiles only what its entry point calls, so an unsupported construct elsewhere in a library is not reported. A namespace named `llvm` at the root of the program is an error on this target, reported as `a namespace named 'llvm' not supported on the 'llvm' target`, because LLVM reserves the names that start with `llvm.` for its own intrinsics. A namespace with that name nested inside another namespace, such as `Outer.llvm`, is valid.
 
 On the llvm target, an exception that nothing catches is reported with the frames it was thrown through, innermost first. The report is the `Unhandled exception.` line, followed by one `   at <name>` line for each frame. The wasm target does the same in a build with `--debug`. In such a build, a throw goes through the loader, so the exception records its stack. Without `--debug`, a throw stays inside the module, which is several times cheaper, and the report has no frames. A trap that the engine raises, such as an integer division by zero, has its frames in either case.
 
@@ -176,9 +176,9 @@ On wasm, the module must be empty, and the name is looked up in `options.externs
 
 On the `wasm` target, a .NET API exists only if the core library declares it. A program that calls any other .NET API gets a name-not-found error, as for any other missing name. A construct that the `wasm` target can never support is reported where it is written:
 
-- a pointer type, as `pointer types not supported on the wasm target`
-- an `IL.` pragma, which states a fact about an assembly, as `pragma IL.name not supported on the wasm target`
-- a mutable local that a closure captures, passed by `ref`, as `on wasm, n cannot be passed by reference because a closure captures it`, and a method that can change a struct, called on a captured struct local, as `on wasm, a method that can change c cannot be called on it because a closure captures it`. Both are reported where the call is written, with a help message that says to use a local of its own or a copy and assign the result back. On `dotnet` and `llvm` the callee's write reaches the closures, with `ghul.runtime` 42 or later
+- a pointer type, as `pointer types not supported on the 'wasm' target`
+- an `IL.` pragma, which states a fact about an assembly, as `pragma 'IL.name' not supported on the 'wasm' target`
+- a mutable local that a closure captures, passed by `ref`, as `on wasm, 'n' cannot be passed by reference because a closure captures it`, and a method that can change a struct, called on a captured struct local, as `on wasm, a method that can change 'c' cannot be called on it because a closure captures it`. Both are reported where the call is written, with a help message that says to use a local of its own or a copy and assign the result back. On `dotnet` and `llvm` the callee's write reaches the closures, with `ghul.runtime` 42 or later
 
 A construct that the target will support, but cannot generate code for yet, is reported at the function that contains it, as `code generation for <construct> is not supported on the wasm target`.
 
