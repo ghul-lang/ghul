@@ -955,6 +955,25 @@ namespace Syntax.Process is
 
             let int_type = _innate_symbol_lookup.get_int_type()
 
+            // A `from` source is counted by the loop, outside a state
+            // machine as for an array: there is no iterator, and its
+            // arguments are evaluated here, ahead of any stage's.
+            let counted_source =
+                if !(_current_state_machine_frame()? /\ `for.iterator_field?) then fusion.counted_source else null fi
+
+            let counted =
+                if let c = counted_source then
+                    IR.COUNTED_SEQUENCE(c.start, c.step, c.value_type, c.is_long, int_type, TEMP.get_next_id())
+                else
+                    null
+                fi
+
+            if let sequence = counted then
+                for value in sequence.setup() do
+                    add(value)
+                od
+            fi
+
             let indexed_source: TEMP? = if indexed? then TEMP(current_block, "fused_source", source.value!) else null fi
             let indexed_count: TEMP? =
                 if let i = indexed, s = indexed_source then
@@ -969,7 +988,7 @@ namespace Syntax.Process is
             // own iterator (e.g. a range).
             let iterator: Value mut
 
-            if indexed? then
+            if indexed? \/ counted? then
                 iterator = source.value!
             elif let reversed_fn = fusion.reversed_iterator_function then
                 iterator = reversed_fn.call(source.location, null, Collections.LIST[Value]([source.value!]), null, _function_caller)
@@ -993,7 +1012,7 @@ namespace Syntax.Process is
                     null
                 fi
 
-            let temp: TEMP? = if !state? /\ !indexed? then TEMP(current_block, "fused_iterator", iterator) else null fi
+            let temp: TEMP? = if !state? /\ !indexed? /\ !counted? then TEMP(current_block, "fused_iterator", iterator) else null fi
 
             if let s = state then
                 add(_build_frame_field_store(s.frame, s.iterator_field, iterator))
@@ -1025,7 +1044,20 @@ namespace Syntax.Process is
 
             let element: Value mut
 
-            if let i = indexed, s = indexed_source, c = indexed_count, x = indexed_index then
+            if let sequence = counted then
+                // The element is read before the sequence moves on, and
+                // the sequence moves on before any stage runs.
+                add(Values.BREAK(structured, BRANCH.Z, sequence.more.load()))
+
+                let read = TEMP(current_block, "fused_element", sequence.current.load())
+                let advance = IR.EXPANSION(_innate_symbol_lookup.get_void_type())
+
+                sequence.advance(advance, read.local)
+
+                add(advance.result)
+
+                element = read.load()
+            elif let i = indexed, s = indexed_source, c = indexed_count, x = indexed_index then
                 // The element is read before the index moves on, and the
                 // index moves on before any stage runs, so a stage that
                 // passes the element over goes on to the next one.

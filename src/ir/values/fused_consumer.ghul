@@ -239,6 +239,11 @@ namespace IR.Values is
         index_count_init: Value? public
         index_read: Value? public
 
+        // A source that is the arithmetic sequence `from` makes, counted
+        // by the loop itself: there is no iterator and no source local.
+        // Absent, the iterator or the index drives the loop.
+        counted: COUNTED_SEQUENCE? public
+
         // A collect over a source whose count is known before the loop,
         // through stages that keep it, sizes its result up front. For a
         // list result the count is the capacity `seed_init` was built
@@ -304,6 +309,12 @@ namespace IR.Values is
                 expansion.store(expansion.declare(local), init)
             fi
 
+            if let sequence = counted then
+                for value in sequence.setup() do
+                    expansion.add(value)
+                od
+            fi
+
             // Each stage's lambda delegate is built once before the loop; a
             // take/skip stage instead seeds its running counter with the
             // count evaluated once; a skip_while's flag starts on the
@@ -344,7 +355,9 @@ namespace IR.Values is
             // through the local (by address for a value-type iterator).
             let indexed = index? /\ index_count? /\ index_count_init? /\ index_read?
 
-            if indexed then
+            if counted? then
+                // The sequence's own locals were set up with the source.
+            elif indexed then
                 expansion.store(expansion.declare(index_count!), index_count_init!)
 
                 expansion.store(expansion.declare(index!), Literal.NUMBER(0, int_type))
@@ -367,7 +380,13 @@ namespace IR.Values is
                 fi
             od
 
-            if indexed then
+            if let sequence = counted then
+                // The element is read before the sequence moves on, and
+                // the sequence moves on before any stage runs.
+                expansion.exit_if(loop, IR.BRANCH.Z, sequence.more.load())
+                expansion.store(expansion.declare(element), sequence.current.load())
+                sequence.advance(expansion, element)
+            elif indexed then
                 // The element is read before the index moves on, and the
                 // index moves on before any stage runs, so a stage that
                 // passes the element over goes on to the next one.

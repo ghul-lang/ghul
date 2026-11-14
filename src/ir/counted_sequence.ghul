@@ -1,0 +1,161 @@
+namespace IR is
+    use Semantic.Types.Type
+
+    use Values
+
+    // The arithmetic sequence `Ghul.Pipes.from` makes, counted by a loop in
+    // place of the pipe object that would produce it. The loop reads
+    // `current`, which starts at the first value, and calls `advance` once
+    // it has taken the value; `more` is zero once the value just taken was
+    // the last the type holds.
+    //
+    // The sequence ends where `COUNT_PIPE.move_next` ends: on the last
+    // value before a step that would wrap past the type's largest value,
+    // or its smallest for a negative step. A step of zero never ends.
+    class COUNTED_SEQUENCE is
+        /// The value the next element is read from.
+        current: LOCAL
+
+        /// Non-zero while there is a value left to take.
+        more: LOCAL
+
+        _start: Value
+        _step: Value?
+        _step_local: LOCAL?
+        _step_sign: int?
+        _value_type: Type
+        _is_long: bool
+        _int_type: Type
+
+        /// The sequence from `start` in steps of `step`, 1 where that is null.
+        ///
+        /// - start: the first value
+        /// - step: the step, or null for 1
+        /// - value_type: `int` or `long`
+        /// - is_long: whether `value_type` is `long`
+        /// - int_type: `int`, the type of `more`
+        /// - id: makes the sequence's locals unique
+        init(start: Value, step: Value?, value_type: Type, is_long: bool, int_type: Type, id: int) is
+            _start = start
+            _step = step
+            _value_type = value_type
+            _is_long = is_long
+            _int_type = int_type
+            _step_sign = _sign_of(step)
+
+            current = LOCAL(".fc_from.{id}", value_type)
+            more = LOCAL(".fc_more.{id}", int_type)
+
+            if !_step_sign? then
+                _step_local = LOCAL(".fc_step.{id}", value_type)
+            fi
+        si
+
+        /// The values that evaluate the start and the step, once and in
+        /// that order, and leave the sequence ready to read.
+        setup() -> Collections.LIST[Value] is
+            let values = Collections.LIST[Value]()
+
+            values.add(DECLARE_LOCAL(current))
+            values.add(_start)
+            values.add(STORE_TEMP(current))
+
+            if let local = _step_local then
+                values.add(DECLARE_LOCAL(local))
+                values.add(_step!)
+                values.add(STORE_TEMP(local))
+            fi
+
+            values.add(DECLARE_LOCAL(more))
+            values.add(Literal.NUMBER(1, _int_type))
+            values.add(STORE_TEMP(more))
+
+            return values
+        si
+
+        /// Moves `current` on by the step, and clears `more` when that
+        /// wrapped, which is when the new value lies on the wrong side of
+        /// `previous`, the value just taken.
+        advance(expansion: EXPANSION, previous: LOCAL) is
+            let sign = _step_sign
+
+            if sign? /\ sign! == 0 then
+                return
+            fi
+
+            expansion.store(
+                current,
+                ARITHMETIC(
+                    ArithmeticOperation.ADD,
+                    current.load(),
+                    _step_value(),
+                    _value_type).unmarked())
+
+            if sign? then
+                _clear_on_wrap(expansion, previous, sign! > 0)
+            else
+                let rising = expansion.region()
+
+                expansion.exit_if(rising, BRANCH.LE, _step_local!.load(), _number(0))
+                _clear_on_wrap(expansion, previous, true)
+                expansion.close(rising)
+
+                let falling = expansion.region()
+
+                expansion.exit_if(falling, BRANCH.GE, _step_local!.load(), _number(0))
+                _clear_on_wrap(expansion, previous, false)
+                expansion.close(falling)
+            fi
+        si
+
+        _clear_on_wrap(expansion: EXPANSION, previous: LOCAL, rising: bool) is
+            let wrapped = expansion.region()
+
+            expansion.exit_if(wrapped, if rising then BRANCH.GE else BRANCH.LE fi, current.load(), previous.load())
+            expansion.store(more, Literal.NUMBER(0, _int_type))
+            expansion.close(wrapped)
+        si
+
+        _step_value() -> Value =>
+            if let local = _step_local then
+                local.load()
+            elif let step = _step then
+                step
+            else
+                _number(1)
+            fi
+
+        _number(value: int) -> Value =>
+            if _is_long then
+                Literal.NUMBER(long(value), _value_type)
+            else
+                Literal.NUMBER(value, _value_type)
+            fi
+
+        // The sign of a step known when the program is compiled: 1, -1 or
+        // 0, or null where the step is only known when it runs.
+        _sign_of(step: Value?) -> int? is
+            if !step? then
+                return 1
+            fi
+
+            if let number: Literal.NUMBER = step then
+                if number.narrowing? then
+                    return null
+                fi
+
+                if let i4: Literal.CONSTANT.I4 = number.constant then
+                    return _sign(long(i4.value))
+                fi
+
+                if let i8: Literal.CONSTANT.I8 = number.constant then
+                    return _sign(i8.value)
+                fi
+            fi
+
+            return null
+        si
+
+        _sign(value: long) -> int => if value > 0L then 1 elif value < 0L then -1 else 0 fi
+    si
+si

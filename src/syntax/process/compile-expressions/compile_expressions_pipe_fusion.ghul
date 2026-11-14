@@ -435,6 +435,14 @@ namespace Syntax.Process is
             // or, where it has none, by position from the end.
             if reads_by_position /\ !fusion.reversed_source then
                 fusion.indexed_source = INDEXED_SOURCE.of(source_value.type, _innate_symbol_lookup)
+
+                if !fusion.indexed_source? then
+                    fusion.counted_source = COUNTED_SOURCE.of(
+                        source_value,
+                        cast Semantic.Symbols.Symbol?(_pipes_owner_symbol),
+                        _innate_symbol_lookup.get_int_type(),
+                        _innate_symbol_lookup.get_long_type())
+                fi
             fi
 
             let to_inline = Collections.LIST[PIPE_FUSION_STAGE]()
@@ -1065,6 +1073,20 @@ namespace Syntax.Process is
         // follow in FUSED_CONSUMER.expand, in the order the unfused calls
         // take them.
         _spill_source(fused: IR.Values.FUSED_CONSUMER, plan: PIPE_FUSION) is
+            // A counted source has no sequence object to evaluate: its
+            // arguments are evaluated in its place, first, by the loop.
+            if let counted = plan.counted_source then
+                fused.counted = IR.COUNTED_SEQUENCE(
+                    counted.start,
+                    counted.step,
+                    counted.value_type,
+                    counted.is_long,
+                    _innate_symbol_lookup.get_int_type(),
+                    _next_fused_local_id())
+
+                return
+            fi
+
             let source_value = plan.source.value!
 
             let source = IR.LOCAL(".fc_source.{_next_fused_local_id()}", source_value.type!)
@@ -1133,7 +1155,7 @@ namespace Syntax.Process is
             consumer_kind: string,
             element_type: Type
         ) is
-            if !_stages_keep_count(plan) then
+            if !_stages_keep_count(plan) \/ fused.counted? then
                 return
             fi
 
