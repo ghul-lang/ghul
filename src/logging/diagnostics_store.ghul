@@ -46,6 +46,11 @@ namespace Logging is
         // Other locations this diagnostic references. Null when there are
         // none. See RELATED_LOCATION.
         related: Collections.LIST[RELATED_LOCATION]?
+        // True for a diagnostic that is an error in its own right. The
+        // human-readable text leaves its code off, because the code reaches
+        // readers through the machine-readable output; a warning promoted to
+        // an error keeps it there, since the code is how to suppress it.
+        hide_code: bool
         is_hint: bool => (severity == DiagnosticSeverity.HINT)
         is_fatal: bool => (severity == DiagnosticSeverity.FATAL \/ severity == DiagnosticSeverity.EXCEPTION)
 
@@ -63,6 +68,7 @@ namespace Logging is
             self.code = null
             self.text = text
             self.related = null
+            self.hide_code = false
         si
 
         init(
@@ -80,6 +86,7 @@ namespace Logging is
             self.code = code
             self.text = text
             self.related = null
+            self.hide_code = false
         si
 
         init(
@@ -98,6 +105,46 @@ namespace Logging is
             self.code = code
             self.text = text
             self.related = related
+            self.hide_code = false
+        si
+
+        init(
+            is_analysis: bool,
+            is_compile_expressions: bool,
+            severity: DiagnosticSeverity,
+            location: LOCATION,
+            code: string?,
+            text: string,
+            hide_code: bool
+        ) is
+            self.is_analysis = is_analysis
+            self.is_compile_expressions = is_compile_expressions
+            self.severity = severity
+            self.location = location
+            self.code = code
+            self.text = text
+            self.related = null
+            self.hide_code = hide_code
+        si
+
+        init(
+            is_analysis: bool,
+            is_compile_expressions: bool,
+            severity: DiagnosticSeverity,
+            location: LOCATION,
+            code: string?,
+            text: string,
+            related: Collections.LIST[RELATED_LOCATION]?,
+            hide_code: bool
+        ) is
+            self.is_analysis = is_analysis
+            self.is_compile_expressions = is_compile_expressions
+            self.severity = severity
+            self.location = location
+            self.code = code
+            self.text = text
+            self.related = related
+            self.hide_code = hide_code
         si
 
         to_string() -> string => "{severity} {location} {text}"
@@ -193,7 +240,7 @@ namespace Logging is
             let location = diagnostic.location
             let severity = diagnostic.severity.to_string().to_lower()
             let message =
-                if diagnostic.code? then
+                if diagnostic.code? /\ !diagnostic.hide_code then
                     "[{diagnostic.code}] {diagnostic.text}"
                 else
                     diagnostic.text
@@ -1094,30 +1141,30 @@ namespace Logging is
             top.add_diagnostic_message(location.file_name, DIAGNOSTIC_MESSAGE(is_analysis, is_compile_expressions, DiagnosticSeverity.FATAL, location, message))
         si
 
-        error(location: LOCATION, message: string) is
+        error(location: LOCATION, code: string, message: string) is
             if let listen = DIAGNOSTIC_TRACE.on_error then
                 listen(location, message)
             fi
 
-            top.add_diagnostic_message(location.file_name, DIAGNOSTIC_MESSAGE(is_analysis, is_compile_expressions, DiagnosticSeverity.ERROR, location, message))
+            top.add_diagnostic_message(location.file_name, DIAGNOSTIC_MESSAGE(is_analysis, is_compile_expressions, DiagnosticSeverity.ERROR, location, code, message, true))
         si
 
-        error(location: LOCATION, message: string, related_location: LOCATION, related_message: string) is
+        error(location: LOCATION, code: string, message: string, related_location: LOCATION, related_message: string) is
             let related = LIST[RELATED_LOCATION]()
 
             related.add(RELATED_LOCATION(related_location, related_message))
 
-            error(location, message, related)
+            error(location, code, message, related)
         si
 
-        error(location: LOCATION, message: string, related: LIST[RELATED_LOCATION]) is
+        error(location: LOCATION, code: string, message: string, related: LIST[RELATED_LOCATION]) is
             if let usable = _usable_related(related) then
                 top.add_diagnostic_message(
                     location.file_name,
-                    DIAGNOSTIC_MESSAGE(is_analysis, is_compile_expressions, DiagnosticSeverity.ERROR, location, null, message, usable)
+                    DIAGNOSTIC_MESSAGE(is_analysis, is_compile_expressions, DiagnosticSeverity.ERROR, location, code, message, usable, true)
                 )
             else
-                error(location, message)
+                error(location, code, message)
             fi
         si
 
@@ -1151,26 +1198,12 @@ namespace Logging is
         // and lose it. Unlike a parse error — which the parser regenerates on
         // every re-walk and so must roll back to avoid duplicates — a lexer
         // error cannot duplicate, because nothing regenerates it.
-        lexer_error(location: LOCATION, message: string) is
-            environment_error(location, message)
+        lexer_error(location: LOCATION, code: string, message: string) is
+            environment_error(location, code, message)
         si
 
-        environment_error(location: LOCATION, message: string) is
-            _base_state.add_diagnostic_message(location.file_name, DIAGNOSTIC_MESSAGE(is_analysis, is_compile_expressions, DiagnosticSeverity.ERROR, location, message))
-        si
-
-        warn(location: LOCATION, message: string) is
-            if _is_quiet(location) then
-                return
-            fi
-
-            let severity =
-                if _all_warnings_are_errors then
-                    DiagnosticSeverity.ERROR
-                else
-                    DiagnosticSeverity.WARN
-                fi
-            top.add_diagnostic_message(location.file_name, DIAGNOSTIC_MESSAGE(is_analysis, is_compile_expressions, severity, location, message))
+        environment_error(location: LOCATION, code: string, message: string) is
+            _base_state.add_diagnostic_message(location.file_name, DIAGNOSTIC_MESSAGE(is_analysis, is_compile_expressions, DiagnosticSeverity.ERROR, location, code, message, true))
         si
 
         warn(location: LOCATION, code: string, message: string) is
@@ -1277,14 +1310,6 @@ namespace Logging is
             )
         si
 
-        info(location: LOCATION, message: string) is
-            if _is_quiet(location) then
-                return
-            fi
-
-            top.add_diagnostic_message(location.file_name, DIAGNOSTIC_MESSAGE(is_analysis, is_compile_expressions, DiagnosticSeverity.INFO, location, message))
-        si
-
         info(location: LOCATION, code: string, message: string) is
             if _is_quiet(location) then
                 return
@@ -1295,14 +1320,6 @@ namespace Logging is
             fi
 
             top.add_diagnostic_message(location.file_name, DIAGNOSTIC_MESSAGE(is_analysis, is_compile_expressions, DiagnosticSeverity.INFO, location, code, message))
-        si
-
-        hint(location: LOCATION, message: string) is
-            if _is_quiet(location) then
-                return
-            fi
-
-            top.add_diagnostic_message(location.file_name, DIAGNOSTIC_MESSAGE(is_analysis, is_compile_expressions, DiagnosticSeverity.HINT, location, message))
         si
 
         hint(location: LOCATION, code: string, message: string) is
