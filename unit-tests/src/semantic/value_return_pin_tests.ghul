@@ -10,6 +10,7 @@ namespace Semantic.UnitTests is
     use Semantic.Types.INFERRED_VARIABLE_TYPE
     use Semantic.Types.MAYBE
     use Semantic.Types.NULLABLE
+    use Semantic.Types.TUPLE
     use Semantic.Types.Type
     use Semantic.VALUE_RETURN_PIN
 
@@ -105,6 +106,55 @@ namespace Semantic.UnitTests is
             lookup.get_optional_type(produced) |> returns(expected, null)
 
             are_same(expected, VALUE_RETURN_PIN.of(slot, produced, lookup))
+        si
+
+        // `(first, second)` over a two-element value tuple.
+        tuple_of(value_tuple: STRUCT, first: Type, second: Type) -> Type =>
+            TUPLE(loc(), value_tuple, Collections.LIST[Type]([first, second]), null)
+
+        // A class and a class derived from it.
+        wider_and_narrower() -> (wider: Type, narrower: Type) is
+            let wider = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "WIDER", System.Array.empty[string](), Semantic.BLOCK_SCOPE())
+            let narrower = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "NARROWER", System.Array.empty[string](), Semantic.BLOCK_SCOPE())
+            narrower.add_ancestor(wider.type!)
+
+            return (wider.type!, narrower.type!)
+        si
+
+        @Test()
+        Calling__of__for_a_tuple_body_wider_than_the_optional_slots_tuple__returns_the_optional_of_the_body() is
+            // The slot `(PRODUCED, NARROWER)?` took NARROWER from another
+            // argument of the call, which gave its least type. A body
+            // producing `(PRODUCED, WIDER)` fits once that type argument
+            // widens, so the return is the optional of the body's tuple,
+            // which the call binds the type argument against.
+            let value_tuple = STRUCT(loc(), loc(), Semantic.BLOCK_SCOPE(), "ValueTuple", ["T1", "T2"], Semantic.BLOCK_SCOPE())
+            let element = a_struct("PRODUCED")
+            let classes = wider_and_narrower()
+
+            let slot = nullable_over(tuple_of(value_tuple, element, classes.narrower))
+            let produced = tuple_of(value_tuple, element, classes.wider)
+
+            let expected = nullable_over(produced)
+
+            let lookup = NSubstitute.Substitute.`for`[Semantic.Lookups.InnateSymbolLookup](System.Array.empty`[object]())
+            lookup.get_optional_type(produced) |> returns(expected, null)
+
+            are_same(expected, VALUE_RETURN_PIN.of(slot, produced, lookup))
+        si
+
+        @Test()
+        Calling__of__for_a_tuple_body_narrower_than_the_optional_slots_tuple__returns_null() is
+            // The body converts to the slot's tuple where it is returned,
+            // and no type argument has to move for it to fit.
+            let value_tuple = STRUCT(loc(), loc(), Semantic.BLOCK_SCOPE(), "ValueTuple", ["T1", "T2"], Semantic.BLOCK_SCOPE())
+            let element = a_struct("PRODUCED")
+            let classes = wider_and_narrower()
+
+            let slot = nullable_over(tuple_of(value_tuple, element, classes.wider))
+            let produced = tuple_of(value_tuple, element, classes.narrower)
+
+            is_null(VALUE_RETURN_PIN.of(slot, produced, lookup()))
         si
 
         @Test()
