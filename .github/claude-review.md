@@ -92,8 +92,8 @@ Every new or edited `error`/`warn`/`info`/`hint` call (and `set_constraint` mess
 
 - **No backticks, ever.** Not around a literal keyword (`await`, `class`, `default`) and not around an interpolated identifier (`{name}`). This is the one violated most often - flag it on sight. A backtick as the language's own reserved-word-escape prefix inside an interpolation (`` {u.`use} ``) doesn't render and is fine.
 - All-lowercase opening word, no trailing period, no em-dashes.
-- Interpolated identifiers and types appear bare in `{...}` - never quoted.
-- Only non-alphanumeric tokens (operators, punctuation, escape sequences) get single quotes, e.g. `'{{'`, `'{operator}'`.
+- Quote source text, leave the compiler's own words bare. In single quotes: names the user wrote, every type whatever its shape, keywords and punctuation, signatures inside a sentence, and paths, e.g. `'{name}'`, `'{type}'`, `'{{'`. Each operand on its own: `'{a}' and '{b}'`. Bare: categories of token (`identifier`, `int literal`), counts and positions, free text and nested messages, and keywords used as ordinary words (`static method`). A signature alone on its own line stays bare.
+- Values arrive unquoted; the message literal writes the quotes. A token's name goes through `TOKEN_NAMES.quoted`, which quotes a keyword or punctuation and leaves a category bare. Flag a value quoted twice.
 - Terse - a noun phrase or short fragment, subject usually implicit.
 - No user advice (`try`, `consider`, `rewrite as`, `did you mean`) folded into the main message string. `error`/`warn` accept a related location and message (`error(location, message, related_location, related_message)`, conventionally prefixed `"help: ..."`) - that's the sanctioned place for a fix hint, and even there it must be **specific**: never just a generally-plausible-sounding suggestion. Reject a help string that assumes something about the flagged value or code shape the surrounding logic hasn't actually established - e.g. "copy into a local variable" is wrong advice where the value is already a local, or where the code checked can't tell either way.
 - No second-person, no apologies, no `please`.

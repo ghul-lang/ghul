@@ -1718,7 +1718,7 @@ If the last statement has no value (a `let`, `for`, `while`, `assert`, ...), the
 
 - The least upper bound of the other values becomes optional. `(let s = f(); return s; null)` with a `string` return is `string?`.
 - When every value is `null`, the block has the type that the context expects.
-- When every value is `null` and the context expects no type, the block is an error: `all val-block contributions are null`.
+- When every value is `null` and the context expects no type, the block is an error: `all 'val'-block contributions are 'null'`.
 
 Nested blocks follow the innermost rule. A `return` in an inner block exits only the inner block, and the outer block continues.
 
