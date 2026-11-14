@@ -1,0 +1,90 @@
+namespace Logging.UnitTests is
+    use Collections
+
+    use Ghul.Pipes
+    use System.Text.RegularExpressions.Regex
+    use TestClass = Microsoft.VisualStudio.TestTools.UnitTesting.TestClassAttribute
+    use Test = Microsoft.VisualStudio.TestTools.UnitTesting.TestMethodAttribute
+
+    // Every diagnostic carries a slug, and the slugs are listed in
+    // src/logging/diagnostic_slugs.txt. A call without a slug does not
+    // compile, so these tests cover the rest: no slug is listed twice, each
+    // is kebab-case, one passed to the logger as a literal is listed, and
+    // none is listed that no source file uses.
+    @TestClass()
+    class DIAGNOSTIC_SLUGS_TESTS is
+        init() is si
+
+        _source_root() -> string is
+            let directory: string? mut = System.AppContext.base_directory
+
+            while directory? do
+                if IO.File.exists(IO.Path.combine(IO.Path.combine(IO.Path.combine(directory, "src"), "logging"), "diagnostic_slugs.txt")) then
+                    return directory
+                fi
+
+                directory = IO.Path.get_directory_name(directory)
+            od
+
+            throw Ghul.Exception("cannot find the compiler source above the test directory")
+        si
+
+        _registered() -> LIST[string] is
+            let path = IO.Path.combine(IO.Path.combine(IO.Path.combine(_source_root(), "src"), "logging"), "diagnostic_slugs.txt")
+
+            IO.File.read_all_lines(path) |> map(line => line.trim()) |> filter(line => line.length > 0) |> LIST()
+        si
+
+        _sources() -> LIST[string] is
+            let src = IO.Path.combine(_source_root(), "src")
+
+            IO.Directory.get_files(src, "*.ghul", IO.SearchOption.ALL_DIRECTORIES) |> LIST()
+        si
+
+        _read(path: string) -> string => IO.File.read_all_text(path)
+
+        @Test()
+        no_slug_is_registered_twice() is
+            let seen = SET[string]()
+
+            for slug in _registered() do
+                Assertions.is_true(seen.add(slug), "registered twice: {slug}")
+            od
+        si
+
+        @Test()
+        every_registered_slug_is_kebab_case() is
+            let pattern = Regex("^[a-z][a-z0-9]*(-[a-z0-9]+)*$")
+
+            for slug in _registered() do
+                Assertions.is_true(pattern.is_match(slug), "not kebab-case: {slug}")
+            od
+        si
+
+        @Test()
+        every_slug_passed_to_the_logger_as_a_literal_is_registered() is
+            let registered = SET[string](_registered())
+            let call =
+                "\\.\\s*(?:error|warn|info|hint|lexer_error|environment_error)\\s*\\(\\s*[^,()]+(?:\\([^()]*\\))?[^,()]*,\\s*\"([a-z][a-z0-9]*(?:-[a-z0-9]+)*)\"\\s*,"
+
+            for path in _sources() do
+                if !path.contains("logging") then
+                    for found in Regex.matches(_read(path), call) do
+                        let slug = found.groups[1].value
+
+                        Assertions.is_true(registered.contains(slug), "{path}: slug not registered: {slug}")
+                    od
+                fi
+            od
+        si
+
+        @Test()
+        every_registered_slug_is_used_in_the_source() is
+            let all = string.join("\n", _sources() |> map(path => _read(path)))
+
+            for slug in _registered() do
+                Assertions.is_true(all.contains("\"{slug}\""), "registered but never used: {slug}")
+            od
+        si
+    si
+si
