@@ -143,7 +143,7 @@ A bare `let` and a `let ... mut` can both take their value from `_`, the default
 - `let i = _` takes its type from the local's own annotation or from later use. `_[T]` gives the type explicitly.
 - A bare `_` as a call argument takes the parameter type from the callee, when the call resolves to a single overload. If the parameter has a declared .NET default value, `_` takes that value, not the type's zero value. So passing `_` by position behaves exactly like omitting the same argument by name.
 - For a `T ref` parameter, `_` discards what the callee writes. The callee receives the address of a new local that holds the default of `T`. So `System.Version.try_parse("1.2", _)` tests the text without keeping the result.
-- A `_` argument is never used to infer a generic type parameter. A type parameter that only the `_` argument could decide is an error (`cannot infer type of default here`), and so is a call that stays ambiguous between overloads.
+- A `_` argument is never used to infer a generic type parameter. A type parameter that only the `_` argument could decide is an error (`cannot infer type of 'default' here`), and so is a call that stays ambiguous between overloads.
 - `_[T]` always means the zero value of `T`, in every position. It never takes a callee's declared default.
 
 `_(...)`, with an argument list, *constructs* the type that the context expects, instead of giving its zero value. So code can build a value without writing its type a second time:
