@@ -135,7 +135,7 @@ namespace Syntax.Process is
             // declaration that is missing the `= expr`.
             for v in `let.variables do
                 if !v.initializer? /\ !v.is_mutable_marked then
-                    _logger.error(v.location, "local value must be initialized")
+                    _logger.error(v.location, "uninitialized-local-value", "local value must be initialized")
                 fi
             od
 
@@ -165,7 +165,7 @@ namespace Syntax.Process is
                     // another. `let x mut = use E` says the same thing
                     // and can be.
                     if v.is_mutable_marked then
-                        _logger.error(v.location, "local declared with let use cannot be mut")
+                        _logger.error(v.location, "mut-use-local", "local declared with let use cannot be mut")
                     fi
 
                     for name in v.names do
@@ -178,7 +178,7 @@ namespace Syntax.Process is
                             let type = variable.type
 
                             if type? /\ !idisposable.is_assignable_from(type) then
-                                _logger.error(name.location, "not disposable")
+                                _logger.error(name.location, "not-disposable", "not disposable")
                             fi
 
                             _visitor.current_statement_list.add_variable_to_dispose(variable)
@@ -191,7 +191,7 @@ namespace Syntax.Process is
         pre_simple_left(left: Trees.Expressions.SIMPLE_LEFT_EXPRESSION) -> bool is
             if let left.value? then
                 if !value.is_consumable then
-                    _logger.error(left.location, "cannot use this here")
+                    _logger.error(left.location, "this-used-in-invalid-context", "cannot use this here")
                     return false
                 fi
 
@@ -214,7 +214,7 @@ namespace Syntax.Process is
             let value_type = value.type
 
             if !expression_value.is_consumable then
-                _logger.error(left.location, "cannot assign to this")
+                _logger.error(left.location, "cannot-assign-to-target", "cannot assign to this")
                 return
             fi
 
@@ -250,7 +250,7 @@ namespace Syntax.Process is
 
             if !lhs_type.is_assignable_from(value_type) then
                 use IoC.CONTAINER.instance.name_display.qualifying_alike(value_type, lhs_type)
-                _logger.error(left.assign_location, "{value_type} is not assignable to {lhs_type}")
+                _logger.error(left.assign_location, "not-assignable", "{value_type} is not assignable to {lhs_type}")
                 return
             fi
 
@@ -329,7 +329,7 @@ namespace Syntax.Process is
             let host = _visitor.disposal_host
 
             if !host? then
-                _logger.error(let_in.location, "cannot dispose a local declared here")
+                _logger.error(let_in.location, "dispose-local-invalid", "cannot dispose a local declared here")
                 return
             fi
 
@@ -341,7 +341,7 @@ namespace Syntax.Process is
                         variable.is_disposed = true
 
                         if variable.type? /\ !idisposable.is_assignable_from(variable.type) then
-                            _logger.error(name.location, "not disposable")
+                            _logger.error(name.location, "not-disposable", "not disposable")
                         fi
 
                         host.add_let_in_disposal(variable)
@@ -400,7 +400,7 @@ namespace Syntax.Process is
             fi
 
             if !right_value.is_consumable then
-                _logger.error(assignment.right.location, "cannot use this here")
+                _logger.error(assignment.right.location, "this-used-in-invalid-context", "cannot use this here")
                 assignment.left.compile_expressions_state.value = IR.Values.DUMMY(Semantic.Types.ERROR(), assignment.right.location)
             else
                 assignment.left.compile_expressions_state.value = right_value
@@ -784,13 +784,13 @@ namespace Syntax.Process is
                     inner_value.type? /\
                     inner_value.type.has_function_generic_argument_foreign_to(_symbol_table.current_function)
                 then
-                    _logger.error(expression.expression.location, "cannot infer type here")
+                    _logger.error(expression.expression.location, "cannot-infer-type", "cannot infer type here")
                 fi
             fi
 
             if !expression.want_value then
                 if expression.expression.must_be_consumed then
-                    _logger.error(expression.expression.location, "{expression.expression.description} result is not used")
+                    _logger.error(expression.expression.location, "expression-result-unused", "{expression.expression.description} result is not used")
                 fi
 
                 // A re-walk that no longer wants a value (e.g. the
@@ -932,7 +932,7 @@ namespace Syntax.Process is
                                         use IoC.CONTAINER.instance.name_display.qualifying_alike(value_type, expected)
                                         _logger.error(
                                             expression.location,
-                                            string.format(error_message, value_type, expected)
+                                            "return-value-type-mismatch-block", string.format(error_message, value_type, expected)
                                         )
                                         return
                                     fi
@@ -957,7 +957,7 @@ namespace Syntax.Process is
                     // diagnostic path so the IL still verifies.
                     if let expected = block.expected_type then
                         if !expected.is_void then
-                            _logger.error(r.location, "return without value from val block requiring a value")
+                            _logger.error(r.location, "return-without-value-in-val-block", "return without value from val block requiring a value")
                         fi
                     fi
                 fi
@@ -1078,7 +1078,7 @@ namespace Syntax.Process is
                         _logger
                             .error(
                                 r.expression!.location,
-                                "cannot return value from function of void type"
+                                "return-value-from-void-function", "cannot return value from function of void type"
                             )
                     elif !function.return_type!.is_assignable_from(value.type!) then
                         // Implicit T → TASK[T] widening at return position
@@ -1109,7 +1109,7 @@ namespace Syntax.Process is
                                 _logger
                                     .error(
                                         r.expression!.location,
-                                        "cannot return value of type {value.type} where {function.return_type} expected"
+                                        "return-value-type-mismatch", "cannot return value of type {value.type} where {function.return_type} expected"
                                     )
                             fi
                         else
@@ -1117,7 +1117,7 @@ namespace Syntax.Process is
                             _logger
                                 .error(
                                     r.expression!.location,
-                                    "cannot return value of type {value.type} where {function.return_type} expected"
+                                    "return-value-type-mismatch", "cannot return value of type {value.type} where {function.return_type} expected"
                                 )
                         fi
                     fi
@@ -1196,7 +1196,7 @@ namespace Syntax.Process is
                     if !_try_await_returned_value(r, expression_value.type!, null) then
                         _logger.error(
                             r.expression!.location,
-                            "cannot return value from function of void type"
+                            "return-value-from-void-function", "cannot return value from function of void type"
                         )
                     fi
                     return
@@ -1235,7 +1235,7 @@ namespace Syntax.Process is
                     use IoC.CONTAINER.instance.name_display.qualifying_alike(expression_value.type, element_type)
                     _logger.error(
                         r.expression!.location,
-                        "cannot return value of type {expression_value.type} where {element_type} expected"
+                        "return-value-type-mismatch", "cannot return value of type {expression_value.type} where {element_type} expected"
                     )
                     return
                 fi

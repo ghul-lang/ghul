@@ -75,7 +75,7 @@ namespace Syntax.Process is
             if name =~ "test" \/ name =~ "test_class" \/ name =~ "test_method" then
                 _logger.error(
                     pragma.name.location,
-                    "{name} is not supported",
+                    "unsupported-test-pragma", "{name} is not supported",
                     pragma.name.location,
                     "help: use the test framework's attributes, as in @TestClass() on the class and @TestMethod() on the method")
                 return
@@ -178,7 +178,7 @@ namespace Syntax.Process is
             let attribute_type = resolve_attribute_type(pragma.name)
 
             if !attribute_type? then
-                _logger.error(pragma.name.location, "unknown attribute {name}")
+                _logger.error(pragma.name.location, "unknown-attribute", "unknown attribute {name}")
                 return
             fi
 
@@ -343,7 +343,7 @@ namespace Syntax.Process is
             let library_sources = IoC.CONTAINER.instance.build_flags.library_sources
 
             if library_sources? /\ !library_sources.can_declare_core(pragma.location.file_name) then
-                _logger.error(pragma.name.location, "trusted_store_free is only accepted in a library source")
+                _logger.error(pragma.name.location, "trusted-store-free-outside-library", "trusted_store_free is only accepted in a library source")
                 return
             fi
 
@@ -354,7 +354,7 @@ namespace Syntax.Process is
                     getter.mark_trusted_store_free()
                 fi
             else
-                _logger.error(pragma.name.location, "trusted_store_free applies only to a function, method or property")
+                _logger.error(pragma.name.location, "trusted-store-free-wrong-target", "trusted_store_free applies only to a function, method or property")
             fi
         si
 
@@ -367,7 +367,7 @@ namespace Syntax.Process is
             let library_sources = IoC.CONTAINER.instance.build_flags.library_sources
 
             if library_sources? /\ !library_sources.can_declare_core(pragma.location.file_name) then
-                _logger.error(pragma.name.location, "finalizer is only accepted in a library source")
+                _logger.error(pragma.name.location, "finalizer-outside-library", "finalizer is only accepted in a library source")
                 return
             fi
 
@@ -375,13 +375,13 @@ namespace Syntax.Process is
                 function.is_instance /\ function.arguments.count == 0 /\ owner.is_class /\ !owner.is_generic
             then
                 if owner.finalizer? then
-                    _logger.error(pragma.name.location, "a class declares at most one finalizer")
+                    _logger.error(pragma.name.location, "duplicate-finalizer", "a class declares at most one finalizer")
                     return
                 fi
 
                 owner.finalizer = cast Semantic.Symbols.Function?(function.root_specialized_from) ?? function
             else
-                _logger.error(pragma.name.location, "finalizer applies only to an instance method of a non-generic class, taking no arguments")
+                _logger.error(pragma.name.location, "finalizer-wrong-target", "finalizer applies only to an instance method of a non-generic class, taking no arguments")
             fi
         si
 
@@ -391,7 +391,7 @@ namespace Syntax.Process is
             if let classy: Semantic.Symbols.Classy = target then
                 classy.is_marked_reflected = true
             else
-                _logger.error(pragma.name.location, "reflected applies only to a class, struct, trait, union or enum")
+                _logger.error(pragma.name.location, "reflected-wrong-target", "reflected applies only to a class, struct, trait, union or enum")
             fi
         si
 
@@ -404,17 +404,17 @@ namespace Syntax.Process is
             let function = cast Semantic.Symbols.Function?(target)
 
             if !function? \/ function.is_instance then
-                _logger.error(pragma.name.location, "extern applies only to a global function or a static method")
+                _logger.error(pragma.name.location, "extern-wrong-target", "extern applies only to a global function or a static method")
                 return
             fi
 
             if function.is_generic \/ (cast Semantic.Symbols.Classy?(function.owner)?.is_generic ?? false) then
-                _logger.error(pragma.name.location, "a function declared extern cannot be generic")
+                _logger.error(pragma.name.location, "extern-generic-function", "a function declared extern cannot be generic")
                 return
             fi
 
             if !function.is_declared_without_body then
-                _logger.error(pragma.name.location, "a function declared extern is the call into foreign code, so it takes no body of its own")
+                _logger.error(pragma.name.location, "extern-function-has-body", "a function declared extern is the call into foreign code, so it takes no body of its own")
                 return
             fi
 
@@ -422,24 +422,24 @@ namespace Syntax.Process is
             let name = _string_literal_at(pragma, 1)
 
             if !module? \/ !name? \/ name.length == 0 then
-                _logger.error(pragma.name.location, "extern takes the module and the name to call, both strings")
+                _logger.error(pragma.name.location, "extern-wrong-arguments", "extern takes the module and the name to call, both strings")
                 return
             fi
 
             let build_target = IoC.CONTAINER.instance.build_flags.target
 
             if build_target == Compiler.Target.DOTNET /\ module.length == 0 then
-                _logger.error(pragma.name.location, "the library to call into is missing from this extern")
+                _logger.error(pragma.name.location, "extern-missing-library", "the library to call into is missing from this extern")
                 return
             fi
 
             if build_target == Compiler.Target.WASM /\ module.length != 0 then
-                _logger.error(pragma.name.location, "extern on the wasm target names no library: the module must be empty")
+                _logger.error(pragma.name.location, "extern-wasm-library-named", "extern on the wasm target names no library: the module must be empty")
                 return
             fi
 
             if build_target == Compiler.Target.LLVM /\ name.starts_with("llvm.") then
-                _logger.error(pragma.name.location, "extern cannot name {name}: LLVM reserves names beginning 'llvm.'")
+                _logger.error(pragma.name.location, "extern-reserved-llvm-name", "extern cannot name {name}: LLVM reserves names beginning 'llvm.'")
                 return
             fi
 
@@ -456,7 +456,7 @@ namespace Syntax.Process is
                 if let refusal = signature.refusal_on(function.arguments[i], build_target) then
                     let location = function.find_direct(names[i])?.location ?? pragma.name.location
 
-                    _logger.error(location, "{names[i]}: {function.arguments[i]} {_refused_parameter(refusal)}")
+                    _logger.error(location, "extern-unsupported-parameter-type", "{names[i]}: {function.arguments[i]} {_refused_parameter(refusal)}")
 
                     return
                 fi
@@ -477,26 +477,26 @@ namespace Syntax.Process is
             let answers_string = signature.is_string(answered)
 
             if result != Semantic.ExternResult.NONE /\ !answers_string then
-                _logger.error(pragma.name.location, "extern result applies only to a function answering a string")
+                _logger.error(pragma.name.location, "extern-result-wrong-return-type", "extern result applies only to a function answering a string")
                 return
             fi
 
             if !signature.can_return_on(answered, build_target, result != Semantic.ExternResult.NONE) then
                 if answers_string /\ build_target == Compiler.Target.DOTNET then
-                    _logger.error(result_location, "{answered} cannot be returned from foreign code on .NET")
-                    _logger.hint(result_location, "a word result read with Marshal.ptr_to_string_u_t_f8 gives the text")
+                    _logger.error(result_location, "extern-return-unsupported-on-dotnet", "{answered} cannot be returned from foreign code on .NET")
+                    _logger.hint(result_location, "extern-string-result-hint", "a word result read with Marshal.ptr_to_string_u_t_f8 gives the text")
                 elif answers_string then
-                    _logger.error(result_location, "{answered} returned from foreign code without saying who owns the text")
-                    _logger.hint(result_location, "result = \"copy\" copies text the library keeps; result = \"take\" also releases it")
+                    _logger.error(result_location, "extern-string-result-ownership-missing", "{answered} returned from foreign code without saying who owns the text")
+                    _logger.hint(result_location, "extern-string-ownership-hint", "result = \"copy\" copies text the library keeps; result = \"take\" also releases it")
                 else
-                    _logger.error(result_location, "{answered} cannot be returned from foreign code")
+                    _logger.error(result_location, "extern-return-unsupported", "{answered} cannot be returned from foreign code")
                 fi
 
                 return
             fi
 
             if options.fixed_parameters > function.arguments.count then
-                _logger.error(pragma.name.location, "extern variadic names {options.fixed_parameters} fixed parameters, but {function.name} has {function.arguments.count}")
+                _logger.error(pragma.name.location, "extern-variadic-count-mismatch", "extern variadic names {options.fixed_parameters} fixed parameters, but {function.name} has {function.arguments.count}")
                 return
             fi
 
@@ -537,14 +537,14 @@ namespace Syntax.Process is
                 let ok = generic.arguments[0]
 
                 if failure.kind == Semantic.ExternFailureKind.NEGATIVE /\ !_is_signed_integer(ok) then
-                    _logger.error(location, "{ok} cannot be negative, so errno negative cannot signal failure")
+                    _logger.error(location, "extern-errno-negative-ok-value", "{ok} cannot be negative, so errno negative cannot signal failure")
                     return null
                 fi
 
                 return ok
             fi
 
-            _logger.error(location, "{declared} cannot carry an errno: an extern that declares errno answers Result[T, int]")
+            _logger.error(location, "extern-errno-wrong-result-type", "{declared} cannot carry an errno: an extern that declares errno answers Result[T, int]")
             return null
         si
 
@@ -574,7 +574,7 @@ namespace Syntax.Process is
             fi
 
             if !import.ok_constructor? \/ !import.error_constructor? then
-                _logger.error(location, "{declared} has no OK and ERROR constructors for an extern to answer with")
+                _logger.error(location, "extern-result-missing-constructors", "{declared} has no OK and ERROR constructors for an extern to answer with")
                 return false
             fi
 
@@ -639,26 +639,26 @@ namespace Syntax.Process is
                         elif text? /\ text =~ "take" then
                             result = Semantic.ExternResult.TAKE
                         else
-                            _logger.error(argument.name.location, "extern result must be copy or take")
+                            _logger.error(argument.name.location, "extern-result-invalid-option", "extern result must be copy or take")
                             return null
                         fi
                     elif name =~ "free" then
                         let text = argument.value.try_get_string_literal()
 
                         if !text? \/ text.length == 0 then
-                            _logger.error(argument.name.location, "extern free must name a function")
+                            _logger.error(argument.name.location, "extern-free-not-function", "extern free must name a function")
                             return null
                         fi
 
                         if target == Compiler.Target.LLVM /\ text.starts_with("llvm.") then
-                            _logger.error(argument.name.location, "extern cannot name {text}: LLVM reserves names beginning 'llvm.'")
+                            _logger.error(argument.name.location, "extern-reserved-llvm-name", "extern cannot name {text}: LLVM reserves names beginning 'llvm.'")
                             return null
                         fi
 
                         deallocator = text
                     elif name =~ "variadic" then
                         if target != Compiler.Target.LLVM then
-                            _logger.error(argument.name.location, "extern variadic not supported on the {_target_name(target)} target")
+                            _logger.error(argument.name.location, "extern-variadic-unsupported-target", "extern variadic not supported on the {_target_name(target)} target")
                             return null
                         fi
 
@@ -667,35 +667,35 @@ namespace Syntax.Process is
                         if let c = count /\ c >= 0 then
                             fixed_parameters = c
                         else
-                            _logger.error(argument.name.location, "extern variadic must be the number of fixed parameters")
+                            _logger.error(argument.name.location, "extern-variadic-not-count", "extern variadic must be the number of fixed parameters")
                             return null
                         fi
                     elif name =~ EXTERN_ERRNO_ARGUMENT then
                         if target == Compiler.Target.WASM then
-                            _logger.error(argument.name.location, "wasm has no errno, so an extern cannot report one")
+                            _logger.error(argument.name.location, "extern-errno-on-wasm", "wasm has no errno, so an extern cannot report one")
                             return null
                         fi
 
                         if target == Compiler.Target.DOTNET then
-                            _logger.error(argument.name.location, "extern errno not supported on the .NET target")
+                            _logger.error(argument.name.location, "extern-errno-on-dotnet", "extern errno not supported on the .NET target")
                             return null
                         fi
 
                         failure = _extern_failure(argument.value)
 
                         if !failure? then
-                            _logger.error(argument.name.location, "extern errno must be a number, negative or set")
+                            _logger.error(argument.name.location, "extern-errno-invalid-option", "extern errno must be a number, negative or set")
                             return null
                         fi
                     else
-                        _logger.error(argument.name.location, "extern has no argument named {name}")
+                        _logger.error(argument.name.location, "extern-unknown-argument", "extern has no argument named {name}")
                         return null
                     fi
                 od
             fi
 
             if deallocator? /\ result != Semantic.ExternResult.TAKE then
-                _logger.error(pragma.name.location, "extern free applies only with result take")
+                _logger.error(pragma.name.location, "extern-free-without-take", "extern free applies only with result take")
                 return null
             fi
 
@@ -736,7 +736,7 @@ namespace Syntax.Process is
                 if !agrees then
                     _logger.error(
                         pragma.name.location,
-                        "extern {import.name} does not match its declaration at {earlier.location}: the fixed parameters and the result must be the same")
+                        "extern-declaration-mismatch", "extern {import.name} does not match its declaration at {earlier.location}: the fixed parameters and the result must be the same")
                 fi
 
                 return agrees
@@ -834,7 +834,7 @@ namespace Syntax.Process is
                 if !signature.can_take(function.arguments[i]) then
                     _logger.error(
                         pragma.name.location,
-                        "{names[i]} is a {function.arguments[i]}, which cannot be passed to a shared library")
+                        "extern-parameter-not-passable", "{names[i]} is a {function.arguments[i]}, which cannot be passed to a shared library")
 
                     return false
                 fi
@@ -843,7 +843,7 @@ namespace Syntax.Process is
             if !signature.can_return(function.return_type) then
                 _logger.error(
                     pragma.name.location,
-                    "{function.return_type} cannot be returned from a shared library")
+                    "extern-return-not-passable", "{function.return_type} cannot be returned from a shared library")
 
                 return false
             fi
@@ -935,7 +935,7 @@ namespace Syntax.Process is
             let function = cast Semantic.Symbols.Function?(target)
 
             if !function? then
-                _logger.error(pragma.name.location, "only a method can carry MethodImpl")
+                _logger.error(pragma.name.location, "method-impl-wrong-target", "only a method can carry MethodImpl")
                 return
             fi
 
@@ -950,7 +950,7 @@ namespace Syntax.Process is
             let options = _number_argument(positional, 0)
 
             if !options? then
-                _logger.error(pragma.name.location, "cannot read the options this MethodImpl names")
+                _logger.error(pragma.name.location, "method-impl-unreadable-options", "cannot read the options this MethodImpl names")
                 return
             fi
 
@@ -1014,7 +1014,7 @@ namespace Syntax.Process is
                 isa Semantic.Symbols.VARIANT(type) \/
                 isa Semantic.Symbols.ENUM_STRUCT(type)
             then
-                _logger.error(pragma.name.location, "only a class or a struct can carry StructLayout")
+                _logger.error(pragma.name.location, "struct-layout-wrong-target", "only a class or a struct can carry StructLayout")
                 return
             fi
 
@@ -1043,7 +1043,7 @@ namespace Syntax.Process is
 
                     _logger.error(
                         pragma.name.location,
-                        "explicit layout needs a FieldOffset on {missing |> Ghul.Pipes.join(", ")}")
+                        "explicit-layout-missing-offset", "explicit layout needs a FieldOffset on {missing |> Ghul.Pipes.join(", ")}")
                 fi
             fi
         si
@@ -1065,7 +1065,7 @@ namespace Syntax.Process is
             let `field = _instance_field(target)
 
             if !`field? then
-                _logger.error(pragma.name.location, "only an instance field can carry FieldOffset")
+                _logger.error(pragma.name.location, "field-offset-wrong-target", "only an instance field can carry FieldOffset")
                 return
             fi
 
@@ -1117,7 +1117,7 @@ namespace Syntax.Process is
         si
 
         _report_offset_without_explicit_layout(location: Source.LOCATION) is
-            _logger.error(location, "a field with a FieldOffset needs a type with explicit layout")
+            _logger.error(location, "field-offset-without-explicit-layout", "a field with a FieldOffset needs a type with explicit layout")
         si
 
         // Reads a `DllImport` into the import the method is emitted
@@ -1134,26 +1134,26 @@ namespace Syntax.Process is
             let function = cast Semantic.Symbols.Function?(target)
 
             if !function? then
-                _logger.error(pragma.name.location, "only a method can carry DllImport")
+                _logger.error(pragma.name.location, "dll-import-wrong-target", "only a method can carry DllImport")
                 return
             fi
 
             if function.is_instance then
-                _logger.error(pragma.name.location, "a method carrying DllImport must be static")
+                _logger.error(pragma.name.location, "dll-import-not-static", "a method carrying DllImport must be static")
                 return
             fi
 
             let module = _string_argument(positional, 0)
 
             if !module? \/ module.length == 0 then
-                _logger.error(pragma.name.location, "the module to call into is missing from this DllImport")
+                _logger.error(pragma.name.location, "dll-import-missing-module", "the module to call into is missing from this DllImport")
                 return
             fi
 
             if !function.is_declared_without_body then
                 _logger.error(
                     pragma.name.location,
-                    "a method carrying DllImport is the call into the library, so it takes no body of its own")
+                    "dll-import-has-body", "a method carrying DllImport is the call into the library, so it takes no body of its own")
                 return
             fi
 
@@ -1296,7 +1296,7 @@ namespace Syntax.Process is
                 if !named_argument_type_token(parameter.as_non_optional())? then
                     _logger.error(
                         pragma.location,
-                        "attribute {attribute_type.name} constructor parameter {index + 1} has an unsupported type {parameter}")
+                        "attribute-unsupported-parameter-type", "attribute {attribute_type.name} constructor parameter {index + 1} has an unsupported type {parameter}")
 
                     return false
                 fi
@@ -1352,7 +1352,7 @@ namespace Syntax.Process is
                 if !member? then
                     _logger.error(
                         named_argument.name.location,
-                        "attribute {attribute_type.name} has no field or property {name}")
+                        "attribute-member-not-found", "attribute {attribute_type.name} has no field or property {name}")
 
                     return null
                 fi
@@ -1365,7 +1365,7 @@ namespace Syntax.Process is
                 then
                     _logger.error(
                         named_argument.name.location,
-                        "{name} is not a field or property of attribute {attribute_type.name}")
+                        "attribute-named-argument-not-member", "{name} is not a field or property of attribute {attribute_type.name}")
 
                     return null
                 fi
@@ -1375,7 +1375,7 @@ namespace Syntax.Process is
                 if !member_type? then
                     _logger.error(
                         named_argument.name.location,
-                        "attribute argument {name} has an unsupported type")
+                        "attribute-argument-unsupported-type", "attribute argument {name} has an unsupported type")
 
                     return null
                 fi
@@ -1452,7 +1452,7 @@ namespace Syntax.Process is
             let init_group = cast Semantic.Symbols.FUNCTION_GROUP?(attribute_type.find_member("init"))
 
             if !init_group? then
-                _logger.error(pragma.location, "attribute {attribute_type.name} has no usable constructor")
+                _logger.error(pragma.location, "attribute-no-usable-constructor", "attribute {attribute_type.name} has no usable constructor")
                 return null
             fi
 
@@ -1491,7 +1491,7 @@ namespace Syntax.Process is
             fi
 
             _logger.commit()
-            _logger.error(pragma.location, "no constructor of attribute {attribute_type.name} matches the supplied arguments")
+            _logger.error(pragma.location, "attribute-constructor-mismatch", "no constructor of attribute {attribute_type.name} matches the supplied arguments")
             return null
         si
 
@@ -1643,7 +1643,7 @@ namespace Syntax.Process is
                 let formatted = format_argument(parameter_types[i], positional[i])
 
                 if !formatted? then
-                    _logger.error(pragma.location, "attribute argument {i + 1} is not a compile-time constant")
+                    _logger.error(pragma.location, "attribute-argument-not-constant", "attribute argument {i + 1} is not a compile-time constant")
                     return null
                 fi
 
@@ -1681,7 +1681,7 @@ namespace Syntax.Process is
             let type_token = named_argument_type_token(named_argument.member_type)
 
             if !type_token? then
-                _logger.error(named_argument.location, "attribute argument {name} has an unsupported type")
+                _logger.error(named_argument.location, "attribute-argument-unsupported-type", "attribute argument {name} has an unsupported type")
                 return null
             fi
 
@@ -1689,7 +1689,7 @@ namespace Syntax.Process is
                 format_argument(named_argument.member_type, named_argument.value)
 
             if !formatted_value? then
-                _logger.error(named_argument.location, "attribute argument {name} is not a compile-time constant")
+                _logger.error(named_argument.location, "attribute-named-argument-not-constant", "attribute argument {name} is not a compile-time constant")
                 return null
             fi
 

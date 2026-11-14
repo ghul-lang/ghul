@@ -189,7 +189,7 @@ namespace Syntax.Process is
                         let target = _visitor.try_get_narrowing_target(member.left)
                         let subject = if target? then target.name else "receiver" fi
 
-                        _logger.error(member.left.location, "{subject} may hold an absent value here")
+                        _logger.error(member.left.location, "absent-value-use", "{subject} may hold an absent value here")
 
                         member.compile_expressions_state.value = DUMMY(Semantic.Types.ERROR(), member.location)
                         return
@@ -231,7 +231,7 @@ namespace Syntax.Process is
                         symbol = arity_zero
                     else
                         let counts = member_group.generic_arguments_counts |> map(a -> string => "{a}") |> join(" or ")
-                        _logger.error(member.identifier.location, "type {member.identifier.name} requires {counts} type arguments")
+                        _logger.error(member.identifier.location, "type-needs-type-arguments", "type {member.identifier.name} requires {counts} type arguments")
                         member.compile_expressions_state.value = DUMMY(Semantic.Types.ERROR(), member.location)
                         return
                     fi
@@ -259,12 +259,12 @@ namespace Syntax.Process is
                         if let kill = dropped then
                             _logger.error(
                                 member.identifier.location,
-                                "member {member.identifier.name} not found in {named_type}",
+                                "member-not-found", "member {member.identifier.name} not found in {named_type}",
                                 kill.crossing.location,
                                 DROPPED_NARROWING.message(kill)
                             )
                         else
-                            _logger.error(member.identifier.location, "member {member.identifier.name} not found in {named_type}")
+                            _logger.error(member.identifier.location, "member-not-found", "member {member.identifier.name} not found in {named_type}")
                         fi
                     fi
 
@@ -275,7 +275,7 @@ namespace Syntax.Process is
                 if _is_indexer_accessor(symbol) then
                     _logger.error(
                         member.identifier.location,
-                        "cannot call an indexer accessor directly",
+                        "indexer-accessor-called-directly", "cannot call an indexer accessor directly",
                         member.identifier.location,
                         "help: index {named_type} with [ ] instead"
                     )
@@ -287,7 +287,7 @@ namespace Syntax.Process is
                 _symbol_use_locations.add_symbol_use(member.identifier.right_location, symbol)
 
                 if _is_instance_only(symbol) /\ !left_value.is_consumable then
-                    _logger.error(member.identifier.location, "cannot access instance member {member.identifier.name} in {named_type}")
+                    _logger.error(member.identifier.location, "instance-member-in-type", "cannot access instance member {member.identifier.name} in {named_type}")
 
                     member.compile_expressions_state.value = DUMMY(Semantic.Types.ERROR(), member.location)
                     return
@@ -304,7 +304,7 @@ namespace Syntax.Process is
 
                 if need_store then
                     if member.is_coalesce then
-                        _logger.error(member.location, "cannot assign through coalescing member access")
+                        _logger.error(member.location, "assign-through-coalescing-access", "cannot assign through coalescing member access")
                     fi
 
                     // A struct-typed receiver with no in-place address is a
@@ -317,7 +317,7 @@ namespace Syntax.Process is
                         type.is_value_type /\
                         !left_value.has_address
                     then
-                        _logger.error(member.location, "cannot assign through a copy of a struct value here")
+                        _logger.error(member.location, "assign-through-struct-copy", "cannot assign through a copy of a struct value here")
 
                         member.compile_expressions_state.value = DUMMY(Semantic.Types.ERROR(), member.location)
                         return
@@ -337,7 +337,7 @@ namespace Syntax.Process is
                 else
                     if symbol.is_unit_variant then
                         if member.is_coalesce then
-                            _logger.error(member.location, "coalescing member access does not apply to a unit-variant constructor")
+                            _logger.error(member.location, "coalescing-on-unit-variant", "coalescing member access does not apply to a unit-variant constructor")
                         fi
 
                         let lowered = _unit_variant_constructor.try_load(member.location, symbol, member.expected_type, member)
@@ -529,7 +529,7 @@ namespace Syntax.Process is
             fi
 
             if !symbol.is_accessible_to(_symbol_table.current_accessor) then
-                _logger.error(location, "{symbol} is not accessible here")
+                _logger.error(location, "symbol-not-accessible", "{symbol} is not accessible here")
                 // The member is assembly-reachable, so let the access through to
                 // avoid a cascade of downstream errors: the diagnostic stands but
                 // the generated IL is still valid.
@@ -564,14 +564,14 @@ namespace Syntax.Process is
                 return true
             fi
 
-            _logger.error(location, "{symbol} is not publicly readable")
+            _logger.error(location, "symbol-not-publicly-readable", "{symbol} is not publicly readable")
 
             return false
         si
 
         check_store_access(location: LOCATION, from: Value?, symbol: Semantic.Symbols.Symbol, type: Type) -> bool is
             if !symbol.is_accessible_to(_symbol_table.current_accessor) then
-                _logger.error(location, "{symbol} is not accessible here")
+                _logger.error(location, "symbol-not-accessible", "{symbol} is not accessible here")
                 // Assembly-reachable: allow the store so the diagnostic does not
                 // cascade into follow-on errors.
                 return true
@@ -603,7 +603,7 @@ namespace Syntax.Process is
                 return true
             fi
 
-            _logger.error(location, "{symbol} is not publicly assignable")
+            _logger.error(location, "symbol-not-publicly-assignable", "{symbol} is not publicly assignable")
 
             return false
         si
@@ -626,7 +626,7 @@ namespace Syntax.Process is
             if let underlying = RELATIONAL_REWRITE.underlying_operator(name) then
                 _logger.error(
                     identifier.location,
-                    "'{name}' is derived from '{underlying}' and is not a function",
+                    "derived-name-not-function", "'{name}' is derived from '{underlying}' and is not a function",
                     identifier.location,
                     "help: use `{underlying} or a function literal")
 
@@ -658,7 +658,7 @@ namespace Syntax.Process is
 
                     _logger.error(
                         identifier.location,
-                        "cannot tell which operator '{name}' is meant here",
+                        "ambiguous-operator-value", "cannot tell which operator '{name}' is meant here",
                         identifier.location,
                         "help: give the expected function type, or name the type: int.`{name}")
 
@@ -671,7 +671,7 @@ namespace Syntax.Process is
                     shape = _function_reference_resolver.get_target_call_shape(inferred)
 
                     if !shape? \/ shape.arguments.count < 2 then
-                        _logger.error(identifier.location, "operator '{name}' is used where {inferred} is expected")
+                        _logger.error(identifier.location, "operator-value-type-mismatch", "operator '{name}' is used where {inferred} is expected")
 
                         return null
                     fi
@@ -725,7 +725,7 @@ namespace Syntax.Process is
                 then
                     _logger.error(
                         identifier.location,
-                        "cannot tell which operator '{name}' is meant here",
+                        "ambiguous-operator-value", "cannot tell which operator '{name}' is meant here",
                         identifier.location,
                         "help: give the expected function type, or name the type: int.`{name}")
 
@@ -736,7 +736,7 @@ namespace Syntax.Process is
             od
 
             if operand_count < 1 \/ operand_count > 2 then
-                _logger.error(identifier.location, "an operator takes one or two operands, not {operand_count}")
+                _logger.error(identifier.location, "operator-operand-count", "an operator takes one or two operands, not {operand_count}")
 
                 return null
             fi
@@ -745,9 +745,9 @@ namespace Syntax.Process is
 
             if !function? then
                 if operand_count == 1 then
-                    _logger.error(identifier.location, "no unary operator {name} found for {operand_types[0]}")
+                    _logger.error(identifier.location, "unary-operator-not-found", "no unary operator {name} found for {operand_types[0]}")
                 else
-                    _logger.error(identifier.location, "operator {operand_types[0]} {name} {operand_types[1]} not found")
+                    _logger.error(identifier.location, "binary-operator-not-found", "operator {operand_types[0]} {name} {operand_types[1]} not found")
                 fi
 
                 return null
@@ -756,7 +756,7 @@ namespace Syntax.Process is
             if function.is_instance then
                 _logger.error(
                     identifier.location,
-                    "cannot take the value of instance operator {function}",
+                    "instance-operator-value", "cannot take the value of instance operator {function}",
                     identifier.location,
                     "help: an instance operator takes its left operand as its receiver; write a function literal")
 
@@ -774,7 +774,7 @@ namespace Syntax.Process is
             let operand_count = shape.arguments.count - 1
 
             if operand_count < 1 \/ operand_count > 2 then
-                _logger.error(identifier.location, "an operator takes one or two operands, not {operand_count}")
+                _logger.error(identifier.location, "operator-operand-count", "an operator takes one or two operands, not {operand_count}")
 
                 return null
             fi
@@ -809,11 +809,11 @@ namespace Syntax.Process is
                 if known_operand_types.count == 0 then
                     _logger.error(
                         identifier.location,
-                        "cannot tell which operator '{name}' is meant here",
+                        "ambiguous-operator-value", "cannot tell which operator '{name}' is meant here",
                         identifier.location,
                         "help: give an operand a type, or name the type: int.`{name}")
                 else
-                    _logger.error(identifier.location, "no operator '{name}' found for {known_operand_types |> join(", ")}")
+                    _logger.error(identifier.location, "operator-not-found-for-operands", "no operator '{name}' found for {known_operand_types |> join(", ")}")
                 fi
 
                 return null
@@ -987,7 +987,7 @@ namespace Syntax.Process is
                     symbol = bare
                 else
                     let counts = group.generic_arguments_counts |> map(a -> string => "{a}") |> join(" or ")
-                    _logger.error(identifier.location, "type {identifier.identifier} requires {counts} type arguments")
+                    _logger.error(identifier.location, "type-needs-type-arguments", "type {identifier.identifier} requires {counts} type arguments")
                     identifier.compile_expressions_state.value = DUMMY(Semantic.Types.ERROR(), identifier.location)
                     return
                 fi
@@ -1030,7 +1030,7 @@ namespace Syntax.Process is
                     // A loop label resolves like any symbol in scope but
                     // is not a value; only `break` consumes the name.
                     if isa Semantic.Symbols.LABEL(symbol) then
-                        _logger.error(identifier.location, "{symbol} names a loop label and has no value")
+                        _logger.error(identifier.location, "loop-label-used-as-value", "{symbol} names a loop label and has no value")
                         identifier.compile_expressions_state.value = DUMMY(Semantic.Types.ERROR(), identifier.location)
                         return
                     fi
@@ -1040,7 +1040,7 @@ namespace Syntax.Process is
                     // as explicit member access. Log but allow: the field is
                     // assembly-reachable, so blocking would only cascade.
                     if symbol.is_field /\ !symbol.is_accessible_to(_symbol_table.current_accessor) then
-                        _logger.error(identifier.location, "{symbol} is not accessible here")
+                        _logger.error(identifier.location, "symbol-not-accessible", "{symbol} is not accessible here")
                     fi
 
                     _symbol_loader.find_symbol = (name: string) => _visitor.find(name)
@@ -1258,7 +1258,7 @@ namespace Syntax.Process is
             if
                 !has_value.left.value.check_is_consumable(_logger, has_value.left.location)
             then
-                _logger.error(has_value.left.location, "cannot use this here")
+                _logger.error(has_value.left.location, "this-misplaced", "cannot use this here")
                 has_value.compile_expressions_state.value = DUMMY(_innate_symbol_lookup.get_bool_type(), has_value.location)
                 return
             fi
@@ -1308,12 +1308,12 @@ namespace Syntax.Process is
                 if !isa Semantic.Symbols.Property(has_value_member) then
                     _logger.error(
                         has_value.left.location,
-                        "has_value member must be a bool property"
+                        "has-value-not-bool-property", "has_value member must be a bool property"
                     )
                 elif !has_value_member.type!.matches(bool_type) then
                     _logger.error(
                         has_value.left.location,
-                        "has_value property must be bool"
+                        "has-value-property-not-bool", "has_value property must be bool"
                     )
                 else
                     has_value_valid = true
@@ -1352,7 +1352,7 @@ namespace Syntax.Process is
                         )
                     fi
                 elif left_value.type!.is_value_type then
-                    _logger.error(has_value.left.location, "not optional")
+                    _logger.error(has_value.left.location, "presence-test-of-non-optional", "not optional")
                     has_value.compile_expressions_state.value = DUMMY(bool_type, has_value.location)
                     return
                 elif assert_condition_depth == 0 /\ !left_value.type!.is_inferred then
@@ -1421,7 +1421,7 @@ namespace Syntax.Process is
             if
                 !unwrap_left_value.check_is_consumable(_logger, unwrap.left.location)
             then
-                _logger.error(unwrap.left.location, "cannot use this here")
+                _logger.error(unwrap.left.location, "this-misplaced", "cannot use this here")
                 unwrap.compile_expressions_state.value = DUMMY(Semantic.Types.ERROR(), unwrap.location)
                 return
             fi
@@ -1521,7 +1521,7 @@ namespace Syntax.Process is
 
                             unwrap.compile_expressions_state.value = left_value
                         else
-                            _logger.error(unwrap.left.location, "cannot unwrap this")
+                            _logger.error(unwrap.left.location, "unwrap-of-non-optional", "cannot unwrap this")
                             unwrap.compile_expressions_state.value = DUMMY(Semantic.Types.ERROR(), unwrap.location)
                         fi
                     fi
@@ -1547,7 +1547,7 @@ namespace Syntax.Process is
 
                 unwrap.compile_expressions_state.value = value_member.load(unwrap.location, unwrap_left_value, _symbol_loader)
             else
-                _logger.error(unwrap.left.location, "cannot unwrap this")
+                _logger.error(unwrap.left.location, "unwrap-of-non-optional", "cannot unwrap this")
                 unwrap.compile_expressions_state.value = DUMMY(Semantic.Types.ERROR(), unwrap.location)
             fi
 
@@ -1894,7 +1894,7 @@ namespace Syntax.Process is
                 if isa Semantic.Symbols.STRUCT(symbol.owner) then
                     _logger.error(
                         identifier.location,
-                        "cannot access instance member {symbol.name} of a struct in a function literal"
+                        "struct-instance-member-in-literal", "cannot access instance member {symbol.name} of a struct in a function literal"
                     )
 
                     return true
@@ -1947,7 +1947,7 @@ namespace Syntax.Process is
             then
                 _logger.error(
                     member.location,
-                    "coalescing member access supports fields, properties and method calls only"
+                    "coalescing-access-unsupported-member", "coalescing member access supports fields, properties and method calls only"
                 )
                 return null
             fi
@@ -2087,7 +2087,7 @@ namespace Syntax.Process is
                         )
                     fi
                 elif receiver_type.is_value_type then
-                    _logger.error(subject.location, "receiver is not optional")
+                    _logger.error(subject.location, "coalescing-receiver-not-optional", "receiver is not optional")
                     return null
                 fi
 
@@ -2340,7 +2340,7 @@ namespace Syntax.Process is
                 return class_type
             fi
 
-            _logger.error(location, "type alias {alias.name} needs type arguments here")
+            _logger.error(location, "alias-needs-type-arguments", "type alias {alias.name} needs type arguments here")
 
             return Semantic.Types.ERROR()
         si
