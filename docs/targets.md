@@ -64,7 +64,7 @@ cd hello
 ghul run --target wasm
 ```
 
-On the llvm target, `T?` over an unconstrained type parameter is held, at an instantiation where `T` is a reference type that is not itself optional, as the reference itself, null where it is absent. On .NET and wasm it is held as `Ghul.MAYBE[T]`, a presence flag and the value. An instantiation over a value type or over an optional type keeps the flag on every target, so a `find` over `int?` or `string?` elements still tells an absent element it found from finding nothing. Two things differ where the value is converted to `object` at such an instantiation:
+On the llvm target, `T?` over an unconstrained type parameter is held, at an instantiation where `T` is a reference type that is not itself optional, as the reference itself, null where it is absent. On .NET and wasm it is held as `Ghul.MAYBE[T]`, a presence flag and the value. An instantiation over a value type or over an optional type keeps the flag on every target, so a `find` over `int?` or `string?` elements still tells an absent element it found from finding nothing. Converting such a value to `object?` gives null or the value on every target. Two things differ only where the value is boxed as itself, as when a type parameter bound to it is converted to `object`:
 
 - an absent value is null on llvm, and a non-null boxed `Ghul.MAYBE[T]` on .NET and wasm
 - a present value is the reference itself on llvm, so `isa Ghul.MAYBE[string](o)` is false and `o.get_type()` names the reference's type, where on .NET and wasm `o` is a boxed `Ghul.MAYBE[string]`
