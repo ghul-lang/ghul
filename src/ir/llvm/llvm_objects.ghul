@@ -307,6 +307,8 @@ namespace IR.LLVMTarget is
         held_type(type: Type?) -> LLVM.Type? is
             if isa Semantic.Types.REFERENCE(type) then
                 return Types.pointer
+            elif let m = maybe_of(type) /\ is_collapsed_maybe(m) then
+                return Types.pointer
             elif let t = type /\ t.is_optional /\ t.is_value_type /\ !t.is_maybe then
                 if let inner = stored_type(t.optional_inner_type) then
                     return Types.structure([Types.i8, inner])
@@ -353,11 +355,47 @@ namespace IR.LLVMTarget is
                 return null
             fi
 
-            if let s = _classes.class_of(type) /\ is_struct(s) then
+            if let s = _classes.class_of(type) /\ is_struct(s) /\ !is_collapsed_maybe(s) then
                 return s
             fi
 
             return null
+        si
+
+        /// The MAYBE instance a value of `type` is, or null where it is not
+        /// one. Decided by the class, not by whether the type reads as an
+        /// optional, so every value of one MAYBE instance is held alike.
+        maybe_of(type: Type?) -> CLASS_INSTANCE? is
+            if !type? \/ (type.is_optional /\ !type.is_maybe) then
+                return null
+            fi
+
+            if let c = _classes.class_of(type) /\ IoC.CONTAINER.instance.innate_symbol_lookup.is_maybe_definition(c.definition) then
+                return c
+            fi
+
+            return null
+        si
+
+        /// Whether `type` is a MAYBE over a reference type that is not itself
+        /// optional. Such a MAYBE is held as the reference, null where it is
+        /// absent: every instantiation is compiled separately here, so the
+        /// carrier an unconstrained `T?` needs is known, and a reference needs
+        /// no presence flag of its own. A MAYBE over a value type keeps its
+        /// layout, which is already a flag and the value, and one over an
+        /// optional keeps its flag, which is the outer level of absence.
+        is_collapsed_maybe(type: CLASS_INSTANCE) -> bool is
+            if !IoC.CONTAINER.instance.innate_symbol_lookup.is_maybe_definition(type.definition) \/ type.arguments.count != 1 then
+                return false
+            fi
+
+            let inner = type.arguments[0]
+
+            return
+                !inner.is_optional /\
+                !inner.is_type_variable /\
+                !inner.is_value_type /\
+                (LLVM_TYPES.is_string(inner) \/ LLVM_TYPES.is_array(inner) \/ LLVM_TYPES.is_object_reference(inner))
         si
 
         /// Whether `type` is a struct, which is held in place rather than
@@ -389,7 +427,13 @@ namespace IR.LLVMTarget is
 
         /// The LLVM struct type an instance of `type` is.
         struct_type(type: CLASS_INSTANCE) -> LLVM.Type =>
-            if _is_built then Types.structure(_layouts[type].to_array()) else Types.structure([Types.pointer]) fi
+            if is_collapsed_maybe(type) then
+                Types.pointer
+            elif _is_built then
+                Types.structure(_layouts[type].to_array())
+            else
+                Types.structure([Types.pointer])
+            fi
 
         /// The size in bytes of an instance of `type`.
         size_of(type: CLASS_INSTANCE) -> int =>
