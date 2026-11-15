@@ -235,9 +235,16 @@ namespace Syntax.Process is
             enter_block(cast IR.Values.BLOCK?(interpolation.value)!)
 
             let string_type = _innate_symbol_lookup.get_string_type()
+            let int_type = _innate_symbol_lookup.get_int_type()
 
-            let literal_length = Literal.NUMBER(interpolation.literal_length, _innate_symbol_lookup.get_int_type())
-            let expression_count = Literal.NUMBER(interpolation.expression_count, _innate_symbol_lookup.get_int_type())
+            if _try_interpolation_shortcut(interpolation, string_type) then
+                leave_block()
+                return
+            fi
+
+            let literal_length = Literal.NUMBER(interpolation.literal_length, int_type)
+            let expression_count = Literal.NUMBER(interpolation.expression_count, int_type)
+            let capacity = Literal.NUMBER(_estimated_capacity(interpolation), int_type)
 
             let interpolator =
                 TEMP(
@@ -245,8 +252,7 @@ namespace Syntax.Process is
                     "interpolator",
                     Values.RUNTIME(
                         IR.RuntimeOperation.NEW_STRING_BUILDER,
-                        literal_length,
-                        expression_count,
+                        [literal_length, expression_count, capacity]:Value,
                         _innate_symbol_lookup.get_interpolated_string_handler_type()
                     )
                 )
@@ -257,14 +263,14 @@ namespace Syntax.Process is
                 let format = eaf.format
                 let expr_value = expression.value!
 
-                if !eaf.is_expression then
+                if !eaf.is_expression \/ _is_plain_string_literal_hole(eaf) then
                     let literal = cast Expressions.Literals.STRING?(expression)!
 
                     if literal.value_string.length == 0 then
                         continue
                     fi
 
-                    add(Values.RUNTIME(IR.RuntimeOperation.APPEND_TEXT, interpolator.load(), expr_value, null))
+                    add(Values.RUNTIME(IR.RuntimeOperation.APPEND_TEXT, interpolator.load(), Literal.STRING(literal.value_string, string_type), null))
                 elif !format? /\ !alignment? then
                     _append_interpolated_value(interpolation.location, interpolator, expr_value, null)
                 elif _reads_differently_from_formatted(expr_value.type!) then
@@ -331,6 +337,122 @@ namespace Syntax.Process is
 
             leave_block()
         si
+        // An interpolation whose text needs no builder: one whose every
+        // piece is literal text, including string literals written as
+        // holes, is that text; one that is a single plain hole holding a
+        // non-optional string is that string, or the empty string where it
+        // is null, as appending it would give. Adds the value and answers
+        // true, or adds nothing and answers false.
+        _try_interpolation_shortcut(interpolation: Expressions.STRING_INTERPOLATION, string_type: Semantic.Types.Type) -> bool is
+            let text = Text.STRING_BUILDER()
+            let only_hole: Expressions.Expression? mut = null
+            let holes mut = 0
+            let any_text mut = false
+
+            for eaf in interpolation.values do
+                if !eaf.is_expression \/ _is_plain_string_literal_hole(eaf) then
+                    let literal = cast Expressions.Literals.STRING?(eaf.expression)!
+
+                    if literal.value_string.length > 0 then
+                        text.append(literal.value_string)
+                        any_text = true
+                    fi
+                else
+                    holes = holes + 1
+
+                    if !eaf.format? /\ !eaf.alignment? then
+                        only_hole = eaf.expression
+                    fi
+                fi
+            od
+
+            if holes == 0 then
+                add(Literal.STRING(text.to_string(), string_type))
+
+                return true
+            fi
+
+            if holes == 1 /\ !any_text then
+                if let hole = only_hole, value = hole.value, type = value.type /\ !type.is_optional /\ type.compare(string_type) == Semantic.Types.MATCH.SAME then
+                    add(Values.NULL_COALESCE(value, Literal.STRING("", string_type), string_type))
+
+                    return true
+                fi
+            fi
+
+            return false
+        si
+
+        // A hole that is a string literal with no alignment or format, such
+        // as `"{"a"}"`: its text is known here.
+        _is_plain_string_literal_hole(eaf: Expressions.INTERPOLATION_FRAGMENT) -> bool =>
+            eaf.is_expression /\ !eaf.format? /\ !eaf.alignment? /\ isa Expressions.Literals.STRING(eaf.expression)
+
+        // The number of code units an interpolation is predicted to take:
+        // its literal text, and for each value the most its type usually
+        // writes, at least the width an alignment pads it to.
+        _estimated_capacity(interpolation: Expressions.STRING_INTERPOLATION) -> int is
+            let total mut = interpolation.literal_length
+
+            for eaf in interpolation.values do
+                if !eaf.is_expression then
+                    continue
+                fi
+
+                if _is_plain_string_literal_hole(eaf) then
+                    total = total + cast Expressions.Literals.STRING(eaf.expression).value_string.length
+                    continue
+                fi
+
+                let estimate mut =
+                    if eaf.format? then
+                        24
+                    elif let value = eaf.expression.value, type = value.type then
+                        _estimated_length(type)
+                    else
+                        16
+                    fi
+
+                if let alignment = eaf.alignment, literal: Values.Literal.NUMBER = alignment.value, width: Values.Literal.CONSTANT.I4 = literal.constant then
+                    let padded = if width.value < 0 then -width.value else width.value fi
+
+                    if padded > estimate then
+                        estimate = padded
+                    fi
+                fi
+
+                total = total + estimate
+            od
+
+            return total
+        si
+
+        // The most code units a value of `type` usually takes as text: the
+        // longest number of its kind, `false` for a bool, one for a char,
+        // and 16 for a string or anything else, whose length isn't known
+        // here.
+        _estimated_length(type: Semantic.Types.Type) -> int is
+            let lookup = _innate_symbol_lookup
+            let inner = if type.is_optional then type.optional_inner_type ?? type else type fi
+
+            let estimate =
+                if _is(inner, lookup.get_int_type()) \/ _is(inner, lookup.get_uint_type()) then 11
+                elif _is(inner, lookup.get_long_type()) \/ _is(inner, lookup.get_ulong_type()) then 20
+                elif _is(inner, lookup.get_short_type()) \/ _is(inner, lookup.get_ushort_type()) then 6
+                elif _is(inner, lookup.get_byte_type()) \/ _is(inner, lookup.get_ubyte_type()) then 4
+                elif _is(inner, lookup.get_char_type()) then 1
+                elif _is(inner, lookup.get_bool_type()) then 5
+                elif _is(inner, lookup.get_double_type()) \/ _is(inner, lookup.get_single_type()) then 24
+                else 16
+                fi
+
+            // An absent optional reads as `null`.
+            return if type.is_optional /\ estimate < 4 then 4 else estimate fi
+        si
+
+        _is(type: Semantic.Types.Type, other: Semantic.Types.Type) -> bool =>
+            type.compare(other) == Semantic.Types.MATCH.SAME
+
         // Whether a plain hole renders a value of `type` other than as .NET
         // formats it, so an aligned or formatted hole has to render it first.
         _reads_differently_from_formatted(type: Semantic.Types.Type) -> bool =>
