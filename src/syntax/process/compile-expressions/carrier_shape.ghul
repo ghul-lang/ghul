@@ -1,0 +1,158 @@
+namespace Syntax.Process is
+    use Semantic.Types.Type
+
+    // A function value becomes a delegate whose type its own signature
+    // fixes. Where a formal's function type differs from it only in
+    // which carrier an optional position uses, nothing converts the
+    // delegate itself: a delegate's parameters and return are type
+    // arguments. Such a value is presented through a thunk that converts
+    // each parameter and the return at a value boundary instead.
+    class CARRIER_SHAPE is
+        // Whether `source`, the function type of a value, and `target`,
+        // the formal it is going into, describe the same call, differing
+        // only in the optional carrier of one or more positions,
+        // including positions inside a tuple. A position still carrying
+        // an inference placeholder says nothing either way and is passed
+        // over; a position that disagrees on anything but the carrier
+        // rules the pair out, so an ordinary mismatch is still reported.
+        is_carrier_only_mismatch(source: Type?, target: Type?) -> bool static is
+            if !source? \/ !target? \/ !source.is_function \/ !target.is_function then
+                return false
+            fi
+
+            if source.arguments.count != target.arguments.count then
+                return false
+            fi
+
+            let last = source.arguments.count - 1
+            let any_carrier_pair mut = false
+
+            for i in 0..source.arguments.count do
+                let from = source.arguments[i]
+                let to = target.arguments[i]
+
+                if from.is_error \/ to.is_error then
+                    return false
+                fi
+
+                if is_carrier_pair(from, to) then
+                    any_carrier_pair = true
+                    continue
+                fi
+
+                if from.contains_inferred \/ to.contains_inferred \/ from.is_wild \/ to.is_wild then
+                    continue
+                fi
+
+                // The return is covariant, every parameter
+                // contravariant, exactly as assignability reads them.
+                let compatible =
+                    if i == last then
+                        to.is_assignable_from(from)
+                    else
+                        from.is_assignable_from(to)
+                    fi
+
+                if !compatible then
+                    return false
+                fi
+            od
+
+            return any_carrier_pair
+        si
+
+        // `source`, with each position that differs from `target` only in
+        // an optional's carrier held in `target`'s carrier instead, over
+        // `source`'s own inner type: the type a function value is judged
+        // at when it goes into `target`, which keeps everything the value
+        // says about its types for the formal's type variables to bind
+        // from.
+        presented(source: Type, target: Type, lookup: Semantic.Lookups.InnateSymbolLookup) -> Type static is
+            let types = Collections.LIST[Type]()
+
+            for i in 0..source.arguments.count do
+                types.add(_carried(source.arguments[i], target.arguments[i], lookup))
+            od
+
+            if source.is_action then
+                types.add(lookup.get_void_type())
+            fi
+
+            return lookup.get_function_type(types, source.is_pure_function)
+        si
+
+        _carried(from: Type, to: Type, lookup: Semantic.Lookups.InnateSymbolLookup) -> Type static is
+            if !is_carrier_pair(from, to) then
+                return from
+            fi
+
+            if from.is_optional then
+                let inner = from.optional_inner_type!
+
+                if to.is_maybe then
+                    return lookup.get_maybe_type(inner) ?? from
+                elif to.is_value_type then
+                    return lookup.get_optional_type(inner)
+                fi
+
+                return inner.as_optional()
+            fi
+
+            let elements = Collections.LIST[Type]()
+
+            for i in 0..from.arguments.count do
+                elements.add(_carried(from.arguments[i], to.arguments[i], lookup))
+            od
+
+            return lookup.get_tuple_type(elements, from.tuple_element_names)
+        si
+
+        // Two types that differ only in an optional's carrier: `MAYBE[T]`
+        // against a reference `T?` or a `Nullable[T]`, either way round,
+        // or two tuples of the same arity whose elements each agree or
+        // are such a pair, with at least one pair among them.
+        is_carrier_pair(left: Type, right: Type) -> bool static is
+            if left.is_optional /\ right.is_optional /\ left.is_maybe != right.is_maybe then
+                let left_inner = left.optional_inner_type
+                let right_inner = right.optional_inner_type
+
+                if !left_inner? \/ !right_inner? then
+                    return false
+                fi
+
+                // A type variable or a placeholder at the inner position
+                // says nothing about whether the two agree - the carrier
+                // is what is being compared, and it already differs.
+                return
+                    left_inner.contains_inferred \/
+                    right_inner.contains_inferred \/
+                    left_inner.is_wild \/
+                    right_inner.is_wild \/
+                    left_inner.is_equivalent_to(right_inner)
+            fi
+
+            if left.is_optional \/ right.is_optional then
+                return false
+            fi
+
+            if !left.is_value_tuple \/ !right.is_value_tuple \/ left.arguments.count != right.arguments.count then
+                return false
+            fi
+
+            let any_pair mut = false
+
+            for i in 0..left.arguments.count do
+                let l = left.arguments[i]
+                let r = right.arguments[i]
+
+                if is_carrier_pair(l, r) then
+                    any_pair = true
+                elif !(l.contains_inferred \/ r.contains_inferred \/ l.is_wild \/ r.is_wild \/ l.is_equivalent_to(r)) then
+                    return false
+                fi
+            od
+
+            return any_pair
+        si
+    si
+si

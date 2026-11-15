@@ -9,7 +9,9 @@ namespace Syntax.Process is
     // takes, calls that function and returns what it returns. Above the
     // pack, it calls that function with its parameters and returns the
     // next thunk's delegate, built closed over the result. A forwarding
-    // thunk passes its parameters straight through to its target.
+    // thunk passes its parameters straight through to its target, and a
+    // carrier thunk converts each to the carrier its function takes and
+    // converts the result back.
     partial GENERATE_IL is
         _gen_pack_thunk(closure: Semantic.Symbols.Closure) is
             let thunk = closure.pack_thunk
@@ -51,7 +53,32 @@ namespace Syntax.Process is
 
             let arguments = Collections.LIST[Value]()
 
-            if thunk.is_forward then
+            if thunk.is_carrier then
+                for i in 0..closure.arguments.count - 1 do
+                    arguments.add(_boxer.box_if_needed(_pack_thunk_parameter(closure, "$pack_{i}"), thunk.callee_type.arguments[i]))
+                od
+
+                let presented_return = closure.return_type!
+                let is_void = presented_return.compare(_innate_symbol_lookup.get_void_type()) == Semantic.Types.MATCH.SAME
+                let callee_return =
+                    if is_void then
+                        presented_return
+                    else
+                        thunk.callee_type.arguments[thunk.callee_type.arguments.count - 1]
+                    fi
+
+                let result = Values.Call.CLOSURE(callee!, callee_return, is_void, thunk.callee_type, arguments)
+
+                if is_void then
+                    add(result)
+                else
+                    add(_boxer.box_if_needed(result, presented_return))
+                fi
+
+                _finish_pack_thunk(closure)
+
+                return
+            elif thunk.is_forward then
                 for i in 0..closure.arguments.count do
                     arguments.add(_pack_thunk_parameter(closure, "$pack_{i}"))
                 od
