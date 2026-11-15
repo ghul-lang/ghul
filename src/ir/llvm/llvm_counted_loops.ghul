@@ -26,7 +26,8 @@ namespace IR.LLVMTarget is
         ARRAY,
         LIST,
         MAP,
-        SET
+        SET,
+        MEMO
     si
 
     // How a counted loop steps: through every element of an array up to a
@@ -157,12 +158,12 @@ namespace IR.LLVMTarget is
             let family = Collections.LIST[(type: CLASS_INSTANCE, kind: StorageKind)]()
             let route: CountedRoute mut
 
-            if let exact = _exact_class(receiver), kind = _storage_kind(exact) /\ _contains(candidates, exact) then
+            if let exact = _exact_class(receiver), kind = _storage_kind(exact) /\ kind != StorageKind.MEMO /\ _contains(candidates, exact) then
                 family.add((exact, kind))
                 route = CountedRoute.EXACT
             elif !has_other /\ candidates.count <= COUNTED_FAMILY_LIMIT /\ _one_shape(candidates) then
                 family.add_range(candidates)
-                route = if candidates.count == 1 /\ !objects.trait_of(receiver_type)? then CountedRoute.EXACT else CountedRoute.GUARDED fi
+                route = if candidates.count == 1 /\ !objects.trait_of(receiver_type)? /\ candidates[0].kind != StorageKind.MEMO then CountedRoute.EXACT else CountedRoute.GUARDED fi
             elif let arrays_and_lists = _plain_members(candidates) /\ arrays_and_lists.count > 0 /\ arrays_and_lists.count <= COUNTED_FAMILY_LIMIT then
                 // A trait some class implements without storage to walk, or
                 // with storage of another shape, still tests for the arrays
@@ -223,9 +224,14 @@ namespace IR.LLVMTarget is
                     _current.branch(_current.compare(IntegerPredicate.EQ, descriptor, LLVM.Values.global(objects.descriptor_name(member.type))), matched, next)
 
                     _start(matched)
-                    _current.store(LLVM.Values.boolean(true), flag, 0)
-                    _load_storage(loop, member, receiver)
-                    _current.branch(join)
+
+                    if member.kind == StorageKind.MEMO then
+                        _load_complete_memo(loop, member, receiver, flag, join, other)
+                    else
+                        _current.store(LLVM.Values.boolean(true), flag, 0)
+                        _load_storage(loop, member, receiver)
+                        _current.branch(join)
+                    fi
 
                     _start(next)
                 od
@@ -263,6 +269,8 @@ namespace IR.LLVMTarget is
                 return StorageKind.MAP
             elif let set = lookup.get_set_class() /\ type.definition == set then
                 return StorageKind.SET
+            elif let memo = lookup.get_memo_class() /\ type.definition == memo then
+                return StorageKind.MEMO
             fi
 
             return null
@@ -353,6 +361,47 @@ namespace IR.LLVMTarget is
             else
                 null
             fi
+
+        // Where `receiver`, a memo, has read its source to the end, walks the
+        // list of elements it cached, as a list is walked, and goes to `other`,
+        // the iterator, while the source is still being read: only a complete
+        // memo has a count that reading it can't change.
+        _load_complete_memo(loop: COUNTED_LOOP, member: (type: CLASS_INSTANCE, kind: StorageKind), receiver: LLVM.Value, flag: LLVM.Value, join: LLVM.BLOCK, other: LLVM.BLOCK) is
+            let cache_type = _field_class(member.type, "_cache")
+
+            if !cache_type? then
+                _report("a memo's cache")
+                _current.branch(other)
+                return
+            fi
+
+            let elements_type = _field_class(cache_type, "elements")
+            let cache = _load_field(member.type, receiver, "_cache", Types.pointer)
+
+            if !elements_type? \/ !cache? then
+                _report("a memo's cache")
+                _current.branch(other)
+                return
+            fi
+
+            let source = _load_field(cache_type, cache, "iterator", Types.pointer)
+            let elements = _load_field(cache_type, cache, "elements", Types.pointer)
+
+            if !source? \/ !elements? then
+                _report("a memo's cache")
+                _current.branch(other)
+                return
+            fi
+
+            let complete = _new_block()
+
+            _current.branch(_current.compare(IntegerPredicate.EQ, source, LLVM.Values.null_pointer), complete, other)
+
+            _start(complete)
+            _current.store(LLVM.Values.boolean(true), flag, 0)
+            _load_storage(loop, (elements_type, StorageKind.LIST), elements)
+            _current.branch(join)
+        si
 
         // Stores the storage of `receiver`, a `member`, where `loop` reads
         // it, as the collection's own iterator takes it when it is made.
