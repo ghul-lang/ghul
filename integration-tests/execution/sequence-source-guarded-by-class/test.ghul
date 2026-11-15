@@ -1,0 +1,74 @@
+use default
+
+// A loop or fused chain over a sequence (`T{}`) reads an array or list behind
+// it by position, after testing the object's class, and uses the iterator
+// for anything else. Each scenario runs fused and with fusion suppressed,
+// over an array, a list, a set and a generator, and the two must agree.
+
+let trace = LIST[string]()
+let source_calls mut = 0
+
+note(s: string, x: int) -> int is
+    trace.add("{s}{x}")
+    x
+si
+
+chain(xs: int{}) -> int => xs |> map(x => note("m", x) * 2) |> filter(x => note("f", x) % 3 != 0) |> sum()
+
+chain_unfused(xs: int{}) -> int is
+    @suppress("pipe-fusion")
+    let total = xs |> map(x => note("m", x) * 2) |> filter(x => note("f", x) % 3 != 0) |> sum()
+    return total
+si
+
+walk(xs: int{}) -> string is
+    let seen = LIST[int]()
+    for x in xs do
+        if x == 3 then continue fi
+        if x == 5 then break fi
+        seen.add(x)
+    od
+    seen |> join(",")
+si
+
+first_even(xs: int{}) -> int? => xs |> find(x => x % 2 == 0)
+
+gen(n: int) -> int{} is
+    for i in 1::n do yield i od
+si
+
+
+counted_source(xs: int{}) -> int{} is
+    source_calls = source_calls + 1
+    return xs
+si
+
+check(name: string, xs: int{}) is
+    trace.clear()
+    let fused = chain(xs)
+    let fused_trace = trace |> join(" ")
+
+    trace.clear()
+    let unfused = chain_unfused(xs)
+    let unfused_trace = trace |> join(" ")
+
+    write_line("{name}: {fused} {unfused} {fused_trace =~ unfused_trace} [{fused_trace}] walk {walk(xs)} even {first_even(xs) ?? -1}")
+si
+
+check("array", ARRAY[int]([1, 2, 3, 4, 5, 6]))
+check("list", LIST[int]([1, 2, 3, 4, 5, 6]))
+check("set", SET[int]([1, 2, 3, 4, 5, 6]))
+check("generator", gen(6))
+check("empty array", ARRAY[int]([]))
+check("empty list", LIST[int]())
+
+// The source is evaluated once, before the first element is read.
+let total = counted_source(LIST[int]([1, 2, 3])) |> map(x => x * 10) |> sum()
+write_line("source evaluated {source_calls} time(s), total {total}")
+
+// A list changed between reads is read again in full: nothing is cached.
+let changing = LIST[int]([1, 2])
+let as_sequence: int{} = changing
+let before = chain(as_sequence)
+changing.add(4)
+write_line("before {before} after {chain(as_sequence)}")

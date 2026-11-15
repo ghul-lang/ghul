@@ -163,6 +163,13 @@ namespace IR.LLVMTarget is
             elif !has_other /\ candidates.count <= COUNTED_FAMILY_LIMIT /\ _one_shape(candidates) then
                 family.add_range(candidates)
                 route = if candidates.count == 1 /\ !objects.trait_of(receiver_type)? then CountedRoute.EXACT else CountedRoute.GUARDED fi
+            elif let arrays_and_lists = _plain_members(candidates) /\ arrays_and_lists.count > 0 /\ arrays_and_lists.count <= COUNTED_FAMILY_LIMIT then
+                // A trait some class implements without storage to walk, or
+                // with storage of another shape, still tests for the arrays
+                // and lists among its implementors, and uses the iterator
+                // for any other class.
+                family.add_range(arrays_and_lists)
+                route = CountedRoute.GUARDED
             else
                 _preevaluated[call.from] = receiver
                 value.accept(self)
@@ -272,6 +279,20 @@ namespace IR.LLVMTarget is
             od
 
             return true
+        si
+
+        // The arrays and lists in `family`: the members a counted loop walks
+        // element by element.
+        _plain_members(family: (type: CLASS_INSTANCE, kind: StorageKind)[]) -> Collections.LIST[(type: CLASS_INSTANCE, kind: StorageKind)] is
+            let result = Collections.LIST[(type: CLASS_INSTANCE, kind: StorageKind)]()
+
+            for member in family do
+                if _shape_of(member.kind) == CountedShape.PLAIN then
+                    result.add(member)
+                fi
+            od
+
+            return result
         si
 
         _contains(family: (type: CLASS_INSTANCE, kind: StorageKind)[], type: CLASS_INSTANCE) -> bool is
