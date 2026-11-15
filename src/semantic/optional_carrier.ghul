@@ -1,0 +1,72 @@
+namespace Semantic is
+    use Types.Type
+
+    use Symbols.TypeParameterConstraintKind
+
+    /// Which representation the optional of a type takes.
+    enum OptionalCarrier is
+        /// The type is optional already, and is its own optional.
+        ALREADY_OPTIONAL,
+        /// A reference type, flagged optional: the same type at run time,
+        /// with null for absent.
+        REFERENCE,
+        /// A value type, carried by `System.Nullable[T]`.
+        NULLABLE,
+        /// An unconstrained type parameter, carried by `Ghul.MAYBE[T]`,
+        /// which holds its own presence flag because the parameter can be
+        /// either kind of type.
+        MAYBE
+    si
+
+    /// The one place that decides how the optional of a type is
+    /// represented. A written `T?`, the result of `?.` and `??`, and the
+    /// join of a type with `null` all take their carrier from here.
+    class OPTIONAL_CARRIER is
+        /// The carrier `t?` takes. A type parameter goes by its declared
+        /// kind: a `struct` parameter takes `NULLABLE`, a `class` one
+        /// `REFERENCE`, an `optional` one is already optional, and an
+        /// unconstrained one takes `MAYBE`. A type parameter is checked
+        /// before `is_value_type`, which every type parameter answers
+        /// true to whatever its kind.
+        /// - t: the type to make optional
+        carrier_of(t: Type) -> OptionalCarrier static is
+            if t.is_optional then
+                return OptionalCarrier.ALREADY_OPTIONAL
+            fi
+
+            if t.is_type_variable then
+                let kind = t.symbol.constraint_kind
+
+                if kind == TypeParameterConstraintKind.VALUE then
+                    return OptionalCarrier.NULLABLE
+                elif kind == TypeParameterConstraintKind.REFERENCE then
+                    return OptionalCarrier.REFERENCE
+                elif kind == TypeParameterConstraintKind.OPTIONAL then
+                    return OptionalCarrier.ALREADY_OPTIONAL
+                fi
+
+                return OptionalCarrier.MAYBE
+            fi
+
+            if t.is_value_type then
+                return OptionalCarrier.NULLABLE
+            fi
+
+            return OptionalCarrier.REFERENCE
+        si
+
+        /// The optional of `t`, in the carrier `carrier_of` names. Null
+        /// only when that carrier is `MAYBE` and `Ghul.MAYBE` is not
+        /// available, which is the case while compiling ghul-runtime
+        /// itself.
+        /// - t: the type to make optional
+        /// - lookup: supplies the `Nullable` and `MAYBE` generic types
+        of(t: Type, lookup: Lookups.InnateSymbolLookup) -> Type? static =>
+            case carrier_of(t)
+            when OptionalCarrier.ALREADY_OPTIONAL then t
+            when OptionalCarrier.REFERENCE then t.as_optional()
+            when OptionalCarrier.NULLABLE then lookup.get_optional_type(t)
+            when OptionalCarrier.MAYBE then lookup.get_maybe_type(t)
+            esac
+    si
+si
