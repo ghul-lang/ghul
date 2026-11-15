@@ -1,0 +1,140 @@
+namespace Semantic.UnitTests is
+    use Collections.LIST
+
+    use Source.LOCATION
+
+    use Semantic.Lookups.InnateSymbolLookup
+    use Semantic.Symbols.CLASS
+    use Semantic.Symbols.STRUCT
+    use Semantic.Symbols.CLASSY_GENERIC_ARGUMENT
+    use Semantic.Symbols.TypeParameterConstraintKind
+    use Semantic.Types.Type
+    use TestClass = Microsoft.VisualStudio.TestTools.UnitTesting.TestClassAttribute
+    use Test = Microsoft.VisualStudio.TestTools.UnitTesting.TestMethodAttribute
+    use Assertions
+    use NSubstitute.SubstituteExtensions.returns_for_any_args
+
+    // OPTIONAL_CARRIER decides the representation of the optional of
+    // every kind of type. The lookup answers each maker with a distinct
+    // marker type, so every test asserts which maker fired.
+    @TestClass()
+    class OPTIONAL_CARRIER_TESTS is
+        _nullable: Type
+        _maybe: Type
+
+        init() is
+            _nullable = marker("$nullable")
+            _maybe = marker("$maybe")
+        si
+
+        loc() -> LOCATION => LOCATION("test.ghul", 1, 1, 1, 1)
+
+        marker(name: string) -> Type =>
+            CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), name, LIST[string](), Semantic.BLOCK_SCOPE()).type!
+
+        a_struct(name: string) -> Type =>
+            STRUCT(loc(), loc(), Semantic.BLOCK_SCOPE(), name, LIST[string](), Semantic.BLOCK_SCOPE()).type!
+
+        type_variable_of_kind(kind: TypeParameterConstraintKind) -> Type is
+            let symbol = CLASSY_GENERIC_ARGUMENT(loc(), Semantic.BLOCK_SCOPE(), "T", 0)
+
+            symbol.set_constraint_kind(kind)
+
+            return symbol.type!
+        si
+
+        a_lookup(maybe: Type?) -> InnateSymbolLookup is
+            let lookup = NSubstitute.Substitute.`for`[InnateSymbolLookup](System.Array.empty`[object]())
+            let any = marker("Any")
+
+            lookup.get_optional_type(any) |> returns_for_any_args(_nullable, null)
+            lookup.get_maybe_type(any) |> returns_for_any_args(maybe, null)
+
+            return lookup
+        si
+
+        @Test()
+        carrier_of__reference_type__is_reference() is
+            are_equal(OptionalCarrier.REFERENCE, OPTIONAL_CARRIER.carrier_of(marker("Foo")))
+        si
+
+        @Test()
+        carrier_of__value_type__is_nullable() is
+            are_equal(OptionalCarrier.NULLABLE, OPTIONAL_CARRIER.carrier_of(a_struct("Point")))
+        si
+
+        @Test()
+        carrier_of__optional_reference__is_already_optional() is
+            are_equal(OptionalCarrier.ALREADY_OPTIONAL, OPTIONAL_CARRIER.carrier_of(marker("Foo").as_optional()))
+        si
+
+        @Test()
+        carrier_of__each_type_parameter_kind__follows_the_declared_kind() is
+            are_equal(OptionalCarrier.MAYBE, OPTIONAL_CARRIER.carrier_of(type_variable_of_kind(TypeParameterConstraintKind.NONE)))
+            are_equal(OptionalCarrier.NULLABLE, OPTIONAL_CARRIER.carrier_of(type_variable_of_kind(TypeParameterConstraintKind.VALUE)))
+            are_equal(OptionalCarrier.REFERENCE, OPTIONAL_CARRIER.carrier_of(type_variable_of_kind(TypeParameterConstraintKind.REFERENCE)))
+            are_equal(OptionalCarrier.ALREADY_OPTIONAL, OPTIONAL_CARRIER.carrier_of(type_variable_of_kind(TypeParameterConstraintKind.OPTIONAL)))
+        si
+
+        @Test()
+        of__reference_type__is_the_flagged_type() is
+            let t = marker("Foo")
+
+            let result = OPTIONAL_CARRIER.of(t, a_lookup(_maybe))!
+
+            is_true(result.is_optional)
+            are_same(t.symbol, result.symbol)
+        si
+
+        @Test()
+        of__value_type__is_nullable() is
+            are_same(_nullable, OPTIONAL_CARRIER.of(a_struct("Point"), a_lookup(_maybe)))
+        si
+
+        @Test()
+        of__already_optional__is_unchanged() is
+            let optional = marker("Foo").as_optional()
+
+            are_same(optional, OPTIONAL_CARRIER.of(optional, a_lookup(_maybe)))
+        si
+
+        @Test()
+        of__unconstrained__is_maybe() is
+            let t = type_variable_of_kind(TypeParameterConstraintKind.NONE)
+
+            are_same(_maybe, OPTIONAL_CARRIER.of(t, a_lookup(_maybe)))
+        si
+
+        @Test()
+        of__unconstrained_without_maybe__is_null() is
+            let t = type_variable_of_kind(TypeParameterConstraintKind.NONE)
+
+            is_null(OPTIONAL_CARRIER.of(t, a_lookup(null)))
+        si
+
+        @Test()
+        of__struct__is_nullable() is
+            let t = type_variable_of_kind(TypeParameterConstraintKind.VALUE)
+
+            are_same(_nullable, OPTIONAL_CARRIER.of(t, a_lookup(_maybe)))
+        si
+
+        @Test()
+        of__class__is_the_flagged_parameter() is
+            let t = type_variable_of_kind(TypeParameterConstraintKind.REFERENCE)
+
+            let result = OPTIONAL_CARRIER.of(t, a_lookup(_maybe))!
+
+            is_true(result.is_optional)
+            is_true(result.is_type_variable)
+            are_same(t.symbol, result.symbol)
+        si
+
+        @Test()
+        of__optional__is_the_parameter_itself() is
+            let t = type_variable_of_kind(TypeParameterConstraintKind.OPTIONAL)
+
+            are_same(t, OPTIONAL_CARRIER.of(t, a_lookup(_maybe)))
+        si
+    si
+si
