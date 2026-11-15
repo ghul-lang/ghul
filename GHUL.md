@@ -16,7 +16,7 @@ These mistakes cost the most rework. A section below explains each one. The last
 - **Strings have no `+` operator.** Join strings with interpolation: `"{a}{b}"`.
 - **`==` on a `string` compares references.** Compare text with `=~`. Use `==` for scalars, enums and references.
 - **Numbers do not convert implicitly.** `1.0 + 1` is an error. Write `1.0 + double(1)` or `cast double(n)`. A big integer is a `bigint`, written with the `n` suffix. Do not use `System.Numerics.BigInteger`.
-- **There is no `new`.** Construct a value by calling its type: `Box(42)`, `LIST[int]()`.
+- **There is no `new`.** Construct a value by calling its type: `Box(42)`, `LIST[int]()`. `new` is an ordinary identifier.
 - **The closing keyword of a block mirrors its opening keyword**: `is` ... `si`, `if` ... `fi`, `do` ... `od`, `case` ... `esac`, `try` ... `yrt`. There are no braces.
 - **A bare `let` is immutable.** A local declared `let count mut = 0` can be reassigned.
 - **An optional `T?` must be narrowed before it is used as a `T`.** Narrow it with `if x?` or `if let v = x`, or assert that it is present with `x!`.
@@ -1784,6 +1784,8 @@ assert index < array.count else "index out of range";
 ```
 
 A string after `else` gets the source location as a prefix, and is thrown in a `Ghul.AssertFailedException`. A `Ghul.Exception` value after `else` is thrown unchanged. Anything else after `else` is a compile error.
+
+When the condition is a comparison (`=~`, `!~`, `==`, `!=`, `<`, `<=`, `>`, `>=`) or a call, the message also gives the values it compared: `index >= 0 (left: -1, right: 0)` for a comparison, `contains(xs, 3) (arguments: [1, 2], 3)` for a call. Each value is written as `inspect` writes it, with a string or a character quoted, after the condition's text or after the `else` string. Each operand is evaluated once, before the condition is tested. A condition of any other form, and an assert in a generator or asynchronous body, gives the condition's text alone.
 
 In an expression, `assert cond else "msg" in expr` checks a condition before an expression. It works like `let X in expr`: if the assert fails it throws, and if it passes the value is the inner expression. The condition's narrowing applies in the inner expression, so the inner expression can use the checked value directly:
 

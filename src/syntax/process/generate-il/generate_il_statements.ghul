@@ -216,6 +216,8 @@ namespace Syntax.Process is
             message: Trees.Expressions.Expression?,
             default_message_source: object
         ) is
+            let reported = _spill_assert_operands(default_message_source, condition_value)
+
             let passed = _open_region(LABEL())
 
             add(Values.BREAK(passed, BRANCH.NZ, condition_value))
@@ -224,16 +226,19 @@ namespace Syntax.Process is
 
             let thrown =
                 if !message? then
-                    _assert_failed(Literal.STRING("{location}: {default_message_source}", string_type))
+                    _assert_failed(_with_reported_values(Literal.STRING("{location}: {default_message_source}", string_type), reported, location))
                 elif _innate_symbol_lookup.get_exception_type().is_assignable_from(message.value!.type!) then
                     message.value!
                 else
                     _assert_failed(
-                        Values.RUNTIME(
-                            IR.RuntimeOperation.CONCAT_STRINGS,
-                            Literal.STRING("{location}: ", string_type),
-                            message.value!,
-                            string_type))
+                        _with_reported_values(
+                            Values.RUNTIME(
+                                IR.RuntimeOperation.CONCAT_STRINGS,
+                                Literal.STRING("{location}: ", string_type),
+                                message.value!,
+                                string_type),
+                            reported,
+                            location))
                 fi
 
             add(Values.THROW(thrown))
@@ -243,6 +248,104 @@ namespace Syntax.Process is
 
         _assert_failed(message: Value) -> Value =>
             Values.RUNTIME(IR.RuntimeOperation.NEW_ASSERT_FAILED, message, null)
+
+        // The operands a failing assert reports: for a comparison its two
+        // sides, and for a call its arguments, each evaluated once into a
+        // local ahead of the condition, which then reads the local. Null
+        // where the condition is neither, where the runtime has no `inspect`
+        // to write a value with, or in a generator or asynchronous body,
+        // whose suspensions a local does not survive.
+        _spill_assert_operands(source: object, condition: Value) -> ASSERT_REPORT? is
+            if _current_state_machine_frame()? then
+                return null
+            fi
+
+            if !IR.Program.CORE_LIBRARY.inspect_function()? then
+                return null
+            fi
+
+            let operands = Collections.LIST[(label: string, value: Value?)]()
+            let is_call mut = false
+
+            if let binary: Expressions.BINARY = source then
+                if !ASSERT_REPORT.is_comparison(binary.actual_operation ?? binary.operation.name) then
+                    return null
+                fi
+
+                operands.add((label = "left", value = binary.left.value))
+                operands.add((label = "right", value = binary.right.value))
+            elif let call: Expressions.CALL = source then
+                is_call = true
+
+                for argument in call.arguments.expressions do
+                    operands.add((label = "", value = argument.value))
+                od
+            else
+                return null
+            fi
+
+            let report = ASSERT_REPORT(is_call)
+
+            for operand in operands do
+                if let value = operand.value, type = value.type /\ ASSERT_REPORT.can_report(value) then
+                    let local = IR.LOCAL(".assert_operand.{TEMP.get_next_id()}", type)
+
+                    if condition.replace_operand(value, local.load()) then
+                        add(Values.DECLARE_LOCAL(local))
+                        add(value)
+                        add(Values.STORE_TEMP(local))
+
+                        report.add(operand.label, local)
+                    fi
+                fi
+            od
+
+            return if report.count > 0 then report else null fi
+        si
+
+        // `message` followed by the values `report` holds, each written by
+        // `inspect`: ` (left: 41, right: 42)`, or ` (arguments: 1, 2)`.
+        _with_reported_values(message: Value, report: ASSERT_REPORT?, location: Source.LOCATION) -> Value is
+            if !report? then
+                return message
+            fi
+
+            let string_type = _innate_symbol_lookup.get_string_type()
+            let inspect = IR.Program.CORE_LIBRARY.inspect_function()!
+
+            let parts = Collections.LIST[Value]()
+            let first mut = true
+
+            for entry in report.entries do
+                let prefix =
+                    if report.is_call then
+                        if first then " (arguments: " else ", " fi
+                    else
+                        if first then " ({entry.label}: " else ", {entry.label}: " fi
+                    fi
+
+                let quote = ASSERT_REPORT.quote_for(entry.local.type, _innate_symbol_lookup)
+
+                parts.add(Literal.STRING("{prefix}{quote}", string_type))
+                parts.add(inspect.call(location, null, Collections.LIST[Value]([entry.local.load()]), null, _function_caller))
+
+                if quote.length > 0 then
+                    parts.add(Literal.STRING(quote, string_type))
+                fi
+
+                first = false
+            od
+
+            parts.add(Literal.STRING(")", string_type))
+
+            let result mut = message
+
+            for part in parts do
+                result = Values.RUNTIME(IR.RuntimeOperation.CONCAT_STRINGS, result, part, string_type)
+            od
+
+            return result
+        si
 
         visit(`assert: Statements.ASSERT) is
             super.visit(`assert)
