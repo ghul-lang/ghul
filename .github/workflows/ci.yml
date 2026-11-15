@@ -988,10 +988,14 @@ jobs:
         test -x "$ghul_llvm"
         dirname "$ghul_llvm" >> "$GITHUB_PATH"
 
-    # Stage 0: the llvm-built compiler of the newest release, checked
-    # against the sha256 published beside it. Where no release carries one
-    # for this platform, there is nothing to start a chain from: the
-    # compiler comes from .NET alone this run, which llvm_bootstrap builds.
+    # Stage 0: the llvm-built compiler of the newest release that carries
+    # one for this platform, checked against the sha256 published beside
+    # it. A release can lack one, when its chain and .NET-seeded builds
+    # disagreed, so the newest few releases are tried in turn; starting
+    # from an older release only means the chain may take a stage longer
+    # to settle. Where none of them carries one, there is nothing to start
+    # a chain from: the compiler comes from .NET alone this run, which
+    # llvm_bootstrap builds.
     - name: Fetch the released llvm-built compiler
       id: stage0
       shell: bash
@@ -1002,14 +1006,23 @@ jobs:
         archive=ghul-compiler-llvm-${{ matrix.triple }}.tar.gz
         mkdir -p "$RUNNER_TEMP/stage-0"
         cd "$RUNNER_TEMP/stage-0"
-        if ! gh release download --repo "${{ github.repository }}" --pattern "$archive" --pattern "$archive.sha256" 2>download.log; then
-          cat download.log
-          echo "::warning::no released llvm-built compiler for ${{ matrix.triple }}: nothing to start a chain from, so this run's compiler for it comes from .NET alone (llvm_bootstrap)"
+        found=
+        for release in $(gh release list --repo "${{ github.repository }}" --exclude-pre-releases --exclude-drafts --limit 10 --json tagName --jq '.[].tagName'); do
+          if gh release download "$release" --repo "${{ github.repository }}" --pattern "$archive" --pattern "$archive.sha256" 2>download.log; then
+            found=$release
+            break
+          fi
+          echo "release $release carries no llvm-built compiler for ${{ matrix.triple }}"
+        done
+        if [ -z "$found" ]; then
+          echo "::warning::no recent release carries an llvm-built compiler for ${{ matrix.triple }}: nothing to start a chain from, so this run's compiler for it comes from .NET alone (llvm_bootstrap)"
           echo "found=false" >> "$GITHUB_OUTPUT"
           mkdir -p "$RUNNER_TEMP/llvm-chain"
           echo no-stage0 > "$RUNNER_TEMP/llvm-chain/status"
           exit 0
         fi
+        echo "stage 0 is the llvm-built compiler released in $found"
+        echo "chain stage 0 for ${{ matrix.triple }}: $found" >> "$GITHUB_STEP_SUMMARY"
         sha256sum --check --quiet "$archive.sha256"
         tar -xzf "$archive"
         echo "found=true" >> "$GITHUB_OUTPUT"
