@@ -1843,6 +1843,8 @@ namespace IR.LLVMTarget is
         _cast_to_optional(conversion: Values.CAST, target: Type) is
             let inner = _value_optional_inner(target)!
             let objects = _objects
+
+
             let box_type = if let o = objects then o.box_type(_specialize(inner)) ?? o.struct_of(_specialize(inner)) else null fi
 
             if !objects? \/ !box_type? then
@@ -4211,6 +4213,20 @@ namespace IR.LLVMTarget is
             return null
         si
 
+        // The reference a cast to `type` is a cast to where `type` is a
+        // MAYBE held as its reference or the optional of one, else `type`.
+        _collapsed_cast_target(type: Type?) -> Type? is
+            if let o = _objects then
+                let candidate = if let t = type /\ t.is_optional /\ !t.is_maybe /\ t.is_value_type then t.optional_inner_type else type fi
+
+                if let m = o.maybe_of(candidate) /\ o.is_collapsed_maybe(m) then
+                    return m.arguments[0].as_optional()
+                fi
+            fi
+
+            return type
+        si
+
         // The MAYBE instance `symbol`, a field, belongs to, where that MAYBE
         // is held as its reference rather than as a struct.
         _collapsed_maybe_owner(symbol: Semantic.Symbols.Symbol) -> CLASS_INSTANCE? is
@@ -5099,7 +5115,13 @@ namespace IR.LLVMTarget is
         // checked cast throws where the test fails, and one to an optional
         // type answers null. A cast to `object` cannot fail.
         visit(conversion: Values.CAST) is
-            let target = _specialize(conversion.type)
+            let specialized = _specialize(conversion.type)
+
+            // A MAYBE held as its reference, or the optional of one, is cast
+            // to as that reference is: the object is the value, and null is
+            // the absent one.
+            let target = _collapsed_cast_target(specialized)
+
             let operand = _type_test_operand(conversion.value)
 
             if let t = target /\ _value_optional_inner(t)? then
