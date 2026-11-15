@@ -56,6 +56,7 @@ namespace Syntax.Process is
             name =~ "trusted_store_free" \/
             name =~ "finalizer" \/
             name =~ "reflected" \/
+            name =~ "test" \/
             name =~ "extern"
 
         resolve(pragma: Trees.Pragmas.PRAGMA, target: Semantic.Symbols.Symbol?) =>
@@ -66,13 +67,21 @@ namespace Syntax.Process is
         resolve(pragma: Trees.Pragmas.PRAGMA, target: Semantic.Symbols.Symbol?, accessors: Collections.LIST[Semantic.Symbols.Function]?) is
             let name = pragma.name.to_string()
 
-            // The test pragmas emitted MSTest 3 attributes against an
+            // `test` marks a test a runner finds through reflection. A use
+            // inside a body resolves against no target, and is reported as
+            // one on the wrong thing.
+            if name =~ "test" then
+                _resolve_test(pragma, target)
+                return
+            fi
+
+            // The MSTest pragmas emitted MSTest 3 attributes against an
             // assembly name MSTest 4 no longer ships, so the tests they
             // marked were silently not discovered. The attributes are
             // written as attributes now instead. The name is rejected
             // whatever the pragma was written against, so a use inside a
             // body — which resolves against no target — reports too.
-            if name =~ "test" \/ name =~ "test_class" \/ name =~ "test_method" then
+            if name =~ "test_class" \/ name =~ "test_method" then
                 _logger.error(
                     pragma.name.location,
                     "unsupported-test-pragma", "'{name}' is not supported",
@@ -383,6 +392,141 @@ namespace Syntax.Process is
             else
                 _logger.error(pragma.name.location, "pragma-wrong-target", "finalizer applies only to an instance method of a non-generic class, taking no arguments")
             fi
+        si
+
+        _test_attribute_resolved: bool
+        _test_attribute_symbol: Semantic.Symbols.Classy?
+        _test_owners_reported: Collections.SET[Semantic.Symbols.Classy]?
+
+        // The attribute a test carries on .NET, found as the intrinsic
+        // marker is; null where neither the reference set nor this
+        // compilation's source declares it.
+        _test_attribute() -> Semantic.Symbols.Classy? is
+            if !_test_attribute_resolved then
+                _test_attribute_resolved = true
+
+                @IF.dotnet()
+                _test_attribute_symbol =
+                    cast Semantic.Symbols.Classy?(
+                        IoC.CONTAINER.instance.dotnet_symbol_table.value
+                            .get_symbol("Ghul.TEST_ATTRIBUTE"))
+
+                if !_test_attribute_symbol? then
+                    if let ghul_namespace = IoC.CONTAINER.instance.namespaces.try_find_namespace(".Ghul") then
+                        _test_attribute_symbol = cast Semantic.Symbols.Classy?(ghul_namespace.find_direct("TEST_ATTRIBUTE"))
+                    fi
+                fi
+            fi
+
+            return _test_attribute_symbol
+        si
+
+        // `test` marks a method or global function a runner calls with no
+        // arguments, on a new instance of its class where it is an
+        // instance method. What a test is written on is checked here, so
+        // a test the runner could not call is reported on its declaration
+        // rather than skipped. A report about the class is made once, on
+        // the class, however many tests it holds.
+        _resolve_test(pragma: Trees.Pragmas.PRAGMA, target: Semantic.Symbols.Symbol?) is
+            let function = cast Semantic.Symbols.Function?(target)
+
+            let is_callable =
+                isa Semantic.Symbols.INSTANCE_METHOD(function) \/
+                isa Semantic.Symbols.STATIC_METHOD(function) \/
+                isa Semantic.Symbols.GLOBAL_FUNCTION(function)
+
+            if !function? \/ !is_callable \/ function.is_static_constructor \/ function.name =~ "init" then
+                _logger.error(pragma.name.location, "pragma-wrong-target", "test applies only to a method or a global function")
+                return
+            fi
+
+            let location = function.location
+            let lookup = IoC.CONTAINER.instance.innate_symbol_lookup
+
+            if function.is_generic then
+                _logger.error(location, "test-generic", "a test can't be generic: the runner has no type arguments to call it with")
+                return
+            fi
+
+            if function.arguments.count > 0 then
+                _logger.error(location, "test-has-parameters", "a test takes no arguments: the runner has none to pass")
+                return
+            fi
+
+            let return_type = function.return_type
+
+            if
+                isa Semantic.Symbols.INSTANCE_ASYNC_METHOD(function) \/ isa Semantic.Symbols.STATIC_ASYNC_METHOD(function) \/ isa Semantic.Symbols.GLOBAL_ASYNC_FUNCTION(function) \/
+                IoC.CONTAINER.instance.task_conversion.is_task_type(return_type) \/
+                IoC.CONTAINER.instance.task_conversion.is_void_task_return(return_type)
+            then
+                _logger.error(location, "test-async", "asynchronous tests aren't supported yet: a test returns nothing")
+                return
+            fi
+
+            if return_type? /\ return_type.compare(lookup.get_void_type()) != Semantic.Types.MATCH.SAME then
+                _logger.error(location, "test-returns-value", "a test returns nothing: the runner has nowhere to put a value")
+                return
+            fi
+
+            if let owner: Semantic.Symbols.Classy = function.owner then
+                if !_check_test_owner(owner, function.is_instance) then
+                    return
+                fi
+            fi
+
+            function.is_marked_test = true
+
+            if let attribute = _test_attribute() then
+                _record_attribute(pragma, function, attribute)
+            fi
+        si
+
+        // Whether a test can be called where `owner` declares it, reporting
+        // why not, once for each class, where it can't.
+        _check_test_owner(owner: Semantic.Symbols.Classy, is_instance: bool) -> bool is
+            let message: string? =
+                if isa Semantic.Symbols.STRUCT(owner) then
+                    "tests in a struct aren't supported yet: declare them in a class"
+                elif owner.is_generic then
+                    "a generic class can't hold tests: the runner has no type arguments to make it with"
+                elif !isa Semantic.Symbols.CLASS(owner) then
+                    "only a class can hold tests: the runner makes an instance of the class to call each one on"
+                elif is_instance /\ owner.is_abstract then
+                    "an abstract class can't hold instance tests: the runner can't make an instance of it"
+                elif is_instance /\ !_has_public_parameterless_init(owner) then
+                    "a class holding instance tests needs a public init() taking no arguments: the runner makes an instance with it for each test"
+                else
+                    null
+                fi
+
+            if let reason = message then
+                let reported = _test_owners_reported ?? Collections.SET[Semantic.Symbols.Classy]()
+
+                _test_owners_reported = reported
+
+                if reported.add(owner) then
+                    _logger.error(owner.location, "test-owner-unsupported", reason)
+                fi
+
+                return false
+            fi
+
+            return true
+        si
+
+        _has_public_parameterless_init(owner: Semantic.Symbols.Classy) -> bool is
+            if let group = cast Semantic.Symbols.FUNCTION_GROUP?(owner.find_direct("init")) then
+                for constructor in group.functions do
+                    if constructor.is_instance /\ !constructor.is_private /\ constructor.arguments.count == 0 then
+                        return true
+                    fi
+                od
+            elif let constructor: Semantic.Symbols.Function = owner.find_direct("init") then
+                return constructor.is_instance /\ !constructor.is_private /\ constructor.arguments.count == 0
+            fi
+
+            return false
         si
 
         // `reflected` marks a type a build under `--rtti-roots` describes

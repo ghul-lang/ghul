@@ -140,6 +140,15 @@ namespace IR.Program is
                     fi
 
                     arguments.add(_bool(constructor.is_public))
+                elif let test: RTTI_CALL.TEST_METHOD = call then
+                    if let invoke = _test_invoker(type, test, call.method) then
+                        arguments.add(_string(test.name))
+                        arguments.add(_bool(test.is_public))
+                        arguments.add(_bool(test.is_static))
+                        arguments.add(invoke)
+                    else
+                        return null
+                    fi
                 fi
 
                 body.add(Values.Call.INSTANCE(Values.Load.ARGUMENT(describer, 0), method, arguments.to_array(), lookup.get_void_type()))
@@ -268,6 +277,32 @@ namespace IR.Program is
             fi
 
             return Values.NULL(optional_type)
+        si
+
+        // `(object?) -> void`, calling the test on the object cast to
+        // `type`, or with no receiver where the test is static.
+        _test_invoker(type: CLASS_INSTANCE, test: RTTI_CALL.TEST_METHOD, method: FUNCTION_INSTANCE) -> Value? is
+            let value_type = _parameter(method, 3)
+            let callee = _member_of(type, test.test, test.name)
+
+            if !value_type? \/ !callee? then
+                return null
+            fi
+
+            let lookup = IoC.CONTAINER.instance.innate_symbol_lookup
+            let void_type = lookup.get_void_type()
+            let invoker = _function(type, "$test_{test.name}", ["instance"], [lookup.get_object_type()], void_type)
+
+            let call: Value =
+                if test.is_static then
+                    Values.Call.STATIC(callee, Collections.LIST[Value]().to_array(), void_type, null)
+                else
+                    Values.Call.INSTANCE(_instance(type, invoker), callee, Collections.LIST[Value]().to_array(), void_type)
+                fi
+
+            _add_body(invoker, LIST[Value]([call, Values.RET()]))
+
+            return _value(value_type, invoker)
         si
 
         // `(ARRAY[object?]) -> object`, making an instance of `type` with

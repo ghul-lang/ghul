@@ -1,0 +1,140 @@
+namespace Syntax.Process is
+    use IR
+    use IR.Values
+
+    use Semantic.Types.Type
+    use Semantic.Symbols.Function
+    use Semantic.Symbols.Classy
+
+    // The core library lists the program's tests for reflection through
+    // one function, `TYPE_DESCRIPTIONS._add_roots(roots: ROOT_TYPES)`,
+    // whose declared body throws. Where the program describes its types,
+    // its body is generated here instead: a call on `roots` naming each
+    // class of the program's own that declares a test, and one for each
+    // of its global functions that is a test. A source library's tests
+    // are not the program's, so none is listed.
+    partial GENERATE_IL is
+        _root_types_found: bool
+        _root_types_function: Function?
+
+        // The core library's listing function, pinned by its exact
+        // parameters; null where the core library declares none.
+        _root_types_listing: Function? is
+            if !_root_types_found then
+                _root_types_found = true
+
+                if let internal_namespace = IoC.CONTAINER.instance.namespaces.try_find_namespace(".Ghul.Internal") then
+                    if let roots: Classy = internal_namespace.find_direct("ROOT_TYPES") then
+                        _root_types_function =
+                            Semantic.KNOWN_MEMBERS.declared(
+                                internal_namespace.find_direct("TYPE_DESCRIPTIONS"),
+                                "_add_roots",
+                                Semantic.KNOWN_SIGNATURE([Semantic.Types.NAMED(roots)], false))
+                    fi
+                fi
+            fi
+
+            return _root_types_function
+        si
+
+        // Whether `symbol`'s body is the generated listing, rather than the
+        // one it declares.
+        _is_generated_root_types(symbol: Function) -> bool =>
+            IoC.CONTAINER.instance.build_flags.want_rtti /\ _root_types_listing? /\ symbol == _root_types_listing
+
+        _gen_root_types(symbol: Function) is
+            let lookup = _innate_symbol_lookup
+            let void_type = lookup.get_void_type()
+            let string_type = lookup.get_string_type()
+            let roots_type = symbol.arguments[0]
+
+            let add_type =
+                if let type_class = IR.Program.CORE_LIBRARY.type_class() then
+                    Semantic.KNOWN_MEMBERS.find(roots_type, "_type", Semantic.KNOWN_SIGNATURE([Semantic.Types.NAMED(type_class)], true))
+                else
+                    null
+                fi
+
+            let test_type = lookup.get_function_type([void_type])
+
+            let add_global_test =
+                Semantic.KNOWN_MEMBERS.find(
+                    roots_type,
+                    "_global_test",
+                    Semantic.KNOWN_SIGNATURE([string_type, string_type, lookup.get_bool_type(), test_type], true))
+
+            _backend.begin_body()
+
+            enter_block()
+
+            let roots = Load.ARGUMENT(symbol, 0)
+
+            for test in _program_tests() do
+                if let owner: Classy = test.owner then
+                    if let add = add_type then
+                        add(Call.INSTANCE(roots, add, [TYPEOF(add.arguments[0], Semantic.Types.NAMED(owner))], void_type))
+                    fi
+                elif let add = add_global_test then
+                    let `namespace = test.owner?.qualified_name ?? ""
+
+                    add(
+                        Call.INSTANCE(
+                            roots,
+                            add,
+                            [
+                                Literal.STRING(if `namespace.starts_with('.') then `namespace.substring(1) else `namespace fi, string_type),
+                                Literal.STRING(test.name, string_type),
+                                Literal.NUMBER(if test.is_private \/ test.name.starts_with('_') then 0 else 1 fi, lookup.get_bool_type()),
+                                MAKE_CLOSURE(add.arguments[3], test, NULL(lookup.get_object_type()))
+                            ],
+                            void_type))
+                fi
+            od
+
+            _backend.write(current_block)
+
+            leave_block()
+
+            _backend.write(RET())
+
+            _backend.finish_body(symbol)
+            _backend.end_body()
+        si
+
+        // The program's own tests: each global function marked `@test()`,
+        // and for each class declaring methods marked so, the first of
+        // them, which stands for its class.
+        _program_tests() -> Collections.LIST[Function] is
+            let result = Collections.LIST[Function]()
+
+            for `namespace in IoC.CONTAINER.instance.namespaces do
+                for symbol in `namespace.symbols do
+                    if let group: Semantic.Symbols.FUNCTION_GROUP = symbol then
+                        for function in group.functions do
+                            if function.is_marked_test /\ PROGRAM_FUNCTIONS.contains(function) then
+                                result.add(function)
+                            fi
+                        od
+                    elif let classy: Classy = symbol /\ !classy.location.is_reflected then
+                        _add_first_test(result, classy)
+                    fi
+                od
+            od
+
+            return result
+        si
+
+        _add_first_test(result: Collections.LIST[Function], classy: Classy) is
+            for member in classy.symbols do
+                if let group: Semantic.Symbols.FUNCTION_GROUP = member then
+                    for function in group.functions do
+                        if function.is_marked_test /\ PROGRAM_FUNCTIONS.contains(function) then
+                            result.add(function)
+                            return
+                        fi
+                    od
+                fi
+            od
+        si
+    si
+si

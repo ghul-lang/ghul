@@ -125,6 +125,17 @@ namespace IR.WasmGC is
 
                     body.add_range(_function_value(made))
                     body.add(Wasm.I32_CONSTANT(if constructor.is_public then 1 else 0 fi))
+                elif let test: RTTI_CALL.TEST_METHOD = call then
+                    let invoker = _test_invoker(call.method, test, numbering)
+
+                    if !invoker? then
+                        return null
+                    fi
+
+                    body.add(INDEX_INSTRUCTION(Opcode.GLOBAL_GET, strings.literal(test.name)))
+                    body.add(Wasm.I32_CONSTANT(if test.is_public then 1 else 0 fi))
+                    body.add(Wasm.I32_CONSTANT(if test.is_static then 1 else 0 fi))
+                    body.add_range(_function_value(invoker))
                 fi
 
                 body.add(INDEX_INSTRUCTION(Opcode.CALL, method))
@@ -223,6 +234,25 @@ namespace IR.WasmGC is
                 body.add(INDEX_INSTRUCTION(Opcode.CALL, index))
 
                 return numbering.reserve(() -> FUNCTION => FUNCTION(_signature_of(method, 3)!, [], body))
+            fi
+
+            return null
+        si
+
+        // `(object?) -> void`, calling the test on the object, or with no
+        // receiver where it is static; null where the test was not
+        // compiled.
+        _test_invoker(method: FUNCTION_INSTANCE, test: RTTI_CALL.TEST_METHOD, numbering: WASMGC_FUNCTION_NUMBERING) -> int? is
+            if let index = numbering.indexed(test.test), signature = _signature_of(method, 3) then
+                let body = LIST[INSTRUCTION]()
+
+                if !test.is_static then
+                    _receiver(body, test.test)
+                fi
+
+                body.add(INDEX_INSTRUCTION(Opcode.CALL, index))
+
+                return numbering.reserve(() -> FUNCTION => FUNCTION(signature, [], body))
             fi
 
             return null
