@@ -776,6 +776,11 @@ namespace IR.LLVMTarget is
         visit(load: Values.Load.SYMBOL) is _report("a load of {load.symbol.name}") si
         visit_address(load: Values.Load.SYMBOL) is _report("the address of {load.symbol.name}") si
         visit_address(load: Values.Load.INSTANCE_FIELD) is
+            if _collapsed_maybe_owner(load.symbol)? then
+                _report("the address of a field of {load.symbol.owner}")
+                return
+            fi
+
             if let address = _field_address(load.from, load.symbol) then
                 _push(address)
             fi
@@ -4190,6 +4195,57 @@ namespace IR.LLVMTarget is
             return null
         si
 
+        // The MAYBE instance `symbol`, a field, belongs to, where that MAYBE
+        // is held as its reference rather than as a struct.
+        _collapsed_maybe_owner(symbol: Semantic.Symbols.Symbol) -> CLASS_INSTANCE? is
+            if let objects = _objects, owner = _owner_class(symbol.owner) /\ objects.is_collapsed_maybe(owner) then
+                return owner
+            fi
+
+            return null
+        si
+
+        // MAYBE's two fields where the MAYBE is held as its reference: its
+        // presence flag, the first, is whether the reference is not null,
+        // and its value, the second, is the reference.
+        _load_collapsed_maybe_field(from: Value?, symbol: Semantic.Symbols.Symbol) is
+            let objects = _objects!
+
+            // A MAYBE is a value held in place, so its fields are read
+            // through where it is held: the receiver of one of its own
+            // methods is that place.
+            let address = if let f = from then _address_of(f) else null fi
+
+            if !address? then
+                _report("a field of {symbol.owner}")
+                return
+            fi
+
+            let reference = _current.load(Types.pointer, address, 0)
+
+            if (objects.field_position(symbol) ?? -1) == 0 then
+                _push(_current.compare(IntegerPredicate.NE, reference, LLVM.Values.null_pointer))
+            else
+                _push(reference)
+            fi
+        si
+
+        // Storing MAYBE's value stores the reference; storing its presence
+        // flag stores nothing, since a present MAYBE's flag is set only
+        // alongside its value, by the constructor that takes one, and the
+        // reference already says whether it is present.
+        _store_collapsed_maybe_field(from: Value?, symbol: Semantic.Symbols.Symbol, value: Value) is
+            let objects = _objects!
+
+            if (objects.field_position(symbol) ?? -1) == 0 then
+                return
+            fi
+
+            if let f = from, address = _address_of(f), reference = _value_of(value) then
+                _current.store(reference, address, 0)
+            fi
+        si
+
         // Tests `object`, which `from` lowered to, for null before it is read
         // through, unless `from` is the receiver, which its caller tested, or
         // `object` is null because `from` is a struct, which is not a
@@ -4201,6 +4257,11 @@ namespace IR.LLVMTarget is
         si
 
         visit(load: Values.Load.INSTANCE_FIELD) is
+            if _collapsed_maybe_owner(load.symbol)? then
+                _load_collapsed_maybe_field(load.from, load.symbol)
+                return
+            fi
+
             if !_stored(load.type)? then
                 _report("a field of type {load.type}")
                 return
@@ -4212,6 +4273,11 @@ namespace IR.LLVMTarget is
         si
 
         visit(store: Values.Store.INSTANCE_FIELD) is
+            if _collapsed_maybe_owner(store.symbol)? then
+                _store_collapsed_maybe_field(store.from, store.symbol, store.value)
+                return
+            fi
+
             if let (object, address) = _field_access(store.from, store.symbol), value = _value_of(store.value) then
                 _check_receiver(store.from, object)
                 _store_stored(value, store.type, address)
