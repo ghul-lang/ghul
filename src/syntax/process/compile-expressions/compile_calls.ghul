@@ -366,6 +366,23 @@ namespace Syntax.Process is
         si
 
         // should be called with logger speculating
+        // `Ghul.Interop.read` and `write` load and store a scalar or a `word`
+        // at an address; any other type has no single machine load.
+        _check_interop_access(call: Trees.Expressions.CALL, function: Semantic.Symbols.Function) is
+            let declared = cast Semantic.Symbols.Function?(function.root_specialized_from) ?? function
+            let operation = declared.intrinsic_operation
+
+            if !operation? \/ (operation !~ "interop.read" /\ operation !~ "interop.write") \/ function.generic_arguments.count != 1 then
+                return
+            fi
+
+            let accessed = function.generic_arguments[0]
+
+            if !Semantic.PINVOKE_SIGNATURE(_innate_symbol_lookup).is_scalar(accessed) then
+                _logger.error(call.function.location, "interop-access-not-scalar", "'{function.name}' takes a scalar or 'word' type, not '{accessed}'")
+            fi
+        si
+
         _compile_call_arguments(
             argument_expressions: Trees.Expressions.LIST,
             arguments: Collections.LIST[Value],
@@ -3610,6 +3627,8 @@ namespace Syntax.Process is
                     if _try_wrap_return_pack(call, function, call_receiver, arguments) then
                         return
                     fi
+
+                    _check_interop_access(call, function)
 
                     call.compile_expressions_state.value = function.call(call.function.location, call_receiver, arguments, null, _function_caller)
                     return

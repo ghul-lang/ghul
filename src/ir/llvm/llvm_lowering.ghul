@@ -2975,6 +2975,30 @@ namespace IR.LLVMTarget is
             fi
         si
 
+        // A scalar of `type` read from, or written to, `offset` bytes past the
+        // address in `arguments[0]`, a `word`. Unaligned, since the offset is
+        // the caller's: C lays out its own structs.
+        _interop_access(is_write: bool, type: Type, arguments: Value[]) is
+            let address = _value_of(arguments[0])
+            let offset = _value_of(arguments[1])
+            let stored = _stored(type)
+
+            if !address? \/ !offset? \/ !stored? then
+                _report("a pointer read or write")
+                return
+            fi
+
+            let at = _current.element_pointer(Types.i8, _current.convert(Conversion.INTEGER_TO_POINTER, address, Types.pointer), [offset], false)
+
+            if is_write then
+                if let value = _value_of(arguments[2]) then
+                    _current.store(_narrow(value, type), at, 1)
+                fi
+            else
+                _push(_widen(_current.load(stored, at, 1), type))
+            fi
+        si
+
         // The instance a call from this body names: a reference from inside a
         // generic body takes its type arguments from the body's own.
         _instance_of(function: Function) -> FUNCTION_INSTANCE =>
@@ -3000,6 +3024,8 @@ namespace IR.LLVMTarget is
                     _call_string(operation, arguments)
                 elif operation =~ "type.size_of" then
                     _push(LLVM.Values.i32(_size_of(function.generic_arguments[0])))
+                elif operation =~ "interop.read" \/ operation =~ "interop.write" then
+                    _interop_access(operation =~ "interop.write", function.generic_arguments[0], arguments)
                 elif operation =~ "build.version" then
                     gen(Values.Literal.STRING(IR.BUILD_VERSION.text, IoC.CONTAINER.instance.innate_symbol_lookup.get_string_type()))
                 elif operation =~ "bigint.is_small" \/ operation =~ "bigint.small" then
