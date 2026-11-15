@@ -1,0 +1,66 @@
+use default
+
+// A loop or fused chain over a list() result walks the elements it cached once
+// it has read its source to the end, and uses its iterator while it is still
+// reading: a partly read memo still pulls the rest in order. Each scenario
+// runs fused and with fusion suppressed, and the two must agree.
+
+let pulled = LIST[int]()
+
+source(n: int) -> int{} is
+    for i in 1::n do
+        pulled.add(i)
+        yield i
+    od
+si
+
+chain(xs: int{}) -> int => xs |> map(x => x * 2) |> filter(x => x % 3 != 0) |> sum()
+
+chain_unfused(xs: int{}) -> int is
+    @suppress("pipe-fusion")
+    let total = xs |> map(x => x * 2) |> filter(x => x % 3 != 0) |> sum()
+    return total
+si
+
+walk(xs: int{}) -> string is
+    let seen = LIST[int]()
+    for x in xs do
+        if x == 3 then continue fi
+        if x == 5 then break fi
+        seen.add(x)
+    od
+    seen |> join(",")
+si
+
+check(name: string, xs: int{}) is
+    write_line("{name}: fused {chain(xs)} unfused {chain_unfused(xs)} walk {walk(xs)} pulled [{pulled |> join(",")}]")
+si
+
+// Complete before the first loop reads it.
+pulled.clear()
+let complete = source(6) |> list()
+complete |> count()
+check("complete", complete)
+
+// Not yet read at all: the first loop reads it through its iterator.
+pulled.clear()
+let unread = source(6) |> list()
+check("unread", unread)
+
+// Partly read: two elements cached, the rest still to pull, in order.
+pulled.clear()
+let partly = source(6) |> list()
+write_line("partly read first: {partly[1]} pulled [{pulled |> join(",")}]")
+check("partly read", partly)
+
+// An unbounded memo is never complete, so it always takes its iterator, and
+// only as far as the chain pulls.
+pulled.clear()
+let unbounded = from(1) |> map(x => (pulled.add(x); x)) |> list()
+write_line("unbounded: {unbounded |> take(4) |> sum()} pulled [{pulled |> join(",")}]")
+
+// A memo changed after it is complete is read as it is now.
+let grown = cast Ghul.Pipes.MEMO_PIPE[int]?([1, 2] |> map(x => x) |> list())!
+grown |> count()
+grown.add(4)
+write_line("grown: {chain(grown)} {chain_unfused(grown)}")
