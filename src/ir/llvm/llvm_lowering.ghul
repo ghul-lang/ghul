@@ -2993,10 +2993,32 @@ namespace IR.LLVMTarget is
                 _lower_bigint_field(call.innate_name, call.arguments[0])
             elif call.innate_name =~ "interop.read" \/ call.innate_name =~ "interop.write" then
                 _interop_access(call.innate_name =~ "interop.write", call.function.generic_arguments[0], call.arguments)
+            elif call.innate_name =~ "interop.elements" then
+                _interop_elements(call.arguments[0])
             elif call.is_lowered then
                 gen(call.lowering)
             else
                 gen(call.lower())
+            fi
+        si
+
+        // The address of the first element of the array `array` holds, as a
+        // `word`: where its elements start, whether or not it has any. The
+        // collector doesn't move objects, so the address stays good for as
+        // long as the array is reachable.
+        _interop_elements(array: Value) is
+            let value = _value_of(array)
+            let arrays = _arrays
+
+            if !value? \/ !arrays? then
+                _report("the address of an array's elements")
+                return
+            fi
+
+            if let instance = arrays.array_of(_specialize(array.type)) then
+                _push(_current.convert(Conversion.POINTER_TO_INTEGER, arrays.element_address(_current, instance, value, _i32(0)), Types.i64))
+            else
+                _report("the address of the elements of {array.type}")
             fi
         si
 
@@ -3051,6 +3073,8 @@ namespace IR.LLVMTarget is
                     _push(LLVM.Values.i32(_size_of(function.generic_arguments[0])))
                 elif operation =~ "interop.read" \/ operation =~ "interop.write" then
                     _interop_access(operation =~ "interop.write", function.generic_arguments[0], arguments)
+                elif operation =~ "interop.elements" then
+                    _interop_elements(arguments[0])
                 elif operation =~ "build.version" then
                     gen(Values.Literal.STRING(IR.BUILD_VERSION.text, IoC.CONTAINER.instance.innate_symbol_lookup.get_string_type()))
                 elif operation =~ "bigint.is_small" \/ operation =~ "bigint.small" then
