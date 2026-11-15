@@ -83,6 +83,8 @@ jobs:
       package: ${{ steps.version.outputs.package }}
       compiler: ${{ steps.compiler_version.outputs.compiler }}
       build: ${{ steps.compiler_version.outputs.build }}
+      runtime: ${{ steps.libraries.outputs.runtime }}
+      ghul_llvm: ${{ steps.libraries.outputs.ghul_llvm }}
 
     permissions:
       contents: read
@@ -93,6 +95,33 @@ jobs:
     - uses: actions/checkout@v7
       with:
         fetch-depth: '0'
+
+    # The libraries every job in this run builds against, chosen once here
+    # so that a release of either during the run can't give two jobs two
+    # different versions: jobs whose outputs are compared, such as the
+    # native chain and the .NET-seeded llvm build, must have compiled the
+    # same runtime and linked with the same ghul-llvm. The runtime is the
+    # release a user of this compiler would get, chosen as ghul-cli chooses
+    # it, so a run tests that pairing; a scheduled run takes the head
+    # instead, pinned to its commit, to catch it drifting from the compiler.
+    # ghul-llvm is its latest release, as a user's build fetches it.
+    - name: Choose the libraries for the run
+      id: libraries
+      shell: bash
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: |
+        set -euo pipefail
+        if [ "${{ github.event_name }}" = schedule ]; then
+          runtime=$(git ls-remote https://github.com/ghul-lang/ghul-runtime HEAD | cut -f1)
+        else
+          runtime=$(build/library-tag.sh ghul-runtime)
+        fi
+        ghul_llvm=$(gh release view --repo ghul-lang/ghul-llvm --json tagName --jq .tagName)
+        [ -n "$runtime" ] && [ -n "$ghul_llvm" ]
+        echo "runtime=$runtime" >> "$GITHUB_OUTPUT"
+        echo "ghul_llvm=$ghul_llvm" >> "$GITHUB_OUTPUT"
+        echo "runtime $runtime, ghul-llvm $ghul_llvm" >> "$GITHUB_STEP_SUMMARY"
 
     # Compute the next version: the patch bump of the latest vX.Y.Z tag, unless
     # the checked-in VERSION file declares a higher minor/major floor (a marker
@@ -592,27 +621,13 @@ jobs:
     # against the runtime library's sources, its core and runtime trees: a
     # wasm build loads no assemblies, so the library comes from its
     # checkout, and the module runs under Node.
-    # The runtime release a user of this compiler would get, chosen as
-    # ghul-cli chooses it, so a run tests that pairing. A scheduled run
-    # takes the head instead, to catch it drifting from the compiler.
-    - name: Choose the runtime release
-      id: libraries
-      shell: bash
-      run: |
-        set -euo pipefail
-        if [ "${{ github.event_name }}" = schedule ]; then
-          echo "runtime=" >> "$GITHUB_OUTPUT"
-        else
-          runtime=$(build/library-tag.sh ghul-runtime)
-          echo "runtime=$runtime" >> "$GITHUB_OUTPUT"
-        fi
-
+    # The runtime the version job chose for the whole run.
     - name: Checkout ghul-runtime
       uses: actions/checkout@v7
       with:
         repository: ghul-lang/ghul-runtime
         path: libraries/ghul-runtime
-        ref: ${{ steps.libraries.outputs.runtime }}
+        ref: ${{ needs.version.outputs.runtime }}
 
     - name: Set up Node.js
       uses: actions/setup-node@v7
@@ -743,26 +758,13 @@ jobs:
     - name: Restore local .NET tools
       run: dotnet tool restore
 
-    # The runtime release a user of this compiler would get, as llvm_test_shards
-    # chooses it; a scheduled run takes the head.
-    - name: Choose the runtime release
-      id: libraries
-      shell: bash
-      run: |
-        set -euo pipefail
-        if [ "${{ github.event_name }}" = schedule ]; then
-          echo "runtime=" >> "$GITHUB_OUTPUT"
-        else
-          runtime=$(build/library-tag.sh ghul-runtime)
-          echo "runtime=$runtime" >> "$GITHUB_OUTPUT"
-        fi
-
+    # The runtime the version job chose for the whole run.
     - name: Checkout ghul-runtime
       uses: actions/checkout@v7
       with:
         repository: ghul-lang/ghul-runtime
         path: libraries/ghul-runtime
-        ref: ${{ steps.libraries.outputs.runtime }}
+        ref: ${{ needs.version.outputs.runtime }}
 
     - name: Type-check the compiler's source for llvm
       run: build/llvm-self-type-check.sh
@@ -804,30 +806,17 @@ jobs:
     - name: Restore local .NET tools
       run: dotnet tool restore
 
-    # The runtime release a user of this compiler would get, as llvm_test_shards
-    # chooses it; a scheduled run takes the head.
-    - name: Choose the runtime release
-      id: libraries
-      shell: bash
-      run: |
-        set -euo pipefail
-        if [ "${{ github.event_name }}" = schedule ]; then
-          echo "runtime=" >> "$GITHUB_OUTPUT"
-        else
-          runtime=$(build/library-tag.sh ghul-runtime)
-          echo "runtime=$runtime" >> "$GITHUB_OUTPUT"
-        fi
-
+    # The runtime the version job chose for the whole run.
     - name: Checkout ghul-runtime
       uses: actions/checkout@v7
       with:
         repository: ghul-lang/ghul-runtime
         path: libraries/ghul-runtime
-        ref: ${{ steps.libraries.outputs.runtime }}
+        ref: ${{ needs.version.outputs.runtime }}
 
     - name: Fetch ghul-llvm
       run: |
-        ghul_llvm="$(build/ghul-llvm.sh "$RUNNER_TEMP/ghul-llvm")"
+        ghul_llvm="$(build/ghul-llvm.sh "$RUNNER_TEMP/ghul-llvm" "${{ needs.version.outputs.ghul_llvm }}")"
         test -x "$ghul_llvm"
         dirname "$ghul_llvm" >> "$GITHUB_PATH"
 
@@ -907,28 +896,16 @@ jobs:
     - name: Restore local .NET tools
       run: dotnet tool restore
 
-    - name: Choose the runtime release
-      id: libraries
-      shell: bash
-      run: |
-        set -euo pipefail
-        if [ "${{ github.event_name }}" = schedule ]; then
-          echo "runtime=" >> "$GITHUB_OUTPUT"
-        else
-          runtime=$(build/library-tag.sh ghul-runtime)
-          echo "runtime=$runtime" >> "$GITHUB_OUTPUT"
-        fi
-
     - name: Checkout ghul-runtime
       uses: actions/checkout@v7
       with:
         repository: ghul-lang/ghul-runtime
         path: libraries/ghul-runtime
-        ref: ${{ steps.libraries.outputs.runtime }}
+        ref: ${{ needs.version.outputs.runtime }}
 
     - name: Fetch ghul-llvm
       run: |
-        ghul_llvm="$(build/ghul-llvm.sh "$RUNNER_TEMP/ghul-llvm")"
+        ghul_llvm="$(build/ghul-llvm.sh "$RUNNER_TEMP/ghul-llvm" "${{ needs.version.outputs.ghul_llvm }}")"
         test -x "$ghul_llvm"
         "$ghul_llvm" --version
         dirname "$ghul_llvm" >> "$GITHUB_PATH"
@@ -998,28 +975,16 @@ jobs:
     steps:
     - uses: actions/checkout@v7
 
-    - name: Choose the runtime release
-      id: libraries
-      shell: bash
-      run: |
-        set -euo pipefail
-        if [ "${{ github.event_name }}" = schedule ]; then
-          echo "runtime=" >> "$GITHUB_OUTPUT"
-        else
-          runtime=$(build/library-tag.sh ghul-runtime)
-          echo "runtime=$runtime" >> "$GITHUB_OUTPUT"
-        fi
-
     - name: Checkout ghul-runtime
       uses: actions/checkout@v7
       with:
         repository: ghul-lang/ghul-runtime
         path: libraries/ghul-runtime
-        ref: ${{ steps.libraries.outputs.runtime }}
+        ref: ${{ needs.version.outputs.runtime }}
 
     - name: Fetch ghul-llvm
       run: |
-        ghul_llvm="$(build/ghul-llvm.sh "$RUNNER_TEMP/ghul-llvm")"
+        ghul_llvm="$(build/ghul-llvm.sh "$RUNNER_TEMP/ghul-llvm" "${{ needs.version.outputs.ghul_llvm }}")"
         test -x "$ghul_llvm"
         dirname "$ghul_llvm" >> "$GITHUB_PATH"
 
@@ -1244,26 +1209,13 @@ jobs:
     - name: Restore local .NET tools
       run: dotnet tool restore
 
-    # The runtime release a user of this compiler would get, as llvm_test_shards
-    # chooses it; a scheduled run takes the head.
-    - name: Choose the runtime release
-      id: libraries
-      shell: bash
-      run: |
-        set -euo pipefail
-        if [ "${{ github.event_name }}" = schedule ]; then
-          echo "runtime=" >> "$GITHUB_OUTPUT"
-        else
-          runtime=$(build/library-tag.sh ghul-runtime)
-          echo "runtime=$runtime" >> "$GITHUB_OUTPUT"
-        fi
-
+    # The runtime the version job chose for the whole run.
     - name: Checkout ghul-runtime
       uses: actions/checkout@v7
       with:
         repository: ghul-lang/ghul-runtime
         path: libraries/ghul-runtime
-        ref: ${{ steps.libraries.outputs.runtime }}
+        ref: ${{ needs.version.outputs.runtime }}
 
     - name: Build the compiler for wasm twice and compare
       env:
@@ -1387,31 +1339,17 @@ jobs:
     - name: Restore local .NET tools
       run: dotnet tool restore
 
-    # The runtime release a user of this compiler would get, chosen as
-    # ghul-cli chooses it, so a run tests that pairing. A scheduled run
-    # takes the head instead, to catch it drifting from the compiler.
-    - name: Choose the runtime release
-      id: libraries
-      shell: bash
-      run: |
-        set -euo pipefail
-        if [ "${{ github.event_name }}" = schedule ]; then
-          echo "runtime=" >> "$GITHUB_OUTPUT"
-        else
-          runtime=$(build/library-tag.sh ghul-runtime)
-          echo "runtime=$runtime" >> "$GITHUB_OUTPUT"
-        fi
-
+    # The runtime the version job chose for the whole run.
     - name: Checkout ghul-runtime
       uses: actions/checkout@v7
       with:
         repository: ghul-lang/ghul-runtime
         path: libraries/ghul-runtime
-        ref: ${{ steps.libraries.outputs.runtime }}
+        ref: ${{ needs.version.outputs.runtime }}
 
     - name: Fetch ghul-llvm
       run: |
-        ghul_llvm="$(build/ghul-llvm.sh "$RUNNER_TEMP/ghul-llvm")"
+        ghul_llvm="$(build/ghul-llvm.sh "$RUNNER_TEMP/ghul-llvm" "${{ needs.version.outputs.ghul_llvm }}")"
         test -x "$ghul_llvm"
         dirname "$ghul_llvm" >> "$GITHUB_PATH"
 
@@ -1487,29 +1425,17 @@ jobs:
     - name: Restore local .NET tools
       run: dotnet tool restore
 
-    # The same runtime release llvm_test_shards chooses.
-    - name: Choose the runtime release
-      id: libraries
-      shell: bash
-      run: |
-        set -euo pipefail
-        if [ "${{ github.event_name }}" = schedule ]; then
-          echo "runtime=" >> "$GITHUB_OUTPUT"
-        else
-          runtime=$(build/library-tag.sh ghul-runtime)
-          echo "runtime=$runtime" >> "$GITHUB_OUTPUT"
-        fi
-
+    # The runtime the version job chose for the whole run.
     - name: Checkout ghul-runtime
       uses: actions/checkout@v7
       with:
         repository: ghul-lang/ghul-runtime
         path: libraries/ghul-runtime
-        ref: ${{ steps.libraries.outputs.runtime }}
+        ref: ${{ needs.version.outputs.runtime }}
 
     - name: Fetch ghul-llvm
       run: |
-        ghul_llvm="$(build/ghul-llvm.sh "$RUNNER_TEMP/ghul-llvm")"
+        ghul_llvm="$(build/ghul-llvm.sh "$RUNNER_TEMP/ghul-llvm" "${{ needs.version.outputs.ghul_llvm }}")"
         test -x "$ghul_llvm"
         dirname "$ghul_llvm" >> "$GITHUB_PATH"
 
@@ -1571,28 +1497,16 @@ jobs:
     - name: Restore local .NET tools
       run: dotnet tool restore
 
-    - name: Choose the runtime release
-      id: libraries
-      shell: bash
-      run: |
-        set -euo pipefail
-        if [ "${{ github.event_name }}" = schedule ]; then
-          echo "runtime=" >> "$GITHUB_OUTPUT"
-        else
-          runtime=$(build/library-tag.sh ghul-runtime)
-          echo "runtime=$runtime" >> "$GITHUB_OUTPUT"
-        fi
-
     - name: Checkout ghul-runtime
       uses: actions/checkout@v7
       with:
         repository: ghul-lang/ghul-runtime
         path: libraries/ghul-runtime
-        ref: ${{ steps.libraries.outputs.runtime }}
+        ref: ${{ needs.version.outputs.runtime }}
 
     - name: Fetch ghul-llvm
       run: |
-        ghul_llvm="$(build/ghul-llvm.sh "$RUNNER_TEMP/ghul-llvm")"
+        ghul_llvm="$(build/ghul-llvm.sh "$RUNNER_TEMP/ghul-llvm" "${{ needs.version.outputs.ghul_llvm }}")"
         test -x "$ghul_llvm"
         "$ghul_llvm" --version
         dirname "$ghul_llvm" >> "$GITHUB_PATH"

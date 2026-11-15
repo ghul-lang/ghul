@@ -4,19 +4,22 @@
 # with, as a user's build fetches it, and print the path of its executable.
 #
 # ghul-llvm is the assembler, optimiser and linker an llvm build hands its
-# module to, with the C runtime and libghul it links against. The latest
-# release is downloaded from GitHub, checked against the sha256 published
-# beside it, and unpacked into <dir>; nothing else is needed on the machine
-# to build or run a program.
+# module to, with the C runtime and libghul it links against. The release
+# named, or the latest, is downloaded from GitHub, checked against the
+# sha256 published beside it, and unpacked into <dir>; nothing else is
+# needed on the machine to build or run a program.
 #
-# Usage: build/ghul-llvm.sh <dir>
+# Usage: build/ghul-llvm.sh <dir> [<release tag>]
+#
+# Without a tag the latest release is fetched. CI passes the tag its version
+# job chose, so every job in a run links with the same ghul-llvm.
 #
 # Prints the absolute path of bin/ghul-llvm, for GHUL_LLVM or the PATH.
 
 set -euo pipefail
 
-if [ $# -ne 1 ]; then
-    echo "usage: build/ghul-llvm.sh <dir>" >&2
+if [ $# -lt 1 ] || [ $# -gt 2 ]; then
+    echo "usage: build/ghul-llvm.sh <dir> [<release tag>]" >&2
     exit 2
 fi
 
@@ -27,7 +30,11 @@ case "$(uname -m)" in
     *) echo "ghul-llvm is not released for $(uname -m)" >&2; exit 1 ;;
 esac
 archive="ghul-llvm-$triple.tar.gz"
-url="https://github.com/ghul-lang/ghul-llvm/releases/latest/download/$archive"
+if [ -n "${2:-}" ]; then
+    url="https://github.com/ghul-lang/ghul-llvm/releases/download/$2/$archive"
+else
+    url="https://github.com/ghul-lang/ghul-llvm/releases/latest/download/$archive"
+fi
 
 mkdir -p "$1"
 dir="$(cd "$1" && pwd)"
