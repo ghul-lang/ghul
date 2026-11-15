@@ -34,7 +34,11 @@ namespace IR.UnitTests is
     // before the boxing branch fires).
     @TestClass()
     class VALUE_BOXER_TESTS is
-        init() is si
+        init() is
+            _nullable = STRUCT(loc(), loc(), Semantic.BLOCK_SCOPE(), "Nullable", LIST[string](["T"]), Semantic.BLOCK_SCOPE())
+            _maybe = STRUCT(loc(), loc(), Semantic.BLOCK_SCOPE(), "MAYBE", LIST[string](["T"]), Semantic.BLOCK_SCOPE())
+            _payload = a_value_struct()
+        si
 
         loc() -> LOCATION => LOCATION("test.ghul", 1, 1, 1, 1)
 
@@ -144,6 +148,69 @@ namespace IR.UnitTests is
             let optional_ref = ref_type().as_optional()
 
             let result = boxer(false).wrap_if_needed(v, optional_ref)
+
+            are_same(v, result)
+        si
+
+        // ===== wrap_if_needed: an optional whose payload is optional =====
+
+        // One instance of each carrier, so two optionals built over the
+        // same payload compare equivalent.
+        _nullable: STRUCT
+        _maybe: STRUCT
+        _payload: STRUCT
+
+        nullable_of(inner: Type) -> Type => Semantic.Types.NULLABLE(loc(), _nullable, LIST[Type]([inner]))
+        maybe_of(inner: Type) -> Type => Semantic.Types.MAYBE(loc(), _maybe, LIST[Type]([inner]))
+
+        @Test()
+        wrap_if_needed__value_of_the_optional_payload__is_wrapped_as_it_stands() is
+            let inner = nullable_of(_payload.type!)
+            let target = maybe_of(inner)
+            let v = STUB_VALUE(inner)
+
+            let result = boxer(false).wrap_if_needed(v, target)
+
+            let wrap = cast IR.Values.WRAP_OPTIONAL?(result)
+            assert wrap? else "expected one wrap at the outer level"
+            are_same(target, wrap.type)
+            are_same(v, wrap.value)
+        si
+
+        @Test()
+        wrap_if_needed__value_widened_to_the_optional_payload__is_wrapped_at_each_level() is
+            let inner = nullable_of(_payload.type!)
+            let target = maybe_of(inner)
+            let v = STUB_VALUE(_payload.type!)
+
+            let result = boxer(false).wrap_if_needed(v, target)
+
+            let outer = cast IR.Values.WRAP_OPTIONAL?(result)
+            assert outer? else "expected a wrap at the outer level"
+            are_same(target, outer.type)
+
+            let inner_wrap = cast IR.Values.WRAP_OPTIONAL?(outer.value)
+            assert inner_wrap? else "expected a wrap at the inner level"
+            is_true(inner_wrap.type.is_equivalent_to(inner))
+            are_same(v, inner_wrap.value)
+        si
+
+        @Test()
+        wrap_if_needed__optional_that_is_not_the_payload__is_not_wrapped_as_a_level() is
+            let target = nullable_of(nullable_of(_payload.type!))
+            let v = STUB_VALUE(nullable_of(ref_type()))
+
+            let result = boxer(false).wrap_if_needed(v, target)
+
+            are_same(v, result)
+        si
+
+        @Test()
+        wrap_if_needed__value_not_assignable_to_the_optional_payload__returns_value_unchanged() is
+            let target = nullable_of(nullable_of(_payload.type!))
+            let v = ref_value()
+
+            let result = boxer(false).wrap_if_needed(v, target)
 
             are_same(v, result)
         si
