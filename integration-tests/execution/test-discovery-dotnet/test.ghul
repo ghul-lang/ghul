@@ -1,0 +1,69 @@
+namespace Probe is
+    use IO.Std.write_line
+
+    class Arithmetic is
+        init() is si
+
+        @test()
+        adds() is
+            write_line("adds: {40 + 2}")
+        si
+
+        @test()
+        _privately() is
+            write_line("privately")
+        si
+
+        @test()
+        counts() static is
+            write_line("counts statically")
+        si
+
+        not_a_test() is
+            write_line("never")
+        si
+    si
+
+    @test()
+    global_check() is
+        write_line("global check")
+    si
+si
+
+namespace Runner is
+    use IO.Std.write_line
+
+    use System.Reflection.Assembly
+    use System.Reflection.BindingFlags
+
+    // The same calls a runner makes on wasm and llvm: every type the entry
+    // assembly holds, and among its own methods, public or not, instance or
+    // static, those carrying the test attribute.
+    entry() is
+        let empty: ARRAY[object?] = []
+        let flags = BindingFlags.PUBLIC | BindingFlags.NON_PUBLIC | BindingFlags.INSTANCE | BindingFlags.STATIC | BindingFlags.DECLARED_ONLY
+        let found = Collections.LIST[(name: string, run: () -> void)]()
+
+        for type in Assembly.get_entry_assembly()!.get_types() do
+            for method in type.get_methods(flags) do
+                if method.is_defined(typeof Ghul.TEST_ATTRIBUTE, false) then
+                    let run: () -> void =
+                        if method.is_static then
+                            () -> void is method.invoke(null, empty) si
+                        else
+                            () -> void is method.invoke(System.Activator.create_instance(type, empty), empty) si
+                        fi
+
+                    found.add((name = "{type.full_name}.{method.name} static={method.is_static} public={method.is_public}", run = run))
+                fi
+            od
+        od
+
+        found.sort((a: (name: string, run: () -> void), b: (name: string, run: () -> void)) -> int => string.compare_ordinal(a.name, b.name))
+
+        for test in found do
+            write_line(test.name)
+            test.run()
+        od
+    si
+si
