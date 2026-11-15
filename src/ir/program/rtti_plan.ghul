@@ -52,6 +52,11 @@ namespace IR.Program is
         /// Records a constructor the type declares, after a PARAMETER call
         /// for each of its parameters.
         CONSTRUCTOR(constructor: FUNCTION_INSTANCE, is_public: bool, ..)
+
+        /// Records a method marked `@test()` the type declares, called
+        /// through a function the target makes for it that takes the
+        /// instance, or null where the method is static.
+        TEST_METHOD(name: string, test: FUNCTION_INSTANCE, is_public: bool, is_static: bool, ..)
     si
 
     /// What a description of each type calls, where the program describes
@@ -67,6 +72,7 @@ namespace IR.Program is
         _description: CLASS_INSTANCE
         _descriptor_only: () -> Collections.Iterable[CLASS_INSTANCE]
         _methods: MAP[string, Function]
+        _test_only: Collections.SET[CLASS_INSTANCE]
 
         /// A plan describing the classes `target` compiles through the
         /// builder class `description`.
@@ -80,6 +86,7 @@ namespace IR.Program is
             _description = description
             _descriptor_only = descriptor_only
             _methods = MAP[string, Function]()
+            _test_only = Collections.SET[CLASS_INSTANCE]()
 
             for method in SRM_MEMBER_ORDER.methods(SRM_EMITTED_TYPE(description.definition)) do
                 if method.is_instance then
@@ -93,13 +100,17 @@ namespace IR.Program is
         ///
         /// - classes: the classes and array types the program uses
         ///
-        /// Under `--rtti-roots`, only the types marked `@reflected()` and
-        /// those their descriptions reach: their bases, the types of their
+        /// Under `--rtti-roots`, only the types marked `@reflected()`, the
+        /// classes declaring the program's own tests, and those their
+        /// descriptions reach: their bases, the types of their
         /// fields, properties and constructor parameters (a value-type
         /// optional's carrier included), their type arguments, array elements
         /// and optionals' values, and every class
         /// among `classes` that extends or implements the type of a value a
-        /// described type holds, other than the root.
+        /// described type holds, other than the root. A class that is
+        /// described only because it declares tests is described as far as
+        /// a runner needs: its kind, its public constructor taking no
+        /// arguments, and its tests, so it reaches no other type.
         described(classes: Collections.Iterable[CLASS_INSTANCE]) -> CLASS_INSTANCE[] is
             let result = LIST[CLASS_INSTANCE](classes)
 
@@ -113,6 +124,8 @@ namespace IR.Program is
         si
 
         _reached_from_roots(candidates: LIST[CLASS_INSTANCE]) -> CLASS_INSTANCE[] is
+            _test_only.clear()
+
             let known = Collections.SET[CLASS_INSTANCE](candidates)
             let reached = Collections.SET[CLASS_INSTANCE]()
             let held = Collections.SET[CLASS_INSTANCE]()
@@ -137,6 +150,10 @@ namespace IR.Program is
                 if reached.add(type) then
                     result.add(type)
                     pending.add(type)
+                elif _test_only.remove(type) then
+                    // Reached as a test root before, and now some other
+                    // way: described in full after all.
+                    pending.add(type)
                 fi
             si
 
@@ -149,6 +166,14 @@ namespace IR.Program is
                 fi
             od
 
+            for type in candidates do
+                if !reached.contains(type) /\ _declares_test(type) then
+                    _test_only.add(type)
+                    reached.add(type)
+                    result.add(type)
+                fi
+            od
+
             let is_done mut = false
 
             while !is_done do
@@ -157,7 +182,7 @@ namespace IR.Program is
                     pending.remove_at(pending.count - 1)
 
                     for call in calls(type) do
-                        if !isa RTTI_CALL.KIND(call) /\ !isa RTTI_CALL.CONSTRUCTOR(call) /\ !isa RTTI_CALL.ATTRIBUTE(call) then
+                        if !isa RTTI_CALL.KIND(call) /\ !isa RTTI_CALL.CONSTRUCTOR(call) /\ !isa RTTI_CALL.ATTRIBUTE(call) /\ !isa RTTI_CALL.TEST_METHOD(call) then
                             let method = call.method.definition
                             let holds = method != base /\ method != parameter
 
@@ -177,6 +202,34 @@ namespace IR.Program is
                 od
 
                 is_done = pending.count == 0
+            od
+
+            return result
+        si
+
+        // Whether `type` declares one of the program's own tests: a source
+        // library's are not the program's to run.
+        _declares_test(type: CLASS_INSTANCE) -> bool is
+            for test in _tests_of(type) do
+                return true
+            od
+
+            return false
+        si
+
+        // The methods marked `@test()` that `type` declares in the
+        // program's own sources.
+        _tests_of(type: CLASS_INSTANCE) -> Function[] is
+            let result = LIST[Function]()
+
+            for symbol in type.definition.symbols do
+                if let group: Semantic.Symbols.FUNCTION_GROUP = symbol then
+                    for function in group.functions do
+                        if function.is_marked_test /\ PROGRAM_FUNCTIONS.contains(function) then
+                            result.add(function)
+                        fi
+                    od
+                fi
             od
 
             return result
@@ -273,6 +326,13 @@ namespace IR.Program is
                 return result
             fi
 
+            if _test_only.contains(type) then
+                _add_constructors(result, type, true)
+                _add_test_methods(result, type)
+
+                return result
+            fi
+
             if _is_nullable(type.definition) then
                 _add_type(result, "_argument", type.arguments[0])
                 _add_type(result, "_nullable_of", type.arguments[0])
@@ -305,8 +365,9 @@ namespace IR.Program is
 
                 _add_fields(result, type)
                 _add_properties(result, type)
-                _add_constructors(result, type)
+                _add_constructors(result, type, false)
                 _add_markers(result, type)
+                _add_test_methods(result, type)
             fi
 
             return result
@@ -332,6 +393,8 @@ namespace IR.Program is
                     fi
                 elif let constructor: RTTI_CALL.CONSTRUCTOR = call then
                     result.add(constructor.constructor)
+                elif let test: RTTI_CALL.TEST_METHOD = call then
+                    result.add(test.test)
                 elif let attribute: RTTI_CALL.ATTRIBUTE = call then
                     result.add(attribute.constructor)
                 fi
@@ -528,8 +591,9 @@ namespace IR.Program is
         // The instance constructors of a class that can be made: not
         // abstract and not a trait. A unit variant's constructor gives the
         // one instance the program shares, as its target makes it. Each is
-        // preceded by its parameters.
-        _add_constructors(result: LIST[RTTI_CALL], type: CLASS_INSTANCE) is
+        // preceded by its parameters. Only the public one taking no
+        // arguments, where `parameterless_only`.
+        _add_constructors(result: LIST[RTTI_CALL], type: CLASS_INSTANCE, parameterless_only: bool) is
             let definition = type.definition
 
             if definition.is_abstract \/ definition.is_trait then
@@ -545,7 +609,7 @@ namespace IR.Program is
 
             if let group = cast Semantic.Symbols.FUNCTION_GROUP?(definition.find_direct("init")) then
                 for constructor in group.functions do
-                    if constructor.is_static_constructor then
+                    if constructor.is_static_constructor \/ (parameterless_only /\ (constructor.arguments.count > 0 \/ constructor.is_private)) then
                         continue
                     fi
 
@@ -558,6 +622,16 @@ namespace IR.Program is
                     od
 
                     result.add(RTTI_CALL.CONSTRUCTOR(instance, !constructor.is_private, FUNCTION_INSTANCE.of(method)))
+                od
+            fi
+        si
+
+        // The program's own tests `type` declares, each called through the
+        // function the target makes for it.
+        _add_test_methods(result: LIST[RTTI_CALL], type: CLASS_INSTANCE) is
+            if let method = _method("_test_method") then
+                for test in _tests_of(type) do
+                    result.add(RTTI_CALL.TEST_METHOD(test.name, FUNCTION_INSTANCE(test, type.type_map), !test.is_private /\ !test.name.starts_with('_'), !test.is_instance, FUNCTION_INSTANCE.of(method)))
                 od
             fi
         si
