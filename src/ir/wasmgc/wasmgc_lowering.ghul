@@ -1596,10 +1596,20 @@ namespace IR.WasmGC is
             _emit(Opcode.REF_EQ)
         si
         // A MAYBE holding a value is built by the core library's constructor
-        // taking that value.
+        // taking that value. The value is produced first and held, since it
+        // may be one an earlier step left on the stack, which has to be
+        // read before the new instance is pushed above it.
         visit(construct: Values.CONSTRUCT_MAYBE) is
             if let constructor = INTERPOLATION_CALLS.method(construct.type, "init", [construct.type.optional_inner_type]) then
-                gen(Values.NEW(construct.type, constructor, LIST[Value]([construct.value])))
+                let value_type = _specialize(construct.value.type) ?? construct.type.optional_inner_type!
+
+                gen(construct.value)
+
+                let held = _temp(_value_type(value_type)!)
+
+                _emit(INDEX_INSTRUCTION(Opcode.LOCAL_SET, held))
+
+                gen(Values.NEW(construct.type, constructor, LIST[Value]([WASMGC_LOCAL_VALUE(held, value_type)])))
             else
                 _report("an optional value, whose MAYBE has no constructor taking its value")
             fi

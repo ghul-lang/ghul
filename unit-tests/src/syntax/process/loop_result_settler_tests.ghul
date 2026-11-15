@@ -20,12 +20,12 @@ namespace Syntax.Process.UnitTests is
     use Test = Microsoft.VisualStudio.TestTools.UnitTesting.TestMethodAttribute
     use Assertions
 
-    // Pins the contract of LOOP_RESULT_SETTLER.settle: which optional
-    // maker fires for which element kind, that an already-optional LUB
+    // Pins the contract of LOOP_RESULT_SETTLER.settle: which carrier the
+    // result takes for which element kind, that an already-optional LUB
     // stands untouched, and the cannot-infer shape (nothing usable and
-    // no expected type). The three makers are injected as recording
-    // stand-ins producing distinct marker types, so every test asserts
-    // identity rather than structure.
+    // no expected type). The injected maker answers a distinct marker
+    // type for each carrier OPTIONAL_CARRIER names, so every test
+    // asserts identity rather than structure.
     @TestClass()
     class LOOP_RESULT_SETTLER_TESTS is
         init() is si
@@ -88,10 +88,22 @@ namespace Syntax.Process.UnitTests is
         // fallback exercised.
         settler(maybe_answer: Type?) -> LOOP_RESULT_SETTLER =>
             LOOP_RESULT_SETTLER(
-                (t: Type) => nullable_marker(),
-                (t: Type) => maybe_answer,
-                (t: Type) => reference_optional_marker()
+                (t: Type) -> Type? =>
+                    case Semantic.OPTIONAL_CARRIER.carrier_of(t)
+                    when Semantic.OptionalCarrier.NULLABLE then nullable_marker()
+                    when Semantic.OptionalCarrier.MAYBE then maybe_answer
+                    when Semantic.OptionalCarrier.REFERENCE then reference_optional_marker()
+                    else t
+                    esac
             )
+
+        a_type_parameter_of_kind(kind: Semantic.Symbols.TypeParameterConstraintKind) -> Type is
+            let symbol = Semantic.Symbols.CLASSY_GENERIC_ARGUMENT(loc(), Semantic.BLOCK_SCOPE(), "T", 0)
+
+            symbol.set_constraint_kind(kind)
+
+            return symbol.type!
+        si
 
         one(t: Type) -> LIST[Type] is
             let result = LIST[Type]()
@@ -124,13 +136,34 @@ namespace Syntax.Process.UnitTests is
         si
 
         @Test()
-        type_element_falls_back_to_the_reference_optional_without_a_runtime() is
-            let settled = settler(null).settle(
-                one(a_type_parameter("T")),
+        struct_constrained_type_element_widens_to_nullable_as_a_written_optional_does() is
+            let settled = settler(maybe_marker()).settle(
+                one(a_type_parameter_of_kind(Semantic.Symbols.TypeParameterConstraintKind.VALUE)),
+                null
+            )
+
+            are_same(nullable_marker(), cast Type?(settled)!)
+        si
+
+        @Test()
+        class_constrained_type_element_widens_to_the_reference_optional_as_a_written_optional_does() is
+            let settled = settler(maybe_marker()).settle(
+                one(a_type_parameter_of_kind(Semantic.Symbols.TypeParameterConstraintKind.REFERENCE)),
                 null
             )
 
             are_same(reference_optional_marker(), cast Type?(settled)!)
+        si
+
+        @Test()
+        type_element_falls_back_to_the_reference_optional_without_a_runtime() is
+            let t = a_type_parameter("T")
+
+            let settled = cast Type?(settler(null).settle(one(t), null))!
+
+            is_true(settled.is_optional)
+            is_true(settled.is_type_variable)
+            are_same(t.symbol, settled.symbol)
         si
 
         @Test()

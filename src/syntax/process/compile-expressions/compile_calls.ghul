@@ -37,7 +37,6 @@ namespace Syntax.Process is
         _pack_push_candidates: Semantic.PACK_PUSH_CANDIDATES
         _async_literal_candidates: Semantic.ASYNC_LITERAL_CANDIDATES
         _symbol_loader: Semantic.SYMBOL_LOADER
-        _function_reference_adapter: FUNCTION_REFERENCE_ADAPTER
         _pack_wrap_builder: PACK_WRAP_BUILDER
 
         init(
@@ -54,8 +53,7 @@ namespace Syntax.Process is
             access: COMPILE_ACCESS,
             visitor: COMPILE_EXPRESSIONS,
             flow: NARROWING_FLOW,
-            symbol_loader: Semantic.SYMBOL_LOADER,
-            function_reference_adapter: FUNCTION_REFERENCE_ADAPTER
+            symbol_loader: Semantic.SYMBOL_LOADER
         ) is
             super.init()
 
@@ -79,7 +77,6 @@ namespace Syntax.Process is
             _pack_push_candidates = Semantic.PACK_PUSH_CANDIDATES()
             _async_literal_candidates = Semantic.ASYNC_LITERAL_CANDIDATES(innate_symbol_lookup, Semantic.TASK_LIKE_RESOLVER(logger, () => Semantic.PATTERN_TYPES(innate_symbol_lookup.get_exception_type(), innate_symbol_lookup.get_async_state_machine_interface_type(), innate_symbol_lookup.get_object_type())))
             _symbol_loader = symbol_loader
-            _function_reference_adapter = function_reference_adapter
             _pack_wrap_builder = PACK_WRAP_BUILDER(symbol_table, symbol_loader, innate_symbol_lookup)
         si
 
@@ -888,6 +885,8 @@ namespace Syntax.Process is
                 named_restrict = binding.targets
             fi
 
+            _present_agreed_carriers(cache_key, function_group, argument_expressions.expressions, argument_types)
+
             let overload_result mut = _overload_resolver.resolve(location, function_group, argument_types, false, true, true, named_restrict)
 
             if !overload_result? then
@@ -1026,6 +1025,8 @@ namespace Syntax.Process is
 
             _resolve_deferred_defaults(function, argument_expressions.expressions, arguments, argument_types)
             _type_sequence_arguments_from_formals(function, argument_expressions.expressions, argument_types)
+
+            present_carrier_arguments(cache_key, argument_expressions.expressions, function, arguments)
 
             if isa Semantic.Symbols.GENERIC(function.owner) then
                 type_symbol = cast Semantic.Symbols.Symbol(function.owner)
@@ -1855,11 +1856,6 @@ namespace Syntax.Process is
 
                     let original = slots.expression(index)!
 
-                    // A named function reference whose shape differs
-                    // from the formal only in an optional position's
-                    // carrier has no delegate to load; it is
-                    // eta-expanded here, and the literal that replaces
-                    // it walks under the formal in its place.
                     let a mut = original
 
                     _bound_value_parameters_from_pack(push_candidate, index, argument_types[index])
@@ -1875,17 +1871,15 @@ namespace Syntax.Process is
                         argument_types[index] = presented
 
                         continue
-                    elif let shape = _carrier_mismatch_shape(original, argument_types[index], f) then
-                        if
-                            let literal =
-                                _function_reference_adapter.try_adapt(
-                                    original,
-                                    shape.arguments.count - 1
-                                ) /\
-                            _splice(cache_key, original, index, literal)
-                        then
-                            a = literal
-                        fi
+                    elif let presented = _presented_carrier_type(cache_key, original, argument_types[index], f) then
+                        // A function value whose shape differs from the
+                        // formal only in an optional position's carrier is
+                        // judged as the formal's shape it will be presented
+                        // as. The value itself is wrapped once a candidate
+                        // has won.
+                        argument_types[index] = presented
+
+                        continue
                     fi
 
                     a.set_expected_type(f, "{{0}} is not assignable to {{1}}")
@@ -1918,32 +1912,6 @@ namespace Syntax.Process is
             fi
 
             return null
-        si
-
-        // Puts `literal` where `original` stood, so the walk below
-        // reaches it and generate-il emits the closure's body from it.
-        // A call holds its arguments in a list addressed by index; an
-        // operator holds each operand in a slot of its own. Any other
-        // node declines rather than being spliced blind: a literal that
-        // does not land in the tree is never emitted, and the delegate
-        // built over it would name a method with no body.
-        _splice(
-            cache_key: Trees.Node,
-            original: Trees.Expressions.Expression,
-            index: int,
-            literal: Trees.Expressions.FUNCTION
-        ) -> bool is
-            if let call: Trees.Expressions.CALL = cache_key then
-                call.arguments.replace_element(index, literal)
-                return true
-            fi
-
-            if let binary: Trees.Expressions.BINARY = cache_key then
-                binary.replace_child(original, literal)
-                return binary.left == literal \/ binary.right == literal
-            fi
-
-            return false
         si
 
         // Whether the pack tuple the formal at `index` takes is decided
@@ -2025,35 +1993,159 @@ namespace Syntax.Process is
             return _delegate_shape.try_get_function_type(formal, _innate_symbol_lookup)
         si
 
-        // The formal's call shape, when this argument is a named
-        // function reference the eta-expansion applies to: it loaded as
-        // a delegate over a named function with no receiver to
-        // re-evaluate, and its own shape differs from the formal's only
-        // in which carrier an optional position uses. Null otherwise.
+        // The formal's call shape, when this argument is a function value
+        // whose own shape differs from the formal's only in which carrier
+        // an optional position uses. Any expression of a settled function
+        // type qualifies: a named function, a local, a field, a call's
+        // result, or a literal whose parameters and return are all
+        // written. A literal with anything left to infer is walked under
+        // the formal instead, and takes the formal's carriers from there.
+        // Null otherwise.
         _carrier_mismatch_shape(
             argument: Trees.Expressions.Expression,
             argument_type: Type?,
             formal: Type?
         ) -> Type? is
-            if isa Trees.Expressions.FUNCTION(argument) then
-                return null
-            fi
-
-            if let delegate: MAKE_CLOSURE = argument.value then
-                if !delegate.referenced_function? \/ !isa NULL(delegate.receiver) then
+            if let literal: Trees.Expressions.FUNCTION = argument then
+                if !_is_annotated_literal(literal) then
                     return null
                 fi
-            else
+            fi
+
+            if !argument_type? \/ !argument_type.is_function then
                 return null
             fi
 
             let shape = _target_shape_of(formal)
 
-            if !FUNCTION_REFERENCE_ADAPTER.is_carrier_only_mismatch(argument_type, shape) then
+            if !CARRIER_SHAPE.is_carrier_only_mismatch(argument_type, shape) then
                 return null
             fi
 
             return shape
+        si
+
+        // Whether every parameter and the return of a literal are written.
+        _is_annotated_literal(literal: Trees.Expressions.FUNCTION) -> bool is
+            if isa Trees.TypeExpressions.INFER(literal.type_expression) then
+                return false
+            fi
+
+            for a in literal.arguments do
+                if let variable: Trees.Expressions.VARIABLE = a then
+                    if isa Trees.TypeExpressions.INFER(variable.type_expression) then
+                        return false
+                    fi
+                else
+                    return false
+                fi
+            od
+
+            return true
+        si
+
+        // The type a function value differing from the formal only in
+        // optional carriers is judged at: the formal's own shape. Only a
+        // call and an operator have the step, after a candidate has won,
+        // that wraps the value. Absent otherwise.
+        _presented_carrier_type(
+            owner: Trees.Node?,
+            argument: Trees.Expressions.Expression,
+            argument_type: Type?,
+            formal: Type?
+        ) -> Type? is
+            if !isa Trees.Expressions.CALL(owner) /\ !isa Trees.Expressions.BINARY(owner) then
+                return null
+            fi
+
+            if let shape = _carrier_mismatch_shape(argument, argument_type, formal) then
+                return CARRIER_SHAPE.presented(argument_type!, shape, _innate_symbol_lookup)
+            fi
+
+            return null
+        si
+
+        // Judges each argument that is a function value differing only in
+        // optional carriers from the formal at its position in every
+        // overload of `group` that has one there, as presented in those
+        // carriers, where every such overload presents it alike. Resolution
+        // then runs over all the arguments and all the overloads as usual;
+        // where any overload would take the argument as it is, or the
+        // overloads disagree, it is left as it is.
+        _present_agreed_carriers(
+            owner: Trees.Node?,
+            group: Semantic.Symbols.FUNCTION_GROUP,
+            expressions: Trees.Expressions.Expression?[],
+            argument_types: Collections.LIST[Type]
+        ) is
+            for index in 0..argument_types.count do
+                if index >= expressions.count then
+                    continue
+                fi
+
+                let expression = expressions[index]
+
+                if !expression? then
+                    continue
+                fi
+
+                let agreed: Type? mut = null
+                let disagree mut = false
+
+                for f in group.functions do
+                    if index >= f.arguments.count then
+                        continue
+                    fi
+
+                    if let presented = _presented_carrier_type(owner, expression, argument_types[index], f.arguments[index]) then
+                        if !agreed? then
+                            agreed = presented
+                        elif !agreed.is_equivalent_to(presented) then
+                            disagree = true
+                        fi
+                    else
+                        disagree = true
+                    fi
+                od
+
+                if !disagree then
+                    if let presented = agreed then
+                        argument_types[index] = presented
+                    fi
+                fi
+            od
+        si
+
+        // Wraps each argument of a resolved call that is a function value
+        // differing from its formal only in optional carriers, so the
+        // delegate the formal is given has the formal's shape.
+        present_carrier_arguments(
+            key: Trees.Node,
+            expressions: Trees.Expressions.Expression?[],
+            function: Semantic.Symbols.Function,
+            arguments: Collections.LIST[Value]
+        ) is
+            for index in 0..arguments.count do
+                if index >= function.arguments.count \/ index >= expressions.count then
+                    continue
+                fi
+
+                let expression = expressions[index]
+
+                if !expression? then
+                    continue
+                fi
+
+                if let shape = _carrier_mismatch_shape(expression, arguments[index].type, function.arguments[index]) then
+                    let presented = CARRIER_SHAPE.presented(arguments[index].type!, shape, _innate_symbol_lookup)
+
+                    if let wrapped = _pack_wrap_builder.present_carriers(key, index, expression.location, arguments[index], presented) then
+                        arguments[index] = wrapped
+
+                        expression.compile_expressions_state.value = wrapped
+                    fi
+                fi
+            od
         si
 
         // A literal that cannot be compiled taking the pack's tuple - one
@@ -3445,6 +3537,7 @@ namespace Syntax.Process is
 
                     _settle_packed_literal_names(function, slots.expressions)
                     present_pack_arguments(call, slots.expressions, function, arguments)
+                    present_carrier_arguments(call, slots.expressions, function, arguments)
 
                     let accessor_class = _symbol_table.current_accessor
 
