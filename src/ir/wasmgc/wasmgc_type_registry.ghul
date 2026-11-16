@@ -403,6 +403,81 @@ namespace IR.WasmGC is
         /// parameters left in it.
         class_of(type: Type?) -> CLASS_INSTANCE? => _class_set.class_of(type)
 
+        /// The MAYBE instance a value of `type` is, where that instance is
+        /// held as its value's box: a MAYBE over a value type that is not
+        /// itself optional. Decided by the class, so every value of one
+        /// instance is held alike whichever way its type is written. Null
+        /// for any other type.
+        boxed_maybe_of(type: Type?) -> CLASS_INSTANCE? is
+            if !type? \/ (type.is_optional /\ !type.is_maybe) then
+                return null
+            fi
+
+            if let c = class_of(type) /\ is_boxed_maybe(c) then
+                return c
+            fi
+
+            return null
+        si
+
+        /// How an optional of the value type `inner` is held: a reference
+        /// to the box of its value, or to its struct, null where absent.
+        boxed_value_type(inner: Type) -> VALUE_TYPE? is
+            if let index = box_index(inner) then
+                return VALUE_TYPE.of_type_index(index, true)
+            elif let held = struct_of(inner) then
+                return VALUE_TYPE.of_type_index(type_index(held)!, true)
+            fi
+
+            return null
+        si
+
+        /// Whether `type` is a MAYBE over a value type that is not itself
+        /// optional, which is held as a value-type optional is: a reference
+        /// to its value's box, or to its struct, null where it is absent. A
+        /// MAYBE over an optional keeps its own struct, so that the two
+        /// levels of absence stay two.
+        is_boxed_maybe(type: CLASS_INSTANCE) -> bool is
+            if !IoC.CONTAINER.instance.innate_symbol_lookup.is_maybe_definition(type.definition) \/ type.arguments.count != 1 then
+                return false
+            fi
+
+            let inner = type.arguments[0]
+
+            // A MAYBE over a MAYBE is an optional of an optional, however
+            // the inner one's type is written.
+            if let inner_class = class_of(inner) /\ IoC.CONTAINER.instance.innate_symbol_lookup.is_maybe_definition(inner_class.definition) then
+                return false
+            fi
+
+            return !inner.is_optional /\ !inner.is_type_variable /\ inner.is_value_type
+        si
+
+        /// The value a value-type optional, or a MAYBE held as one, holds;
+        /// null where `type` is held otherwise.
+        boxed_optional_inner(type: Type?) -> Type? is
+            if !type? then
+                return null
+            fi
+
+            if type.is_optional /\ type.is_value_type /\ !type.is_maybe then
+                // A type test against a MAYBE held as its value's box goes
+                // through the MAYBE's optional, and reads what the MAYBE is
+                // boxed as: its value's box, or null.
+                if let maybe = boxed_maybe_of(type.optional_inner_type) then
+                    return maybe.arguments[0]
+                fi
+
+                return type.optional_inner_type
+            fi
+
+            if let maybe = boxed_maybe_of(type) then
+                return maybe.arguments[0]
+            fi
+
+            return null
+        si
+
         /// Numbers every class held and builds the recursion group and the
         /// globals. Must run before anything else adds a type to the module.
         build() is
@@ -943,6 +1018,11 @@ namespace IR.WasmGC is
             elif let owner = FUNCTION_BODIES.owning_class(definition) /\ (owner.is_trait \/ owner.is_object) then
                 return object_reference
             elif let owner = FUNCTION_BODIES.owning_class(definition) then
+                // A MAYBE held as its value's box receives that box, or null.
+                if let type = class_of(owner, function.type_map) /\ is_boxed_maybe(type) then
+                    return boxed_value_type(type.arguments[0])
+                fi
+
                 if let type = class_of(owner, function.type_map) /\ is_object_type(type) then
                     return VALUE_TYPE.of_type_index(type_index(type)!, true)
                 elif owner == _string?.definition /\ string_type_index? then
@@ -1710,7 +1790,7 @@ namespace IR.WasmGC is
                 return null
             fi
 
-            if let held = class_of(type) /\ is_struct(held) then
+            if let held = class_of(type) /\ is_struct(held) /\ !is_boxed_maybe(held) then
                 return held
             fi
 
@@ -1822,16 +1902,8 @@ namespace IR.WasmGC is
             fi
             // A value-type optional is a reference to the box of its value,
             // null where it is absent, as boxing it on .NET gives.
-            if type.is_optional /\ type.is_value_type /\ !type.is_maybe then
-                let inner = type.optional_inner_type
-
-                if let index = box_index(inner) then
-                    return VALUE_TYPE.of_type_index(index, true)
-                elif let held = struct_of(inner) then
-                    return VALUE_TYPE.of_type_index(type_index(held)!, true)
-                fi
-
-                return null
+            if let inner = boxed_optional_inner(type) then
+                return boxed_value_type(inner)
             fi
 
             if let held = struct_of(type) then
@@ -2144,7 +2216,7 @@ namespace IR.WasmGC is
         // are its implementors', and a value-type optional is held as its
         // value's box.
         _descriptor_only_instance(type: Type?) -> CLASS_INSTANCE? is
-            if !type? \/ !(type.is_trait \/ (type.is_optional /\ type.is_value_type /\ !type.is_maybe)) then
+            if !type? \/ !(type.is_trait \/ boxed_optional_inner(type)?) then
                 return null
             fi
 

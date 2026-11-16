@@ -69,6 +69,11 @@ On the llvm target, `T?` over an unconstrained type parameter is held, at an ins
 - an absent value is null on llvm, and a non-null boxed `Ghul.MAYBE[T]` on .NET and wasm
 - a present value is the reference itself on llvm, so `isa Ghul.MAYBE[string](o)` is false and `o.get_type()` names the reference's type, where on .NET and wasm `o` is a boxed `Ghul.MAYBE[string]`
 
+At an instantiation where `T` is a value type that is not itself optional, wasm and llvm hold `T?` as they hold a written `int?`. On wasm that is a reference to the value's box, or to the struct, null where it is absent. On llvm it is the flag and the value, in place. Either way it is boxed, compared and hashed as `int?` is. Where such a value is boxed as itself, the targets differ in two ways:
+
+- an absent value is null on wasm and llvm, and a non-null boxed `Ghul.MAYBE[T]` on .NET
+- a present value is the boxed value on wasm and llvm, so `isa Ghul.MAYBE[int](o)` is false there, where on .NET `o` is a boxed `Ghul.MAYBE[int]`
+
 On every target, a type object's name, as `typeof` and `get_type` give it, names the scalars, `string` and `object` as .NET names them. Any other type is named on .NET by its CLR name, ``System.Collections.Generic.IReadOnlyList`1[System.String]`` for `typeof string[]`, and on wasm and llvm by the name it is emitted under, `Collections.List[System.String]`. So code that compares a type's name with text is target-specific; comparing type objects with `==` is not.
 
 ## conditional compilation

@@ -353,11 +353,11 @@ namespace IR.WasmGC is
         _optional_struct_of(type: Type?) -> CLASS_INSTANCE? is
             let specialized = _specialize(type)
 
-            if !specialized? \/ !specialized.is_optional \/ !specialized.is_value_type \/ specialized.is_maybe then
-                return null
+            if let inner = _registry.boxed_optional_inner(specialized) then
+                return _registry.struct_of(inner)
             fi
 
-            return _registry.struct_of(specialized.optional_inner_type)
+            return null
         si
         // Whether a value of `type` is a struct whose box is changed in
         // place, so that a value read from somewhere is a copy of the box.
@@ -952,6 +952,10 @@ namespace IR.WasmGC is
         si
 
         _field_get(load: Values.Load.INSTANCE_FIELD) is
+            if _boxed_maybe_field_get(load) then
+                return
+            fi
+
             if let `field = _instance_field(load.from, load.symbol) then
                 _reading_receiver(load.from!)
                 _coerce_top(VALUE_TYPE.of_type_index(`field.type_index, true))
@@ -974,6 +978,38 @@ namespace IR.WasmGC is
                     fi
                 fi
             fi
+        si
+
+        // A field of a MAYBE held as its value's box, read from the box:
+        // whether it is present is whether the reference is not null, and
+        // the value is the box's. False where `load` is any other field.
+        _boxed_maybe_field_get(load: Values.Load.INSTANCE_FIELD) -> bool is
+            let from = load.from
+
+            if !from? \/ !_registry.boxed_maybe_of(_optional_receiver_type(from.type))? then
+                return false
+            fi
+
+            if load.symbol.name =~ "_has_value" then
+                _lower_nullable("nullable.has_value", from)
+            elif load.symbol.name =~ "_value" then
+                _lower_nullable("nullable.value", from)
+            else
+                _report("the field {load.symbol.name} of {from.type}")
+            fi
+
+            return true
+        si
+
+        // `type`, or what it is a reference to.
+        _optional_receiver_type(type: Type?) -> Type? is
+            let specialized = _specialize(type)
+
+            if let reference: Semantic.Types.REFERENCE = specialized then
+                return reference.arguments[0]
+            fi
+
+            return specialized
         si
 
         // Where an instance field lives, or null, reported, where the
@@ -1600,6 +1636,11 @@ namespace IR.WasmGC is
         // may be one an earlier step left on the stack, which has to be
         // read before the new instance is pushed above it.
         visit(construct: Values.CONSTRUCT_MAYBE) is
+            if _registry.boxed_maybe_of(_specialize(construct.type))? then
+                _gen_boxed(construct.value)
+                return
+            fi
+
             if let constructor = INTERPOLATION_CALLS.method(construct.type, "init", [construct.type.optional_inner_type]) then
                 let value_type = _specialize(construct.value.type) ?? construct.type.optional_inner_type!
 
@@ -1668,7 +1709,7 @@ namespace IR.WasmGC is
         si
 
         visit_address(self_load: Values.Load.REFERENCE_SELF) is
-            if _struct_of(self_load.type)? then
+            if _struct_of(self_load.type)? \/ _is_boxed_maybe_self(self_load.type) then
                 _load_receiver()
             else
                 _report("self")
@@ -1694,18 +1735,25 @@ namespace IR.WasmGC is
             elif _struct_of(self_load.type)? then
                 _load_receiver()
                 _copy_if_mutable(self_load.type)
+            elif _is_boxed_maybe_self(self_load.type) then
+                _load_receiver()
             else
                 _report("self")
             fi
         si
 
         visit_address(self_load: Values.Load.VALUE_SELF) is
-            if _struct_of(self_load.type)? then
+            if _struct_of(self_load.type)? \/ _is_boxed_maybe_self(self_load.type) then
                 _load_receiver()
             else
                 _report("self")
             fi
         si
+
+        // Whether `type` is a MAYBE held as its value's box, whose methods
+        // receive that box, which is never changed in place.
+        _is_boxed_maybe_self(type: Type?) -> bool =>
+            _registry.boxed_maybe_of(_optional_receiver_type(type))?
         visit(runtime: Values.RUNTIME) is
             if _lower_builder(runtime) then
                 return
@@ -2105,14 +2153,19 @@ namespace IR.WasmGC is
         // since it may read a receiver an earlier step left on the stack.
         visit(wrap: Values.WRAP_OPTIONAL) is
             // A MAYBE, the optional of an unconstrained type parameter, is the
-            // core library's struct, built by its constructor.
-            if _specialize(wrap.type)?.is_maybe ?? false then
+            // core library's struct, built by its constructor, unless it is
+            // held as its value's box.
+            if (_specialize(wrap.type)?.is_maybe ?? false) /\ !_registry.boxed_maybe_of(_specialize(wrap.type))? then
                 gen(Values.CONSTRUCT_MAYBE(_specialize(wrap.type)!, wrap.value))
                 return
             fi
 
-            let value = wrap.value
+            _gen_boxed(wrap.value)
+        si
 
+        // A present value-type optional holding `value`: the box of its value,
+        // or the value itself where it is a struct, which is a reference.
+        _gen_boxed(value: Value) is
             if let index = _registry.box_index(_specialize(value.type)) then
                 _box(value, _registry.box_type(_specialize(value.type))!, index)
             elif _struct_of(value.type)? then
@@ -2568,6 +2621,31 @@ namespace IR.WasmGC is
                 return
             fi
 
+            // A value-type optional, or a MAYBE held as one, declares no
+            // `=~` of its own here: two present values compare as their
+            // value's type does.
+            if let inner = _registry.boxed_optional_inner(type) then
+                let left_local = _temp(value_type)
+                let right_local = _temp(value_type)
+
+                gen(left)
+                _coerce_top(value_type)
+                _emit(INDEX_INSTRUCTION(Opcode.LOCAL_SET, left_local))
+
+                gen(right)
+                _coerce_top(value_type)
+                _emit(INDEX_INSTRUCTION(Opcode.LOCAL_SET, right_local))
+
+                _begin()
+                _equal_values(
+                    Values.UNBOX(WASMGC_LOCAL_VALUE(left_local, inner)),
+                    Values.UNBOX(WASMGC_LOCAL_VALUE(right_local, inner)),
+                    inner)
+
+                _equal_when_present(left_local, right_local, _end())
+                return
+            fi
+
             if let strings = _strings /\ WASMGC_TYPES.is_string(type) then
                 _call_string_helper(strings.equals_function, strings, LIST[Value]([left, right]))
                 return
@@ -2606,8 +2684,14 @@ namespace IR.WasmGC is
 
             _begin()
             gen(call)
-            let compared = _end()
 
+            _equal_when_present(left_local, right_local, _end())
+        si
+
+        // With `left` and `right` in locals that may be null, leaves whether
+        // they are equal: both absent, or both present and `compared`, which
+        // runs only then, leaves true.
+        _equal_when_present(left_local: int, right_local: int, compared: LIST[INSTRUCTION]) is
             let right_present = LIST[INSTRUCTION]()
 
             right_present.add(INDEX_INSTRUCTION(Opcode.LOCAL_GET, right_local))
@@ -3479,8 +3563,8 @@ namespace IR.WasmGC is
         // The box a value-type optional over a scalar is held as, or null
         // where `type` is not one.
         _optional_box_index(type: Type?) -> int? is
-            if let optional = _specialize(type) /\ optional.is_optional /\ optional.is_value_type /\ !optional.is_maybe then
-                return _registry.box_index(optional.optional_inner_type)
+            if let inner = _registry.boxed_optional_inner(_specialize(type)) then
+                return _registry.box_index(inner)
             fi
 
             return null
@@ -3577,6 +3661,18 @@ namespace IR.WasmGC is
 
             if type.definition.is_unit_variant then
                 _emit(INDEX_INSTRUCTION(Opcode.GLOBAL_GET, _registry.unit_variant_global(type)!))
+                return
+            fi
+
+            // A MAYBE held as its value's box is built without its
+            // constructors: absent is null, and present is the box.
+            if _registry.is_boxed_maybe(type) then
+                if construction.arguments.count == 0 then
+                    gen(Values.DEFAULT(construction.type))
+                else
+                    _gen_boxed(construction.arguments[0])
+                fi
+
                 return
             fi
 
@@ -4994,6 +5090,7 @@ namespace IR.WasmGC is
 
             let type = _specialize(constrained.type)
 
+
             if let scalar = WASMGC_TYPES.scalar(type) then
                 if call.function.name =~ "get_hash_code" /\ call.arguments.count == 0 then
                     gen(receiver)
@@ -5011,6 +5108,16 @@ namespace IR.WasmGC is
                 fi
 
                 return
+            fi
+
+            // A MAYBE held as its value's box is null where absent, and has
+            // no descriptor to dispatch through, so the member it declares
+            // in place of the root's is called directly.
+            if _registry.boxed_maybe_of(type)? then
+                if let own = Semantic.KNOWN_MEMBERS.declared(type?.symbol, call.function.name, Semantic.KNOWN_SIGNATURE(call.function.arguments)) then
+                    gen(Values.Call.STRUCT(receiver, own, call.arguments, call.type))
+                    return
+                fi
             fi
 
             gen(Values.Call.INSTANCE(receiver, call.function, call.arguments, call.type))
@@ -5417,7 +5524,9 @@ namespace IR.WasmGC is
                 _gen_optional(receiver)
                 _check_present()
 
-                if let index = _registry.box_index(_specialize(inner)) then
+                if _is_optional_of_boxed_maybe(receiver.type) then
+                    // The MAYBE tested for is the box itself.
+                elif let index = _registry.box_index(_specialize(inner)) then
                     _emit(HEAP_TYPE_INSTRUCTION(Opcode.REF_CAST, HEAP_TYPE.of_type_index(index)))
                     _emit(TYPE_FIELD_INSTRUCTION(Opcode.STRUCT_GET, index, WASMGC_TYPE_REGISTRY.BOX_VALUE))
                 elif let held = _struct_of(inner) then
@@ -5459,11 +5568,18 @@ namespace IR.WasmGC is
                 specialized = reference.arguments[0]
             fi
 
-            if specialized? /\ specialized.is_optional /\ specialized.is_value_type /\ !specialized.is_maybe then
-                return specialized.optional_inner_type
-            fi
+            return _registry.boxed_optional_inner(specialized)
+        si
 
-            return null
+        // Whether `type`, or what it is a reference to, is the optional of a
+        // MAYBE held as its value's box, which a type test against that
+        // MAYBE goes through.
+        _is_optional_of_boxed_maybe(type: Type?) -> bool is
+            let optional = _optional_receiver_type(type)
+
+            return
+                optional? /\ optional.is_optional /\ optional.is_value_type /\ !optional.is_maybe /\
+                _registry.boxed_maybe_of(optional.optional_inner_type)?
         si
 
         // Lowers `value`, a value-type optional or its address, to the
@@ -5686,6 +5802,13 @@ namespace IR.WasmGC is
         si
 
         visit(store: Values.Store.INSTANCE_FIELD) is
+            // A MAYBE held as its value's box is never built by its
+            // constructors, the only code that writes its fields.
+            if store.from? /\ _registry.boxed_maybe_of(_optional_receiver_type(store.from.type))? then
+                _emit(Opcode.UNREACHABLE)
+                return
+            fi
+
             if let `field = _instance_field(store.from, store.symbol) then
                 _struct_receiver(store.from!)
                 _coerce_top(VALUE_TYPE.of_type_index(`field.type_index, true))
