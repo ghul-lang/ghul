@@ -1,10 +1,6 @@
 namespace IR.UnitTests is
     use Collections.LIST
 
-    use Microsoft.VisualStudio.TestTools.UnitTesting.Assert
-
-    use NSubstitute
-    use NSubstitute.SubstituteExtensions.returns
 
     use Source.LOCATION
 
@@ -13,25 +9,21 @@ namespace IR.UnitTests is
     use Semantic.Types.Type
 
     use IR.VALUE_CONVERTER
-    use TestClass = Microsoft.VisualStudio.TestTools.UnitTesting.TestClassAttribute
-    use Test = Microsoft.VisualStudio.TestTools.UnitTesting.TestMethodAttribute
     use Assertions
 
-    @TestClass()
     class VALUE_CONVERTER_TESTS is
         init() is si
 
         loc() -> LOCATION => LOCATION("test.ghul", 1, 1, 1, 1)
 
         // Numeric-primitive stand-ins for the decimal-conversion path.
-        // Each `get_*_type()` mock returns the same Type instance every
+        // Each `get_*_type()` stub returns the same Type instance every
         // call so callers can identity-compare. Distinct names keep the
         // decimal tables' qualified_name keys from colliding. Other
         // members on `InnateSymbolLookup` aren't touched by the
-        // decimal-conversion path; NSubstitute auto-stubs them.
+        // decimal-conversion path, so they are left unset.
         build() -> (converter: VALUE_CONVERTER, lookup: InnateSymbolLookup) is
-            let arguments = System.Array.empty`[object]()
-            let lookup = NSubstitute.Substitute.`for`[InnateSymbolLookup](arguments)
+            let lookup = Semantic.UnitTests.STUB_INNATE_SYMBOL_LOOKUP()
 
             // VALUE_CONVERTER walks every numeric primitive at init
             // time to register its decimal-conversion neighbour, so
@@ -52,24 +44,24 @@ namespace IR.UnitTests is
             let double_type = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "double", LIST[string](), Semantic.BLOCK_SCOPE()).type
             let decimal_type = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "decimal", LIST[string](), Semantic.BLOCK_SCOPE()).type
 
-            lookup.get_bool_type() |> returns(bool_type, null)
-            lookup.get_char_type() |> returns(char_type, null)
-            lookup.get_byte_type() |> returns(byte_type, null)
-            lookup.get_ubyte_type() |> returns(ubyte_type, null)
-            lookup.get_short_type() |> returns(short_type, null)
-            lookup.get_ushort_type() |> returns(ushort_type, null)
-            lookup.get_int_type() |> returns(int_type, null)
-            lookup.get_uint_type() |> returns(uint_type, null)
-            lookup.get_long_type() |> returns(long_type, null)
-            lookup.get_ulong_type() |> returns(ulong_type, null)
-            lookup.get_word_type() |> returns(word_type, null)
-            lookup.get_uword_type() |> returns(uword_type, null)
-            lookup.get_single_type() |> returns(single_type, null)
-            lookup.get_double_type() |> returns(double_type, null)
-            lookup.get_decimal_type() |> returns(decimal_type, null)
+            lookup.get_bool_type_answer = bool_type
+            lookup.get_char_type_answer = char_type
+            lookup.get_byte_type_answer = byte_type
+            lookup.get_ubyte_type_answer = ubyte_type
+            lookup.get_short_type_answer = short_type
+            lookup.get_ushort_type_answer = ushort_type
+            lookup.get_int_type_answer = int_type
+            lookup.get_uint_type_answer = uint_type
+            lookup.get_long_type_answer = long_type
+            lookup.get_ulong_type_answer = ulong_type
+            lookup.get_word_type_answer = word_type
+            lookup.get_uword_type_answer = uword_type
+            lookup.get_single_type_answer = single_type
+            lookup.get_double_type_answer = double_type
+            lookup.get_decimal_type_answer = decimal_type
 
             let logger =
-                NSubstitute.Substitute.`for`[Logging.Logger](System.Array.empty`[object]())
+                Logging.DIAGNOSTICS_STORE()
 
             let converter = VALUE_CONVERTER(logger, lookup)
             return (converter, lookup)
@@ -80,7 +72,7 @@ namespace IR.UnitTests is
         // them. A non-null return here would
         // make TYPE_CASTER emit a decimal call for, say,
         // `cast int(some_double)`, which is wrong.
-        @Test()
+        @test()
         get_decimal_conversion__no_decimal__returns_null() is
             let b = build()
 
@@ -91,7 +83,7 @@ namespace IR.UnitTests is
         // op_Implicit. Catches a regression that flipped it to
         // op_Explicit (which exists for float source but not for ints),
         // making the call fail to resolve at JIT.
-        @Test()
+        @test()
         get_decimal_conversion__int_to_decimal__widens() is
             let b = build()
             let c = b.converter.get_decimal_conversion(b.lookup.get_int_type(), b.lookup.get_decimal_type())!
@@ -100,7 +92,7 @@ namespace IR.UnitTests is
             are_same(b.lookup.get_int_type(), c.parameter_type)
         si
 
-        @Test()
+        @test()
         get_decimal_conversion__long_to_decimal__widens() is
             let b = build()
             let c = b.converter.get_decimal_conversion(b.lookup.get_long_type(), b.lookup.get_decimal_type())!
@@ -113,7 +105,7 @@ namespace IR.UnitTests is
         // it op_Explicit (there's no implicit float -> decimal in .NET).
         // Flipping to op_Implicit would emit a methodref the loader
         // rejects.
-        @Test()
+        @test()
         get_decimal_conversion__double_to_decimal__does_not_widen() is
             let b = build()
             let c = b.converter.get_decimal_conversion(b.lookup.get_double_type(), b.lookup.get_decimal_type())!
@@ -125,7 +117,7 @@ namespace IR.UnitTests is
         // decimal -> any numeric never widens, so it is always
         // op_Explicit (no implicit narrowing exists). Return type drives
         // overload selection on the Decimal class.
-        @Test()
+        @test()
         get_decimal_conversion__decimal_to_int__does_not_widen() is
             let b = build()
             let c = b.converter.get_decimal_conversion(b.lookup.get_decimal_type(), b.lookup.get_int_type())!
@@ -138,7 +130,7 @@ namespace IR.UnitTests is
         // than null so TYPE_CASTER can still wrap with CONVERT
         // (keeping the stack-type annotation consistent) but the
         // result is no IL work at runtime.
-        @Test()
+        @test()
         get_decimal_conversion__decimal_to_decimal__emits_nop() is
             let b = build()
             let c = b.converter.get_decimal_conversion(b.lookup.get_decimal_type(), b.lookup.get_decimal_type())!
@@ -152,14 +144,14 @@ namespace IR.UnitTests is
         // decimal-touches-decimal gate then promotes that to an
         // explicit "cannot convert" error rather than falling
         // through to `conv.u1` on a 128-bit struct (unverifiable IL).
-        @Test()
+        @test()
         get_decimal_conversion__decimal_to_bool__returns_null() is
             let b = build()
 
             is_null(b.converter.get_decimal_conversion(b.lookup.get_decimal_type(), b.lookup.get_bool_type()))
         si
 
-        @Test()
+        @test()
         get_decimal_conversion__bool_to_decimal__returns_null() is
             let b = build()
 
@@ -171,14 +163,14 @@ namespace IR.UnitTests is
         // neighbour would emit a methodref the loader rejects, so the
         // converter must report no-conversion for char in both
         // directions and let TYPE_CASTER surface a clean error.
-        @Test()
+        @test()
         get_decimal_conversion__char_to_decimal__returns_null() is
             let b = build()
 
             is_null(b.converter.get_decimal_conversion(b.lookup.get_char_type(), b.lookup.get_decimal_type()))
         si
 
-        @Test()
+        @test()
         get_decimal_conversion__decimal_to_char__returns_null() is
             let b = build()
 
@@ -189,21 +181,21 @@ namespace IR.UnitTests is
         // have to be scalars for a built-in conversion, so their absence
         // made word and uword unreachable from every scalar - including
         // from themselves.
-        @Test()
+        @test()
         scalar__word__is_the_native_signed_integer() is
             let b = build()
 
             are_equal(IR.Scalar.INT_NATIVE, b.converter.scalar(b.lookup.get_word_type()))
         si
 
-        @Test()
+        @test()
         scalar__uword__is_the_native_unsigned_integer() is
             let b = build()
 
             are_equal(IR.Scalar.UINT_NATIVE, b.converter.scalar(b.lookup.get_uword_type()))
         si
 
-        @Test()
+        @test()
         scalar__decimal__is_not_a_scalar() is
             let b = build()
 
@@ -215,28 +207,28 @@ namespace IR.UnitTests is
         // no-conversion. That null is what POINTER_SIZED_DECIMAL_BRIDGE
         // answers instead of, by routing through the 64-bit integer of
         // the same signedness.
-        @Test()
+        @test()
         get_decimal_conversion__word_to_decimal__returns_null() is
             let b = build()
 
             is_null(b.converter.get_decimal_conversion(b.lookup.get_word_type(), b.lookup.get_decimal_type()))
         si
 
-        @Test()
+        @test()
         get_decimal_conversion__decimal_to_word__returns_null() is
             let b = build()
 
             is_null(b.converter.get_decimal_conversion(b.lookup.get_decimal_type(), b.lookup.get_word_type()))
         si
 
-        @Test()
+        @test()
         get_decimal_conversion__uword_to_decimal__returns_null() is
             let b = build()
 
             is_null(b.converter.get_decimal_conversion(b.lookup.get_uword_type(), b.lookup.get_decimal_type()))
         si
 
-        @Test()
+        @test()
         get_decimal_conversion__decimal_to_uword__returns_null() is
             let b = build()
 

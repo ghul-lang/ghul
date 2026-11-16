@@ -1,8 +1,6 @@
 namespace Semantic.UnitTests is
     use Collections.LIST
 
-    use NSubstitute
-    use NSubstitute.SubstituteExtensions.returns
 
     use Source.LOCATION
 
@@ -19,15 +17,12 @@ namespace Semantic.UnitTests is
     use Semantic.Symbols.STATIC_METHOD
 
     use Semantic.Types.Type
-    use TestClass = Microsoft.VisualStudio.TestTools.UnitTesting.TestClassAttribute
-    use Test = Microsoft.VisualStudio.TestTools.UnitTesting.TestMethodAttribute
     use Assertions
 
     // Pins how an asynchronous literal with no declared return type
     // settles between same-arity overloads: what a formal is read as
     // asking for, and which candidate the literals' bodies leave
     // standing.
-    @TestClass()
     class ASYNC_LITERAL_CANDIDATES_TESTS is
         _int_type: Type
         _exception_type: Type
@@ -52,9 +47,8 @@ namespace Semantic.UnitTests is
             _unit_task_like = new_class("UNIT_COROUTINE")
             _unit_task_like.async_builder = unit_builder(_unit_task_like).type
 
-            let arguments = System.Array.empty`[object]()
-            let lookup = NSubstitute.Substitute.`for`[InnateSymbolLookup](arguments)
-            lookup.get_void_task_type() |> returns(_void_task.type, null)
+            let lookup = Semantic.UnitTests.STUB_INNATE_SYMBOL_LOOKUP()
+            lookup.get_void_task_type_answer = _void_task.type
 
             _logger = DIAGNOSTICS_STORE()
             _candidates = ASYNC_LITERAL_CANDIDATES(lookup, TASK_LIKE_RESOLVER(_logger, () => Semantic.PATTERN_TYPES(_exception_type, null, null)))
@@ -175,24 +169,24 @@ namespace Semantic.UnitTests is
 
         // === formal_asks_for_result ===
 
-        @Test()
+        @test()
         Formal_returning_a_task_like_with_a_result__asks_for_one() is
             is_true(_candidates.formal_asks_for_result(function_returning(result_task_like())) =~ true)
         si
 
-        @Test()
+        @test()
         Formal_returning_a_task_like_without_a_result__asks_for_none() is
             is_true(_candidates.formal_asks_for_result(function_returning(_unit_task_like.type!)) =~ false)
         si
 
         // Task is not marked with the builder attribute, so it is
         // known by identity rather than resolved.
-        @Test()
+        @test()
         Formal_returning_Task__asks_for_none() is
             is_true(_candidates.formal_asks_for_result(function_returning(_void_task.type!)) =~ false)
         si
 
-        @Test()
+        @test()
         Formal_returning_a_plain_type__is_not_a_candidate() is
             is_null(_candidates.formal_asks_for_result(function_returning(_int_type)))
         si
@@ -201,7 +195,7 @@ namespace Semantic.UnitTests is
         // two-argument generic is refused as a task-like with a
         // diagnostic when it is the chosen return type, and silently
         // when it is only a candidate's formal being looked at.
-        @Test()
+        @test()
         Formal_returning_a_two_argument_generic__is_not_a_candidate_and_reports_nothing() is
             let pair = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "MAP", LIST[string](["K", "V"]), Semantic.BLOCK_SCOPE())
             pair.async_builder = generic_builder().type
@@ -216,19 +210,19 @@ namespace Semantic.UnitTests is
             are_equal(0, reported)
         si
 
-        @Test()
+        @test()
         Action_formal__is_not_a_candidate() is
             is_null(_candidates.formal_asks_for_result(action()))
         si
 
-        @Test()
+        @test()
         Non_function_formal__is_not_a_candidate() is
             is_null(_candidates.formal_asks_for_result(_int_type))
         si
 
         // === pick ===
 
-        @Test()
+        @test()
         Pick__with_a_valued_body__takes_the_result_carrying_overload() is
             let owner = new_class("Owner")
             let group = FUNCTION_GROUP(loc(), owner, "spawn")
@@ -240,7 +234,7 @@ namespace Semantic.UnitTests is
             are_same(valued, _candidates.pick(group, literals([(0, true)]), 1, false))
         si
 
-        @Test()
+        @test()
         Pick__with_a_valueless_body__takes_the_result_less_overload() is
             let owner = new_class("Owner")
             let group = FUNCTION_GROUP(loc(), owner, "spawn")
@@ -252,7 +246,7 @@ namespace Semantic.UnitTests is
             are_same(unit, _candidates.pick(group, literals([(0, false)]), 1, false))
         si
 
-        @Test()
+        @test()
         Pick__with_no_literal__returns_null() is
             let owner = new_class("Owner")
             let group = FUNCTION_GROUP(loc(), owner, "spawn")
@@ -261,7 +255,7 @@ namespace Semantic.UnitTests is
             is_null(_candidates.pick(group, literals([]), 1, false))
         si
 
-        @Test()
+        @test()
         Pick__where_two_candidates_agree__returns_null() is
             let owner = new_class("Owner")
             let group = FUNCTION_GROUP(loc(), owner, "spawn")
@@ -271,7 +265,7 @@ namespace Semantic.UnitTests is
             is_null(_candidates.pick(group, literals([(0, false)]), 1, false))
         si
 
-        @Test()
+        @test()
         Pick__where_no_candidate_agrees__returns_null() is
             let owner = new_class("Owner")
             let group = FUNCTION_GROUP(loc(), owner, "spawn")
@@ -283,7 +277,7 @@ namespace Semantic.UnitTests is
 
         // A formal that takes no asynchronous literal at all rules its
         // candidate out, whatever the body does.
-        @Test()
+        @test()
         Pick__where_the_formal_is_not_a_task_like_function__rules_the_candidate_out() is
             let owner = new_class("Owner")
             let group = FUNCTION_GROUP(loc(), owner, "run")
@@ -295,7 +289,7 @@ namespace Semantic.UnitTests is
             are_same(unit, _candidates.pick(group, literals([(0, false)]), 1, false))
         si
 
-        @Test()
+        @test()
         Pick__with_two_literals__needs_every_formal_to_agree() is
             let owner = new_class("Owner")
             let group = FUNCTION_GROUP(loc(), owner, "pair")
@@ -308,7 +302,7 @@ namespace Semantic.UnitTests is
             are_same(both_unit, _candidates.pick(group, literals([(0, false), (1, false)]), 2, false))
         si
 
-        @Test()
+        @test()
         Pick__skips_arity_mismatches_and_instance_members_when_not_wanted() is
             let owner = new_class("Owner")
             let group = FUNCTION_GROUP(loc(), owner, "spawn")
