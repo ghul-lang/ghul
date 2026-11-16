@@ -318,7 +318,7 @@ od
 write_line("{factorial}");     // 265252859812191058636308480000000
 ```
 
-Mixed operands are an error, exactly as `1.0 + 1` is. If `total` is a `bigint`, `total * 2` is an error; write `total * 2n`. `==` on a `bigint` is an error, as it is on every other struct. Compare `bigint` values with `=~`.
+Mixed operands are an error, exactly as `1.0 + 1` is. If `total` is a `bigint`, `total * 2` is an error; write `total * 2n`. `==` and `!=` on two `bigint`s compare their values, as they do on two `decimal`s, so `factorial(25) == factorial(24) * 25n` is true. `=~` gives the same answer.
 
 A fractional literal is a `double` unless it has a suffix: `s` for single, `d` for double, `m` for decimal, in either case. The `m` suffix also works on a literal with only digits, to write an integral decimal (`100m`). Exponent notation is valid: `1.5e3`, `1.5E-3`.
 
@@ -1194,6 +1194,7 @@ So `a == b` means one instruction, and a reader can understand it without knowin
 Because of this, `==` and `!=` accept only these operands:
 
 - primitive scalars: the integer types, `single`, `double`, `decimal`, `bool`, `char`
+- `bigint`, which `==` compares by value, as `=~` does. Like `decimal`, a `bigint` compares through its type's own equality rather than one instruction. The comparison never throws, but its cost grows with the size of the numbers, since every digit can matter.
 - enum members
 - references: `string`, `object`, any class, any trait, and `null` compared with one of these
 - a bare type parameter. The type argument decides which of the above it is.

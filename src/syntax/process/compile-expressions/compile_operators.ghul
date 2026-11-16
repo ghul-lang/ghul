@@ -771,6 +771,16 @@ namespace Syntax.Process is
                         left_type? /\
                         !VALUE_EQUALITY_OPERANDS.can_compare(left_type)
                     then
+                        // A `bigint` is a built-in, and `==` on two of
+                        // them compares their values, as it does on two
+                        // `decimal`s: through the equality `=~` would
+                        // choose for them.
+                        if let by_value = _bigint_value_equality(binary, left_value, right_value) then
+                            binary.compile_expressions_state.value = by_value
+
+                            return
+                        fi
+
                         // compare.value lowers to a bare ceq, which for
                         // struct operands the runtime either refuses at
                         // JIT time or runs as a shallow bitwise
@@ -1029,6 +1039,53 @@ namespace Syntax.Process is
                 return null
             fi
 
+            return _build_lowered_equality(binary, lowering, left_value, right_value)
+        si
+
+        // `a == b` or `a != b` on two `bigint`s, as the value equality
+        // `=~` and `!~` would give them; null where either operand is not
+        // a `bigint`.
+        _bigint_value_equality(
+            binary: Trees.Expressions.BINARY,
+            left_value: Value,
+            right_value: Value
+        ) -> Value? is
+            let bigint_type = _innate_symbol_lookup.get_bigint_type()
+            let left_type = left_value.type
+            let right_type = right_value.type
+
+            if
+                !left_type? \/ !right_type? \/
+                left_type.compare(bigint_type) != Semantic.Types.MATCH.SAME \/
+                right_type.compare(bigint_type) != Semantic.Types.MATCH.SAME
+            then
+                return null
+            fi
+
+            let lowering = _choose_equality(left_type, right_type, binary.location)
+
+            if !lowering? \/ isa EqualityLowering.IDENTITY(lowering) then
+                return null
+            fi
+
+            let comparison = _build_lowered_equality(binary, lowering, left_value, right_value)
+
+            if !comparison? then
+                return null
+            fi
+
+            return if binary.actual_operation =~ "!=" then NOT(comparison) else comparison fi
+        si
+
+        // The comparison `lowering` builds of `left_value` and
+        // `right_value`, with the operand a partial application's `*`
+        // stands for moved into its thunk first.
+        _build_lowered_equality(
+            binary: Trees.Expressions.BINARY,
+            lowering: EqualityLowering,
+            left_value: Value,
+            right_value: Value
+        ) -> Value? is
             let left mut = left_value
             let right mut = right_value
 
