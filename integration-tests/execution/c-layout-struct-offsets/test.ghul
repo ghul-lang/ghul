@@ -1,0 +1,86 @@
+namespace Test is
+    use IO.Std.write_line;
+
+    // Tests: a struct with layout "c" has the offsets and size C gives a
+    // struct of the same fields, with the padding between them: a nested
+    // struct, an array of structs, a struct passed by reference and one the
+    // library holds, read and written in place. fixture.ll is the foreign
+    // side, and reaches every field by its byte offset.
+
+    @layout("c")
+    struct MIX is
+        a: byte field public;
+        b: short field public;
+        c: int field public;
+        d: double field public;
+        e: ubyte field public;
+        f: single field public;
+        g: long field public;
+
+        init() is si
+    si
+
+    @layout("c")
+    struct OUTER is
+        tag: ubyte field public;
+        m: MIX field public;
+        tail: ushort field public;
+
+        init() is si
+    si
+
+    @layout("c")
+    struct PAIR is
+        x: int field public;
+        y: int field public;
+
+        init(x: int, y: int) is
+            self.x = x;
+            self.y = y;
+        si
+    si
+
+    @extern("", "fx_fill_mix") fill_mix(m: MIX ref);
+    @extern("", "fx_mix_integers") mix_integers(m: MIX ref) -> long;
+    @extern("", "fx_mix_reals") mix_reals(m: MIX ref) -> double;
+    @extern("", "fx_fill_outer") fill_outer(o: OUTER ref);
+    @extern("", "fx_sum_pairs") sum_pairs(pairs: word, count: int) -> int;
+    @extern("", "fx_kept_mix") kept_mix() -> word;
+    @extern("", "fx_kept_written") kept_written() -> int;
+
+    @intrinsic("interop.read") read[T](address: word, offset: word) -> T;
+    @intrinsic("interop.write") write[T](address: word, offset: word, value: T);
+    @intrinsic("interop.elements") elements[T](array: ARRAY[T]) -> word;
+    @intrinsic("type.size_of") size_of[T]() -> int => -1;
+
+    entry() is
+        write_line("sizes {size_of[MIX]()} {size_of[OUTER]()} {size_of[PAIR]()}");
+
+        // C writes each field at its offset; ghul reads them back.
+        let m mut = MIX();
+        fill_mix(m ref);
+        write_line("filled {m.a} {m.b} {m.c} {m.d} {m.e} {m.f} {m.g}");
+
+        // ghul writes each field; C reads it at its offset.
+        let n mut = MIX();
+        n.a = -1b; n.b = 2s; n.c = -3; n.d = 0.25; n.e = 255ub; n.f = 0.5s; n.g = 100L;
+        write_line("read by C {mix_integers(n ref)} {mix_reals(n ref)}");
+
+        let o mut = OUTER();
+        fill_outer(o ref);
+        write_line("outer {o.tag} {o.m.a} {o.m.g} {o.tail}");
+
+        let pairs = [PAIR(1, 2), PAIR(3, 4), PAIR(5, 6)] |> ARRAY();
+        write_line("pairs {sum_pairs(elements(pairs), pairs.count)}");
+
+        // A struct the library holds, read and written where it is.
+        let kept = kept_mix();
+        let k = read[MIX](kept, 0w);
+        write_line("kept {k.a} {k.c} {k.e} {k.g}");
+
+        let changed mut = k;
+        changed.a = 9b; changed.b = 1000s; changed.g = 5L;
+        write[MIX](kept, 0w, changed);
+        write_line("written {kept_written()}");
+    si
+si

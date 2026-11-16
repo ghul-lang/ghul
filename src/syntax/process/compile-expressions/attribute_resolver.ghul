@@ -57,7 +57,8 @@ namespace Syntax.Process is
             name =~ "finalizer" \/
             name =~ "reflected" \/
             name =~ "test" \/
-            name =~ "extern"
+            name =~ "extern" \/
+            name =~ "layout"
 
         resolve(pragma: Trees.Pragmas.PRAGMA, target: Semantic.Symbols.Symbol?) =>
             resolve(pragma, target, null)
@@ -177,6 +178,11 @@ namespace Syntax.Process is
 
             if name =~ "reflected" then
                 _resolve_reflected(pragma, target)
+                return
+            fi
+
+            if name =~ "layout" then
+                _resolve_layout(pragma, target)
                 return
             fi
 
@@ -542,6 +548,46 @@ namespace Syntax.Process is
             fi
         si
 
+        // `layout("c")` promises a struct is laid out as C lays out a struct
+        // of the same fields, in declaration order with C's alignment and
+        // padding. The promise is recorded when types are resolved; here the
+        // struct is checked to be one that can keep it.
+        _resolve_layout(pragma: Trees.Pragmas.PRAGMA, target: Semantic.Symbols.Symbol) is
+            let kind = _string_literal_at(pragma, 0)
+
+            if pragma.arguments.count != 1 \/ !kind? \/ kind !~ "c" then
+                _logger.error(pragma.name.location, "layout-wrong-arguments", "'layout' takes the one layout it promises, and \"c\" is the only one")
+                return
+            fi
+
+            let s = cast Semantic.Symbols.STRUCT?(target)
+
+            if !s? then
+                _logger.error(pragma.name.location, "pragma-wrong-target", "'layout' applies only to a struct")
+                return
+            fi
+
+            if s.is_generic then
+                _logger.error(pragma.name.location, "layout-c-generic-struct", "a struct with layout \"c\" cannot be generic")
+                return
+            fi
+
+            let signature = Semantic.PINVOKE_SIGNATURE(_innate_symbol_lookup)
+
+            for symbol in s.symbols do
+                if let `field = _instance_field(symbol) /\ `field.owner == s then
+                    if !signature.can_hold_in_c_layout(`field.type) then
+                        _logger.error(
+                            `field.location,
+                            "layout-c-field-not-c-shaped",
+                            "a struct with layout \"c\" cannot hold a field of type '{`field.type}'",
+                            `field.location,
+                            "help: a field is a scalar other than 'bool' or 'char', a 'word', or another struct with layout \"c\"; use 'ubyte' for C's '_Bool', and 'byte' or 'ubyte' for its 'char'")
+                    fi
+                fi
+            od
+        si
+
         // `extern(module, name)` declares a function the program is linked
         // with rather than defines: the call is the foreign code's, so the
         // declaration takes no body. What may cross, and what the module
@@ -740,7 +786,7 @@ namespace Syntax.Process is
         // Why a parameter cannot cross, after its name and type.
         _refused_parameter(refusal: Semantic.ExternRefusal) -> string =>
             case refusal
-            when Semantic.ExternRefusal.REFERENCE_TO_NON_SCALAR then "cannot be passed to foreign code: only a reference to a scalar crosses"
+            when Semantic.ExternRefusal.REFERENCE_TO_NON_SCALAR then "cannot be passed to foreign code: only a reference to a scalar or to a struct marked @layout(\"c\") crosses"
             when Semantic.ExternRefusal.REFERENCE_ON_WASM then "cannot be passed to foreign code on wasm: the host cannot write through a reference"
             when Semantic.ExternRefusal.ARRAY_ON_WASM then "cannot be passed to foreign code on wasm: the host cannot read a WasmGC array"
             when Semantic.ExternRefusal.ARRAY_OF_NON_BYTE then "cannot be passed to foreign code: only ARRAY[ubyte] crosses as a buffer"
