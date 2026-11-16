@@ -11,6 +11,10 @@
 ;                                                           tag 0, m 8,
 ;                                                           tail 40; size 48
 ;   struct pair  { int32_t x; int32_t y; }                  x 0, y 4; size 8
+;   struct refs  { int32_t a; void *text; bool flag; void *same; }
+;                                                           a 0, text 8,
+;                                                           flag 16, same 24;
+;                                                           size 32
 ;
 ; Built by build/llvm-test-objects.sh, which the llvm test runs need first.
 
@@ -123,4 +127,18 @@ define i32 @fx_kept_written() {
   %ok = and i1 %ok12, %ok3
   %r = zext i1 %ok to i32
   ret i32 %r
+}
+
+; Copies text to same, and sets flag to whether a is 42.
+define void @fx_fill_refs(ptr %p) {
+  %a = load i32, ptr %p, align 4
+  %tp = getelementptr i8, ptr %p, i64 8
+  %t = load ptr, ptr %tp, align 8
+  %sp = getelementptr i8, ptr %p, i64 24
+  store ptr %t, ptr %sp, align 8
+  %is = icmp eq i32 %a, 42
+  %f = zext i1 %is to i8
+  %fp = getelementptr i8, ptr %p, i64 16
+  store i8 %f, ptr %fp, align 1
+  ret void
 }
