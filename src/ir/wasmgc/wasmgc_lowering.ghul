@@ -1709,7 +1709,7 @@ namespace IR.WasmGC is
         si
 
         visit_address(self_load: Values.Load.REFERENCE_SELF) is
-            if _struct_of(self_load.type)? then
+            if _struct_of(self_load.type)? \/ _is_boxed_maybe_self(self_load.type) then
                 _load_receiver()
             else
                 _report("self")
@@ -1735,18 +1735,25 @@ namespace IR.WasmGC is
             elif _struct_of(self_load.type)? then
                 _load_receiver()
                 _copy_if_mutable(self_load.type)
+            elif _is_boxed_maybe_self(self_load.type) then
+                _load_receiver()
             else
                 _report("self")
             fi
         si
 
         visit_address(self_load: Values.Load.VALUE_SELF) is
-            if _struct_of(self_load.type)? then
+            if _struct_of(self_load.type)? \/ _is_boxed_maybe_self(self_load.type) then
                 _load_receiver()
             else
                 _report("self")
             fi
         si
+
+        // Whether `type` is a MAYBE held as its value's box, whose methods
+        // receive that box, which is never changed in place.
+        _is_boxed_maybe_self(type: Type?) -> bool =>
+            _registry.boxed_maybe_of(_optional_receiver_type(type))?
         visit(runtime: Values.RUNTIME) is
             if _lower_builder(runtime) then
                 return
@@ -5517,7 +5524,9 @@ namespace IR.WasmGC is
                 _gen_optional(receiver)
                 _check_present()
 
-                if let index = _registry.box_index(_specialize(inner)) then
+                if _is_optional_of_boxed_maybe(receiver.type) then
+                    // The MAYBE tested for is the box itself.
+                elif let index = _registry.box_index(_specialize(inner)) then
                     _emit(HEAP_TYPE_INSTRUCTION(Opcode.REF_CAST, HEAP_TYPE.of_type_index(index)))
                     _emit(TYPE_FIELD_INSTRUCTION(Opcode.STRUCT_GET, index, WASMGC_TYPE_REGISTRY.BOX_VALUE))
                 elif let held = _struct_of(inner) then
@@ -5560,6 +5569,17 @@ namespace IR.WasmGC is
             fi
 
             return _registry.boxed_optional_inner(specialized)
+        si
+
+        // Whether `type`, or what it is a reference to, is the optional of a
+        // MAYBE held as its value's box, which a type test against that
+        // MAYBE goes through.
+        _is_optional_of_boxed_maybe(type: Type?) -> bool is
+            let optional = _optional_receiver_type(type)
+
+            return
+                optional? /\ optional.is_optional /\ optional.is_value_type /\ !optional.is_maybe /\
+                _registry.boxed_maybe_of(optional.optional_inner_type)?
         si
 
         // Lowers `value`, a value-type optional or its address, to the

@@ -1266,6 +1266,13 @@ namespace IR.LLVMTarget is
             fi
 
             if specialized? /\ specialized.is_optional /\ specialized.is_value_type /\ !specialized.is_maybe then
+                // A type test against a MAYBE over a value type goes through
+                // the MAYBE's optional, and reads what the MAYBE is boxed
+                // as: its value, or null.
+                if let maybe = _value_maybe_of(specialized.optional_inner_type) then
+                    return maybe.arguments[0]
+                fi
+
                 return specialized.optional_inner_type
             fi
 
@@ -1357,10 +1364,38 @@ namespace IR.LLVMTarget is
 
                 _start(carry_on)
 
-                _push(_extract_member(held, 1, inner))
+                if _is_optional_of_value_maybe(from.type) then
+                    // The MAYBE tested for has the layout the test read.
+                    _push(held)
+                else
+                    _push(_extract_member(held, 1, inner))
+                fi
             else
                 _report("the operation {operation}")
             fi
+        si
+
+        // The MAYBE over a value type `type` is, or null.
+        _value_maybe_of(type: Type?) -> IR.Program.CLASS_INSTANCE? =>
+            if let objects = _objects /\ (type?.is_value_type ?? false), maybe = objects.maybe_of(type) /\ objects.is_value_maybe(maybe) then
+                maybe
+            else
+                null
+            fi
+
+        // Whether `type`, or what it is a reference to, is the optional of a
+        // MAYBE over a value type, which a type test against that MAYBE
+        // goes through.
+        _is_optional_of_value_maybe(type: Type?) -> bool is
+            let optional mut = _specialize(type)
+
+            if let reference: Semantic.Types.REFERENCE = optional then
+                optional = reference.arguments[0]
+            fi
+
+            return
+                optional? /\ optional.is_optional /\ optional.is_value_type /\ !optional.is_maybe /\
+                _value_maybe_of(optional.optional_inner_type)?
         si
 
         // Where the optional `from` stands for is held: `from` itself where
