@@ -25,14 +25,46 @@ namespace Analysis is
     // take it. Nothing else about the analyser becomes concurrent -
     // every request is still handled on the main thread, one at a time,
     // and this class touches no compiler state.
-    class REQUEST_READER(_reader: IO.TextReader) is
+    class REQUEST_READER is
+        _reader: IO.TextReader
         _gate: object
         _frames: Collections.LIST[QueuedFrame]
 
-        init(..) is
+        // Where there is no reader thread, what says a complete line is
+        // waiting to be read, and what waits for one, giving up after a
+        // number of milliseconds. The host answers both for standard input.
+        _has_pending_input: () -> bool
+        _wait_for_input: (int) -> bool
+
+        // A reader of `reader`, which is standard input.
+        init(reader: IO.TextReader) is
+            init(reader, () -> bool => _standard_input_pending(), (timeout_ms: int) -> bool => _standard_input_ready(timeout_ms))
+        si
+
+        // A reader of `reader`, which need not be standard input: where
+        // there is no reader thread, `has_pending_input` says whether a
+        // complete line of it is waiting, and `wait_for_input` waits for
+        // one for up to the milliseconds it is given. A reader thread
+        // blocks on `reader` itself and calls neither.
+        init(reader: IO.TextReader, has_pending_input: () -> bool, wait_for_input: (int) -> bool) is
+            _reader = reader
+            _has_pending_input = has_pending_input
+            _wait_for_input = wait_for_input
             _gate = object()
             _frames = Collections.LIST[QueuedFrame]()
         si
+
+        @IF.dotnet()
+        _standard_input_pending() -> bool static => false
+
+        @IF.dotnet()
+        _standard_input_ready(timeout_ms: int) -> bool static => false
+
+        @IF.not.dotnet()
+        _standard_input_pending() -> bool static => IO.Std.has_pending_input()
+
+        @IF.not.dotnet()
+        _standard_input_ready(timeout_ms: int) -> bool static => IO.Std.wait_for_input(timeout_ms)
 
         // Whether a request has been taken since the last collection made
         // while idle.
@@ -80,7 +112,7 @@ namespace Analysis is
                 return
             fi
 
-            while IO.Std.has_pending_input() do
+            while _has_pending_input() do
                 if !_read_one() then
                     return
                 fi
@@ -187,14 +219,14 @@ namespace Analysis is
                 // collector's whole allocation budget instead of paying for a
                 // collection part way through. The collection gives up the
                 // moment input arrives.
-                if !IO.Std.wait_for_input(idle_quiet_ms) then
+                if !_wait_for_input(idle_quiet_ms) then
                     if System.GC.collect_when_idle() then
                         _collect_when_idle_due = false
                     fi
                 fi
             fi
 
-            if !IO.Std.wait_for_input(timeout_ms) then
+            if !_wait_for_input(timeout_ms) then
                 return false
             fi
 

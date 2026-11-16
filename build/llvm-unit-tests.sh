@@ -40,8 +40,11 @@ mkdir -p "$directory"
 
 start=$(date +%s)
 
-# The tests' own entry runs, rather than the compiler's.
-if ! "$@" --target llvm --llvm-parallel-gc --rtti-roots --underscore-access legacy --entry unit_tests_entry -o "$directory/unit-tests" @"$directory/libraries.rsp" @"$directory/sources.rsp" > "$directory/build.log" 2>&1; then
+# The tests' own entry runs, rather than the compiler's. They are built
+# unoptimised: optimising takes three quarters of an -O2 build (about two
+# minutes) and saves the run a few milliseconds, and the llvm bootstrap
+# already builds and checks the optimised compiler.
+if ! "$@" --target llvm --llvm-parallel-gc --rtti-roots --underscore-access legacy --optimise 0 --entry unit_tests_entry -o "$directory/unit-tests" @"$directory/libraries.rsp" @"$directory/sources.rsp" > "$directory/build.log" 2>&1; then
     grep -v ': warn: ' "$directory/build.log" || true
     echo "the unit tests failed to build"
     exit 1

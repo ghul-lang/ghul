@@ -1,0 +1,238 @@
+namespace Syntax.Process.UnitTests is
+    use Collections
+
+    @IF.dotnet()
+    use System.IO.Abstractions
+
+    @IF.not.dotnet()
+    use IFileSystem = Syntax.Process.SOURCE_CORE_FILE_SYSTEM
+
+    use IO.Directory
+    use IO.File
+    use IO.Path
+
+    use Logging
+    use Syntax.Process
+    use Assertions
+
+    // EXPAND_NAMESPACES naming a file's namespace from the folders it is in,
+    // walking a real directory tree, written under a fresh temporary folder,
+    // with the file system the compiler itself uses; and the characters a
+    // folder name's identifier keeps. The rest of its naming is in
+    // EXPAND_NAMESPACES_TESTS.
+    class EXPAND_NAMESPACES_PATH_TESTS is
+        init() is si
+
+        @IF.dotnet()
+        file_system() -> IFileSystem => FileSystem()
+
+        @IF.not.dotnet()
+        file_system() -> IFileSystem => IFileSystem()
+
+        // A new, empty folder holding the tree `some/path/to`.
+        make_tree() -> string is
+            let root = Path.combine(Path.get_temp_path(), "ghul-expand-namespaces-tests-{System.Guid.new_guid()}")
+
+            Directory.create_directory(Path.combine(Path.combine(Path.combine(root, "some"), "path"), "to"))
+
+            return root
+        si
+
+        remove_tree(root: string) is
+            if Directory.exists(root) then
+                Directory.delete(root, true)
+            fi
+        si
+
+        folder(root: string, relative: string) -> string is
+            let result mut = root
+
+            for part in relative.split(['/']) do
+                result = Path.combine(result, part)
+            od
+
+            return result
+        si
+
+        // The namespace name of `root` when no folder above it marks a
+        // project: every folder from the file-system root down.
+        unmarked_prefix(root: string) -> string is
+            let names = LIST[string]()
+            let info mut = file_system().directory_info.`new(root)
+
+            names.add(info.name)
+
+            while info.parent? do
+                info = info.parent!
+                names.add(info.name)
+            od
+
+            let result = Text.STRING_BUILDER()
+
+            for i in 0..names.count do
+                result.append("{EXPAND_NAMESPACES.convert_file_name_to_identifier(names[names.count - 1 - i])}__")
+            od
+
+            return result.to_string()
+        si
+
+        // A file URI as an editor writes one for `path`.
+        file_uri(path: string) -> string is
+            let forward = path.replace('\\', '/')
+
+            return if forward.starts_with("/") then "file://{forward}" else "file:///{forward}" fi
+        si
+
+        @test()
+        Calling__convert_file_name_to_identifier__with_name_containing_special_chars__should_omit_them() is
+            let name = "some-file-name!@#$%^&*()+{{}}|:\"<>?[];',/`~"
+
+            let object_under_test = EXPAND_NAMESPACES(file_system())
+
+            let result = object_under_test.convert_file_name_to_identifier(name)
+
+            are_equal("some_file_name", result)
+        si
+
+        @test()
+        Calling__convert_file_name_to_identifier__with_name_containing_underscores__should_pass_them_through() is
+            let name = "some_file_name"
+
+            let object_under_test = EXPAND_NAMESPACES(file_system())
+
+            let result = object_under_test.convert_file_name_to_identifier(name)
+
+            are_equal("some_file_name", result)
+        si
+
+        @test()
+        Calling__convert_file_name_to_identifier__with_name_containing_digits__should_pass_them_through() is
+            let name = "some_file_name_123"
+
+            let object_under_test = EXPAND_NAMESPACES(file_system())
+
+            let result = object_under_test.convert_file_name_to_identifier(name)
+
+            are_equal("some_file_name_123", result)
+        si
+
+        @test()
+        Calling_get_namespace_name__with_absolute_uri_and_no_config__should_return_expected_namespace_name() is
+            let root = make_tree()
+
+            try
+                let path = Path.combine(folder(root, "some/path/to"), "some-file-name.ghul")
+                let uri = "file://{path}"
+
+                let object_under_test = EXPAND_NAMESPACES(file_system())
+
+                let result = object_under_test.get_namespace_name(uri)
+
+                are_equal("{unmarked_prefix(root)}some__path__to__some_file_name", result)
+            finally
+                remove_tree(root)
+            yrt
+        si
+
+        // On Windows the URI names a drive (`file:///C:/...`), and the path
+        // it holds is read as `C:\...`; elsewhere it names the root.
+        @test()
+        Calling_get_namespace_name__with_windows_uri_and_no_config__should_return_expected_namespace_name() is
+            let root = make_tree()
+
+            try
+                let path = Path.combine(folder(root, "some/path/to"), "some-file-name.ghul")
+                let uri = file_uri(path)
+
+                let object_under_test = EXPAND_NAMESPACES(file_system())
+
+                let result = object_under_test.get_namespace_name(uri)
+
+                are_equal("{unmarked_prefix(root)}some__path__to__some_file_name", result)
+            finally
+                remove_tree(root)
+            yrt
+        si
+
+        @test()
+        Calling_get_namespace_name__with_absolute_path_and_no_config__should_return_expected_namespace_name() is
+            let root = make_tree()
+
+            try
+                let path = Path.combine(folder(root, "some/path/to"), "some-file-name.ghul")
+
+                let object_under_test = EXPAND_NAMESPACES(file_system())
+
+                let result = object_under_test.get_namespace_name(path)
+
+                are_equal("{unmarked_prefix(root)}some__path__to__some_file_name", result)
+            finally
+                remove_tree(root)
+            yrt
+        si
+
+        @test()
+        Calling_get_namespace_name__with_ghul_json_below_root__should_return_expected_namespace_name() is
+            let root = make_tree()
+
+            try
+                let path = Path.combine(folder(root, "some/path/to"), "some-file-name.ghul")
+
+                File.write_all_text(Path.combine(folder(root, "some/path"), "ghul.json"), "{{}}")
+
+                let object_under_test = EXPAND_NAMESPACES(file_system())
+
+                let result = object_under_test.get_namespace_name(path)
+
+                are_equal("path__to__some_file_name", result)
+            finally
+                remove_tree(root)
+            yrt
+        si
+
+        @test()
+        Calling_get_namespace_name__again_in_the_same_folder__should_reuse_the_folder_name_found_first() is
+            let root = make_tree()
+
+            try
+                let path = Path.combine(folder(root, "some/path/to"), "some-file-name.ghul")
+
+                File.write_all_text(Path.combine(folder(root, "some/path"), "ghul.json"), "{{}}")
+
+                let object_under_test = EXPAND_NAMESPACES(file_system())
+
+                are_equal("path__to__some_file_name", object_under_test.get_namespace_name(path))
+
+                // A project marker appearing in the file's own folder would
+                // change the answer if the walk were made again; the folder's
+                // name is the one found first.
+                let other = Path.combine(folder(root, "some/path/to"), "other-file.ghul")
+
+                File.write_all_text(Path.combine(folder(root, "some/path/to"), "ghul.json"), "{{}}")
+
+                are_equal("path__to__other_file", object_under_test.get_namespace_name(other))
+            finally
+                remove_tree(root)
+            yrt
+        si
+
+        @test()
+        Calling_get_namespace_name__with_ghulproj_below_root__should_return_expected_namespace_name() is
+            let root = make_tree()
+
+            try
+                let path = Path.combine(folder(root, "some/path/to"), "some-file-name.ghul")
+
+                File.write_all_text(Path.combine(folder(root, "some/path"), "test.ghulproj"), "<Project />")
+
+                let object_under_test = EXPAND_NAMESPACES(file_system())
+
+                let result = object_under_test.get_namespace_name(path)
+
+                are_equal("path__to__some_file_name", result)
+            finally
+                remove_tree(root)
+            yrt
+        si
+    si
+si
