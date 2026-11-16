@@ -1159,10 +1159,11 @@ si
 
 The compiler resolves an operator among the declarations that take the same number of operands as the use. A prefix `-` has one operand. So a member `-` with two operands (`self` and one argument) never matches a prefix `-`. Inside the type that declares such a member, a prefix `-` still finds the unary operator declared as a static member or at namespace scope.
 
-An operator's precedence comes from its first character. A declaration cannot set it. So an operator that looks like arithmetic has arithmetic precedence. From highest to lowest precedence:
+An operator's precedence comes from its first character. A declaration cannot set it. So an operator that looks like arithmetic has arithmetic precedence. The exceptions are opening pairs: an operator opening with `**` is a power, and one opening with a doubled `<` or `>` is a shift. From highest to lowest precedence:
 
 | level | characters |
 |-------|------------|
+| power | `**` |
 | multiplication | `*` `/` `%` `×` `÷` `✕` `⊗` `⊘` `⊙` `⋅` `∗` |
 | addition | `+` `-` `⊕` `⊖` `±` `∓` |
 | bitwise | `&` `\|` `¦` `^` `∩` `∪` `⊻` `⊼` `⊽` |
@@ -1171,6 +1172,8 @@ An operator's precedence comes from its first character. A declaration cannot se
 | thread-first | `\|>` `~>` |
 | relational | `=` `!` `~` `<` `>` `≠` `≤` `≥` `≈` `≉` `≡` `≢` `∈` `∉` `∋` `⊂` `⊃` `⊆` `⊇` |
 | boolean | `∧` `∨`, and `/\` and `\/` |
+
+`**` raises its left operand to the power of its right one, as `pow` does, and is reached as `pow` is, through `use default` or ``use Ghul.Math.`**``. An integer or `bigint` base takes an `int` exponent, and a `double` base takes a `double`. So `2 ** 10` is 1024, `2L ** 40` is a `long`, and `x ** 0.5` is a square root. An integer power that does not fit its type throws `OverflowException`, where `*` wraps, and a negative integer exponent throws `ArgumentOutOfRangeException`. `**` binds tighter than `*`, so `2 * 3 ** 2` is 18. It groups to the left like every other operator, so `2 ** 3 ** 2` is `(2 ** 3) ** 2`, which is 64. A chain like that has a warning, because mathematics groups a power to the right; parentheses around one pair silence it. A prefix operator applies before `**`, as before any binary operator, so `-2 ** 2` is `(-2) ** 2`, which is 4.
 
 The unary `\` is the bitwise complement of an integer. Its result has the operand's type: `\5` is `-6` for an `int`, `\0` is `-1`, and `\x` is `250` for a `ubyte` `x` of 5. `\` is the unary partner of the binary `&`, `|` and `^`. `!` is the logical not of a `bool`. The boolean operators `/\` and `\/` are each one token.
 
