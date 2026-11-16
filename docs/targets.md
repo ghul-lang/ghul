@@ -8,7 +8,7 @@ GHUL.md describes the `dotnet` and `wasm` targets. The third target, `llvm`, bui
 
 1. type-checks the program against ghul-runtime, as a `wasm` build does
 2. writes an LLVM module
-3. links the module into a statically linked executable with the `ghul-llvm` tool. The tool must be on the path, or named by `GHUL_LLVM`.
+3. links the module into an executable with the `ghul-llvm` tool: statically linked by default, or dynamically linked with `--llvm-link-mode dynamic`. The tool must be on the path, or named by `GHUL_LLVM`.
 
 These options control an `llvm` build:
 
@@ -18,6 +18,7 @@ These options control an `llvm` build:
 - `--debug` adds line tables and variables, so a debugger and a crash's backtrace show ghūl files, lines and variables.
 - `--optimise <0-3>` sets the optimisation level. The default is 2, and 0 for a `--debug` build that sets no level.
 - `--llvm-parallel-gc` links the collector that marks with several threads: as many as there are processors, up to four, or `GC_MARKERS` of them where that is set. It is for programs that keep a large heap. On the compiler's own native build, with about 500 MB live, a full mark falls from about 350 ms to about 150 ms. It is not for general programs yet: a small program starts with about 7 MB resident rather than under 1 MB, and one that allocates many short-lived objects ran about 50% slower.
+- `--llvm-link-mode static|dynamic` chooses how the executable is linked. `static`, the default, links it against musl, and the program runs on any Linux of the same architecture. `dynamic` links it against the glibc of the machine it is built on, and lets `--native-library` name the system's shared libraries (see [foreign functions](#foreign-functions)). The program then needs glibc 2.34 or later and those libraries where it runs. Linking dynamically needs no C compiler and no development packages. `--llvm-parallel-gc` is not available with it yet.
 
 A library build writes the module's text and links nothing.
 
@@ -119,11 +120,13 @@ The meaning of the module and the name depends on the target. So write a declara
 | llvm | the library that supplies the symbol; empty for what the C library or libghul already holds | the C symbol, spelled exactly |
 | wasm | must be empty | a function the program's caller supplies |
 
-On .NET, an `@extern` is the `DllImport` it stands for, with the platform's default marshalling. On llvm, it is a C ABI call. The program links statically against musl, so a library that it names must be available as a static archive built for musl. These options control the link, and each can be repeated:
+On .NET, an `@extern` is the `DllImport` it stands for, with the platform's default marshalling. On llvm, it is a C ABI call. By default the program links statically against musl, so a library that it names must be available as a static archive built for musl. With `--llvm-link-mode dynamic` it links against the system's glibc instead, and a library that it names is the system's shared library. These options control the link, and each can be repeated:
 
 - `--native-input <path>` adds an object file or archive.
-- `--native-library <name>` links `lib<name>.a`.
+- `--native-library <name>` links `lib<name>.a`, or under `--llvm-link-mode dynamic` the shared library `lib<name>.so`.
 - `--native-library-path <dir>` adds a directory to search for libraries.
+
+In a dynamic link, a shared library is looked for in each `--native-library-path` directory, then where the system's dynamic loader looks: its cache, `/etc/ld.so.cache`, and the standard library directories. The file linked is the one the library's soname names, such as `libz.so.1`, so only the library's runtime package needs to be installed, not its development package. A library found in a `--native-library-path` directory is recorded in the program, so the program finds it there when it runs.
 
 A symbol that the link cannot find is reported at the `@extern` declaration that names it. A library that is named but that no call reaches is not linked.
 
