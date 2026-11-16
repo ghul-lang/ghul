@@ -27,6 +27,7 @@ namespace Syntax.Parsers.Expressions is
         ADDITION       = 150,
         USER_7         = 160,
         MULTIPLICATION = 170,
+        POWER          = 175,   // `**`
         USER_8         = 180,
         MEMBER         = 190,
         PRIMARY        = 200
@@ -161,6 +162,12 @@ namespace Syntax.Parsers.Expressions is
             if op.starts_with("..") \/ op.starts_with("::") then
                 return PRECEDENCE.RANGE
             fi
+            // Any operator opening with `**` raises to a power, which binds
+            // tighter than multiplication, as a doubled `<` or `>` is a
+            // shift rather than a comparison.
+            if op.starts_with("**") then
+                return PRECEDENCE.POWER
+            fi
 
             let first = op[0]
 
@@ -250,6 +257,7 @@ namespace Syntax.Parsers.Expressions is
         // precedence climbing expression parser:
         parse(context: CONTEXT, left: Trees.Expressions.Expression mut, min_precedence: PRECEDENCE) -> Trees.Expressions.Expression is
             let last_was_yield_infix mut = false
+            let last_was_power mut = false
 
             do
                 let left_precedence = precedence(context)
@@ -274,6 +282,7 @@ namespace Syntax.Parsers.Expressions is
                         )
 
                     last_was_yield_infix = false
+                    last_was_power = false
 
                     continue
                 fi
@@ -323,7 +332,20 @@ namespace Syntax.Parsers.Expressions is
                     fi
                     left = lower_yield_infix(left, right)
                     last_was_yield_infix = true
+                    last_was_power = false
                 else
+                    // A power operator taking a power on its left that was not
+                    // written in parentheses groups to the left, which is not
+                    // how a power is read in mathematics.
+                    let is_power = left_precedence == PRECEDENCE.POWER
+
+                    if is_power /\ last_was_power then
+                        context.warn(op_location, "power-chain", "'{apparent_op}' chain groups to the left, as '(a {apparent_op} b) {apparent_op} c'")
+                        IoC.CONTAINER.instance.logger.hint(op_location, "power-chain-hint", "parentheses around one pair make the grouping explicit")
+                    fi
+
+                    last_was_power = is_power
+
                     let binary = Trees.Expressions.BINARY(left.location::right.location, op, apparent_op, left, right)
 
                     // `a + *` is `+(a, *)`: a partial application of the
