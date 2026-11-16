@@ -1,0 +1,118 @@
+namespace Semantic.Symbols.UnitTests is
+    use Collections.LIST
+
+    use Source.LOCATION
+
+    use Semantic.Types.Type
+
+    use Assertions
+
+    // Tests for rebuilding a function's `[T..]` from the pack markers
+    // its formals and return carry, which is all a reflected function
+    // arrives with.
+    class FUNCTION_PACK_TYPE_PARAMETER_TESTS is
+        _string_type: Type
+        _function_owner: CLASS
+
+        init() is
+            _string_type =
+                CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "string", LIST[string](), Semantic.BLOCK_SCOPE()).type!
+            _function_owner =
+                CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Function", LIST[string](["A", "R"]), Semantic.BLOCK_SCOPE())
+        si
+
+        loc() -> LOCATION => LOCATION("test.ghul", 1, 1, 1, 1)
+
+        // `combinator[T, U]` with no marker set on either parameter.
+        make_combinator() -> (function: GLOBAL_FUNCTION, t: FUNCTION_GENERIC_ARGUMENT, u: FUNCTION_GENERIC_ARGUMENT) is
+            let function = GLOBAL_FUNCTION(loc(), loc(), Semantic.BLOCK_SCOPE(), "combinator", Semantic.BLOCK_SCOPE())
+
+            let t = FUNCTION_GENERIC_ARGUMENT(loc(), function, "T", 0)
+            let u = FUNCTION_GENERIC_ARGUMENT(loc(), function, "U", 1)
+
+            function.generic_argument_names = LIST[string](["T", "U"])
+            function.generic_arguments =
+                LIST[Type]([Semantic.Types.FUNCTION_GENERIC_ARGUMENT(t), Semantic.Types.FUNCTION_GENERIC_ARGUMENT(u)])
+
+            function.argument_names = LIST[string](["f"])
+
+            let defaults = LIST[string?]()
+            defaults.add(null)
+            function.argument_defaults = defaults
+
+            return (function, t, u)
+        si
+
+        // `T -> U`, the function type a formal `f: T.. -> U` declares.
+        callable_over(t: FUNCTION_GENERIC_ARGUMENT, u: FUNCTION_GENERIC_ARGUMENT) -> Type =>
+            Semantic.Types.FUNCTION(
+                loc(),
+                _function_owner,
+                LIST[Type]([Semantic.Types.FUNCTION_GENERIC_ARGUMENT(t), Semantic.Types.FUNCTION_GENERIC_ARGUMENT(u)]))
+
+        @test()
+        Calling__mark_pack_type_parameters__with_a_callable_formal__marks_the_parameter_it_takes() is
+            let (function, t, u) = make_combinator()
+
+            function.arguments = LIST[Type]([callable_over(t, u)])
+            function.argument_is_pack = LIST[bool]([true])
+            function.argument_pack_depth = LIST[int]([0])
+            function.spread_argument_index = -1
+            function.return_pack_depth = -1
+
+            function.mark_pack_type_parameters()
+
+            is_true(t.is_argument_pack)
+            is_false(u.is_argument_pack)
+        si
+
+        @test()
+        Calling__mark_pack_type_parameters__with_a_spread_formal__marks_its_own_type() is
+            let (function, t, u) = make_combinator()
+
+            function.arguments = LIST[Type]([Semantic.Types.FUNCTION_GENERIC_ARGUMENT(t)])
+            function.argument_is_pack = LIST[bool]([false])
+            function.argument_pack_depth = LIST[int]([-1])
+            function.spread_argument_index = 0
+            function.return_pack_depth = -1
+
+            function.mark_pack_type_parameters()
+
+            is_true(t.is_argument_pack)
+            is_false(u.is_argument_pack)
+        si
+
+        @test()
+        Calling__mark_pack_type_parameters__with_a_marked_return__marks_the_parameter_it_takes() is
+            let (function, t, u) = make_combinator()
+
+            function.arguments = LIST[Type]([_string_type])
+            function.argument_is_pack = LIST[bool]([false])
+            function.argument_pack_depth = LIST[int]([-1])
+            function.spread_argument_index = -1
+            function.return_type = callable_over(t, u)
+            function.return_pack_depth = 0
+
+            function.mark_pack_type_parameters()
+
+            is_true(t.is_argument_pack)
+            is_false(u.is_argument_pack)
+        si
+
+        @test()
+        Calling__mark_pack_type_parameters__with_no_marker__marks_nothing() is
+            let (function, t, u) = make_combinator()
+
+            function.arguments = LIST[Type]([callable_over(t, u)])
+            function.argument_is_pack = LIST[bool]([false])
+            function.argument_pack_depth = LIST[int]([-1])
+            function.spread_argument_index = -1
+            function.return_pack_depth = -1
+
+            function.mark_pack_type_parameters()
+
+            is_false(t.is_argument_pack)
+            is_false(u.is_argument_pack)
+        si
+    si
+si

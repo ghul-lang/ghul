@@ -1,0 +1,109 @@
+namespace Semantic.UnitTests is
+
+    use Source.LOCATION
+
+    use Semantic.Symbols.ENUM_STRUCT
+    use Semantic.Symbols.ENUM_STRUCT_MEMBER
+    use Semantic.Symbols.NAMESPACE
+    use Assertions
+
+    // Pins `ENUM_STRUCT_MEMBER.numeric_value`, the number an enum member
+    // denotes.
+    //
+    // `value` is the initializer's token exactly as it was written, so it
+    // still carries whatever digit grouping, radix prefix and type suffix
+    // the lexer accepts on an integer literal. Neither back end can use
+    // any of that: ilasm rejects `int32(200l)` and a Constant row needs an
+    // actual integer, so both read this instead.
+    //
+    // A value it cannot read is absent rather than zero, because zero is
+    // an ordinary enum value, and `emitted_value` falls back to the text
+    // verbatim. Nothing is reported: a source member that arrives
+    // unreadable has already been rejected — an out-of-range literal by
+    // the numeric literal classifier, an incomplete declaration by the
+    // parser — so a second diagnostic would only name it twice. A
+    // reflected member has been through neither, and one of an enum
+    // wider than int32 is ordinary.
+    //
+    // The suffix rule is the classifier's, and it is not radix-aware,
+    // which is the case worth knowing: `b` and `c` are hex digits as
+    // well as size selectors, so `0x1Fb` is 31 rather than 507, and
+    // `0xBEE` is 3054 because `E` is a digit and nothing else. Two
+    // readers that resolved that differently would give one token two
+    // meanings.
+    class ENUM_STRUCT_MEMBER_VALUE_TESTS is
+        init() is si
+
+        loc() -> LOCATION => LOCATION("test.ghul", 1, 1, 1, 1)
+
+        member(value: string) -> ENUM_STRUCT_MEMBER is
+            let owner = NAMESPACE(loc(), "Test", null, ".Test", false)
+            let `enum = ENUM_STRUCT(loc(), loc(), owner, "Level", owner)
+
+            return ENUM_STRUCT_MEMBER(loc(), `enum, "MEMBER", value)
+        si
+
+        @test()
+        A_plain_decimal_literal_is_its_own_value() is
+            are_equal(200, member("200").numeric_value!)
+        si
+
+        @test()
+        A_type_suffix_is_not_part_of_the_value() is
+            are_equal(200, member("200l").numeric_value!)
+            are_equal(7, member("7uS").numeric_value!)
+        si
+
+        @test()
+        Digit_grouping_is_not_part_of_the_value() is
+            are_equal(1000000, member("1_000_000").numeric_value!)
+        si
+
+        @test()
+        A_hexadecimal_literal_is_read_in_base_sixteen() is
+            are_equal(500, member("0x1F4").numeric_value!)
+            are_equal(500, member("0x1_F4").numeric_value!)
+        si
+
+        // The suffix rule is the numeric literal classifier's, so the
+        // digits are read as far as they go in the literal's own radix
+        // and a trailing hex digit is a digit even where it is also a
+        // size selector. A suffix reaches a hex literal only through a
+        // backtick, and does not contribute to the value.
+        @test()
+        A_hexadecimal_literal_reads_its_suffix_the_way_the_classifier_does() is
+            are_equal(3054, member("0xBEE").numeric_value!)
+            are_equal(507, member("0x1Fb").numeric_value!)
+            are_equal(44, member("0x2c").numeric_value!)
+            are_equal(31, member("0x1F`b").numeric_value!)
+        si
+
+        // Absent rather than zero: zero is an ordinary enum value, so a
+        // consumer that forgot to check would read a member it could not
+        // parse as the first one.
+        @test()
+        A_value_that_cannot_be_read_is_absent() is
+            is_false(member("").numeric_value?)
+            is_false(member("si").numeric_value?)
+            is_false(member("99999999999").numeric_value?)
+        si
+
+        // A reflected member has been through neither the classifier nor
+        // the parser, and one of an enum whose underlying type is wider
+        // than int32 is ordinary — `[Flags] enum : uint` with the high
+        // bit set arrives as "2147483648". Emitting zero for it would
+        // silently take the wrong branch at every comparison, so the text
+        // is emitted unchanged and fails where it always did.
+        @test()
+        A_value_that_cannot_be_read_is_emitted_as_it_arrived() is
+            are_equal("2147483648", member("2147483648").emitted_value)
+            are_equal("", member("").emitted_value)
+        si
+
+        @test()
+        A_value_that_can_be_read_is_emitted_as_a_plain_number() is
+            are_equal("200", member("200l").emitted_value)
+            are_equal("500", member("0x1F4").emitted_value)
+        si
+    si
+si

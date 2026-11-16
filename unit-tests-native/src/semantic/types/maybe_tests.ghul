@@ -1,0 +1,504 @@
+namespace Semantic.Types.UnitTests is
+    use Collections.Iterable
+    use Collections.LIST
+    use Collections.List
+
+    use Source.LOCATION
+
+    use Semantic.Symbols.CLASS
+    use Semantic.Symbols.CLASSY_GENERIC_ARGUMENT
+    use Semantic.Symbols.STRUCT
+    use Semantic.Types.GENERIC
+    use Semantic.Types.GENERIC_ARGUMENT_BIND_RESULTS
+    use Semantic.Types.MAYBE
+    use Semantic.Types.NAMED
+    use Semantic.Types.NULLABLE
+    use Semantic.Types.Type
+    use Assertions
+
+    // Tests for the `Ghul.MAYBE[T]` recognition path. The substantive
+    // guarantees are:
+    //
+    //  - Types.MAYBE reports is_maybe = true; a plain Types.GENERIC
+    //    over the same symbol reports is_maybe = false. That keeps
+    //    source-side compilation of ghul-runtime's own `MAYBE` struct
+    //    (which never goes through the reflected wrapper path) from
+    //    triggering the implicit MAYBE -> T? conversion.
+    //
+    //  - NAMED.compare accepts a MAYBE[T] source when the target is a
+    //    flagged-optional reference type and T matches. The value-T
+    //    counterpart — `NULLABLE.compare_optional` accepting a MAYBE
+    //    against a `Nullable[T]` target — sits in the NULLABLE suite
+    //    rather than here; this NAMED-side rule covers only the
+    //    reference-type targets. A bare value-type target via NAMED
+    //    is rejected because a value-T's `T?` is NULLABLE, not a
+    //    flagged NAMED, so the rule doesn't silently widen through
+    //    this path. A mismatched-T target is rejected for the same
+    //    reason.
+    //
+    // The MAYBE_TYPE_WRAPPER's reflected materialisation, its
+    // hand-off to Types.MAYBE on specialisation, and the
+    // VALUE_BOXER's `.value` property load are covered end-to-end by
+    // `integration-tests/execution/maybe-as-optional-probe`; the
+    // value-T layout-blit by `maybe-as-optional-value`.
+    class MAYBE_TESTS is
+        init() is si
+
+        loc() -> LOCATION => LOCATION("test.ghul", 1, 1, 1, 1)
+
+        empty_names() -> LIST[string] => LIST[string]()
+
+        names_for(values: Iterable[string]) -> LIST[string] is
+            let result = LIST[string]()
+            for v in values do result.add(v); od
+            return result
+        si
+
+        // A reference type stand-in for T — its `T?` form is a flagged
+        // NAMED rather than a NULLABLE wrap.
+        a_reference_class() -> CLASS =>
+            CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Cat", empty_names(), Semantic.BLOCK_SCOPE())
+
+        another_reference_class() -> CLASS =>
+            CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Dog", empty_names(), Semantic.BLOCK_SCOPE())
+
+        // A value-type stand-in for T — its `T?` form would be a
+        // NULLABLE wrap, not a flagged NAMED, so a flagged-NAMED target
+        // can never be a value-type T?.
+        a_value_struct() -> STRUCT =>
+            STRUCT(loc(), loc(), Semantic.BLOCK_SCOPE(), "Pixel", empty_names(), Semantic.BLOCK_SCOPE())
+
+        // A stand-in for Ghul.MAYBE[T] — declares one type parameter
+        // so Symbols.GENERIC accepts it as the generic underlying.
+        a_maybe_class() -> CLASS =>
+            CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "MAYBE", names_for(["T"]), Semantic.BLOCK_SCOPE())
+
+        build_maybe_over(inner: NAMED) -> MAYBE is
+            let arguments = LIST[Type]()
+            arguments.add(inner)
+            return MAYBE(loc(), a_maybe_class(), arguments)
+        si
+
+        build_generic_over(inner: NAMED) -> GENERIC is
+            let arguments = LIST[Type]()
+            arguments.add(inner)
+            return GENERIC(loc(), a_maybe_class(), arguments)
+        si
+
+        // A stand-in for System.Nullable[T], the value-T spelling of
+        // `T?`.
+        a_nullable_class() -> STRUCT =>
+            STRUCT(loc(), loc(), Semantic.BLOCK_SCOPE(), "Nullable", names_for(["T"]), Semantic.BLOCK_SCOPE())
+
+        build_nullable_over(inner: NAMED) -> NULLABLE is
+            let arguments = LIST[Type]()
+            arguments.add(inner)
+            return NULLABLE(loc(), a_nullable_class(), arguments)
+        si
+
+        // An unresolved MAYBE[T], as a `T?` formal is before the call
+        // site pins T. The owner comes back with it: an actual that is
+        // itself a MAYBE has to be built over the same class, since
+        // binding pairs two generics on symbol identity.
+        build_open_maybe() -> (maybe: MAYBE, t: CLASSY_GENERIC_ARGUMENT, owner: CLASS) is
+            let owner = a_maybe_class()
+            let t = CLASSY_GENERIC_ARGUMENT(loc(), owner, "T", 0)
+
+            let arguments = LIST[Type]()
+            arguments.add(t.type!)
+
+            return (maybe = MAYBE(loc(), owner, arguments), t = t, owner = owner)
+        si
+
+        build_maybe_of(owner: CLASS, inner: NAMED) -> MAYBE is
+            let arguments = LIST[Type]()
+            arguments.add(inner)
+            return MAYBE(loc(), owner, arguments)
+        si
+
+        bound_type_for(t: CLASSY_GENERIC_ARGUMENT, results: GENERIC_ARGUMENT_BIND_RESULTS) -> Type? is
+            let map = results.map
+
+            if map.contains_key(t) then
+                return map[t]
+            fi
+
+            return null
+        si
+
+        @test()
+        is_maybe__on_Types_MAYBE__is_true() is
+            let cat = cast NAMED(a_reference_class().type)
+
+            let m = build_maybe_over(cat)
+
+            is_true(m.is_maybe)
+        si
+
+        @test()
+        is_maybe__on_plain_GENERIC__is_false() is
+            let cat = cast NAMED(a_reference_class().type)
+
+            // Same underlying symbol, but constructed as plain
+            // Types.GENERIC. Stands in for ghul-runtime's own
+            // source-side MAYBE definition during its own compile.
+            let g = build_generic_over(cat)
+
+            is_false(g.is_maybe)
+        si
+
+        @test()
+        is_maybe__on_a_plain_named_reference__is_false() is
+            let cat = cast NAMED(a_reference_class().type)
+
+            is_false(cat.is_maybe)
+        si
+
+        @test()
+        is_optional__on_Types_MAYBE__is_true() is
+            let cat = cast NAMED(a_reference_class().type)
+
+            let m = build_maybe_over(cat)
+
+            is_true(m.is_optional)
+        si
+
+        @test()
+        is_optional__on_plain_GENERIC__is_false() is
+            let cat = cast NAMED(a_reference_class().type)
+
+            // Source-side MAYBE definition (inside ghul-runtime's own
+            // compile) is a plain Types.GENERIC and must not report
+            // as optional, or the compiler would treat ghul-runtime's
+            // own internal uses of the struct as optional values.
+            let g = build_generic_over(cat)
+
+            is_false(g.is_optional)
+        si
+
+        @test()
+        optional_inner_type__on_Types_MAYBE__is_inner_T() is
+            let cat = cast NAMED(a_reference_class().type)
+
+            let m = build_maybe_over(cat)
+
+            are_same(cat, m.optional_inner_type)
+        si
+
+        @test()
+        optional_inner_type__on_plain_GENERIC__is_null() is
+            let cat = cast NAMED(a_reference_class().type)
+
+            let g = build_generic_over(cat)
+
+            is_null(g.optional_inner_type)
+        si
+
+        @test()
+        compare__MAYBE_against_matching_reference_optional__is_assignable() is
+            let cat = cast NAMED(a_reference_class().type)
+            let cat_optional = cast NAMED(cat.as_optional())
+
+            let m = build_maybe_over(cat)
+
+            // Direction matches NAMED.compare semantics:
+            // target.compare(source) yields ASSIGNABLE.
+            let result = cat_optional.compare(m)
+
+            are_equal(Types.MATCH.ASSIGNABLE, result)
+        si
+
+        // The reverse direction: a bare T widening into a MAYBE[T] slot,
+        // the implicit T -> T? conversion for an unconstrained T. Here
+        // MAYBE is the target and the bare T is the source.
+        @test()
+        compare__MAYBE_target_against_bare_matching_T__is_assignable() is
+            let cat = cast NAMED(a_reference_class().type)
+
+            let m = build_maybe_over(cat)
+
+            // ASSIGNABLE, not SAME, so an overload resolver still prefers
+            // an exact f(T) candidate over f(T?) for a T argument.
+            let result = m.compare(cat)
+
+            are_equal(Types.MATCH.ASSIGNABLE, result)
+        si
+
+        @test()
+        compare__MAYBE_target_against_bare_mismatched_T__not_assignable() is
+            let cat = cast NAMED(a_reference_class().type)
+            let dog = cast NAMED(another_reference_class().type)
+
+            let m = build_maybe_over(cat)
+
+            // MAYBE[Cat] does not accept a bare Dog.
+            let result = m.compare(dog)
+
+            are_not_equal(Types.MATCH.ASSIGNABLE, result)
+        si
+
+        @test()
+        compare__MAYBE_target_against_null__is_assignable() is
+            let cat = cast NAMED(a_reference_class().type)
+
+            let m = build_maybe_over(cat)
+
+            // The absent value: null widens into any MAYBE[T] slot.
+            let result = m.compare(Types.NULL())
+
+            are_equal(Types.MATCH.ASSIGNABLE, result)
+        si
+
+        @test()
+        compare__MAYBE_against_non_optional_reference__not_assignable() is
+            let cat = cast NAMED(a_reference_class().type)
+
+            let m = build_maybe_over(cat)
+
+            // The flagged-optional guard rules this out — the MAYBE
+            // path is for `T?` slots, not bare `T`.
+            let result = cat.compare(m)
+
+            are_not_equal(Types.MATCH.ASSIGNABLE, result)
+        si
+
+        @test()
+        compare__MAYBE_against_mismatched_T_optional__not_assignable() is
+            let dog = cast NAMED(another_reference_class().type)
+            let dog_optional = cast NAMED(dog.as_optional())
+
+            let cat = cast NAMED(a_reference_class().type)
+            let m = build_maybe_over(cat)
+
+            // Different T — `Dog?` does not accept `MAYBE[Cat]`.
+            let result = dog_optional.compare(m)
+
+            are_not_equal(Types.MATCH.ASSIGNABLE, result)
+        si
+
+        @test()
+        compare__MAYBE_against_value_type_optional__not_assignable() is
+            let pixel = cast NAMED(a_value_struct().type)
+
+            // A value-type's `T?` is NULLABLE[T], not a flagged NAMED,
+            // so the `!is_value_type` guard rules this out before the
+            // MAYBE branch fires. Pinned so a future widen of the rule
+            // can't silently flow MAYBE into a value-type-T? slot
+            // through this path.
+            let m = build_maybe_over(pixel)
+
+            let result = pixel.compare(m)
+
+            are_not_equal(Types.MATCH.ASSIGNABLE, result)
+        si
+
+        // The other two `T?` lowerings reaching a MAYBE[T] slot. All
+        // three are intercompatible by design, so the slot takes any
+        // of them and VALUE_BOXER emits the coercion.
+        @test()
+        compare__MAYBE_target_against_matching_reference_optional__is_assignable() is
+            let cat = cast NAMED(a_reference_class().type)
+            let cat_optional = cast NAMED(cat.as_optional())
+
+            let m = build_maybe_over(cat)
+
+            are_equal(Types.MATCH.ASSIGNABLE, m.compare(cat_optional))
+        si
+
+        @test()
+        compare__MAYBE_target_against_matching_value_optional__is_assignable() is
+            let pixel = cast NAMED(a_value_struct().type)
+
+            let m = build_maybe_over(pixel)
+
+            are_equal(Types.MATCH.ASSIGNABLE, m.compare(build_nullable_over(pixel)))
+        si
+
+        @test()
+        compare__MAYBE_target_against_mismatched_reference_optional__not_assignable() is
+            let cat = cast NAMED(a_reference_class().type)
+            let dog = cast NAMED(another_reference_class().type)
+
+            let m = build_maybe_over(cat)
+
+            are_not_equal(Types.MATCH.ASSIGNABLE, m.compare(cast NAMED(dog.as_optional())))
+        si
+
+        @test()
+        compare__MAYBE_target_against_mismatched_value_optional__not_assignable() is
+            let cat = cast NAMED(a_reference_class().type)
+            let pixel = cast NAMED(a_value_struct().type)
+
+            let m = build_maybe_over(cat)
+
+            are_not_equal(Types.MATCH.ASSIGNABLE, m.compare(build_nullable_over(pixel)))
+        si
+
+        // A `T?` formal pins T from whichever carrier the actual
+        // arrived in, so the type argument is inferred rather than
+        // having to be written at the call.
+        @test()
+        bind_type_variables__against_a_reference_optional__binds_the_inner_type() is
+            let cat = cast NAMED(a_reference_class().type)
+            let (maybe, t, _) = build_open_maybe()
+
+            let results = GENERIC_ARGUMENT_BIND_RESULTS()
+
+            is_true(maybe.bind_type_variables(cat.as_optional(), results))
+
+            // `as_optional` / `as_non_optional` each build a fresh
+            // NAMED, so what is pinned is an equivalent type rather
+            // than the same object.
+            is_true(cat.is_equivalent_to(bound_type_for(t, results)!))
+        si
+
+        @test()
+        bind_type_variables__against_a_value_optional__binds_the_inner_type() is
+            let pixel = cast NAMED(a_value_struct().type)
+            let (maybe, t, _) = build_open_maybe()
+
+            let results = GENERIC_ARGUMENT_BIND_RESULTS()
+
+            is_true(maybe.bind_type_variables(build_nullable_over(pixel), results))
+            are_same(pixel, bound_type_for(t, results))
+        si
+
+        @test()
+        bind_type_variables__against_another_MAYBE__binds_the_inner_type() is
+            let cat = cast NAMED(a_reference_class().type)
+            let (maybe, t, owner) = build_open_maybe()
+
+            let results = GENERIC_ARGUMENT_BIND_RESULTS()
+
+            is_true(maybe.bind_type_variables(build_maybe_of(owner, cat), results))
+            are_same(cat, bound_type_for(t, results))
+        si
+
+        // The implicit `T` -> `T?` widening: a non-optional actual
+        // pins T to itself rather than to anything it is wrapped in.
+        @test()
+        bind_type_variables__against_a_bare_actual__binds_it_whole() is
+            let cat = cast NAMED(a_reference_class().type)
+            let (maybe, t, _) = build_open_maybe()
+
+            let results = GENERIC_ARGUMENT_BIND_RESULTS()
+
+            is_true(maybe.bind_type_variables(cat, results))
+            are_same(cat, bound_type_for(t, results))
+        si
+
+        // A nested type argument is taken literally by the CLR, so a
+        // MAYBE formal at that position binds only against a MAYBE
+        // actual: `LIST[T?]` is `LIST[MAYBE[T]]`, and neither a
+        // `LIST[Cat?]` nor a `LIST[Nullable[Pixel]]` is that type for
+        // any T. The slot-boundary coercion that makes the carriers
+        // interchangeable at top level cannot reach inside a generic.
+        // Two constructions over one LIST symbol, so binding pairs
+        // them on symbol identity and reaches the element position.
+        build_list_pair(formal_element: Type, actual_element: Type) -> (formal: GENERIC, actual: GENERIC) is
+            let owner = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "LIST", names_for(["E"]), Semantic.BLOCK_SCOPE())
+
+            let formal_arguments = LIST[Type]()
+            formal_arguments.add(formal_element)
+
+            let actual_arguments = LIST[Type]()
+            actual_arguments.add(actual_element)
+
+            return (formal = GENERIC(loc(), owner, formal_arguments), actual = GENERIC(loc(), owner, actual_arguments))
+        si
+
+        @test()
+        bind_type_variables__nested_MAYBE_formal_against_nested_reference_optional__does_not_bind() is
+            let cat = cast NAMED(a_reference_class().type)
+            let (maybe, t, _) = build_open_maybe()
+            let (formal, actual) = build_list_pair(maybe, cat.as_optional())
+
+            let results = GENERIC_ARGUMENT_BIND_RESULTS()
+
+            is_false(formal.bind_type_variables(actual, results))
+            is_null(bound_type_for(t, results))
+        si
+
+        @test()
+        bind_type_variables__nested_MAYBE_formal_against_nested_value_optional__does_not_bind() is
+            let pixel = cast NAMED(a_value_struct().type)
+            let (maybe, t, _) = build_open_maybe()
+            let (formal, actual) = build_list_pair(maybe, build_nullable_over(pixel))
+
+            let results = GENERIC_ARGUMENT_BIND_RESULTS()
+
+            is_false(formal.bind_type_variables(actual, results))
+            is_null(bound_type_for(t, results))
+        si
+
+        @test()
+        bind_type_variables__nested_MAYBE_formal_against_nested_bare_actual__does_not_bind() is
+            let cat = cast NAMED(a_reference_class().type)
+            let (maybe, t, _) = build_open_maybe()
+            let (formal, actual) = build_list_pair(maybe, cat)
+
+            let results = GENERIC_ARGUMENT_BIND_RESULTS()
+
+            is_false(formal.bind_type_variables(actual, results))
+            is_null(bound_type_for(t, results))
+        si
+
+        @test()
+        bind_type_variables__nested_MAYBE_formal_against_nested_plain_construction_of_MAYBE__binds_the_inner_type() is
+            let cat = cast NAMED(a_reference_class().type)
+            let (maybe, t, owner) = build_open_maybe()
+
+            let plain_arguments = LIST[Type]()
+            plain_arguments.add(cat)
+
+            let (formal, actual) = build_list_pair(maybe, GENERIC(loc(), owner, plain_arguments))
+
+            let results = GENERIC_ARGUMENT_BIND_RESULTS()
+
+            is_true(formal.bind_type_variables(actual, results))
+            are_same(cat, bound_type_for(t, results))
+        si
+
+        @test()
+        bind_type_variables__nested_MAYBE_formal_against_nested_MAYBE__binds_the_inner_type() is
+            let cat = cast NAMED(a_reference_class().type)
+            let (maybe, t, owner) = build_open_maybe()
+            let (formal, actual) = build_list_pair(maybe, build_maybe_of(owner, cat))
+
+            let results = GENERIC_ARGUMENT_BIND_RESULTS()
+
+            is_true(formal.bind_type_variables(actual, results))
+            are_same(cat, bound_type_for(t, results))
+        si
+
+        @test()
+        bind_type_variables__against_null__binds_nothing() is
+            let (maybe, t, _) = build_open_maybe()
+
+            let results = GENERIC_ARGUMENT_BIND_RESULTS()
+
+            // A bare null pins no type variable; the call site's other
+            // actuals or an explicit type argument have to.
+            is_true(maybe.bind_type_variables(Types.NULL(), results))
+            is_null(bound_type_for(t, results))
+        si
+
+        @test()
+        to_string__on_Types_MAYBE__renders_inner_with_question_mark() is
+            let cat = cast NAMED(a_reference_class().type)
+
+            let m = build_maybe_over(cat)
+
+            are_equal("{cat.to_string()}?", m.to_string())
+        si
+
+        @test()
+        short_description__on_Types_MAYBE__renders_inner_with_question_mark() is
+            let cat = cast NAMED(a_reference_class().type)
+
+            let m = build_maybe_over(cat)
+
+            are_equal("{cat.short_description}?", m.short_description)
+        si
+    si
+si

@@ -1,0 +1,252 @@
+namespace Semantic.Symbols.UnitTests is
+    use Collections.LIST
+
+    use Source.LOCATION
+
+    use Logging.DIAGNOSTICS_STORE
+    use Assertions
+
+    // Tests for TOP_LEVEL_VARIABLE's store and load gating: a bare `let`
+    // rejects every store except the entry's own initialising one, and
+    // the use-before-declaration report fires for any use in the same
+    // file written above the declaration, whatever it is written in —
+    // the entry's own statements, a function literal one of them
+    // writes, or a named function's body. A use inside the `let`'s own
+    // initializer reports too, on the variable not yet being defined
+    // rather than on position. A use in another file is not ordered
+    // against this declaration at all, so it stays silent.
+    class TOP_LEVEL_VARIABLE_TESTS is
+        init() is si
+
+        loc(file_name: string, line: int) -> LOCATION => LOCATION(file_name, line, 1, line, 10)
+
+        // The variable's own declaration sits at script.ghul line 5.
+        declaration_location() -> LOCATION => loc("script.ghul", 5)
+
+        // The walk calls define() on the `let`'s left once the
+        // declaration has been made, which is what puts the variable in
+        // scope for the statements below it. A fixture standing for a
+        // use below the declaration has to say so the same way.
+        defined_variable() -> TOP_LEVEL_VARIABLE is
+            let result = make_variable()
+
+            result.define()
+
+            return result
+        si
+
+        make_variable() -> TOP_LEVEL_VARIABLE is
+            let result = TOP_LEVEL_VARIABLE(declaration_location(), Semantic.BLOCK_SCOPE(), "shared")
+
+            let owner = CLASS(loc("script.ghul", 1), loc("script.ghul", 1), Semantic.BLOCK_SCOPE(), "PAYLOAD", LIST[string](), Semantic.BLOCK_SCOPE())
+            result.set_type(Types.NAMED(owner))
+
+            return result
+        si
+
+        // Installs a fresh symbol table with `function` as the current
+        // function, and returns a loader over it.
+        enter(function: Function) -> SYMBOL_LOADER is
+            // These tests count reports on the container's logger, which
+            // outlives each of them, and several report the same thing
+            // at the same place. Deduplication would collapse those into
+            // the first test's report and the rest would count nothing.
+            IoC.CONTAINER.instance.want_duplicate_diagnostics()
+
+            let logger = DIAGNOSTICS_STORE()
+            let symbol_table = SYMBOL_TABLE(logger)
+
+            IoC.CONTAINER.instance.set_symbol_table_for_testing(symbol_table)
+            symbol_table.enter_scope(function)
+
+            return SYMBOL_LOADER(
+                logger,
+                symbol_table,
+                FUNCTION_CALLER(symbol_table, IR.VALUE_BOXER(logger)),
+                IR.VALUE_BOXER(logger),
+                Semantic.UnitTests.TEST_INNATE_SYMBOL_LOOKUP())
+        si
+
+        // A function literal written among the top-level statements is
+        // walked with the entry still on the scope stack, which is what
+        // distinguishes it from a named function's body.
+        enter_literal_in_entry() -> SYMBOL_LOADER is
+            let loader = enter(entry_function())
+
+            IoC.CONTAINER.instance.symbol_table.enter_scope(closure())
+
+            return loader
+        si
+
+        entry_function() -> Function is
+            let result = GLOBAL_FUNCTION(loc("script.ghul", 1), loc("script.ghul", 1), Semantic.BLOCK_SCOPE(), "entry", Semantic.BLOCK_SCOPE())
+
+            result.is_top_level_entry = true
+
+            return result
+        si
+
+        plain_function() -> Function =>
+            GLOBAL_FUNCTION(loc("script.ghul", 2), loc("script.ghul", 2), Semantic.BLOCK_SCOPE(), "helper", Semantic.BLOCK_SCOPE())
+
+        closure() -> Function =>
+            GLOBAL_CLOSURE(loc("script.ghul", 3), Semantic.BLOCK_SCOPE(), "$anon_0", Semantic.BLOCK_SCOPE(), false)
+
+        errors() -> int => IoC.CONTAINER.instance.logger.error_count
+
+        value_for(variable: TOP_LEVEL_VARIABLE) -> IR.Values.Value =>
+            IR.Values.DUMMY(variable.type!, loc("script.ghul", 9))
+
+        @test()
+        given_a_bare_let__the_initialising_store__should_not_report() is
+            let variable = make_variable()
+            let loader = enter(entry_function())
+
+            let before = errors()
+            variable.store(declaration_location(), null, value_for(variable), loader, true)
+
+            are_equal(before, errors())
+        si
+
+        @test()
+        given_a_bare_let__a_reassignment__should_report() is
+            let variable = defined_variable()
+            let loader = enter(entry_function())
+
+            let before = errors()
+            variable.store(loc("script.ghul", 8), null, value_for(variable), loader, false)
+
+            are_equal(before + 1, errors())
+        si
+
+        @test()
+        given_a_mut_let__a_reassignment_below_the_declaration__should_not_report() is
+            let variable = defined_variable()
+            variable.is_mutable_marked = true
+
+            let loader = enter(entry_function())
+
+            let before = errors()
+            variable.store(loc("script.ghul", 8), null, value_for(variable), loader, false)
+
+            are_equal(before, errors())
+        si
+
+        @test()
+        given_a_mut_let__a_reassignment_above_the_declaration_in_the_entry__should_report() is
+            let variable = make_variable()
+            variable.is_mutable_marked = true
+
+            let loader = enter(entry_function())
+
+            let before = errors()
+            variable.store(loc("script.ghul", 2), null, value_for(variable), loader, false)
+
+            are_equal(before + 1, errors())
+        si
+
+        @test()
+        given_a_use_above_the_declaration_in_the_entry__load__should_report() is
+            let variable = make_variable()
+            let loader = enter(entry_function())
+
+            let before = errors()
+            variable.load(loc("script.ghul", 2), null, loader)
+
+            are_equal(before + 1, errors())
+        si
+
+        @test()
+        given_a_use_below_the_declaration_in_the_entry__load__should_not_report() is
+            let variable = defined_variable()
+            let loader = enter(entry_function())
+
+            let before = errors()
+            variable.load(loc("script.ghul", 8), null, loader)
+
+            are_equal(before, errors())
+        si
+
+        @test()
+        given_a_use_above_the_declaration_in_another_function__load__should_report() is
+            let variable = make_variable()
+            let loader = enter(plain_function())
+
+            let before = errors()
+            variable.load(loc("script.ghul", 2), null, loader)
+
+            are_equal(before + 1, errors())
+        si
+
+        @test()
+        given_a_use_below_the_declaration_in_another_function__load__should_not_report() is
+            let variable = make_variable()
+            let loader = enter(plain_function())
+
+            let before = errors()
+            variable.load(loc("script.ghul", 8), null, loader)
+
+            are_equal(before, errors())
+        si
+
+        @test()
+        given_a_use_above_the_declaration_in_a_function_literal__load__should_report() is
+            let variable = make_variable()
+            let loader = enter_literal_in_entry()
+
+            let before = errors()
+            variable.load(loc("script.ghul", 2), null, loader)
+
+            are_equal(before + 1, errors())
+        si
+
+        @test()
+        given_a_use_below_the_declaration_in_a_function_literal__load__should_not_report() is
+            let variable = defined_variable()
+            let loader = enter_literal_in_entry()
+
+            let before = errors()
+            variable.load(loc("script.ghul", 8), null, loader)
+
+            are_equal(before, errors())
+        si
+
+        // A literal in the `let`'s own initializer sits below the name it
+        // declares, so position alone does not catch it - the variable
+        // not yet being defined is what does.
+        @test()
+        given_a_use_in_the_declarations_own_initializer__load__should_report() is
+            let variable = make_variable()
+            let loader = enter_literal_in_entry()
+
+            let before = errors()
+            variable.load(loc("script.ghul", 5), null, loader)
+
+            are_equal(before + 1, errors())
+        si
+
+        @test()
+        given_a_use_above_the_declaration_in_a_literal_in_another_function__load__should_report() is
+            let variable = make_variable()
+            let loader = enter(plain_function())
+
+            IoC.CONTAINER.instance.symbol_table.enter_scope(closure())
+
+            let before = errors()
+            variable.load(loc("script.ghul", 2), null, loader)
+
+            are_equal(before + 1, errors())
+        si
+
+        @test()
+        given_a_use_in_another_file__load__should_not_report() is
+            let variable = defined_variable()
+            let loader = enter(entry_function())
+
+            let before = errors()
+            variable.load(loc("other.ghul", 2), null, loader)
+
+            are_equal(before, errors())
+        si
+    si
+si

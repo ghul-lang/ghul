@@ -1,0 +1,169 @@
+namespace Analysis.UnitTests is
+    use Collections.LIST
+
+    use Semantic.Symbols.PARTS
+    use Semantic.Symbols.SignaturePart
+
+    use Syntax.Process.Printer.SIGNATURE_RENDERER
+    use Assertions
+
+    // SIGNATURE_DOC walks a SignaturePart tree and lays it out against
+    // a column budget. WRAPPABLE parts are the layout break points:
+    // they render flat when the whole tree fits, otherwise each item
+    // sits on its own 4-space-indented line with the close returning to
+    // the outer indent. Tests here feed hand-built trees directly so
+    // they pin the layout without constructing Symbol fixtures.
+    class SIGNATURE_DOC_TESTS is
+        init() is si
+
+        // A signature that fits the budget renders flat: WRAPPABLE
+        // groups flatten to `open` + items joined by separator + " "
+        // (or nothing when tight) + `close`.
+        @test()
+        signature_that_fits_the_budget_is_returned_unchanged() is
+            let args = LIST[SignaturePart]()
+            args.add(PARTS.literal("x: int"))
+            args.add(PARTS.literal("y: int"))
+
+            let tree = PARTS.sequence([
+                PARTS.literal("Foo.bar"),
+                SignaturePart.WRAPPABLE("(", ",", false, ")", args),
+                PARTS.literal(" -> int")
+            ])
+
+            are_equal(
+                "Foo.bar(x: int, y: int) -> int",
+                SIGNATURE_DOC.render(tree, 60)
+            )
+        si
+
+        // Once the flat form exceeds the budget the group breaks:
+        // each argument gets its own 4-space-indented line and the
+        // closing paren sits back at the outer indent.
+        @test()
+        signature_that_exceeds_the_budget_breaks_the_argument_list() is
+            let args = LIST[SignaturePart]()
+            args.add(PARTS.literal("context: CONTEXT"))
+            args.add(PARTS.literal("expected_type: Type?"))
+            args.add(PARTS.literal("previous: LIST[Value]?"))
+            args.add(PARTS.literal("budget: Ghul.int"))
+
+            let tree = PARTS.sequence([
+                PARTS.literal("Foo.compile_expression_with_context"),
+                SignaturePart.WRAPPABLE("(", ",", false, ")", args),
+                PARTS.literal(" -> Value?")
+            ])
+
+            let expected =
+                "Foo.compile_expression_with_context(\n"
+                "    context: CONTEXT,\n"
+                "    expected_type: Type?,\n"
+                "    previous: LIST[Value]?,\n"
+                "    budget: Ghul.int\n"
+                ") -> Value?"
+
+            are_equal(expected, SIGNATURE_DOC.render(tree, 60))
+        si
+
+        // A tight WRAPPABLE — the generic-argument bracket shape —
+        // renders without space after separator in flat mode.
+        @test()
+        tight_wrappable_flattens_without_space() is
+            let items = LIST[SignaturePart]()
+            items.add(PARTS.literal("T"))
+            items.add(PARTS.literal("U"))
+
+            let tree = SignaturePart.WRAPPABLE("[", ",", true, "]", items)
+
+            are_equal("[T,U]", SIGNATURE_DOC.render(tree, 60))
+        si
+
+        // A WRAPPABLE with no items renders as `open + close` — nothing
+        // to indent between.
+        @test()
+        empty_wrappable_stays_flat() is
+            let items = LIST[SignaturePart]()
+
+            let tree = SignaturePart.WRAPPABLE("(", ",", false, ")", items)
+
+            are_equal("()", SIGNATURE_DOC.render(tree, 60))
+        si
+
+        // A HANGING body that fits stays on its indented continuation
+        // line after the head, flat.
+        @test()
+        hanging_body_that_fits_stays_flat() is
+            let tree = PARTS.sequence([
+                PARTS.literal("x: Animal"),
+                PARTS.hanging(4, "► ", PARTS.literal("Cat"))
+            ])
+
+            are_equal("x: Animal\n    ► Cat", SIGNATURE_DOC.render(tree, 60))
+        si
+
+        // A HANGING whose body is a long wrappable breaks the wrappable,
+        // and the continuation lines hang under the text after the head:
+        // members at head-indent + head width + 4, close at head-indent +
+        // head width. Here head-indent is 4 and `► ` is 2 wide, so the
+        // one-of opens at column 6, members sit at 10 and `}` returns to 6.
+        @test()
+        hanging_wrappable_body_hangs_under_the_head() is
+            let members = LIST[SignaturePart]()
+            members.add(PARTS.literal("INVALID_ASSEMBLER_OUTPUT"))
+            members.add(PARTS.literal("FILE_ASSEMBLER_OUTPUT"))
+            members.add(PARTS.literal("BUFFER_ASSEMBLER_OUTPUT"))
+
+            let tree = PARTS.sequence([
+                PARTS.literal("x: AssemblyOutput"),
+                PARTS.hanging(4, "► ", SignaturePart.WRAPPABLE("AssemblyOutput{{", "|", true, "}}", members))
+            ])
+
+            let expected =
+                "x: AssemblyOutput\n"
+                "    ► AssemblyOutput{{\n"
+                "          INVALID_ASSEMBLER_OUTPUT|\n"
+                "          FILE_ASSEMBLER_OUTPUT|\n"
+                "          BUFFER_ASSEMBLER_OUTPUT\n"
+                "      }}"
+
+            are_equal(expected, SIGNATURE_DOC.render(tree, 60))
+        si
+
+        // render_nested lays the first line flush left and hangs the
+        // broken continuation `base_indent` columns in, so it sits beneath
+        // a prefix of that width. With base_indent 2 (an inlay `► ` sigil)
+        // members land at 2 + 4 = 6 and the close returns to 2.
+        @test()
+        render_nested_hangs_continuation_under_the_prefix() is
+            let members = LIST[SignaturePart]()
+            members.add(PARTS.literal("FILE_ASSEMBLER_OUTPUT"))
+            members.add(PARTS.literal("BUFFER_ASSEMBLER_OUTPUT"))
+            members.add(PARTS.literal("STREAM_ASSEMBLER_OUTPUT"))
+
+            let tree = SignaturePart.WRAPPABLE("AssemblyOutput{{", "|", true, "}}", members)
+
+            let expected =
+                "AssemblyOutput{{\n"
+                "      FILE_ASSEMBLER_OUTPUT|\n"
+                "      BUFFER_ASSEMBLER_OUTPUT|\n"
+                "      STREAM_ASSEMBLER_OUTPUT\n"
+                "  }}"
+
+            are_equal(expected, SIGNATURE_RENDERER.render_nested(tree, 2, 40))
+        si
+
+        // A signature with no WRAPPABLE part has no break point — even
+        // if the flat form exceeds the budget, the tree renders as-is.
+        @test()
+        signature_with_no_wrappable_stays_flat() is
+            let tree = PARTS.literal(
+                "Namespace.LONG_CLASS.some_very_long_property_name: SomeReallyLongTypeName"
+            )
+
+            are_equal(
+                "Namespace.LONG_CLASS.some_very_long_property_name: SomeReallyLongTypeName",
+                SIGNATURE_DOC.render(tree, 40)
+            )
+        si
+    si
+si

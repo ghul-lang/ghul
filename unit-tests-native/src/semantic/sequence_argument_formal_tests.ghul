@@ -1,0 +1,116 @@
+namespace Semantic.UnitTests is
+    use Collections.LIST
+
+    use Source.LOCATION
+
+    use Semantic.SEQUENCE_ARGUMENT_FORMAL
+    use Semantic.Symbols.CLASS
+    use Semantic.Symbols.CLASSY_GENERIC_ARGUMENT
+    use Semantic.Types.Type
+    use Assertions
+
+    // Which type an array literal argument is rebuilt at once the formal
+    // it fills is known: the formal, where the literal as built does not
+    // convert to it but its elements convert to the formal's element type.
+    class SEQUENCE_ARGUMENT_FORMAL_TESTS is
+        _array_class: CLASS
+        _tuple_class: Semantic.Symbols.STRUCT
+
+        init() is
+            _array_class = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Array", LIST[string](["T"]), Semantic.BLOCK_SCOPE())
+            _tuple_class = Semantic.Symbols.STRUCT(loc(), loc(), Semantic.BLOCK_SCOPE(), "TUPLE_2", LIST[string](["T1", "T2"]), Semantic.BLOCK_SCOPE())
+        si
+
+        loc() -> LOCATION => LOCATION("test.ghul", 1, 1, 1, 1)
+
+        a_class(name: string) -> CLASS =>
+            CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), name, LIST[string](), Semantic.BLOCK_SCOPE())
+
+        a_child(name: string, parent: Type) -> Type is
+            let result = a_class(name)
+
+            result.push_ancestor(parent)
+
+            return result.type!
+        si
+
+        array_of(element: Type) -> Type =>
+            Semantic.Types.ARRAY(
+                loc(),
+                _array_class,
+                [element]
+            )
+
+        pair_of(first: Type, second: Type) -> Type =>
+            Semantic.Types.TUPLE(
+                loc(),
+                _tuple_class,
+                LIST[Type]([first, second]),
+                null)
+
+        a_wild_type() -> Type is
+            let owner = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "OWNER", LIST[string](["T"]), Semantic.BLOCK_SCOPE())
+
+            return CLASSY_GENERIC_ARGUMENT(loc(), owner, "T", 0).type!
+        si
+
+        @test()
+        given_tuple_elements_that_convert_to_the_formal_element__builds_at_the_formal() is
+            let name = a_class("NAME").type!
+            let operation = a_class("Operation").type!
+            let append = a_child("APPEND", operation)
+
+            let formal = array_of(pair_of(name, operation))
+            let actual = array_of(pair_of(name, append))
+
+            are_same(formal, SEQUENCE_ARGUMENT_FORMAL.build_at(formal, actual, null))
+        si
+
+        @test()
+        given_an_actual_that_already_converts__builds_at_nothing_else() is
+            let animal = a_class("Animal").type!
+            let cat = a_child("CAT", animal)
+
+            is_null(SEQUENCE_ARGUMENT_FORMAL.build_at(array_of(animal), array_of(cat), null))
+        si
+
+        @test()
+        given_elements_that_do_not_convert__builds_at_nothing_else() is
+            let name = a_class("NAME").type!
+            let operation = a_class("Operation").type!
+            let unrelated = a_class("UNRELATED").type!
+
+            let formal = array_of(pair_of(name, operation))
+            let actual = array_of(pair_of(name, unrelated))
+
+            is_null(SEQUENCE_ARGUMENT_FORMAL.build_at(formal, actual, null))
+        si
+
+        @test()
+        given_a_formal_still_carrying_a_type_variable__builds_at_nothing_else() is
+            let name = a_class("NAME").type!
+            let operation = a_class("Operation").type!
+
+            let formal = array_of(pair_of(name, a_wild_type()))
+            let actual = array_of(pair_of(name, operation))
+
+            is_null(SEQUENCE_ARGUMENT_FORMAL.build_at(formal, actual, null))
+        si
+
+        @test()
+        given_a_formal_with_no_element_type__builds_at_nothing_else() is
+            let name = a_class("NAME").type!
+            let operation = a_class("Operation").type!
+
+            is_null(SEQUENCE_ARGUMENT_FORMAL.build_at(operation, array_of(pair_of(name, operation)), null))
+        si
+
+        @test()
+        given_no_formal_or_no_actual__builds_at_nothing_else() is
+            let operation = a_class("Operation").type!
+
+            is_null(SEQUENCE_ARGUMENT_FORMAL.build_at(null, array_of(operation), null))
+            is_null(SEQUENCE_ARGUMENT_FORMAL.build_at(array_of(operation), null, null))
+        si
+    si
+si

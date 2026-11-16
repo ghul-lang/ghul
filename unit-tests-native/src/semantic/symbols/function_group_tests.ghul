@@ -1,0 +1,217 @@
+namespace Semantic.Symbols.UnitTests is
+    use Collections.LIST
+
+    use Source.LOCATION
+
+    use Semantic.Types.Type
+    use Assertions
+
+    // Tests for FUNCTION_GROUP.merged_over - the overload join used when a
+    // member function group shadows an enclosing scope's group of the same
+    // name: the member group's functions win their override class, the
+    // outer group contributes only overloads the member group doesn't have.
+    //
+    // Also pins FUNCTION_GROUP.is_internal deriving from its members: a
+    // store holds the group under its name, so store-level filters
+    // (completion, outline, duplicate checks) test the group rather than
+    // the overloads in it.
+    class FUNCTION_GROUP_TESTS is
+        // A scope to own the symbols built here. merged_over reads the
+        // owner off the group it rebuilds, and real compilation never
+        // produces an ownerless group.
+        _scope: Semantic.BLOCK_SCOPE
+
+        init() is
+            _scope = Semantic.BLOCK_SCOPE()
+        si
+
+        loc() -> LOCATION => LOCATION("test.ghul", 1, 1, 1, 1)
+
+        zero_arg_method(name: string) -> INSTANCE_METHOD is
+            let result = INSTANCE_METHOD(loc(), loc(), _scope, name, Semantic.BLOCK_SCOPE())
+            result.arguments = LIST[Type]()
+            return result
+        si
+
+        one_arg_method(name: string, argument: Type) -> INSTANCE_METHOD is
+            let result = INSTANCE_METHOD(loc(), loc(), _scope, name, Semantic.BLOCK_SCOPE())
+
+            let arguments = LIST[Type]()
+            arguments.add(argument)
+            result.arguments = arguments
+
+            return result
+        si
+
+        group_of(functions: ARRAY[Function]) -> FUNCTION_GROUP is
+            let result = FUNCTION_GROUP(loc(), _scope, "foo")
+
+            for f in functions do
+                result.add(f)
+            od
+
+            return result
+        si
+
+        // Declares through the real wrapping path - Classy.declare_function
+        // routes into declare_function_group, so what the store holds under
+        // `name` is the group, not the bare method.
+        declared_function(name: string, location: LOCATION) -> FUNCTION_GROUP is
+            let c = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "HOLDER", LIST[string](), Semantic.BLOCK_SCOPE())
+            c.declare_function(location, location, name, false, false, true, false, Semantic.BLOCK_SCOPE(), null)
+
+            return cast FUNCTION_GROUP?(c.find_member(name))!
+        si
+
+        @test()
+        Calling__merged_over__should_append_outer_overloads_the_member_group_lacks() is
+            let t = CLASSY_GENERIC_ARGUMENT(loc(), _scope, "T", 0)
+
+            let member_function = zero_arg_method("foo")
+            let outer_function = one_arg_method("foo", t.type!)
+
+            let merged = group_of([member_function]).merged_over(group_of([outer_function]))
+
+            are_equal(2, merged.functions.count)
+            are_same(member_function, merged.functions[0])
+            are_same(outer_function, merged.functions[1])
+        si
+
+        @test()
+        Calling__merged_over__should_drop_outer_overloads_the_member_group_already_has() is
+            let member_function = zero_arg_method("foo")
+            let outer_function = zero_arg_method("foo")
+
+            let merged = group_of([member_function]).merged_over(group_of([outer_function]))
+
+            are_equal(1, merged.functions.count)
+            are_same(member_function, merged.functions[0])
+        si
+
+        @test()
+        Calling__merged_over__on_disjoint_multi_function_groups__should_keep_every_overload() is
+            let t = CLASSY_GENERIC_ARGUMENT(loc(), _scope, "T", 0)
+            let u = CLASSY_GENERIC_ARGUMENT(loc(), _scope, "U", 1)
+
+            let member_a = zero_arg_method("foo")
+            let member_b = one_arg_method("foo", t.type!)
+            let outer_matching = one_arg_method("foo", t.type!)
+            let outer_extra = one_arg_method("foo", u.type!)
+
+            let merged = group_of([member_a, member_b]).merged_over(group_of([outer_matching, outer_extra]))
+
+            are_equal(3, merged.functions.count)
+            are_same(member_a, merged.functions[0])
+            are_same(member_b, merged.functions[1])
+            are_same(outer_extra, merged.functions[2])
+        si
+
+        @test()
+        group_of_marked_function_is_internal() is
+            let group = declared_function("$get_x", loc())
+
+            group.functions[0].mark_synthesized()
+
+            is_true(group.is_internal)
+        si
+
+        @test()
+        group_of_internal_location_functions_is_internal_unmarked() is
+            is_true(declared_function("$get_x", LOCATION.internal).is_internal)
+        si
+
+        @test()
+        group_of_ordinary_functions_is_not_internal() is
+            is_false(declared_function("fetch", loc()).is_internal)
+        si
+
+        @test()
+        group_holding_a_visible_overload_is_not_internal() is
+            let c = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "HOLDER", LIST[string](), Semantic.BLOCK_SCOPE())
+
+            let synthesized = c.declare_function(loc(), loc(), "$get_x", false, false, true, false, Semantic.BLOCK_SCOPE(), null)
+            c.declare_function(loc(), loc(), "$get_x", false, false, true, false, Semantic.BLOCK_SCOPE(), null)
+
+            synthesized.mark_synthesized()
+
+            let group = cast FUNCTION_GROUP?(c.find_member("$get_x"))!
+
+            is_true(group.functions.count == 2)
+            is_false(group.is_internal)
+        si
+
+        @test()
+        empty_group_is_not_internal() is
+            is_false(group_of([]).is_internal)
+        si
+
+        // `foo[T](x: T) -> T`, with T constrained to `kind`.
+        generic_method(kind: TypeParameterConstraintKind) -> STATIC_METHOD is
+            let t = FUNCTION_GENERIC_ARGUMENT(loc(), _scope, "T", 0)
+            let result = STATIC_METHOD(loc(), loc(), _scope, "foo", Semantic.BLOCK_SCOPE())
+
+            result.is_generic = true
+            result.generic_argument_names = LIST[string](["T"])
+            result.generic_arguments = LIST[Type]([t.type!])
+            result.generic_argument_constraint_kinds = LIST[TypeParameterConstraintKind]([kind])
+            result.arguments = LIST[Type]([t.type!])
+            result.return_type = t.type!
+
+            return result
+        si
+
+        value_type() -> Type =>
+            STRUCT(loc(), loc(), Semantic.BLOCK_SCOPE(), "ValThing", LIST[string](), Semantic.BLOCK_SCOPE()).type!
+
+        // try_specialize keeps only the overloads whose constraints the type
+        // arguments satisfy, and reports a constraint only when none does:
+        // the call's own arguments choose among the rest.
+        @test()
+        Calling__try_specialize__when_one_overload_rejects_the_type_argument__should_keep_the_other_without_error() is
+            let logger = Logging.DIAGNOSTICS_STORE()
+
+            let group = group_of([generic_method(TypeParameterConstraintKind.REFERENCE), generic_method(TypeParameterConstraintKind.NONE)])
+
+            let specialized = cast FUNCTION_GROUP?(group.try_specialize(loc(), logger, LIST[Type]([value_type()])))
+
+            is_true(logger.is_clean)
+            is_true(specialized?)
+            are_equal(1, specialized!.functions.count)
+        si
+
+        @test()
+        Calling__try_specialize__when_every_overload_rejects_the_type_argument__should_report_it() is
+            let logger = Logging.DIAGNOSTICS_STORE()
+
+            let group = group_of([generic_method(TypeParameterConstraintKind.REFERENCE), generic_method(TypeParameterConstraintKind.REFERENCE)])
+
+            group.try_specialize(loc(), logger, LIST[Type]([value_type()]))
+
+            is_false(logger.is_clean)
+        si
+
+        @test()
+        Reading__deprecation__should_be_absent_when_any_overload_is_current() is
+            let deprecated = zero_arg_method("foo")
+            deprecated.set_deprecation(Semantic.DEPRECATION("gone", false))
+
+            let current = one_arg_method("foo", CLASSY_GENERIC_ARGUMENT(loc(), _scope, "T", 0).type!)
+
+            is_false(group_of([deprecated, current]).deprecation?)
+        si
+
+        @test()
+        Reading__deprecation__should_be_present_when_every_overload_is_deprecated() is
+            let first = zero_arg_method("foo")
+            first.set_deprecation(Semantic.DEPRECATION("use bar", true))
+
+            let second = one_arg_method("foo", CLASSY_GENERIC_ARGUMENT(loc(), _scope, "T", 0).type!)
+            second.set_deprecation(Semantic.DEPRECATION(null, false))
+
+            let deprecation = group_of([first, second]).deprecation
+
+            is_true(deprecation?)
+            are_equal("use bar", deprecation?.message)
+        si
+    si
+si

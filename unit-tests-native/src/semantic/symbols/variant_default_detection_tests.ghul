@@ -1,0 +1,107 @@
+namespace Semantic.Symbols.UnitTests is
+    use Collections.Iterable
+    use Collections.LIST
+
+    use Source.LOCATION
+    use Assertions
+
+    // Pin the contract that `compile_access` relies on for the
+    // cast-based `?`/`!` lowering: the parent `UNION` carries a
+    // `default_variant` pointer set by `declare_symbols`; each
+    // `VARIANT` exposes `is_default` (set from the AST modifier)
+    // and `own_field_count` (own fields only, no inherited primary
+    // splice). The detection rule itself lives in declare_symbols
+    // — these tests pin the field shape and the helpers that feed
+    // that rule.
+    class VARIANT_DEFAULT_DETECTION_TESTS is
+        init() is si
+
+        loc() -> LOCATION => LOCATION("test.ghul", 1, 1, 1, 1)
+
+        names() -> LIST[string] is
+            let result = LIST[string]()
+            return result
+        si
+
+        make_union() -> UNION =>
+            UNION(loc(), loc(), Semantic.BLOCK_SCOPE(), "U", names(), Semantic.BLOCK_SCOPE())
+
+        make_variant(`union: UNION) -> VARIANT =>
+            VARIANT(loc(), loc(), `union, "V", names(), `union)
+
+        @test()
+        Default_variant__on_a_freshly_constructed_union__is_null() is
+            let u = make_union()
+
+            is_null(u.default_variant)
+        si
+
+        @test()
+        Default_variant__is_publicly_assignable__so_declare_symbols_can_set_it() is
+            let u = make_union()
+            let v = make_variant(u)
+
+            u.default_variant = v
+
+            are_same(v, u.default_variant)
+        si
+
+        @test()
+        Is_default__on_a_freshly_constructed_variant__is_false() is
+            let v = make_variant(make_union())
+
+            is_false(v.is_default)
+        si
+
+        @test()
+        Is_default__is_publicly_assignable__so_declare_symbols_can_carry_the_AST_flag() is
+            let v = make_variant(make_union())
+
+            v.is_default = true
+
+            is_true(v.is_default)
+        si
+
+        @test()
+        Own_field_count__on_a_freshly_constructed_variant__is_zero() is
+            let v = make_variant(make_union())
+
+            are_equal(0, v.own_field_count)
+        si
+
+        @test()
+        Declare_variable__on_a_variant__bumps_own_field_count() is
+            let u = make_union()
+            let v = make_variant(u)
+
+            v.declare_variable(loc(), "payload", false, null)
+            v.declare_variable(loc(), "tag", false, null)
+
+            are_equal(2, v.own_field_count)
+        si
+
+        @test()
+        Register_inherited_primary_field_name__does_not_bump_own_field_count() is
+            let u = make_union()
+            let v = make_variant(u)
+
+            v.declare_variable(loc(), "payload", false, null)
+            v.register_inherited_primary_field_name("id")
+            v.register_inherited_primary_field_name("tag")
+
+            are_equal(1, v.own_field_count)
+            are_equal(3, v.field_count)
+        si
+
+        @test()
+        Register_reflected_field_name__bumps_own_field_count_for_cross_asm_variants() is
+            let u = make_union()
+            let v = make_variant(u)
+
+            v.register_reflected_field_name("a")
+            v.register_reflected_field_name("b")
+
+            are_equal(2, v.own_field_count)
+        si
+    si
+si

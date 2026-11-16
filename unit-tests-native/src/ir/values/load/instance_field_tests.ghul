@@ -1,0 +1,103 @@
+namespace IR.Values.Load.UnitTests is
+    use Collections.LIST
+
+    use Source.LOCATION
+
+    use Semantic.Symbols.CLASS
+    use Semantic.Symbols.Classy
+    use Semantic.Symbols.STRUCT
+    use Semantic.Types.NAMED
+    use Semantic.Types.Type
+    use Assertions
+
+    // Pins the addressability contract for field loads: a field is
+    // addressable in place exactly when its containing instance is.
+    // A reference receiver always addresses (ldflda from the object
+    // reference); a struct receiver addresses only when it has an
+    // address itself - a struct copy on the stack does not, so a
+    // field reached through one must spill to a temporary rather
+    // than pretend to be an lvalue.
+    class INSTANCE_FIELD_TESTS is
+        init() is si
+
+        loc() -> LOCATION => LOCATION("test.ghul", 1, 1, 1, 1)
+        empty_names() -> LIST[string] => LIST[string]()
+
+        make_class(name: string) -> Classy is
+            let c = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), name, empty_names(), Semantic.BLOCK_SCOPE())
+            c.set_type(NAMED(c))
+            return c
+        si
+
+        make_struct(name: string) -> Classy is
+            let s = STRUCT(loc(), loc(), Semantic.BLOCK_SCOPE(), name, empty_names(), Semantic.BLOCK_SCOPE())
+            s.set_type(NAMED(s))
+            return s
+        si
+
+        make_field(owner: Classy, name: string, `type: Type) -> Semantic.Symbols.INSTANCE_FIELD is
+            let `field = Semantic.Symbols.INSTANCE_FIELD(loc(), owner, name)
+            `field.set_type(`type)
+            return `field
+        si
+
+        @test()
+        field_load_through_reference_receiver_should_report_address() is
+            let owner = make_class("Node")
+            let state = make_struct("State")
+            let from = STACK_TOP(owner.type!)
+
+            let load = INSTANCE_FIELD(from, make_field(owner, "state", state.type!))
+
+            is_false(from.has_address)
+            is_true(load.has_address)
+        si
+
+        @test()
+        field_load_through_struct_copy_should_not_report_address() is
+            let owner = make_struct("Outer")
+            let inner = make_struct("Inner")
+            let from = STACK_TOP(owner.type!)
+
+            let load = INSTANCE_FIELD(from, make_field(owner, "inner", inner.type!))
+
+            is_false(load.has_address)
+        si
+
+        @test()
+        field_load_through_addressable_struct_receiver_should_report_address() is
+            let owner = make_struct("Outer")
+            let inner = make_struct("Inner")
+            let from = STACK_TOP_ADDRESS(owner.type!)
+
+            let load = INSTANCE_FIELD(from, make_field(owner, "inner", inner.type!))
+
+            is_true(load.has_address)
+        si
+
+        @test()
+        field_load_chain_should_propagate_addressability_from_the_root() is
+            let root = make_class("Node")
+            let outer = make_struct("Outer")
+            let inner = make_struct("Inner")
+
+            let outer_load = INSTANCE_FIELD(STACK_TOP(root.type!), make_field(root, "outer", outer.type!))
+            let inner_load = INSTANCE_FIELD(outer_load, make_field(outer, "inner", inner.type!))
+
+            is_true(inner_load.has_address)
+        si
+
+        @test()
+        field_load_chain_rooted_at_a_copy_should_not_report_address() is
+            let outer = make_struct("Outer")
+            let inner = make_struct("Inner")
+            let leaf = make_struct("Leaf")
+
+            let outer_copy = STACK_TOP(outer.type!)
+            let inner_load = INSTANCE_FIELD(outer_copy, make_field(outer, "inner", inner.type!))
+            let leaf_load = INSTANCE_FIELD(inner_load, make_field(inner, "leaf", leaf.type!))
+
+            is_false(leaf_load.has_address)
+        si
+    si
+si

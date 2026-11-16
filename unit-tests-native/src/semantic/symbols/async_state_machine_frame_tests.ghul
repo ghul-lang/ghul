@@ -1,0 +1,196 @@
+namespace Semantic.Symbols.UnitTests is
+
+    use Source.LOCATION
+    use Assertions
+
+    // A value-async lambda whose inferred return type hasn't pinned
+    // yet constructs its frame with a null result type, and declare()
+    // returns early until ensure_result_field fills the type in. The
+    // argument and awaiter field lists must still be usable in that
+    // window — await emission can ask for an awaiter slot without a
+    // completed declare() run.
+    class ASYNC_STATE_MACHINE_FRAME_TESTS is
+        // The frame takes its own owner from the owner's owner, so the
+        // class it hangs off needs a scope of its own.
+        _scope: Semantic.BLOCK_SCOPE
+
+        init() is
+            _scope = Semantic.BLOCK_SCOPE()
+
+            // A completed declare() mints its $state field against the
+            // container's innate lookup; the reflection-backed default
+            // needs loaded assemblies a unit test does not have.
+            Fixtures.use_test_innate_symbol_lookup()
+        si
+
+        loc() -> LOCATION => LOCATION("test.ghul", 1, 1, 1, 1)
+
+        make_frame_with_unpinned_result() -> ASYNC_STATE_MACHINE_FRAME is
+            let owner = CLASS(loc(), loc(), _scope, "Owner", Collections.LIST[string]().to_array(), Semantic.BLOCK_SCOPE())
+            let function = STATIC_METHOD(loc(), loc(), owner, "do_async", Semantic.BLOCK_SCOPE())
+
+            return ASYNC_STATE_MACHINE_FRAME(owner, function, null, false)
+        si
+
+        @test()
+        Constructing_a_frame_with_unpinned_result_type__should_leave_field_lists_iterable() is
+            let frame = make_frame_with_unpinned_result()
+
+            let count mut = 0
+            for f in frame.argument_fields do
+                count = count + 1
+            od
+            for f in frame.awaiter_fields do
+                count = count + 1
+            od
+
+            are_equal(0, count)
+        si
+
+        @test()
+        Calling__declare_awaiter_field__after_declare_returned_early_on_unpinned_result__should_record_the_field() is
+            let frame = make_frame_with_unpinned_result()
+
+            // Value-async with no result type yet: declare() waits
+            // for ensure_result_field rather than declaring members.
+            frame.declare()
+
+            let awaiter_type = CLASSY_GENERIC_ARGUMENT(loc(), Semantic.BLOCK_SCOPE(), "awaiter", 0).type!
+
+            let awaiter_field = frame.declare_awaiter_field(awaiter_type)
+
+            is_true(awaiter_field?)
+
+            let count mut = 0
+            let seen: Field? mut = null
+            for f in frame.awaiter_fields do
+                count = count + 1
+                seen = f
+            od
+
+            are_equal(1, count)
+            are_same(awaiter_field, seen)
+        si
+
+        // An async closure's parameter group with no written aggregate
+        // type holds an INFERRED_VARIABLE_TYPE placeholder until the
+        // body-retry walk settles it. The frame's first declare() runs
+        // mid-inference and captures the placeholder into the argument
+        // field; the re-declare at IL-emission time must re-derive the
+        // settled type - a placeholder in a field signature reaches the
+        // signature encoder and is refused.
+        @test()
+        Redeclaring_a_frame_whose_argument_placeholder_settled__should_rederive_the_argument_field_type() is
+            // Any concrete settled type will do; a plain class avoids
+            // the innate-lookup's reflection-backed assembly tables.
+            let concrete = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Settled", Collections.LIST[string]().to_array(), Semantic.BLOCK_SCOPE()).type!
+            let owner = CLASS(loc(), loc(), _scope, "Owner", Collections.LIST[string]().to_array(), Semantic.BLOCK_SCOPE())
+            let function = STATIC_METHOD(loc(), loc(), owner, "do_async", Semantic.BLOCK_SCOPE())
+
+            function.start_declaring_arguments()
+            let group = cast Variable?(function.declare_variable(loc(), "$arg_0", false, null))
+            function.end_declaring_arguments()
+
+            function.argument_names = Collections.LIST[string](["$arg_0"])
+
+            let phantom = Types.INFERRED_VARIABLE_TYPE(group!)
+            group.set_type(phantom)
+
+            let frame = ASYNC_STATE_MACHINE_FRAME(owner, function, concrete, false)
+
+            // First declare: the placeholder is all inference knows.
+            frame.declare()
+
+            let arg_field: Field? mut = null
+            for f in frame.argument_fields do
+                arg_field = f
+            od
+
+            is_true(arg_field?)
+            is_true(isa Types.INFERRED_VARIABLE_TYPE(arg_field!.type))
+
+            // Inference settles; generate-il re-declares before emitting.
+            group.add_lower_bound(concrete)
+            frame.declare()
+
+            is_false(isa Types.INFERRED_VARIABLE_TYPE(arg_field.type))
+            are_equal(
+                Semantic.Types.MATCH.SAME,
+                arg_field.type!.compare(concrete))
+        si
+
+        // A literal that awaits and leaves its return to its body builds
+        // its frame while nothing yet says whether the body carries a
+        // result. Each of the three answers the return can settle to
+        // reaches the frame through ensure_result_field.
+        make_frame_for_inferred_return() -> ASYNC_STATE_MACHINE_FRAME is
+            let owner = CLASS(loc(), loc(), _scope, "Owner", Collections.LIST[string]().to_array(), Semantic.BLOCK_SCOPE())
+            let function = STATIC_METHOD(loc(), loc(), owner, "do_async", Semantic.BLOCK_SCOPE())
+
+            function.set_return_type(Types.INFERRED_RETURN_TYPE())
+
+            return ASYNC_STATE_MACHINE_FRAME(owner, function, null, false)
+        si
+
+        lookup() -> Lookups.InnateSymbolLookup => IoC.CONTAINER.instance.innate_symbol_lookup
+
+        // The `$outer_self` field is what the body reads a capture
+        // through, and what it points at is settled by the owning
+        // function alone. A frame whose result type has not pinned
+        // declares no members that need it, but has to declare this
+        // one: a capture load built in that window otherwise falls
+        // back to a plain self reference, which inside MoveNext is
+        // the state machine rather than the receiver.
+        @test()
+        Declaring_a_frame_for_an_instance_method_with_unpinned_result__should_still_declare_outer_self() is
+            let owner = CLASS(loc(), loc(), _scope, "Owner", Collections.LIST[string]().to_array(), Semantic.BLOCK_SCOPE())
+            let function = INSTANCE_METHOD(loc(), loc(), owner, "do_async", Semantic.BLOCK_SCOPE())
+
+            let frame = ASYNC_STATE_MACHINE_FRAME(owner, function, null, false)
+
+            frame.declare()
+
+            is_true(frame.outer_self_field?)
+        si
+
+        @test()
+        Calling__ensure_result_field__while_the_return_is_still_inferred__should_settle_nothing() is
+            let frame = make_frame_for_inferred_return()
+
+            // An inferred return is a placeholder, which matches every
+            // type — the result-less task included — so it says nothing
+            // about the shape yet and has to wait for a later poll.
+            frame.ensure_result_field(lookup())
+
+            is_false(frame.is_void_async)
+            is_false(frame.result_type?)
+        si
+
+        @test()
+        Calling__ensure_result_field__after_the_return_settled_result_less__should_make_the_frame_void() is
+            let frame = make_frame_for_inferred_return()
+
+            frame.owning_function.set_return_type(lookup().get_void_task_type()!)
+
+            frame.ensure_result_field(lookup())
+
+            is_true(frame.is_void_async)
+        si
+
+        @test()
+        Calling__ensure_result_field__after_the_return_settled_to_a_task_of_T__should_take_T_as_the_result() is
+            let frame = make_frame_for_inferred_return()
+
+            let element = lookup().get_int_type()
+
+            frame.owning_function.set_return_type(lookup().get_task_type(element)!)
+
+            frame.ensure_result_field(lookup())
+
+            is_false(frame.is_void_async)
+            are_equal(
+                Semantic.Types.MATCH.SAME,
+                frame.result_type!.compare(element))
+        si
+    si
+si

@@ -1,0 +1,168 @@
+namespace Semantic.Symbols.UnitTests is
+
+    use Source.LOCATION
+    use Assertions
+
+    // Pins TYPE_GROUP's argument-count-dispatch + multi-member contract —
+    // the foundation for source-side `class Foo is` / `class Foo[T] is`
+    // coexistence. Without these, a regression in
+    // find_by_generic_arguments_count or collapse_group_if_single_member
+    // could silently drop the no-arguments member or misroute the
+    // bare-name case.
+    class TYPE_GROUP_TESTS is
+        init() is si
+
+        loc() -> LOCATION => LOCATION("test.ghul", 1, 1, 1, 1)
+
+        names() -> Collections.LIST[string] => Collections.LIST[string]()
+
+        names_one() -> Collections.LIST[string] is
+            let r = Collections.LIST[string]()
+            r.add("T")
+            return r
+        si
+
+        names_two() -> Collections.LIST[string] is
+            let r = Collections.LIST[string]()
+            r.add("T")
+            r.add("U")
+            return r
+        si
+
+        @test()
+        Calling__find_by_generic_arguments_count__on_a_group_with_one_no_arguments_member__returns_it() is
+            let foo = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "FOO", names(), Semantic.BLOCK_SCOPE())
+            let group = TYPE_GROUP(loc(), Semantic.BLOCK_SCOPE(), "FOO")
+            group.add(foo)
+
+            are_same(foo, group.find_by_generic_arguments_count(0))
+        si
+
+        @test()
+        Calling__find_by_generic_arguments_count__on_a_group_with_three_counts__returns_each_by_count() is
+            let foo_0 = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "FOO", names(), Semantic.BLOCK_SCOPE())
+            let foo_1 = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "FOO", names_one(), Semantic.BLOCK_SCOPE())
+            let foo_2 = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "FOO", names_two(), Semantic.BLOCK_SCOPE())
+
+            let group = TYPE_GROUP(loc(), Semantic.BLOCK_SCOPE(), "FOO")
+            group.add(foo_0)
+            group.add(foo_1)
+            group.add(foo_2)
+
+            are_same(foo_0, group.find_by_generic_arguments_count(0))
+            are_same(foo_1, group.find_by_generic_arguments_count(1))
+            are_same(foo_2, group.find_by_generic_arguments_count(2))
+        si
+
+        @test()
+        Calling__sole_generic_member__with_one_generic_member__returns_it() is
+            let foo_0 = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "FOO", names(), Semantic.BLOCK_SCOPE())
+            let foo_1 = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "FOO", names_one(), Semantic.BLOCK_SCOPE())
+
+            let group = TYPE_GROUP(loc(), Semantic.BLOCK_SCOPE(), "FOO")
+            group.add(foo_0)
+            group.add(foo_1)
+
+            are_same(foo_1, group.sole_generic_member())
+        si
+
+        @test()
+        Calling__sole_generic_member__with_no_generic_members__returns_null() is
+            let foo_0 = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "FOO", names(), Semantic.BLOCK_SCOPE())
+
+            let group = TYPE_GROUP(loc(), Semantic.BLOCK_SCOPE(), "FOO")
+            group.add(foo_0)
+
+            is_null(group.sole_generic_member())
+        si
+
+        @test()
+        Calling__sole_generic_member__with_two_generic_members__returns_null() is
+            let foo_1 = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "FOO", names_one(), Semantic.BLOCK_SCOPE())
+            let foo_2 = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "FOO", names_two(), Semantic.BLOCK_SCOPE())
+
+            let group = TYPE_GROUP(loc(), Semantic.BLOCK_SCOPE(), "FOO")
+            group.add(foo_1)
+            group.add(foo_2)
+
+            is_null(group.sole_generic_member())
+        si
+
+        @test()
+        Calling__find_by_generic_arguments_count__with_no_matching_member__returns_null() is
+            let foo_1 = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "FOO", names_one(), Semantic.BLOCK_SCOPE())
+
+            let group = TYPE_GROUP(loc(), Semantic.BLOCK_SCOPE(), "FOO")
+            group.add(foo_1)
+
+            is_null(group.find_by_generic_arguments_count(0))
+            is_null(group.find_by_generic_arguments_count(2))
+        si
+
+        @test()
+        Calling__add__marks_each_member_as_having_argument_count_siblings() is
+            let foo_0 = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "FOO", names(), Semantic.BLOCK_SCOPE())
+            let foo_1 = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "FOO", names_one(), Semantic.BLOCK_SCOPE())
+
+            let group = TYPE_GROUP(loc(), Semantic.BLOCK_SCOPE(), "FOO")
+            group.add(foo_0)
+            group.add(foo_1)
+
+            is_true(foo_0.has_argument_count_siblings)
+            is_true(foo_1.has_argument_count_siblings)
+        si
+
+        @test()
+        Calling__generic_arguments_counts__returns_sorted_ascending_list() is
+            let foo_2 = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "FOO", names_two(), Semantic.BLOCK_SCOPE())
+            let foo_0 = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "FOO", names(), Semantic.BLOCK_SCOPE())
+            let foo_1 = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "FOO", names_one(), Semantic.BLOCK_SCOPE())
+
+            let group = TYPE_GROUP(loc(), Semantic.BLOCK_SCOPE(), "FOO")
+            group.add(foo_2)
+            group.add(foo_0)
+            group.add(foo_1)
+
+            let counts = group.generic_arguments_counts
+
+            are_equal(3, counts.count)
+            are_equal(0, counts[0])
+            are_equal(1, counts[1])
+            are_equal(2, counts[2])
+        si
+
+        @test()
+        Calling__collapse_group_if_single_member__with_one_member__returns_member() is
+            let foo = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "FOO", names(), Semantic.BLOCK_SCOPE())
+            let group = TYPE_GROUP(loc(), Semantic.BLOCK_SCOPE(), "FOO")
+            group.add(foo)
+
+            are_same(foo, group.collapse_group_if_single_member())
+        si
+
+        @test()
+        Calling__collapse_group_if_single_member__with_two_members__returns_group() is
+            let foo_0 = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "FOO", names(), Semantic.BLOCK_SCOPE())
+            let foo_1 = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "FOO", names_one(), Semantic.BLOCK_SCOPE())
+            let group = TYPE_GROUP(loc(), Semantic.BLOCK_SCOPE(), "FOO")
+            group.add(foo_0)
+            group.add(foo_1)
+
+            are_same(group, group.collapse_group_if_single_member())
+        si
+
+        @test()
+        Calling__is_type_group__on_TYPE_GROUP__returns_true() is
+            let group = TYPE_GROUP(loc(), Semantic.BLOCK_SCOPE(), "FOO")
+
+            is_true(group.is_type_group)
+        si
+
+        @test()
+        Calling__is_type__on_TYPE_GROUP__returns_true() is
+            let group = TYPE_GROUP(loc(), Semantic.BLOCK_SCOPE(), "FOO")
+
+            is_true(group.is_type)
+        si
+    si
+si

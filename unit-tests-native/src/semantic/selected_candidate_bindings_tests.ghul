@@ -1,0 +1,109 @@
+namespace Semantic.UnitTests is
+    use Collections.LIST
+
+    use Source.LOCATION
+
+    use Semantic.Symbols.CLASS
+    use Semantic.Symbols.CLASSY_GENERIC_ARGUMENT
+    use Semantic.Symbols.Function
+    use Semantic.Symbols.GLOBAL_FUNCTION
+    use Semantic.Symbols.INFERRED_TYPE_ARG_ORIGIN
+    use Semantic.Types.GENERIC_ARGUMENT_BIND_RESULTS
+    use Semantic.Types.GenericArgument
+    use Semantic.Types.INFERRED_VARIABLE_TYPE
+    use Semantic.Types.Type
+    use Assertions
+
+    // SELECTED_CANDIDATE_BINDINGS decides which of the candidates the
+    // overload resolver bound during ranking gets to offer its bindings
+    // to the placeholder actuals it paired them with.
+    class SELECTED_CANDIDATE_BINDINGS_TESTS is
+        init() is si
+
+        loc() -> LOCATION => LOCATION("test.ghul", 1, 1, 1, 1)
+
+        candidate(name: string) -> GLOBAL_FUNCTION =>
+            GLOBAL_FUNCTION(loc(), loc(), Semantic.BLOCK_SCOPE(), name, Semantic.BLOCK_SCOPE())
+
+        type_param() -> GenericArgument =>
+            cast GenericArgument(CLASSY_GENERIC_ARGUMENT(loc(), Semantic.BLOCK_SCOPE(), "T", 0).type)
+
+        class_type(name: string) -> Type =>
+            CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), name, LIST[string](), Semantic.BLOCK_SCOPE()).type!
+
+        // A bind result that pinned its type argument to `bound` and
+        // paired `origin`'s placeholder with it, as a candidate whose
+        // formals are `(T, T)` does for actuals `(bound, placeholder)`.
+        bound_against_placeholder(bound: Type, origin: INFERRED_TYPE_ARG_ORIGIN) -> GENERIC_ARGUMENT_BIND_RESULTS is
+            let results = GENERIC_ARGUMENT_BIND_RESULTS()
+            let t = type_param()
+
+            is_true(results.bind(t, bound))
+            is_true(results.bind(t, INFERRED_VARIABLE_TYPE(origin)))
+
+            return results
+        si
+
+        entry(f: Function, bindings: GENERIC_ARGUMENT_BIND_RESULTS) -> (candidate: Function, bindings: GENERIC_ARGUMENT_BIND_RESULTS) =>
+            (candidate = f, bindings = bindings)
+
+        @test()
+        Calling__offer__should_offer_the_selected_candidates_binding() is
+            let selected = candidate("pick")
+            let origin = INFERRED_TYPE_ARG_ORIGIN(loc(), Semantic.BLOCK_SCOPE(), "v")
+            let cat = class_type("cat")
+
+            SELECTED_CANDIDATE_BINDINGS.offer(
+                selected,
+                LIST([entry(selected, bound_against_placeholder(cat, origin))])
+            )
+
+            are_same(cat, origin.try_get_inferred_type())
+        si
+
+        // The candidate that lost bound just as cleanly, and a lower
+        // bound is never withdrawn, so it must record none.
+        @test()
+        Calling__offer__should_leave_a_rejected_candidates_binding_unoffered() is
+            let selected = candidate("pick")
+            let rejected = candidate("pick")
+
+            let selected_origin = INFERRED_TYPE_ARG_ORIGIN(loc(), Semantic.BLOCK_SCOPE(), "v")
+            let rejected_origin = INFERRED_TYPE_ARG_ORIGIN(loc(), Semantic.BLOCK_SCOPE(), "v")
+
+            let cat = class_type("cat")
+            let dog = class_type("dog")
+
+            SELECTED_CANDIDATE_BINDINGS.offer(
+                selected,
+                LIST([
+                    entry(rejected, bound_against_placeholder(dog, rejected_origin)),
+                    entry(selected, bound_against_placeholder(cat, selected_origin))
+                ])
+            )
+
+            are_same(cat, selected_origin.try_get_inferred_type())
+            is_null(rejected_origin.try_get_inferred_type())
+        si
+
+        // What the resolver selects is the specialization it made of the
+        // candidate ranking recorded, so the offer follows that link.
+        @test()
+        Calling__offer__with_a_specialized_selection__should_offer_the_candidate_it_came_from() is
+            let unspecialized = candidate("pick")
+
+            let specialized = candidate("pick")
+            specialized.specialized_from = unspecialized
+
+            let origin = INFERRED_TYPE_ARG_ORIGIN(loc(), Semantic.BLOCK_SCOPE(), "v")
+            let cat = class_type("cat")
+
+            SELECTED_CANDIDATE_BINDINGS.offer(
+                specialized,
+                LIST([entry(unspecialized, bound_against_placeholder(cat, origin))])
+            )
+
+            are_same(cat, origin.try_get_inferred_type())
+        si
+    si
+si

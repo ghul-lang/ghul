@@ -1,0 +1,152 @@
+namespace Syntax.Process.UnitTests is
+    use Collections.LIST
+
+    use Source.LOCATION
+
+    use Semantic.Symbols.CLASS
+    use Semantic.Types.Type
+    use Semantic.Types.ERROR
+    use Semantic.Types.INFERRED_RETURN_TYPE
+    use Semantic.Types.INFERRED_VARIABLE_TYPE
+    use Semantic.Symbols.LOCAL_VARIABLE
+
+    use Syntax.Process.VOID_TOLERANT_POSITION
+    use Assertions
+
+    // Pins the decision VOID_TOLERANT_POSITION factors out of the `if` /
+    // `case` value formation: whether a composite in a void-tolerant
+    // position - the body of a function literal whose return type is
+    // still being inferred, or a function body's implicit tail - should
+    // produce no value at all. The visitor orchestration that supplies
+    // the arm values is covered by the integration tests.
+    class VOID_TOLERANT_POSITION_TESTS is
+        init() is
+            Fixtures.enter_function()
+        si
+
+        loc() -> LOCATION => LOCATION("test.ghul", 1, 1, 1, 1)
+
+        settled_type() -> Type =>
+            CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Settled", LIST[string](), Semantic.BLOCK_SCOPE()).type!
+
+        // --- declines_value ----------------------------------------------
+
+        @test()
+        declines_value__when_no_arm_yields_a_value__is_true() is
+            // Void arms, diverging arms, or a mix: the composite is the
+            // statement it is, and a void-tolerant consumer (an implicit
+            // function tail, or an inferred-return literal body) takes no
+            // value from it.
+            is_true(VOID_TOLERANT_POSITION.declines_value(true, false))
+        si
+
+        @test()
+        declines_value__when_an_arm_yields_a_value__is_false() is
+            // Mixed arms keep the value form, so the void arm is reported
+            // where it cannot be consumed rather than silently dropped.
+            is_false(VOID_TOLERANT_POSITION.declines_value(true, true))
+        si
+
+        @test()
+        declines_value__when_the_position_is_not_void_tolerant__is_false() is
+            // `let x = if ... fi` over void arms stays an error.
+            is_false(VOID_TOLERANT_POSITION.declines_value(false, false))
+        si
+
+        // --- arm classification ------------------------------------------
+
+        @test()
+        counts_as_non_void__for_a_settled_type__is_true() is
+            is_true(VOID_TOLERANT_POSITION.counts_as_non_void(settled_type()))
+        si
+
+        @test()
+        counts_as_non_void__for_an_error_type__is_false() is
+            // An arm already reported is neither: forcing the value form
+            // from it would pile a second diagnostic onto the same arm.
+            is_false(VOID_TOLERANT_POSITION.counts_as_non_void(ERROR()))
+        si
+
+        @test()
+        counts_as_non_void__for_the_enclosing_functions_own_return__is_false() is
+            // A recursive self-call in a composite that is itself
+            // helping to settle that return: nothing has said yet that
+            // the arm yields a value.
+            is_false(VOID_TOLERANT_POSITION.counts_as_non_void(INFERRED_RETURN_TYPE()))
+        si
+
+        @test()
+        counts_as_non_void__for_an_unresolved_variable_type__is_true() is
+            // A slot some later walk fills with a real type, not a body
+            // that might turn out to be void.
+            is_true(VOID_TOLERANT_POSITION.counts_as_non_void(
+                    INFERRED_VARIABLE_TYPE(LOCAL_VARIABLE(loc(), Semantic.BLOCK_SCOPE(), "v"))
+                ))
+        si
+
+        @test()
+        counts_as_non_void__for_a_literal_return_origin__is_false() is
+            // A recursive literal's self-call typed at the literal's own
+            // unsettled return, as INFERRED_RETURN_TYPE was.
+            let origin = Semantic.Symbols.INFERRED_RESULT_ORIGIN(loc(), Semantic.BLOCK_SCOPE(), "$return")
+            origin.is_literal_return = true
+
+            is_false(VOID_TOLERANT_POSITION.counts_as_non_void(INFERRED_VARIABLE_TYPE(origin)))
+        si
+
+        @test()
+        counts_as_non_void__for_another_result_origin__is_true() is
+            // An empty list literal's element type is a slot a later walk
+            // fills, like any unresolved variable type.
+            let origin = Semantic.Symbols.INFERRED_RESULT_ORIGIN(loc(), Semantic.BLOCK_SCOPE(), "$[]")
+
+            is_true(VOID_TOLERANT_POSITION.counts_as_non_void(INFERRED_VARIABLE_TYPE(origin)))
+        si
+
+        // --- is_undecided ------------------------------------------------
+
+        @test()
+        is_undecided__when_an_arm_is_in_error_and_none_yields_a_value__is_true() is
+            // The arm in error might have yielded a value: on a walk made
+            // before its types are known, the composite cannot yet be
+            // called a statement.
+            is_true(VOID_TOLERANT_POSITION.is_undecided(true, false, true))
+        si
+
+        @test()
+        is_undecided__when_an_arm_yields_a_value__is_false() is
+            // The value form is already decided, and reports the arm in
+            // error where it cannot be joined.
+            is_false(VOID_TOLERANT_POSITION.is_undecided(true, true, true))
+        si
+
+        @test()
+        is_undecided__when_no_arm_is_in_error__is_false() is
+            is_false(VOID_TOLERANT_POSITION.is_undecided(true, false, false))
+        si
+
+        @test()
+        is_undecided__when_void_is_not_tolerated__is_false() is
+            // A position that demands a value never declines, so there is
+            // nothing to leave undecided.
+            is_false(VOID_TOLERANT_POSITION.is_undecided(false, false, true))
+        si
+
+        // --- is_in_error -------------------------------------------------
+
+        @test()
+        is_in_error__for_an_error_type__is_true() is
+            is_true(VOID_TOLERANT_POSITION.is_in_error(ERROR()))
+        si
+
+        @test()
+        is_in_error__for_a_settled_type__is_false() is
+            is_false(VOID_TOLERANT_POSITION.is_in_error(settled_type()))
+        si
+
+        @test()
+        is_in_error__for_no_type__is_false() is
+            is_false(VOID_TOLERANT_POSITION.is_in_error(null))
+        si
+    si
+si

@@ -1,0 +1,984 @@
+namespace Semantic.UnitTests is
+    use Collections.LIST
+
+    use Source.LOCATION
+
+    use Logging.DIAGNOSTICS_STORE
+
+    use Semantic.Types.Type
+
+    use Semantic.Symbols.CLASS
+    use Semantic.Symbols.STATIC_METHOD
+    use Semantic.Symbols.INSTANCE_METHOD
+    use Semantic.Symbols.FUNCTION_GROUP
+    use Assertions
+
+    // Tests for FUNCTION_REFERENCE_RESOLVER — the helper that converts
+    // a global function, static/instance method, or an overloaded
+    // group member into a function/delegate value in place of a call.
+    class FUNCTION_REFERENCE_RESOLVER_TESTS is
+        init() is si
+
+        loc() -> LOCATION => LOCATION("test.ghul", 1, 1, 1, 1)
+
+        // Fresh resolver plus the collaborators a test needs to build
+        // fixtures and inspect diagnostics.
+        build_resolver() -> (FUNCTION_REFERENCE_RESOLVER, DIAGNOSTICS_STORE, Lookups.InnateSymbolLookup) is
+            let logger = DIAGNOSTICS_STORE()
+            let symbol_table = SYMBOL_TABLE(logger)
+            let innate_symbol_lookup = TEST_INNATE_SYMBOL_LOOKUP()
+            let overload_resolver = OVERLOAD_RESOLVER(logger)
+            let symbol_loader = SYMBOL_LOADER(logger, symbol_table, FUNCTION_CALLER(symbol_table, IR.VALUE_BOXER(logger)), IR.VALUE_BOXER(logger), innate_symbol_lookup)
+
+            let resolver = FUNCTION_REFERENCE_RESOLVER(logger, symbol_table, symbol_loader, innate_symbol_lookup, overload_resolver, Syntax.Process.PACK_WRAP_BUILDER(symbol_table, symbol_loader, innate_symbol_lookup))
+
+            return (resolver, logger, innate_symbol_lookup)
+        si
+
+        // As build_resolver, also handing back the symbol table, for a
+        // test that has to walk inside a function body.
+        build_resolver_with_table() -> (FUNCTION_REFERENCE_RESOLVER, DIAGNOSTICS_STORE, Lookups.InnateSymbolLookup, SYMBOL_TABLE) is
+            let logger = DIAGNOSTICS_STORE()
+            let symbol_table = SYMBOL_TABLE(logger)
+            let innate_symbol_lookup = TEST_INNATE_SYMBOL_LOOKUP()
+            let overload_resolver = OVERLOAD_RESOLVER(logger)
+            let symbol_loader = SYMBOL_LOADER(logger, symbol_table, FUNCTION_CALLER(symbol_table, IR.VALUE_BOXER(logger)), IR.VALUE_BOXER(logger), innate_symbol_lookup)
+
+            let resolver = FUNCTION_REFERENCE_RESOLVER(logger, symbol_table, symbol_loader, innate_symbol_lookup, overload_resolver, Syntax.Process.PACK_WRAP_BUILDER(symbol_table, symbol_loader, innate_symbol_lookup))
+
+            return (resolver, logger, innate_symbol_lookup, symbol_table)
+        si
+
+        static_method(owner: CLASS, name: string, argument_types: Type[], return_type: Type) -> STATIC_METHOD is
+            let f = STATIC_METHOD(loc(), loc(), owner, name, Semantic.BLOCK_SCOPE())
+            f.arguments = argument_types
+            f.return_type = return_type
+            return f
+        si
+
+        // A minimal stand-in for a real .NET delegate type: a CLASS
+        // whose only ancestor is the same MulticastDelegate symbol the
+        // lookup answers with, since DELEGATE_SHAPE compares ancestry
+        // by symbol identity, and whose sole `invoke` member carries
+        // the call shape.
+        delegate_type(name: string, argument_types: Type[], return_type: Type) -> CLASS is
+            let d = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), name, LIST[string](), Semantic.BLOCK_SCOPE())
+
+            d.add_ancestor(TEST_INNATE_SYMBOL_LOOKUP.multicast_delegate.type!)
+
+            let invoke = INSTANCE_METHOD(loc(), loc(), d, "invoke", Semantic.BLOCK_SCOPE())
+            invoke.arguments = argument_types
+            invoke.return_type = return_type
+            d.add_member(invoke)
+
+            return d
+        si
+
+        @test()
+        Calling__try_load__on_a_call_target__returns_null() is
+            let (resolver, logger, innate_symbol_lookup) = build_resolver()
+            let owner = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Owner", LIST[string](), Semantic.BLOCK_SCOPE())
+            let f = static_method(owner, "foo", LIST[Type](), innate_symbol_lookup.get_int_type())
+
+            let result = resolver.try_load(loc(), f, null, null, true)
+
+            is_null(result)
+        si
+
+        @test()
+        Calling__try_load__on_a_non_function_symbol__returns_null() is
+            let (resolver, logger, innate_symbol_lookup) = build_resolver()
+            let not_a_function = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Owner", LIST[string](), Semantic.BLOCK_SCOPE())
+
+            let result = resolver.try_load(loc(), not_a_function, null, null, false)
+
+            is_null(result)
+        si
+
+        // With no target context, a single function reference infers
+        // its own native call shape — the same default a bare lambda
+        // literal gets.
+        @test()
+        Calling__try_load__on_a_single_function_with_no_target__uses_its_own_shape() is
+            let (resolver, logger, innate_symbol_lookup) = build_resolver()
+            let owner = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Owner", LIST[string](), Semantic.BLOCK_SCOPE())
+            let int_type = innate_symbol_lookup.get_int_type()
+            let f = static_method(owner, "double_it", LIST[Type]([int_type]), int_type)
+
+            let result = resolver.try_load(loc(), f, null, null, false)
+
+            assert result? else "expected a value"
+            is_true(result.type!.is_function, "expected a function-shaped value")
+            are_equal(0, logger.error_count, "no diagnostic expected")
+        si
+
+        // Regression: a pushed target type that is present but isn't
+        // itself function/delegate-shaped (a plain non-function class,
+        // standing in for `object` / `string`) must not be adopted as
+        // the built value's type — that mistagged the closure value
+        // with an unrelated type and produced bad IL with no
+        // diagnostic. The function's own native shape is used instead,
+        // leaving the ordinary assignability check at the use site to
+        // accept or reject it.
+        @test()
+        Calling__try_load__with_a_non_callable_target__falls_back_to_the_native_shape() is
+            let (resolver, logger, innate_symbol_lookup) = build_resolver()
+            let owner = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Owner", LIST[string](), Semantic.BLOCK_SCOPE())
+            let int_type = innate_symbol_lookup.get_int_type()
+            let f = static_method(owner, "double_it", LIST[Type]([int_type]), int_type)
+
+            let not_callable = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "NotCallable", LIST[string](), Semantic.BLOCK_SCOPE())
+
+            let result = resolver.try_load(loc(), f, null, not_callable.type!, false)
+
+            assert result? else "expected a value"
+            is_true(result.type!.is_function, "expected the function's own native shape, not the pushed non-callable target")
+            are_equal(0, logger.error_count, "no diagnostic expected — falling back silently is correct here")
+        si
+
+        // A pushed target that IS function-shaped but incompatible
+        // (wrong arity) is a genuine mismatch: one diagnostic, not a
+        // silently mistyped value.
+        @test()
+        Calling__try_load__with_an_incompatible_function_target__logs_one_error() is
+            let (resolver, logger, innate_symbol_lookup) = build_resolver()
+            let owner = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Owner", LIST[string](), Semantic.BLOCK_SCOPE())
+            let int_type = innate_symbol_lookup.get_int_type()
+            let f = static_method(owner, "double_it", LIST[Type]([int_type]), int_type)
+
+            let target_shape = innate_symbol_lookup.get_function_type(LIST[Type]([int_type, int_type, int_type]))
+
+            let result = resolver.try_load(loc(), f, null, target_shape, false)
+
+            is_true(result?, "expected a poison value, not null")
+            are_equal(1, logger.error_count, "expected exactly one compatibility diagnostic")
+        si
+
+        // A target whose return slot is a free type variable of the
+        // enclosing generic callee can't be checked by assignability —
+        // the function's own return type is what should flow into that
+        // slot. The value carries the function's native shape and no
+        // mismatch is reported here; the use site binds the slot from
+        // the value it receives.
+        @test()
+        Calling__try_load__with_a_free_type_variable_return_target__builds_at_the_native_shape() is
+            let (resolver, logger, innate_symbol_lookup) = build_resolver()
+            let owner = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Owner", LIST[string](), Semantic.BLOCK_SCOPE())
+            let int_type = innate_symbol_lookup.get_int_type()
+            let f = static_method(owner, "double_it", LIST[Type]([int_type]), int_type)
+
+            // (int) -> S, with S a free type variable of the callee
+            let free = Semantic.Types.FUNCTION_GENERIC_ARGUMENT(owner)
+            let target_shape = innate_symbol_lookup.get_function_type(LIST[Type]([int_type, free]))
+
+            let result = resolver.try_load(loc(), f, null, target_shape, false)
+
+            assert result? else "expected a value"
+            are_equal(
+                int_type,
+                result.type!.arguments[result.type!.arguments.count - 1],
+                "the return slot should be the function's own, not the free variable")
+            are_equal(0, logger.error_count, "an open return slot is not a mismatch")
+        si
+
+        // A target whose result is an error type leaves the result open:
+        // the overloads a call pushes it for agree on the parameters and
+        // differ in what they return. The value is built at the function's
+        // own shape, and what it returns chooses between them.
+        @test()
+        Calling__try_load__with_an_error_result_target__builds_at_the_native_shape() is
+            let (resolver, logger, innate_symbol_lookup) = build_resolver()
+            let owner = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Owner", LIST[string](), Semantic.BLOCK_SCOPE())
+            let int_type = innate_symbol_lookup.get_int_type()
+            let f = static_method(owner, "double_it", LIST[Type]([int_type]), int_type)
+
+            let target_shape = innate_symbol_lookup.get_function_type(LIST[Type]([int_type, Semantic.Types.ERROR()]))
+
+            let result = resolver.try_load(loc(), f, null, target_shape, false)
+
+            assert result? else "expected a value"
+            are_equal(int_type, result.type!.arguments[result.type!.arguments.count - 1], "the result should be the function's own")
+            are_equal(0, logger.error_count, "an open result is not a mismatch")
+        si
+
+        // The parameters alone pick a group's member, and the member keeps
+        // its own result.
+        @test()
+        Calling__try_load__on_an_overloaded_group_with_an_error_result_target__picks_by_the_parameters() is
+            let (resolver, logger, innate_symbol_lookup) = build_resolver()
+            let owner = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Owner", LIST[string](), Semantic.BLOCK_SCOPE())
+            let int_type = innate_symbol_lookup.get_int_type()
+            let string_type = innate_symbol_lookup.get_string_type()
+
+            let group = FUNCTION_GROUP(loc(), owner, "describe")
+            group.add(static_method(owner, "describe", LIST[Type]([int_type]), int_type))
+            group.add(static_method(owner, "describe", LIST[Type]([string_type]), string_type))
+
+            let target_shape = innate_symbol_lookup.get_function_type(LIST[Type]([int_type, Semantic.Types.ERROR()]))
+
+            let result = resolver.try_load(loc(), group, null, target_shape, false)
+
+            assert result? else "expected the int overload"
+            are_equal(int_type, result.type!.arguments[0], "picked by its parameter")
+            are_equal(int_type, result.type!.arguments[result.type!.arguments.count - 1], "with its own result")
+            are_equal(0, logger.error_count)
+        si
+
+        // An error type in a parameter position, from a parameter that
+        // failed to resolve, is open too: the failure was reported where it
+        // arose, and is not reported again as a mismatch here.
+        @test()
+        Calling__try_load__with_an_error_parameter_target__builds_at_the_native_shape() is
+            let (resolver, logger, innate_symbol_lookup) = build_resolver()
+            let owner = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Owner", LIST[string](), Semantic.BLOCK_SCOPE())
+            let int_type = innate_symbol_lookup.get_int_type()
+            let f = static_method(owner, "double_it", LIST[Type]([int_type]), int_type)
+
+            let target_shape = innate_symbol_lookup.get_function_type(LIST[Type]([Semantic.Types.ERROR(), int_type]))
+
+            let result = resolver.try_load(loc(), f, null, target_shape, false)
+
+            assert result? else "expected a value"
+            are_equal(int_type, result.type!.arguments[0], "the parameter should be the function's own")
+            are_equal(0, logger.error_count, "no second diagnostic for an error already reported")
+        si
+
+        // An overloaded name with no target shape in scope to pick a
+        // member by is left alone — the caller falls back to its
+        // ordinary "value" diagnostic rather than a guess.
+        @test()
+        Calling__try_load__on_an_overloaded_group_with_no_target__returns_null() is
+            let (resolver, logger, innate_symbol_lookup) = build_resolver()
+            let owner = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Owner", LIST[string](), Semantic.BLOCK_SCOPE())
+            let int_type = innate_symbol_lookup.get_int_type()
+            let string_type = innate_symbol_lookup.get_string_type()
+
+            let group = FUNCTION_GROUP(loc(), owner, "describe")
+            group.add(static_method(owner, "describe", LIST[Type]([int_type]), string_type))
+            group.add(static_method(owner, "describe", LIST[Type]([string_type]), string_type))
+
+            let result = resolver.try_load(loc(), group, null, null, false)
+
+            is_null(result)
+            are_equal(0, logger.error_count, "left alone means no diagnostic here either — the caller's own path reports it")
+        si
+
+        // With a target shape in scope, the group is resolved through
+        // the ordinary OVERLOAD_RESOLVER, the same as a call site.
+        @test()
+        Calling__try_load__on_an_overloaded_group_with_a_matching_target__resolves_it() is
+            let (resolver, logger, innate_symbol_lookup) = build_resolver()
+            let owner = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Owner", LIST[string](), Semantic.BLOCK_SCOPE())
+            let int_type = innate_symbol_lookup.get_int_type()
+            let string_type = innate_symbol_lookup.get_string_type()
+
+            let group = FUNCTION_GROUP(loc(), owner, "describe")
+            group.add(static_method(owner, "describe", LIST[Type]([int_type]), string_type))
+            group.add(static_method(owner, "describe", LIST[Type]([string_type]), string_type))
+
+            let target_shape = innate_symbol_lookup.get_function_type(LIST[Type]([int_type, string_type]))
+
+            let result = resolver.try_load(loc(), group, null, target_shape, false)
+
+            is_true(result?, "expected an overload to resolve")
+            are_equal(0, logger.error_count, "a matching overload should not log a diagnostic")
+        si
+
+        // An instance method's receiver comes from the supplied `from`
+        // value directly — `load_self` (which needs a live enclosing
+        // function context) is never reached when a receiver is
+        // already in hand.
+        @test()
+        Calling__try_load__on_an_instance_method_with_a_receiver__uses_it() is
+            let (resolver, logger, innate_symbol_lookup) = build_resolver()
+            let owner = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Owner", LIST[string](), Semantic.BLOCK_SCOPE())
+            let int_type = innate_symbol_lookup.get_int_type()
+
+            let f = INSTANCE_METHOD(loc(), loc(), owner, "scale", Semantic.BLOCK_SCOPE())
+            f.arguments = LIST[Type]([int_type])
+            f.return_type = int_type
+
+            let receiver = IR.Values.NULL(owner.type!)
+
+            let result = resolver.try_load(loc(), f, receiver, null, false)
+
+            is_true(result?, "expected a value")
+            are_equal(0, logger.error_count, "no diagnostic expected")
+        si
+
+        // Regression: a plain `ldftn` always captures the statically-
+        // resolved implementation, so a virtual instance method bound
+        // to a live receiver must dispatch through `ldvirtftn`
+        // instead — otherwise a function value and a direct call
+        // through the same reference can disagree on an overridden
+        // method.
+        @test()
+        Calling__try_load__on_a_virtual_instance_method__dispatches_virtually() is
+            let (resolver, logger, innate_symbol_lookup) = build_resolver()
+            let owner = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Owner", LIST[string](), Semantic.BLOCK_SCOPE())
+            let int_type = innate_symbol_lookup.get_int_type()
+
+            let f = INSTANCE_METHOD(loc(), loc(), owner, "scale", Semantic.BLOCK_SCOPE())
+            f.arguments = LIST[Type]([int_type])
+            f.return_type = int_type
+
+            let receiver = IR.Values.NULL(owner.type!)
+
+            let result = resolver.try_load(loc(), f, receiver, null, false)
+            let closure = cast IR.Values.MAKE_CLOSURE(result!)
+
+            is_true(closure.is_virtual, "a virtual instance method should dispatch through ldvirtftn")
+        si
+
+        // A method that isn't virtual in the first place (a private
+        // instance method resolves statically) should not pay for -
+        // or accidentally trigger - the ldvirtftn/dup sequence.
+        @test()
+        Calling__try_load__on_a_non_virtual_instance_method__does_not_dispatch_virtually() is
+            let (resolver, logger, innate_symbol_lookup) = build_resolver()
+            let owner = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Owner", LIST[string](), Semantic.BLOCK_SCOPE())
+            let int_type = innate_symbol_lookup.get_int_type()
+
+            let f = Semantic.Symbols.PRIVATE_METHOD(loc(), loc(), owner, "scale", Semantic.BLOCK_SCOPE())
+            f.arguments = LIST[Type]([int_type])
+            f.return_type = int_type
+
+            let receiver = IR.Values.NULL(owner.type!)
+
+            let result = resolver.try_load(loc(), f, receiver, null, false)
+            let closure = cast IR.Values.MAKE_CLOSURE(result!)
+
+            is_false(closure.is_virtual, "a non-virtual method should not dispatch through ldvirtftn")
+        si
+
+        // Pushing a real named-delegate target type must build a
+        // value typed at the delegate itself, not at the invoke shape
+        // used for the assignability check - the CIL lowering
+        // needs the concrete delegate type to emit `newobj` against
+        // the right `.ctor`. The fixture's invoke shape and delegate
+        // type agree on arity/types, so only the value's `type`
+        // distinguishes the two.
+        @test()
+        Calling__try_load__with_a_named_delegate_target__builds_a_value_typed_at_the_delegate() is
+            let (resolver, logger, innate_symbol_lookup) = build_resolver()
+            let owner = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Owner", LIST[string](), Semantic.BLOCK_SCOPE())
+            let int_type = innate_symbol_lookup.get_int_type()
+            let f = static_method(owner, "compare_descending", LIST[Type]([int_type, int_type]), int_type)
+
+            let comparison = delegate_type("Comparison", LIST[Type]([int_type, int_type]), int_type)
+
+            let result = resolver.try_load(loc(), f, null, comparison.type!, false)
+
+            assert result? else "expected a value"
+            are_same(comparison.type!, result.type!, "expected the value typed at the delegate itself, not its invoke shape")
+            are_equal(0, logger.error_count, "no diagnostic expected")
+        si
+
+        // A method-level `T` type variable of the shape `f[T](...)`
+        // carries on its signature.
+        method_type_variable() -> Semantic.Symbols.FUNCTION_GENERIC_ARGUMENT =>
+            method_type_variable("T", 0)
+
+        method_type_variable(name: string, index: int) -> Semantic.Symbols.FUNCTION_GENERIC_ARGUMENT =>
+            Semantic.Symbols.FUNCTION_GENERIC_ARGUMENT(loc(), Semantic.BLOCK_SCOPE(), name, index)
+
+        generic_static_method(
+            owner: CLASS,
+            name: string,
+            t: Semantic.Symbols.FUNCTION_GENERIC_ARGUMENT,
+            argument_types: Type[],
+            return_type: Type
+        ) -> STATIC_METHOD is
+            let f = STATIC_METHOD(loc(), loc(), owner, name, Semantic.BLOCK_SCOPE())
+            f.is_generic = true
+            f.generic_argument_names = LIST[string](["T"])
+            f.generic_arguments = LIST[Type]([t.type!])
+            f.arguments = argument_types
+            f.return_type = return_type
+            return f
+        si
+
+        // A value-position reference to an open generic binds the
+        // function's own type arguments from the slot's function type,
+        // the same way a call binds them from its actual arguments.
+        @test()
+        Calling__try_load__on_a_generic_function_with_a_matching_target__specializes_it() is
+            let (resolver, logger, innate_symbol_lookup) = build_resolver()
+            let owner = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Owner", LIST[string](), Semantic.BLOCK_SCOPE())
+            let int_type = innate_symbol_lookup.get_int_type()
+            let t = method_type_variable()
+            let f = generic_static_method(owner, "identity", t, LIST[Type]([t.type!]), t.type!)
+
+            let target_shape = innate_symbol_lookup.get_function_type(LIST[Type]([int_type, int_type]))
+
+            let result = resolver.try_load(loc(), f, null, target_shape, false)
+
+            assert result? else "expected a value"
+            are_same(int_type, result.type!.arguments[0], "the parameter should be bound to the slot's parameter type")
+            are_same(int_type, result.type!.arguments[result.type!.arguments.count - 1], "the return follows the bound parameter")
+            are_equal(0, logger.error_count, "no diagnostic expected")
+        si
+
+        // A type argument that appears only in the return type is
+        // bound from the slot's return slot.
+        @test()
+        Calling__try_load__on_a_return_only_generic_function__binds_from_the_return_slot() is
+            let (resolver, logger, innate_symbol_lookup) = build_resolver()
+            let owner = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Owner", LIST[string](), Semantic.BLOCK_SCOPE())
+            let int_type = innate_symbol_lookup.get_int_type()
+            let string_type = innate_symbol_lookup.get_string_type()
+            let t = method_type_variable()
+            let f = generic_static_method(owner, "zero_of", t, LIST[Type]([int_type]), t.type!)
+
+            let target_shape = innate_symbol_lookup.get_function_type(LIST[Type]([int_type, string_type]))
+
+            let result = resolver.try_load(loc(), f, null, target_shape, false)
+
+            assert result? else "expected a value"
+            are_same(string_type, result.type!.arguments[result.type!.arguments.count - 1], "the return slot should pin the type argument")
+            are_equal(0, logger.error_count, "no diagnostic expected")
+        si
+
+        // A target whose return slot is still open (a pipe combinator's
+        // `map` formal, `(T) -> S` with T bound by the source) still
+        // pins the parameter-driven half; the built value presents the
+        // specialized shape so the open slot can be bound from it.
+        @test()
+        Calling__try_load__on_a_generic_function_with_an_open_return_target__specializes_from_the_parameters() is
+            let (resolver, logger, innate_symbol_lookup) = build_resolver()
+            let owner = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Owner", LIST[string](), Semantic.BLOCK_SCOPE())
+            let int_type = innate_symbol_lookup.get_int_type()
+            let t = method_type_variable()
+            let f = generic_static_method(owner, "identity", t, LIST[Type]([t.type!]), t.type!)
+
+            let open_return = Semantic.Types.FUNCTION_GENERIC_ARGUMENT(owner)
+            let target_shape = innate_symbol_lookup.get_function_type(LIST[Type]([int_type, open_return]))
+
+            let result = resolver.try_load(loc(), f, null, target_shape, false)
+
+            assert result? else "expected a value"
+            are_same(
+                int_type,
+                result.type!.arguments[result.type!.arguments.count - 1],
+                "the value presents the bound return, not the open slot")
+            are_equal(0, logger.error_count, "an open return slot is not a mismatch")
+        si
+
+        // A reference reaching a call argument arrives as its group,
+        // and the first walk of an argument carries no slot at all.
+        // Building at the open signature there would feed the
+        // function's own type variables into the enclosing call's
+        // inference, so the group is left unresolved for the deferred
+        // re-walk that follows the resolved formal.
+        @test()
+        Calling__try_load__on_a_single_generic_group_member_with_no_target__returns_null() is
+            let (resolver, logger, innate_symbol_lookup) = build_resolver()
+            let owner = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Owner", LIST[string](), Semantic.BLOCK_SCOPE())
+            let t = method_type_variable()
+
+            let group = FUNCTION_GROUP(loc(), owner, "identity")
+            group.add(generic_static_method(owner, "identity", t, LIST[Type]([t.type!]), t.type!))
+
+            let result = resolver.try_load(loc(), group, null, null, false)
+
+            is_null(result)
+            are_equal(0, logger.error_count, "the load reports itself; nothing is diagnosed here")
+        si
+
+        // Same when a slot is in scope but written in the type
+        // variables of the call still being resolved - it pins
+        // nothing, so it is no better than no slot at all.
+        @test()
+        Calling__try_load__on_a_single_generic_group_member_with_an_unsettled_slot__returns_null() is
+            let (resolver, logger, innate_symbol_lookup) = build_resolver()
+            let owner = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Owner", LIST[string](), Semantic.BLOCK_SCOPE())
+            let t = method_type_variable()
+
+            let group = FUNCTION_GROUP(loc(), owner, "identity")
+            group.add(generic_static_method(owner, "identity", t, LIST[Type]([t.type!]), t.type!))
+
+            // (S) -> S, with S a type variable of the enclosing callee
+            let callee_variable = Semantic.Types.FUNCTION_GENERIC_ARGUMENT(owner)
+            let target_shape = innate_symbol_lookup.get_function_type(LIST[Type]([callee_variable, callee_variable]))
+
+            let result = resolver.try_load(loc(), group, null, target_shape, false)
+
+            is_null(result)
+        si
+
+        // A settled slot pins the instantiation, so the group member
+        // resolves rather than being deferred.
+        @test()
+        Calling__try_load__on_a_single_generic_group_member_with_a_settled_slot__specializes_it() is
+            let (resolver, logger, innate_symbol_lookup) = build_resolver()
+            let owner = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Owner", LIST[string](), Semantic.BLOCK_SCOPE())
+            let int_type = innate_symbol_lookup.get_int_type()
+            let t = method_type_variable()
+
+            let group = FUNCTION_GROUP(loc(), owner, "identity")
+            group.add(generic_static_method(owner, "identity", t, LIST[Type]([t.type!]), t.type!))
+
+            let target_shape = innate_symbol_lookup.get_function_type(LIST[Type]([int_type, int_type]))
+
+            let result = resolver.try_load(loc(), group, null, target_shape, false)
+
+            assert result? else "expected a value"
+            are_same(int_type, result.type!.arguments[0], "the slot pins T")
+            are_equal(0, logger.error_count, "no diagnostic expected")
+        si
+
+        // A bare function symbol carries no deferral protocol - only a
+        // group load reports itself as unresolved - so with no slot it
+        // keeps the open signature and the use site reports whatever
+        // the uninstantiated form can't satisfy.
+        @test()
+        Calling__try_load__on_a_generic_function_with_no_target__keeps_the_open_signature() is
+            let (resolver, logger, innate_symbol_lookup) = build_resolver()
+            let owner = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Owner", LIST[string](), Semantic.BLOCK_SCOPE())
+            let t = method_type_variable()
+            let f = generic_static_method(owner, "identity", t, LIST[Type]([t.type!]), t.type!)
+
+            let result = resolver.try_load(loc(), f, null, null, false)
+
+            assert result? else "expected a value"
+            are_same(t.type!, result.type!.arguments[0], "with no slot there is nothing to bind the parameter to")
+            are_equal(0, logger.error_count, "no diagnostic expected")
+        si
+
+        // Type variables split between the parameters and the return
+        // slot bind from both positions at once - each half alone
+        // would leave the other unpinned.
+        @test()
+        Calling__try_load__on_a_split_generic_function__binds_from_both_positions() is
+            let (resolver, logger, innate_symbol_lookup) = build_resolver()
+            let owner = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Owner", LIST[string](), Semantic.BLOCK_SCOPE())
+            let int_type = innate_symbol_lookup.get_int_type()
+            let string_type = innate_symbol_lookup.get_string_type()
+            let t = method_type_variable()
+            let u = method_type_variable("U", 1)
+
+            let f = STATIC_METHOD(loc(), loc(), owner, "convert", Semantic.BLOCK_SCOPE())
+            f.is_generic = true
+            f.generic_argument_names = LIST[string](["T", "U"])
+            f.generic_arguments = LIST[Type]([t.type!, u.type!])
+            f.arguments = LIST[Type]([t.type!])
+            f.return_type = u.type!
+
+            let target_shape = innate_symbol_lookup.get_function_type(LIST[Type]([int_type, string_type]))
+
+            let result = resolver.try_load(loc(), f, null, target_shape, false)
+
+            assert result? else "expected a value"
+            are_same(int_type, result.type!.arguments[0], "the parameter position pins T")
+            are_same(string_type, result.type!.arguments[result.type!.arguments.count - 1], "the return slot pins U")
+            are_equal(0, logger.error_count, "no diagnostic expected")
+        si
+
+        // Binding succeeds but the instantiated signature still
+        // doesn't fit the slot - the compatibility diagnostic names
+        // the specialized function, not the open one.
+        @test()
+        Calling__try_load__on_a_generic_function_whose_instantiation_does_not_fit__reports_the_specialized_signature() is
+            let (resolver, logger, innate_symbol_lookup) = build_resolver()
+            let owner = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Owner", LIST[string](), Semantic.BLOCK_SCOPE())
+            let int_type = innate_symbol_lookup.get_int_type()
+            let string_type = innate_symbol_lookup.get_string_type()
+            let t = method_type_variable()
+            let f = generic_static_method(owner, "identity", t, LIST[Type]([t.type!]), t.type!)
+
+            let target_shape = innate_symbol_lookup.get_function_type(LIST[Type]([string_type, int_type]))
+
+            let result = resolver.try_load(loc(), f, null, target_shape, false)
+
+            is_true(result?, "expected a poison value, not null")
+            are_equal(1, logger.error_count, "expected exactly one compatibility diagnostic")
+        si
+
+        // A built-in operator: an instruction sequence with no method
+        // behind it, declared here as the scalar's own static member.
+        innate_operator(owner: CLASS, name: string, argument_types: Type[], return_type: Type) -> Semantic.Symbols.INNATE_FUNCTION is
+            let f = Semantic.Symbols.INNATE_FUNCTION(loc(), owner, name, owner, "arithmetic.add")
+            f.arguments = argument_types
+            f.return_type = return_type
+            return f
+        si
+
+        // The value of a built-in operator is a thunk declared into the
+        // function the reference sits in, so the walk has to be inside
+        // one: this puts `method` on the symbol table's stack, inside
+        // `owner`, the way compile-expressions has it while walking the
+        // method's body.
+        // Settling the thunk's return type builds its function type
+        // through the container's lookup, so the test's stands in there.
+        enter_body(symbol_table: SYMBOL_TABLE, innate_symbol_lookup: Lookups.InnateSymbolLookup, owner: CLASS, method: STATIC_METHOD) is
+            IoC.CONTAINER.instance.set_innate_symbol_lookup_for_testing(innate_symbol_lookup)
+            IoC.CONTAINER.instance.set_symbol_table_for_testing(symbol_table)
+
+            symbol_table.enter_scope(owner)
+            symbol_table.enter_scope(method)
+        si
+
+        // Inside a function body, a built-in operator's value is a thunk
+        // declared into that function, at the operator's own shape when
+        // no target says otherwise, pure where the operator is, and shared
+        // by every reference to the operator at that shape.
+        @test()
+        Calling__forwarding_thunk__twice_for_one_operator_at_one_shape__returns_one_thunk() is
+            let logger = DIAGNOSTICS_STORE()
+            let symbol_table = SYMBOL_TABLE(logger)
+            let innate_symbol_lookup = TEST_INNATE_SYMBOL_LOOKUP()
+            let symbol_loader = SYMBOL_LOADER(logger, symbol_table, FUNCTION_CALLER(symbol_table, IR.VALUE_BOXER(logger)), IR.VALUE_BOXER(logger), innate_symbol_lookup)
+            let builder = Syntax.Process.PACK_WRAP_BUILDER(symbol_table, symbol_loader, innate_symbol_lookup)
+
+            let int_type = innate_symbol_lookup.get_int_type()
+            let scalar = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Int", LIST[string](), Semantic.BLOCK_SCOPE())
+            let plus = innate_operator(scalar, "+", LIST[Type]([int_type, int_type]), int_type)
+            plus.mark_declared_pure()
+
+            let owner = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Owner", LIST[string](), Semantic.BLOCK_SCOPE())
+            let body = static_method(owner, "run", LIST[Type](), int_type)
+
+            enter_body(symbol_table, innate_symbol_lookup, owner, body)
+
+            let shape = plus.get_full_type(innate_symbol_lookup)
+
+            let first = builder.forwarding_thunk(loc(), body, plus, shape, null)
+            let second = builder.forwarding_thunk(loc(), body, plus, shape, null)
+
+            assert first? /\ second? else "expected a thunk"
+            is_true(first == second, "two references to one operator at one shape share a thunk")
+            are_equal(2, first.arguments.count, "the thunk takes the operator's operands")
+            are_equal(int_type, first.return_type!, "the thunk returns what the operator returns")
+            is_true(first.is_declared_pure, "a thunk over a pure operator is pure")
+            is_true(first.pack_thunk!.is_forward, "the thunk forwards its parameters")
+            is_true(first.pack_thunk!.target == plus, "the thunk calls the operator")
+            are_equal(0, logger.error_count, "no diagnostic expected")
+        si
+
+        // One operator wanted as a function type and as a named delegate
+        // type is two shapes, with a thunk each.
+        @test()
+        Calling__forwarding_thunk__for_one_operator_at_two_delegate_types__returns_two_thunks() is
+            let logger = DIAGNOSTICS_STORE()
+            let symbol_table = SYMBOL_TABLE(logger)
+            let innate_symbol_lookup = TEST_INNATE_SYMBOL_LOOKUP()
+            let symbol_loader = SYMBOL_LOADER(logger, symbol_table, FUNCTION_CALLER(symbol_table, IR.VALUE_BOXER(logger)), IR.VALUE_BOXER(logger), innate_symbol_lookup)
+            let builder = Syntax.Process.PACK_WRAP_BUILDER(symbol_table, symbol_loader, innate_symbol_lookup)
+
+            let int_type = innate_symbol_lookup.get_int_type()
+            let scalar = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Int", LIST[string](), Semantic.BLOCK_SCOPE())
+            let plus = innate_operator(scalar, "+", LIST[Type]([int_type, int_type]), int_type)
+
+            let owner = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Owner", LIST[string](), Semantic.BLOCK_SCOPE())
+            let body = static_method(owner, "run", LIST[Type](), int_type)
+
+            enter_body(symbol_table, innate_symbol_lookup, owner, body)
+
+            let shape = plus.get_full_type(innate_symbol_lookup)
+            let adder = delegate_type("Adder", LIST[Type]([int_type, int_type]), int_type).type!
+
+            let as_function = builder.forwarding_thunk(loc(), body, plus, shape, null)
+            let as_delegate = builder.forwarding_thunk(loc(), body, plus, shape, adder)
+
+            assert as_function? /\ as_delegate? else "expected two thunks"
+            is_true(as_function != as_delegate, "a named delegate type and a function type are two shapes")
+            are_equal(adder, as_delegate.delegate_target_type!, "the thunk carries the delegate type it is wanted as")
+            are_equal(2, body.symbols |> Ghul.Pipes.count(), "both thunks are declared into the enclosing function")
+        si
+
+        // A built-in operator over a type variable the enclosing function
+        // does not own - one the call being resolved still has to bind -
+        // has no fixed shape to be stood in for at.
+        @test()
+        Calling__try_load__on_a_built_in_operator_over_a_foreign_type_variable__logs_one_error() is
+            let logger = DIAGNOSTICS_STORE()
+            let symbol_table = SYMBOL_TABLE(logger)
+            let innate_symbol_lookup = TEST_INNATE_SYMBOL_LOOKUP()
+            let symbol_loader = SYMBOL_LOADER(logger, symbol_table, FUNCTION_CALLER(symbol_table, IR.VALUE_BOXER(logger)), IR.VALUE_BOXER(logger), innate_symbol_lookup)
+            let resolver = FUNCTION_REFERENCE_RESOLVER(logger, symbol_table, symbol_loader, innate_symbol_lookup, OVERLOAD_RESOLVER(logger), Syntax.Process.PACK_WRAP_BUILDER(symbol_table, symbol_loader, innate_symbol_lookup))
+
+            let bool_type = innate_symbol_lookup.get_bool_type()
+            let other = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Other", LIST[string](), Semantic.BLOCK_SCOPE())
+            let foreign = Semantic.Types.FUNCTION_GENERIC_ARGUMENT(static_method(other, "elsewhere", LIST[Type](), bool_type))
+
+            let intrinsics = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Intrinsics", LIST[string](), Semantic.BLOCK_SCOPE())
+            let equal = innate_operator(intrinsics, "==", LIST[Type]([foreign, foreign]), bool_type)
+
+            let owner = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Owner", LIST[string](), Semantic.BLOCK_SCOPE())
+            let body = static_method(owner, "run", LIST[Type](), bool_type)
+
+            enter_body(symbol_table, innate_symbol_lookup, owner, body)
+
+            let result = resolver.try_load(loc(), equal, null, null, false)
+
+            is_true(result?, "expected a poison value, not null")
+            are_equal(1, logger.error_count, "expected exactly one diagnostic")
+            are_equal(0, body.symbols |> Ghul.Pipes.count(), "no thunk is declared for a shape that is not fixed")
+        si
+
+        // A built-in operator wanted at a shape it does not have is the
+        // ordinary compatibility mismatch, reported once.
+        @test()
+        Calling__try_load__on_a_built_in_operator_with_an_incompatible_target__logs_one_error() is
+            let logger = DIAGNOSTICS_STORE()
+            let symbol_table = SYMBOL_TABLE(logger)
+            let innate_symbol_lookup = TEST_INNATE_SYMBOL_LOOKUP()
+            let symbol_loader = SYMBOL_LOADER(logger, symbol_table, FUNCTION_CALLER(symbol_table, IR.VALUE_BOXER(logger)), IR.VALUE_BOXER(logger), innate_symbol_lookup)
+            let resolver = FUNCTION_REFERENCE_RESOLVER(logger, symbol_table, symbol_loader, innate_symbol_lookup, OVERLOAD_RESOLVER(logger), Syntax.Process.PACK_WRAP_BUILDER(symbol_table, symbol_loader, innate_symbol_lookup))
+
+            let int_type = innate_symbol_lookup.get_int_type()
+            let bool_type = innate_symbol_lookup.get_bool_type()
+            let scalar = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Int", LIST[string](), Semantic.BLOCK_SCOPE())
+            let plus = innate_operator(scalar, "+", LIST[Type]([int_type, int_type]), int_type)
+
+            let owner = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Owner", LIST[string](), Semantic.BLOCK_SCOPE())
+            let body = static_method(owner, "run", LIST[Type](), int_type)
+
+            enter_body(symbol_table, innate_symbol_lookup, owner, body)
+
+            let result = resolver.try_load(loc(), plus, null, innate_symbol_lookup.get_function_type(LIST[Type]([int_type, int_type, bool_type])), false)
+
+            is_true(result?, "expected a poison value, not null")
+            are_equal(1, logger.error_count, "expected exactly one compatibility diagnostic")
+        si
+
+        // Outside any function body there is nowhere to declare the
+        // thunk, so the reference is an error rather than a value.
+        @test()
+        Calling__try_load__on_a_built_in_operator_outside_a_function__logs_one_error() is
+            let (resolver, logger, innate_symbol_lookup) = build_resolver()
+            let int_type = innate_symbol_lookup.get_int_type()
+            let scalar = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Int", LIST[string](), Semantic.BLOCK_SCOPE())
+            let plus = innate_operator(scalar, "+", LIST[Type]([int_type, int_type]), int_type)
+
+            let result = resolver.try_load(loc(), plus, null, null, false)
+
+            is_true(result?, "expected a poison value, not null")
+            are_equal(1, logger.error_count, "expected exactly one diagnostic")
+        si
+
+        // A function of two parameters wanted where one is expected is
+        // the shape an argument pack adapts: the call presents the value
+        // as the function of the parameters' tuple once it has it, so the
+        // reference builds at its own shape and reports nothing here.
+        @test()
+        Calling__try_load__with_a_target_the_pack_adaptation_applies_to__builds_at_the_native_shape() is
+            let (resolver, logger, innate_symbol_lookup) = build_resolver()
+            let owner = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Owner", LIST[string](), Semantic.BLOCK_SCOPE())
+            let int_type = innate_symbol_lookup.get_int_type()
+            let add = static_method(owner, "add", LIST[Type]([int_type, int_type]), int_type)
+
+            let one_parameter = innate_symbol_lookup.get_function_type(LIST[Type]([int_type, int_type]))
+
+            let result = resolver.try_load(loc(), add, null, one_parameter, false)
+
+            assert result? else "expected a value"
+            are_equal(3, result.type!.arguments.count, "expected the function's own two-parameter shape")
+            are_equal(0, logger.error_count, "the call that pushed the slot decides, not the reference")
+        si
+
+        // A class with one constructor of the given parameters, declared
+        // into the class the way declare-symbols declares an init.
+        class_with_constructor(name: string, argument_types: Type[], innate_symbol_lookup: Lookups.InnateSymbolLookup) -> CLASS is
+            let c = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), name, LIST[string](), Semantic.BLOCK_SCOPE())
+
+            let constructor = cast Semantic.Symbols.Function(c.declare_function(loc(), loc(), "init", false, false, true, false, c, null))
+            constructor.arguments = argument_types
+            constructor.return_type = innate_symbol_lookup.get_void_type()
+
+            return c
+        si
+
+        // A type named where a function of its constructor's parameters
+        // is expected is a thunk declared into the enclosing function that
+        // constructs the type, shared by every reference at that shape.
+        @test()
+        Calling__try_load__on_a_type_at_its_constructor_shape__builds_one_constructing_thunk() is
+            let (resolver, logger, innate_symbol_lookup, symbol_table) = build_resolver_with_table()
+            let int_type = innate_symbol_lookup.get_int_type()
+            let string_type = innate_symbol_lookup.get_string_type()
+
+            let person = class_with_constructor("Person", LIST[Type]([string_type, int_type]), innate_symbol_lookup)
+
+            let owner = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Owner", LIST[string](), Semantic.BLOCK_SCOPE())
+            let body = static_method(owner, "run", LIST[Type](), int_type)
+
+            enter_body(symbol_table, innate_symbol_lookup, owner, body)
+
+            let shape = innate_symbol_lookup.get_function_type(LIST[Type]([string_type, int_type, person.type!]))
+
+            let first = resolver.try_load(loc(), person, null, shape, false)
+            let second = resolver.try_load(loc(), person, null, shape, false)
+
+            assert first? /\ second? else "expected a value"
+            are_equal(0, logger.error_count, "no diagnostic expected")
+            are_equal(1, body.symbols |> Ghul.Pipes.count(), "one thunk serves both references")
+
+            let thunk = cast Semantic.Symbols.Closure(body.symbols |> Ghul.Pipes.first()!)
+            let description = thunk.pack_thunk!
+
+            is_true(description.is_forward, "the thunk forwards its parameters")
+            are_equal(person.type!, description.constructed_type!, "the thunk constructs the type")
+            is_true(description.target!.is_constructor, "the thunk's target is the constructor")
+            are_equal(2, thunk.arguments.count, "the thunk takes the constructor's parameters")
+            are_equal(person.type!, thunk.return_type!, "the thunk returns the instance")
+        si
+
+        // With no function expected, a type name is left as it was: the
+        // caller's own path makes it a type expression.
+        @test()
+        Calling__try_load__on_a_type_with_no_target__returns_null() is
+            let (resolver, logger, innate_symbol_lookup) = build_resolver()
+            let int_type = innate_symbol_lookup.get_int_type()
+            let person = class_with_constructor("Person", LIST[Type]([int_type]), innate_symbol_lookup)
+
+            is_null(resolver.try_load(loc(), person, null, null, false))
+            is_null(resolver.try_load(loc(), person, null, int_type, false))
+            are_equal(0, logger.error_count, "no diagnostic expected")
+        si
+
+        // A constructor can be a value only where its parameters are
+        // known: a slot still carrying a type variable of the call being
+        // resolved is left for that call's re-walk.
+        @test()
+        Calling__try_load__on_a_type_at_a_shape_with_a_foreign_parameter__returns_null() is
+            let (resolver, logger, innate_symbol_lookup, symbol_table) = build_resolver_with_table()
+            let int_type = innate_symbol_lookup.get_int_type()
+            let person = class_with_constructor("Person", LIST[Type]([int_type]), innate_symbol_lookup)
+
+            let other = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Other", LIST[string](), Semantic.BLOCK_SCOPE())
+            let foreign = Semantic.Types.FUNCTION_GENERIC_ARGUMENT(static_method(other, "elsewhere", LIST[Type](), int_type))
+
+            let owner = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Owner", LIST[string](), Semantic.BLOCK_SCOPE())
+            let body = static_method(owner, "run", LIST[Type](), int_type)
+
+            enter_body(symbol_table, innate_symbol_lookup, owner, body)
+
+            let shape = innate_symbol_lookup.get_function_type(LIST[Type]([foreign, person.type!]))
+
+            is_null(resolver.try_load(loc(), person, null, shape, false))
+            are_equal(0, logger.error_count, "no diagnostic expected")
+        si
+
+        // An abstract class has no instance to construct.
+        @test()
+        Calling__try_load__on_an_abstract_class_at_a_function_shape__logs_one_error() is
+            let (resolver, logger, innate_symbol_lookup, symbol_table) = build_resolver_with_table()
+            let int_type = innate_symbol_lookup.get_int_type()
+            let animal = class_with_constructor("Animal", LIST[Type](), innate_symbol_lookup)
+            animal.mark_abstract()
+
+            let owner = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Owner", LIST[string](), Semantic.BLOCK_SCOPE())
+            let body = static_method(owner, "run", LIST[Type](), int_type)
+
+            enter_body(symbol_table, innate_symbol_lookup, owner, body)
+
+            let shape = innate_symbol_lookup.get_function_type(LIST[Type]([animal.type!]))
+
+            let result = resolver.try_load(loc(), animal, null, shape, false)
+
+            is_true(result?, "expected a poison value, not null")
+            are_equal(1, logger.error_count, "expected exactly one diagnostic")
+        si
+
+        // A shape no constructor accepts is the overload resolver's to
+        // report, as it is for a call.
+        @test()
+        Calling__try_load__on_a_type_at_a_shape_no_constructor_takes__logs_an_error() is
+            let (resolver, logger, innate_symbol_lookup, symbol_table) = build_resolver_with_table()
+            let int_type = innate_symbol_lookup.get_int_type()
+            let string_type = innate_symbol_lookup.get_string_type()
+            let person = class_with_constructor("Person", LIST[Type]([string_type]), innate_symbol_lookup)
+
+            let owner = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Owner", LIST[string](), Semantic.BLOCK_SCOPE())
+            let body = static_method(owner, "run", LIST[Type](), int_type)
+
+            enter_body(symbol_table, innate_symbol_lookup, owner, body)
+
+            let shape = innate_symbol_lookup.get_function_type(LIST[Type]([int_type, person.type!]))
+
+            let result = resolver.try_load(loc(), person, null, shape, false)
+
+            is_true(result?, "expected a poison value, not null")
+            is_true(logger.error_count > 0, "expected a diagnostic")
+        si
+
+        // A function with an inferred signature whose parameters are still
+        // placeholders, and whose return is `Int`.
+        _inferred_function(parameter_names: LIST[string], lookup: Lookups.InnateSymbolLookup) -> (function: Semantic.Symbols.GLOBAL_FUNCTION, parameters: LIST[Semantic.Symbols.Variable]) is
+            let function = Semantic.Symbols.GLOBAL_FUNCTION(loc(), loc(), Semantic.BLOCK_SCOPE(), "measure", Semantic.BLOCK_SCOPE())
+            function.is_inferred_signature = true
+            function.argument_names = parameter_names
+            function.return_type = lookup.get_int_type()
+
+            let parameters = LIST[Semantic.Symbols.Variable]()
+            let types = LIST[Type]()
+
+            // a variable takes a local id from the function being declared,
+            // as declare-members enters one around each function
+            let local_ids = IoC.CONTAINER.instance.local_id_generator
+            local_ids.enter_function()
+
+            for name in parameter_names do
+                let parameter = cast Semantic.Symbols.Variable(function.declare_variable(loc(), name, false, null))
+                parameters.add(parameter)
+                types.add(Semantic.Types.INFERRED_VARIABLE_TYPE(parameter))
+            od
+
+            local_ids.leave_function()
+
+            function.arguments = types
+
+            return (function, parameters)
+        si
+
+        _phantom(name: string) -> Semantic.Symbols.Variable =>
+            Semantic.Symbols.INFERRED_TYPE_ARG_ORIGIN(loc(), Semantic.BLOCK_SCOPE(), name)
+
+        // Passed where a `(String) -> R` is expected, the function is typed
+        // as if called with a `String`, and its `Int` return bounds `R`.
+        @test()
+        Calling__offer_slot_to_inferred_signature__with_a_matching_shape__bounds_parameters_and_the_slot_return() is
+            let (resolver, _, lookup) = build_resolver()
+            let f = _inferred_function(LIST[string](["text"]), lookup)
+            let slot_return = _phantom("R")
+
+            let shape = lookup.get_function_type(LIST[Type]([lookup.get_string_type(), Semantic.Types.INFERRED_VARIABLE_TYPE(slot_return)]))
+
+            resolver._offer_slot_to_inferred_signature(f.function, shape)
+
+            are_same(lookup.get_string_type(), f.parameters[0].try_get_inferred_type())
+            are_same(lookup.get_int_type(), slot_return.try_get_inferred_type())
+        si
+
+        // A slot taking another number of parameters says nothing about
+        // this function's.
+        @test()
+        Calling__offer_slot_to_inferred_signature__with_another_parameter_count__bounds_nothing() is
+            let (resolver, _, lookup) = build_resolver()
+            let f = _inferred_function(LIST[string](["a", "b"]), lookup)
+            let slot_return = _phantom("R")
+
+            let shape = lookup.get_function_type(LIST[Type]([lookup.get_string_type(), Semantic.Types.INFERRED_VARIABLE_TYPE(slot_return)]))
+
+            resolver._offer_slot_to_inferred_signature(f.function, shape)
+
+            is_null(f.parameters[0].try_get_inferred_type())
+            is_null(f.parameters[1].try_get_inferred_type())
+            is_null(slot_return.try_get_inferred_type())
+        si
+
+        // A slot that is not a function type, or no slot at all, bounds
+        // nothing.
+        @test()
+        Calling__offer_slot_to_inferred_signature__with_no_function_slot__bounds_nothing() is
+            let (resolver, _, lookup) = build_resolver()
+            let f = _inferred_function(LIST[string](["text"]), lookup)
+
+            resolver._offer_slot_to_inferred_signature(f.function, lookup.get_string_type())
+            resolver._offer_slot_to_inferred_signature(f.function, null)
+
+            is_null(f.parameters[0].try_get_inferred_type())
+        si
+    si
+si

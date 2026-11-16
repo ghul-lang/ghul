@@ -1,0 +1,227 @@
+namespace Semantic.UnitTests is
+    use Collections.Iterable
+    use Collections.LIST
+    use Collections.MAP
+
+    use Source.LOCATION
+
+    use Semantic.OWNER_CONSTRAINT_SPECIALIZER
+
+    use Semantic.Symbols.CLASS
+    use Semantic.Symbols.CLASSY_GENERIC_ARGUMENT
+    use Semantic.Symbols.GENERIC
+    use Semantic.Symbols.INSTANCE_METHOD
+
+    use Semantic.Types.GenericArgument
+    use Semantic.Types.Type
+    use Assertions
+
+    // Tests for OWNER_CONSTRAINT_SPECIALIZER — companion to the
+    // existing OWNER_TYPE_ARG_SPECIALIZER, applied when a downstream
+    // type constraint is available (e.g. `let b: Box[int] = Box()`)
+    // rather than relying on sibling-arg binding.
+    //
+    // Direct- and variant-match paths exercise pre-built type_maps
+    // from the constraint itself. The ancestor-unification path
+    // walks owner_classy's ancestors looking for one whose head
+    // matches the constraint's; it's the only branch that
+    // independently builds a type_map, so it gets the bulk of the
+    // focused coverage here.
+    class OWNER_CONSTRAINT_SPECIALIZER_TESTS is
+        init() is si
+
+        loc() -> LOCATION => LOCATION("test.ghul", 1, 1, 1, 1)
+
+        empty_names() -> LIST[string] => LIST[string]()
+        names_for(values: Iterable[string]) -> LIST[string] is
+            let result = LIST[string]()
+            for v in values do result.add(v); od
+            return result
+        si
+
+        int_type() -> Type is
+            let int_class = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "int", empty_names(), Semantic.BLOCK_SCOPE())
+            return int_class.type!
+        si
+
+        // === try_unify_via_ancestor ===
+
+        // class C[T]: Parent[T] — the canonical positive case.
+        // Walking C's ancestors finds Parent[T-arg]; pairing the
+        // ancestor's GenericArgument with the constraint's slot 0
+        // (int) produces the type_map { T: int }.
+        @test()
+        Calling__try_unify_via_ancestor__with_parent_T_constraint_int__binds_T_to_int() is
+            let int_t = int_type()
+
+            let parent = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Parent", names_for(["U"]), Semantic.BLOCK_SCOPE())
+            let parent_u = parent.declare_type(loc(), "U", 0, null)
+
+            // Declared through declare_type, as declare-symbols does:
+            // substitution matches a type parameter by symbol, so a
+            // parameter that was only named is never substituted.
+            let c = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "C", names_for(["T"]), Semantic.BLOCK_SCOPE())
+            let c_t = c.declare_type(loc(), "T", 0, null)
+
+            // Add Parent[T] as C's ancestor by constructing a
+            // Types.GENERIC over Parent with the GenericArgument
+            // for T (from C's perspective).
+            let parent_ancestor_args = LIST[Type]()
+            parent_ancestor_args.add(c_t.type!)
+            let parent_ancestor = Semantic.Types.GENERIC(loc(), parent, parent_ancestor_args)
+            c.push_ancestor(parent_ancestor)
+
+            // constraint: Parent[int]
+            let constraint_args = LIST[Type]()
+            constraint_args.add(int_t)
+            let constraint_generic = GENERIC(loc(), parent, constraint_args)
+
+            let specializer = OWNER_CONSTRAINT_SPECIALIZER()
+            let type_map = specializer.try_unify_via_ancestor(c, constraint_generic)
+
+            assert type_map?
+            is_true(type_map.contains_key(c_t))
+            are_same(int_t, type_map[c_t])
+        si
+
+        // No ancestors → null. The owner has no inheritance chain
+        // to walk, so there's no binding to recover.
+        @test()
+        Calling__try_unify_via_ancestor__with_no_ancestors__returns_null() is
+            let parent = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Parent", names_for(["U"]), Semantic.BLOCK_SCOPE())
+            let c = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "C", names_for(["T"]), Semantic.BLOCK_SCOPE())
+
+            let constraint_args = LIST[Type]()
+            constraint_args.add(int_type())
+            let constraint_generic = GENERIC(loc(), parent, constraint_args)
+
+            let specializer = OWNER_CONSTRAINT_SPECIALIZER()
+            let type_map = specializer.try_unify_via_ancestor(c, constraint_generic)
+
+            is_null(type_map)
+        si
+
+        // Ancestor with mismatched head → null. C inherits from
+        // Other (different class), constraint asks for Parent.
+        // Walk completes without finding a match.
+        @test()
+        Calling__try_unify_via_ancestor__with_mismatched_ancestor_head__returns_null() is
+            let parent = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Parent", names_for(["U"]), Semantic.BLOCK_SCOPE())
+            let other = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Other", names_for(["V"]), Semantic.BLOCK_SCOPE())
+
+            let c = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "C", names_for(["T"]), Semantic.BLOCK_SCOPE())
+            let c_t = CLASSY_GENERIC_ARGUMENT(loc(), c, "T", 0)
+
+            let other_args = LIST[Type]()
+            other_args.add(c_t.type!)
+            let other_ancestor = Semantic.Types.GENERIC(loc(), other, other_args)
+            c.push_ancestor(other_ancestor)
+
+            let constraint_args = LIST[Type]()
+            constraint_args.add(int_type())
+            let constraint_generic = GENERIC(loc(), parent, constraint_args)
+
+            let specializer = OWNER_CONSTRAINT_SPECIALIZER()
+            let type_map = specializer.try_unify_via_ancestor(c, constraint_generic)
+
+            is_null(type_map)
+        si
+
+        // Owner declares Parent ancestor with non-GenericArgument
+        // slot — e.g. `class C[T]: Parent[(T, int)]`. The slot is a
+        // TUPLE, not a GenericArgument, so the alignment loop bails
+        // with `ok = false`, and the ancestor walk continues. No
+        // other ancestor matches → null.
+        //
+        // Pinning this corner because relaxing the
+        // `isa GenericArgument` guard to accept any Type would write
+        // bad keys (`(T, int)` as a name?) into the type_map and
+        // produce a non-functional specialised owner.
+        @test()
+        Calling__try_unify_via_ancestor__with_non_GenericArgument_slot__returns_null() is
+            let parent = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Parent", names_for(["U"]), Semantic.BLOCK_SCOPE())
+
+            let c = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "C", names_for(["T"]), Semantic.BLOCK_SCOPE())
+
+            // Ancestor slot is a plain int_type (not a
+            // GenericArgument). The alignment loop's
+            // `isa GenericArgument` guard fails and ok flips false.
+            let parent_ancestor_args = LIST[Type]()
+            parent_ancestor_args.add(int_type())
+            let parent_ancestor = Semantic.Types.GENERIC(loc(), parent, parent_ancestor_args)
+            c.push_ancestor(parent_ancestor)
+
+            let constraint_args = LIST[Type]()
+            constraint_args.add(int_type())
+            let constraint_generic = GENERIC(loc(), parent, constraint_args)
+
+            let specializer = OWNER_CONSTRAINT_SPECIALIZER()
+            let type_map = specializer.try_unify_via_ancestor(c, constraint_generic)
+
+            is_null(type_map)
+        si
+
+        // Ancestor exists but type_map doesn't cover every owner
+        // name — fall through to null. `class C[T,U]: Parent[T]`
+        // with constraint `Parent[int]` binds only T; the owner's
+        // U slot is unbound and the helper rejects partial maps.
+        @test()
+        Calling__try_unify_via_ancestor__with_unbound_owner_name__returns_null() is
+            let parent = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Parent", names_for(["X"]), Semantic.BLOCK_SCOPE())
+
+            let c = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "C", names_for(["T", "U"]), Semantic.BLOCK_SCOPE())
+            let c_t = CLASSY_GENERIC_ARGUMENT(loc(), c, "T", 0)
+            let c_u = CLASSY_GENERIC_ARGUMENT(loc(), c, "U", 1)
+
+            // Ancestor reads `Parent[T]` only — U is unbound.
+            let parent_ancestor_args = LIST[Type]()
+            parent_ancestor_args.add(c_t.type!)
+            let parent_ancestor = Semantic.Types.GENERIC(loc(), parent, parent_ancestor_args)
+            c.push_ancestor(parent_ancestor)
+
+            let constraint_args = LIST[Type]()
+            constraint_args.add(int_type())
+            let constraint_generic = GENERIC(loc(), parent, constraint_args)
+
+            let specializer = OWNER_CONSTRAINT_SPECIALIZER()
+            let type_map = specializer.try_unify_via_ancestor(c, constraint_generic)
+
+            is_null(type_map)
+        si
+
+        // === specialize_from_constraint: early bail-outs ===
+
+        // Null constraint → return the original candidate. Pinned
+        // because the call site does NOT pre-check (constraints
+        // are commonly null at constructor calls without a written
+        // declared type).
+        @test()
+        Calling__specialize_from_constraint__with_null_constraint__returns_candidate() is
+            let box = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Box", empty_names(), Semantic.BLOCK_SCOPE())
+            let init = INSTANCE_METHOD(loc(), loc(), box, "init", Semantic.BLOCK_SCOPE())
+
+            let specializer = OWNER_CONSTRAINT_SPECIALIZER()
+            let result = specializer.specialize_from_constraint(loc(), init, null)
+
+            are_same(init, result)
+        si
+
+        // Non-generic owner → return the original candidate. No
+        // owner-generic args to bind, so the constraint can't
+        // contribute anything.
+        @test()
+        Calling__specialize_from_constraint__on_non_generic_owner__returns_candidate() is
+            let box = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Box", empty_names(), Semantic.BLOCK_SCOPE())
+            let init = INSTANCE_METHOD(loc(), loc(), box, "init", Semantic.BLOCK_SCOPE())
+
+            // constraint is some type, doesn't matter — owner is
+            // non-generic so we bail before looking at it.
+            let some_class = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Something", empty_names(), Semantic.BLOCK_SCOPE())
+
+            let specializer = OWNER_CONSTRAINT_SPECIALIZER()
+            let result = specializer.specialize_from_constraint(loc(), init, some_class.type!)
+
+            are_same(init, result)
+        si
+    si
+si

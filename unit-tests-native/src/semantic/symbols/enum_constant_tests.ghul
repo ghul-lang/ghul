@@ -1,0 +1,124 @@
+namespace Semantic.UnitTests is
+
+    use Source.LOCATION
+
+    use Collections.LIST
+
+    use Semantic.Types.Type
+
+    use Semantic.Symbols.CLASS
+    use Semantic.Symbols.ENUM_CONSTANT
+    use Semantic.Symbols.ENUM_STRUCT
+    use Semantic.Symbols.NAMESPACE
+    use Assertions
+
+    // The primitive types the width decision asks about, each one
+    // instance shared between the enum's recorded underlying type and
+    // the lookup's answer — the position holds in the compiler too,
+    // where both sides of the comparison come from one type mapper's
+    // cache. Everything else is the stub lookup's
+    // NotImplementedException, which these tests never reach.
+    class WIDE_ENUM_TEST_LOOKUP: TEST_INNATE_SYMBOL_LOOKUP is
+        _long_type: Type
+        _ulong_type: Type
+
+        init() is
+            super.init()
+
+            let loc = LOCATION("test.ghul", 1, 1, 1, 1)
+
+            _long_type = CLASS(loc, loc, Semantic.BLOCK_SCOPE(), "Long", LIST[string](), Semantic.BLOCK_SCOPE()).type!
+            _ulong_type = CLASS(loc, loc, Semantic.BLOCK_SCOPE(), "ULong", LIST[string](), Semantic.BLOCK_SCOPE()).type!
+        si
+
+        get_long_type() -> Type => _long_type
+        get_ulong_type() -> Type => _ulong_type
+    si
+
+    // Pins ENUM_CONSTANT, the one place the width an enum-typed value is
+    // read at is decided: the width the enum was declared over where an
+    // import recorded one wider than int32, and int32 otherwise - which
+    // is what every ghūl-declared enum is.
+    //
+    // A member of a wide enum whose value fits int32 arrives parsed, as
+    // `from_number`'s int; one that does not arrives as text and is
+    // parsed to a bit pattern for `from_pattern`. Both have to read at
+    // the enum's width: a small member and a large one of the same wide
+    // enum taking different widths would push an int32 constant where
+    // the enum's IL signature wants int64.
+    class ENUM_CONSTANT_TESTS is
+        init() is si
+
+        loc() -> LOCATION => LOCATION("test.ghul", 1, 1, 1, 1)
+
+        // An enum whose recorded underlying type is the one given -
+        // null for the ghūl-declared shape, which records nothing.
+        enum_backed_by(underlying: Type?) -> Type is
+            let owner = NAMESPACE(loc(), "Test", null, ".Test", false)
+            let `enum = ENUM_STRUCT(loc(), loc(), owner, "Level", owner)
+
+            `enum.underlying_type = underlying
+
+            return `enum.type!
+        si
+
+        @test()
+        A_parsed_value_of_a_long_backed_enum_reads_at_sixty_four_bits() is
+            let lookup = WIDE_ENUM_TEST_LOOKUP()
+
+            let result =
+                cast IR.Values.Literal.NUMBER(
+                    ENUM_CONSTANT.from_number(enum_backed_by(lookup.get_long_type()), 3, lookup))
+
+            if let i8: IR.Values.Literal.CONSTANT.I8 = result.constant then
+                are_equal(3L, i8.value)
+            else
+                is_true(false, "expected an int64 constant")
+            fi
+        si
+
+        @test()
+        A_parsed_value_of_a_ghul_declared_enum_reads_at_thirty_two_bits() is
+            let lookup = WIDE_ENUM_TEST_LOOKUP()
+
+            let result =
+                cast IR.Values.Literal.NUMBER(ENUM_CONSTANT.from_number(enum_backed_by(null), 3, lookup))
+
+            if let i4: IR.Values.Literal.CONSTANT.I4 = result.constant then
+                are_equal(3, i4.value)
+            else
+                is_true(false, "expected an int32 constant")
+            fi
+        si
+
+        @test()
+        A_parsed_pattern_of_a_long_backed_enum_reads_at_sixty_four_bits() is
+            let lookup = WIDE_ENUM_TEST_LOOKUP()
+
+            let result =
+                cast IR.Values.Literal.NUMBER(
+                    ENUM_CONSTANT.from_pattern(enum_backed_by(lookup.get_long_type()), 4294967296UL, lookup))
+
+            if let i8: IR.Values.Literal.CONSTANT.I8 = result.constant then
+                are_equal(4294967296L, i8.value)
+            else
+                is_true(false, "expected an int64 constant")
+            fi
+        si
+
+        @test()
+        A_parsed_pattern_of_a_ghul_declared_enum_reads_at_thirty_two_bits() is
+            let lookup = WIDE_ENUM_TEST_LOOKUP()
+
+            let result =
+                cast IR.Values.Literal.NUMBER(
+                    ENUM_CONSTANT.from_pattern(enum_backed_by(null), 4294967296UL, lookup))
+
+            if let i4: IR.Values.Literal.CONSTANT.I4 = result.constant then
+                are_equal(0, i4.value)
+            else
+                is_true(false, "expected an int32 constant")
+            fi
+        si
+    si
+si

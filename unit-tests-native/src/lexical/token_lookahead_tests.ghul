@@ -1,0 +1,110 @@
+namespace Lexical.UnitTests is
+    use Collections
+
+    use Logging
+
+    use Ghul.Pipes
+
+    class FAKE_TOKEN_SOURCE: Lexical.TokenSource is
+        _token_iterator: Iterator[Lexical.TOKEN_PAIR]
+
+        init(tokens: Iterable[Lexical.TOKEN_PAIR]) is
+            _token_iterator = tokens.iterator
+        si
+
+        read_token() -> Lexical.TOKEN_PAIR is
+            if _token_iterator.move_next() then
+                return _token_iterator.current
+            else
+                return Lexical.TOKEN_PAIR(Lexical.TOKEN.END_OF_INPUT, Source.LOCATION("test.ghul", 0, 0), "")
+            fi
+        si
+
+        expect_format_specifier() is
+        si
+    si
+
+    class TOKEN_LOOKAHEAD_TESTS is
+        init() is si
+
+        get_dummy_identifier(n: int) -> Lexical.TOKEN_PAIR =>
+            Lexical.TOKEN_PAIR(Lexical.TOKEN.IDENTIFIER, Source.LOCATION("test.ghul", 0, 0), "dummy_{n}")
+
+        @test()
+        given_an_empty_queue__speculate__should_enter_speculation_mode() is
+            let queue = Lexical.TOKEN_QUEUE(8)
+            let source = FAKE_TOKEN_SOURCE([get_dummy_identifier(1), get_dummy_identifier(2)])
+            let lookahead = Lexical.TOKEN_LOOKAHEAD(queue, source)
+
+            queue.speculate_enter()
+
+            assert queue.is_speculating
+        si
+
+        @test()
+        given_a_stream_of_tokens__speculate_read_two_tokens_back_track_and_read_two_tokens__should_return_the_same_two_tokens_again() is
+            let expected_tokens = (0..8) |> map(i => get_dummy_identifier(i)) |> ARRAY()
+
+            let queue = Lexical.TOKEN_QUEUE(8)
+            let source = FAKE_TOKEN_SOURCE(expected_tokens)
+            let lookahead = Lexical.TOKEN_LOOKAHEAD(queue, source)
+
+            lookahead.speculate()
+            let token1 = lookahead.read_token()
+            let token2 = lookahead.read_token()
+            lookahead.backtrack()
+            let token3 = lookahead.read_token()
+            let token4 = lookahead.read_token()
+
+            assert token1 == expected_tokens[0]
+            assert token2 == expected_tokens[1]
+            assert token3 == expected_tokens[0]
+            assert token4 == expected_tokens[1]
+        si
+
+        @test()
+        given_a_stream_of_tokens__nested_speculate_backtrack_and_read__should_return_the_same_tokens() is
+            let expected_tokens = (0..8) |> map(i => get_dummy_identifier(i)) |> ARRAY()
+
+            let queue = Lexical.TOKEN_QUEUE(8)
+            let source = FAKE_TOKEN_SOURCE(expected_tokens)
+            let lookahead = Lexical.TOKEN_LOOKAHEAD(queue, source)
+
+            lookahead.speculate()
+            let token1 = lookahead.read_token()
+            let token2 = lookahead.read_token()
+            lookahead.speculate()
+            let token3 = lookahead.read_token()
+            let token4 = lookahead.read_token()
+            lookahead.backtrack()
+            let token5 = lookahead.read_token()
+            let token6 = lookahead.read_token()
+
+            assert token1 == expected_tokens[0]
+            assert token2 == expected_tokens[1]
+            assert token3 == expected_tokens[2]
+            assert token4 == expected_tokens[3]
+            assert token5 == expected_tokens[2]
+            assert token6 == expected_tokens[3]
+        si
+
+        @test()
+        given_a_stream_of_tokens__after_speculate_backtrack__should_return_token_before_speculate() is
+            let expected_tokens = (0..8) |> map(i => get_dummy_identifier(i)) |> ARRAY()
+
+            let queue = Lexical.TOKEN_QUEUE(8)
+            let source = FAKE_TOKEN_SOURCE(expected_tokens)
+            let lookahead = Lexical.TOKEN_LOOKAHEAD(queue, source)
+
+            let token1 = lookahead.read_token()
+            let token2 = lookahead.read_token()
+            lookahead.speculate()
+
+            let token3 = lookahead.read_token()
+            let token4 = lookahead.read_token()
+            let actual = lookahead.backtrack()
+
+            assert actual == expected_tokens[1]
+        si
+    si
+si

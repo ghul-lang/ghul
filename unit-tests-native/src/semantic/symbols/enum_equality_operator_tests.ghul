@@ -1,0 +1,113 @@
+namespace Semantic.UnitTests is
+
+    use Collections.LIST
+
+    use Source.LOCATION
+
+    use Semantic.Symbols.CLASS
+    use Semantic.Symbols.ENUM_EQUALITY_OPERATOR
+    use Semantic.Symbols.ENUM_STRUCT
+    use Semantic.Symbols.FUNCTION_GROUP
+    use Semantic.Symbols.Function
+    use Semantic.Symbols.InnateFunction
+    use Semantic.Types.Type
+    use Assertions
+
+    // An enum's equality is the same opcode comparison the numeric
+    // primitives use, supplied per enum type because each enum is its
+    // own type. The operator's shape is what the comparison lowering
+    // and the store-free walk both read, so it is pinned here. Mirrors
+    // `enum_order_operator_tests`, which pins the `<>` analogue.
+    class ENUM_EQUALITY_OPERATOR_TESTS is
+        init() is si
+
+        loc() -> LOCATION => LOCATION("test.ghul", 1, 1, 1, 1)
+
+        bool_type() -> Type =>
+            CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "bool", LIST[string](), Semantic.BLOCK_SCOPE()).type!
+
+        an_enum() -> ENUM_STRUCT =>
+            ENUM_STRUCT(loc(), loc(), Semantic.BLOCK_SCOPE(), "Level", Semantic.BLOCK_SCOPE())
+
+        equality_operator_of(owner: ENUM_STRUCT) -> Function? is
+            let member = owner.find_member("=~")
+
+            if !member? then
+                return null
+            fi
+
+            if isa FUNCTION_GROUP(member) then
+                for f in (cast FUNCTION_GROUP(member)).functions do
+                    return f
+                od
+
+                return null
+            fi
+
+            if isa Function(member) then
+                return cast Function(member)
+            fi
+
+            return null
+        si
+
+        @test()
+        Registering__adds_an_equality_operator() is
+            let owner = an_enum()
+
+            ENUM_EQUALITY_OPERATOR.register(owner, bool_type())
+
+            is_true(equality_operator_of(owner)?)
+        si
+
+        @test()
+        Registered_operator__takes_one_argument_of_the_enum_type() is
+            let owner = an_enum()
+
+            ENUM_EQUALITY_OPERATOR.register(owner, bool_type())
+
+            let operator = equality_operator_of(owner)!
+
+            are_equal(1, operator.arguments.count)
+            are_same(owner.type!, operator.arguments[0])
+        si
+
+        @test()
+        Registered_operator__returns_the_bool_type() is
+            let owner = an_enum()
+            let bool = bool_type()
+
+            ENUM_EQUALITY_OPERATOR.register(owner, bool)
+
+            are_same(bool, equality_operator_of(owner)!.return_type!)
+        si
+
+        // infer-store-free classifies an innate by walking its body, and
+        // this one has none, so the bit is declared rather than inferred.
+        // Without it a comparison drops every narrowing at its call site.
+        @test()
+        Registered_operator__is_declared_pure() is
+            let owner = an_enum()
+
+            ENUM_EQUALITY_OPERATOR.register(owner, bool_type())
+
+            is_true(equality_operator_of(owner)!.is_declared_pure)
+        si
+
+        // `=~` lowers through `compare.value` (the `ceq` innate), not
+        // `compare.order`; the innate name is what selects the lowering,
+        // so a change to the innate this operator is built with fails here.
+        @test()
+        Registered_operator__lowers_to_the_value_comparison() is
+            let owner = an_enum()
+
+            ENUM_EQUALITY_OPERATOR.register(owner, bool_type())
+
+            let operator = equality_operator_of(owner)!
+            let innate_op = cast InnateFunction?(operator)
+
+            is_true(innate_op?)
+            are_equal("compare.value", innate_op!.innate_name)
+        si
+    si
+si

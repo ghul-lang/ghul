@@ -1,0 +1,123 @@
+namespace Semantic.Types.UnitTests is
+    use Collections.LIST
+
+    use Source.LOCATION
+
+    use Semantic.Symbols.CLASS
+    use Semantic.Symbols.INFERRED_TYPE_ARG_ORIGIN
+    use Semantic.Symbols.Variable
+
+    use Semantic.Types.ACTION
+    use Semantic.Types.FUNCTION
+    use Semantic.Types.INFERRED_VARIABLE_TYPE
+    use Semantic.Types.Type
+    use Assertions
+
+    // Tests for GENERIC.is_function_with_any_implicit_argument_types, the
+    // predicate OVERLOAD_RESOLVER reads to decide whether a call needs a
+    // constraint-push retry so a lambda-literal argument's still-unresolved
+    // parameter types can be settled from the chosen formal.
+    //
+    // The predicate has to skip a trailing return-type slot on a
+    // value-returning FUNCTION but must NOT do so on a void-returning
+    // ACTION, whose `arguments` holds parameter types alone. Excluding
+    // the last entry unconditionally treats an arity-1 ACTION's sole
+    // parameter as though it were a return slot that isn't there,
+    // wrongly declining the retry that would have resolved it.
+    class ACTION_IMPLICIT_ARGUMENT_TYPES_TESTS is
+        init() is si
+
+        loc() -> LOCATION => LOCATION("test.ghul", 1, 1, 1, 1)
+        empty_names() -> LIST[string] => LIST[string]()
+
+        int_class() -> CLASS => CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "int", empty_names(), Semantic.BLOCK_SCOPE())
+
+        // The owner a GENERIC-derived type wraps must itself be
+        // generic, with one type-parameter name per element of
+        // `arguments` — mirroring the innate Action[T..]/Func[T.., TResult]
+        // declarations `get_function_type` instantiates against.
+        names(count: int) -> LIST[string] is
+            let result = LIST[string]()
+            for i in 0..count do
+                result.add("T{i}")
+            od
+            return result
+        si
+
+        action_class(arity: int) -> CLASS => CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "action", names(arity), Semantic.BLOCK_SCOPE())
+        function_class(arity: int) -> CLASS => CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "function", names(arity), Semantic.BLOCK_SCOPE())
+
+        placeholder() -> Type is
+            let origin: Variable = INFERRED_TYPE_ARG_ORIGIN(loc(), Semantic.BLOCK_SCOPE(), "T")
+            return INFERRED_VARIABLE_TYPE(origin)
+        si
+
+        @test()
+        Is_function_with_any_implicit_argument_types__on_arity_1_action_with_placeholder_param__returns_true() is
+            // (placeholder) -> void: ACTION.arguments is the parameter
+            // list alone, no trailing return slot to exclude.
+            let args = LIST[Type]([placeholder()])
+            let action = ACTION(loc(), action_class(1), args)
+
+            is_true(action.is_function_with_any_implicit_argument_types)
+        si
+
+        @test()
+        Is_function_with_any_implicit_argument_types__on_arity_1_action_with_concrete_param__returns_false() is
+            let args = LIST[Type]([int_class().type!])
+            let action = ACTION(loc(), action_class(1), args)
+
+            is_false(action.is_function_with_any_implicit_argument_types)
+        si
+
+        @test()
+        Is_function_with_any_implicit_argument_types__on_action_with_second_param_placeholder__returns_true() is
+            // (int, placeholder) -> void — the second (last) parameter
+            // still has to be checked on an ACTION, unlike on a FUNCTION
+            // where the last slot is the return type.
+            let args = LIST[Type]([int_class().type!, placeholder()])
+            let action = ACTION(loc(), action_class(2), args)
+
+            is_true(action.is_function_with_any_implicit_argument_types)
+        si
+
+        @test()
+        Is_function_with_any_implicit_argument_types__on_function_with_placeholder_return_only__returns_false() is
+            // (int) -> placeholder: FUNCTION.arguments is [param, return],
+            // and a still-inferring return type alone must not trigger
+            // the retry — only parameter positions matter here.
+            let args = LIST[Type]([int_class().type!, placeholder()])
+            let function = FUNCTION(loc(), function_class(2), args)
+
+            is_false(function.is_function_with_any_implicit_argument_types)
+        si
+
+        @test()
+        Is_function_with_any_implicit_argument_types__on_function_with_placeholder_param__returns_true() is
+            // (placeholder) -> int: the parameter position is checked.
+            let args = LIST[Type]([placeholder(), int_class().type!])
+            let function = FUNCTION(loc(), function_class(2), args)
+
+            is_true(function.is_function_with_any_implicit_argument_types)
+        si
+
+        @test()
+        Is_function_with_any_implicit_argument_types__on_function_returning_a_function_with_a_placeholder_param__returns_true() is
+            // (int) -> (placeholder) -> int: the returned function still has
+            // an implicit parameter, which the second pass settles from the
+            // formal's return spine.
+            let inner = FUNCTION(loc(), function_class(2), LIST[Type]([placeholder(), int_class().type!]))
+            let outer = FUNCTION(loc(), function_class(2), LIST[Type]([int_class().type!, inner]))
+
+            is_true(outer.is_function_with_any_implicit_argument_types)
+        si
+
+        @test()
+        Is_function_with_any_implicit_argument_types__on_function_returning_a_fully_typed_function__returns_false() is
+            let inner = FUNCTION(loc(), function_class(2), LIST[Type]([int_class().type!, int_class().type!]))
+            let outer = FUNCTION(loc(), function_class(2), LIST[Type]([int_class().type!, inner]))
+
+            is_false(outer.is_function_with_any_implicit_argument_types)
+        si
+    si
+si

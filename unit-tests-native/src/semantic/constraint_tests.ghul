@@ -1,0 +1,688 @@
+namespace Semantic.UnitTests is
+    use Collections.LIST
+
+    use Source.LOCATION
+
+    use Semantic.Symbols.CLASS
+    use Semantic.Symbols.INFERRED_TYPE_ARG_ORIGIN
+
+    use Semantic.Types.ERROR
+    use Semantic.Types.INFERRED_RETURN_TYPE
+    use Semantic.Types.INFERRED_VARIABLE_TYPE
+
+    use Semantic.Constraint
+    use Semantic.MEMBER_CONSTRAINT
+    use Semantic.CALL_CONSTRAINT
+    use Semantic.DESTRUCTURE_CONSTRAINT
+    use Semantic.ITERABLE_CONSTRAINT
+    use Semantic.INDEX_CONSTRAINT
+    use Assertions
+
+    // Tests for the operation-constraint abstraction consulted by
+    // the constraint-aware LUB. The discharge function is the lever
+    // the LUB uses to filter candidate types — a false positive
+    // lets it pick a candidate that doesn't actually expose the
+    // operation, leading to broken IL or runtime type errors. Pin
+    // the conservative-rejection paths here so refactors can't
+    // accidentally flip them.
+    class MEMBER_CONSTRAINT_TESTS is
+        init() is si
+
+        loc() -> LOCATION => LOCATION("test.ghul", 1, 1, 1, 1)
+        empty_names() -> LIST[string] => LIST[string]()
+
+        // Conservative-rejection axis 1: null candidates. A null
+        // type cannot expose any member, so discharge returns false.
+        @test()
+        Calling__try_discharge__on_a_null_candidate__should_return_false() is
+            let c = MEMBER_CONSTRAINT("foo")
+
+            is_false(c.try_discharge(null))
+        si
+
+        // Conservative-rejection axis 2: ERROR-typed candidates.
+        // ERROR is a hard-failure marker; treating it as a valid
+        // discharge target would let the LUB resolve a placeholder
+        // to ERROR, silently propagating the failure further into
+        // IL generation. Reject explicitly.
+        @test()
+        Calling__try_discharge__on_an_error_candidate__should_return_false() is
+            let c = MEMBER_CONSTRAINT("foo")
+
+            is_false(c.try_discharge(ERROR()))
+        si
+
+        // Conservative-rejection axis 3: placeholder candidates.
+        // An INFERRED_VARIABLE_TYPE or INFERRED_RETURN_TYPE is
+        // itself awaiting resolution. Discharging against another
+        // placeholder produces a circular chain that never lands
+        // on a real type — reject so the solver picks something
+        // concrete instead.
+        @test()
+        Calling__try_discharge__on_an_inferred_variable_type_candidate__should_return_false() is
+            let origin = INFERRED_TYPE_ARG_ORIGIN(loc(), Semantic.BLOCK_SCOPE(), "T")
+            let placeholder = INFERRED_VARIABLE_TYPE(origin)
+            let c = MEMBER_CONSTRAINT("foo")
+
+            is_false(c.try_discharge(placeholder))
+        si
+
+        @test()
+        Calling__try_discharge__on_an_inferred_return_type_candidate__should_return_false() is
+            let c = MEMBER_CONSTRAINT("foo")
+
+            is_false(c.try_discharge(INFERRED_RETURN_TYPE()))
+        si
+
+        // Member-name miss: a candidate that doesn't carry the
+        // requested member name fails to discharge. This is the
+        // most common path during solving — most candidate types
+        // won't have the specific operation site's member.
+        @test()
+        Calling__try_discharge__on_a_class_without_the_requested_member__should_return_false() is
+            let k = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Empty", empty_names(), Semantic.BLOCK_SCOPE())
+            let c = MEMBER_CONSTRAINT("nonexistent_member")
+
+            is_false(c.try_discharge(k.type))
+        si
+
+        // Equality + hash. Two MEMBER_CONSTRAINTs asking for the
+        // same member name MUST collide so the SET-based
+        // accumulator on Variable folds repeat emissions from
+        // re-walks. Pinning both `equals` and `get_hash_code` here
+        // so subclasses can't accidentally diverge — the SET
+        // breaks silently if hash and equality disagree.
+        @test()
+        Two__MEMBER_CONSTRAINT__instances_with_the_same_name__should_be_equal() is
+            let a = MEMBER_CONSTRAINT("foo")
+            let b = MEMBER_CONSTRAINT("foo")
+
+            is_true(a.equals(b))
+            are_equal(a.get_hash_code(), b.get_hash_code())
+        si
+
+        @test()
+        Two__MEMBER_CONSTRAINT__instances_with_different_names__should_not_be_equal() is
+            let a = MEMBER_CONSTRAINT("foo")
+            let b = MEMBER_CONSTRAINT("bar")
+
+            is_false(a.equals(b))
+        si
+
+        // Cross-subclass equality returns false. Subclasses must
+        // stay distinguishable even when they share a "name" or
+        // other shape, because the Variable._constraints SET
+        // accumulator relies on equals/get_hash_code to dedup
+        // per-shape.
+        @test()
+        A__MEMBER_CONSTRAINT__should_not_be_equal_to_a_DESTRUCTURE_CONSTRAINT() is
+            let a = MEMBER_CONSTRAINT("foo")
+            let b = DESTRUCTURE_CONSTRAINT(0)
+
+            is_false(a.equals(b))
+            is_false(b.equals(a))
+        si
+
+        // A null other is rejected, never NREs. The set machinery
+        // shouldn't pass null but we're defensive.
+        @test()
+        Calling__equals__with_null_other__should_return_false() is
+            let a = MEMBER_CONSTRAINT("foo")
+
+            is_false(a.equals(null))
+        si
+    si
+
+    // Tests for CALL_CONSTRAINT — emitted at `_visit(call)` when
+    // the receiver is itself an INFERRED_VARIABLE_TYPE placeholder
+    // (e.g. self-applied shapes like `(f, x) => f(f(x))`, where
+    // the inner `f(x)` calls a placeholder-typed receiver).
+    //
+    // Pinning conservative-rejection paths so accidental loosening
+    // can't push CALL_CONSTRAINT into accepting non-callable types
+    // or mis-matched-arity types as discharge candidates — both
+    // failures would let the LUB resolve a placeholder to a type
+    // the call site can't actually invoke, producing broken IL.
+    class CALL_CONSTRAINT_TESTS is
+        init() is si
+
+        loc() -> LOCATION => LOCATION("test.ghul", 1, 1, 1, 1)
+        empty_names() -> LIST[string] => LIST[string]()
+
+        types() -> LIST[Semantic.Types.Type] => LIST[Semantic.Types.Type]()
+        types(a: Semantic.Types.Type) -> LIST[Semantic.Types.Type] is
+            let result = LIST[Semantic.Types.Type]()
+            result.add(a)
+            return result
+        si
+        types(a: Semantic.Types.Type, b: Semantic.Types.Type) -> LIST[Semantic.Types.Type] is
+            let result = LIST[Semantic.Types.Type]()
+            result.add(a)
+            result.add(b)
+            return result
+        si
+
+        // Two-argument generic-arg-name list for synthesised
+        // Function-shaped classy symbols. Matches the (one input,
+        // one return) shape of `T -> R` Function instantiations used
+        // in the discharge tests below.
+        function_arg_names() -> LIST[string] is
+            let result = LIST[string]()
+            result.add("T")
+            result.add("R")
+            return result
+        si
+
+        // Conservative-rejection axis 1: null candidate cannot be
+        // callable, discharge returns false. Same shape as
+        // MEMBER_CONSTRAINT_TESTS' axis 1 — pinned here as the
+        // CALL_CONSTRAINT-specific equivalent.
+        @test()
+        Calling__try_discharge__on_a_null_candidate__should_return_false() is
+            let c = CALL_CONSTRAINT(types())
+
+            is_false(c.try_discharge(null))
+        si
+
+        // Conservative-rejection axis 2: ERROR candidate. Same
+        // rationale as MEMBER_CONSTRAINT — treating ERROR as a
+        // valid discharge target lets the LUB silently propagate
+        // failure.
+        @test()
+        Calling__try_discharge__on_an_error_candidate__should_return_false() is
+            let c = CALL_CONSTRAINT(types())
+
+            is_false(c.try_discharge(ERROR()))
+        si
+
+        // Conservative-rejection axis 3: placeholder candidate.
+        // We can't determine callability of a not-yet-resolved
+        // placeholder; defer.
+        @test()
+        Calling__try_discharge__on_an_inferred_variable_type_candidate__should_return_false() is
+            let origin = INFERRED_TYPE_ARG_ORIGIN(loc(), Semantic.BLOCK_SCOPE(), "T")
+            let placeholder = INFERRED_VARIABLE_TYPE(origin)
+            let c = CALL_CONSTRAINT(types())
+
+            is_false(c.try_discharge(placeholder))
+        si
+
+        // Captured args containing a placeholder no longer reject
+        // outright — an unresolved placeholder doesn't refute the
+        // candidate, since the placeholder may resolve to anything
+        // on a later iter. The rejection here comes from a different
+        // axis: the candidate type is a plain class (`int_class`),
+        // not Function/Action, so the not-callable check returns
+        // false first. Pinning so the non-callable rejection stays
+        // strict — placeholder-arg + non-callable candidate is
+        // still rejected, just via the shape check rather than the
+        // arg check.
+        @test()
+        Calling__try_discharge__when_a_captured_arg_is_a_placeholder_and_candidate_is_non_callable__should_return_false() is
+            let origin = INFERRED_TYPE_ARG_ORIGIN(loc(), Semantic.BLOCK_SCOPE(), "T")
+            let placeholder_arg = INFERRED_VARIABLE_TYPE(origin)
+            let c = CALL_CONSTRAINT(types(placeholder_arg))
+
+            let int_class = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "int", empty_names(), Semantic.BLOCK_SCOPE())
+
+            is_false(c.try_discharge(int_class.type))
+        si
+
+        // Non-function candidate: discharge false. A class type
+        // with no special function shape isn't callable. Pinned
+        // because a regression that accepted "has invoke member"
+        // instead of strictly Function/Action would let user-
+        // defined classes resolve as placeholders for callable
+        // sites — confusing behaviour even when ghūl supports it
+        // in principle.
+        @test()
+        Calling__try_discharge__on_a_non_function_class_type__should_return_false() is
+            let k = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Empty", empty_names(), Semantic.BLOCK_SCOPE())
+            let c = CALL_CONSTRAINT(types())
+
+            is_false(c.try_discharge(k.type))
+        si
+
+        // Pin the new look-through path: when a captured arg is a
+        // phantom whose origin has settled on a concrete type that
+        // matches the candidate's formal, discharge accepts. Without
+        // the look-through (the previous behaviour) `contains_inferred`
+        // sees the phantom's own identity and rejects, leaving the
+        // phantom origin's symbol unresolved even though its LUB had
+        // the right candidate.
+        @test()
+        Calling__try_discharge__when_a_captured_arg_phantom_origin_has_settled__should_return_true() is
+            let int_class = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "int", empty_names(), Semantic.BLOCK_SCOPE())
+            let int_t = int_class.type!
+
+            // Variable whose type is already int — simulating an
+            // origin that resolved on a prior retry iter.
+            let origin = INFERRED_TYPE_ARG_ORIGIN(loc(), Semantic.BLOCK_SCOPE(), "T")
+            origin.set_type(int_t)
+
+            // The phantom captured at constraint-emission time
+            // points back at that origin.
+            let phantom_arg = INFERRED_VARIABLE_TYPE(origin)
+            let c = CALL_CONSTRAINT(types(phantom_arg))
+
+            // Candidate: int -> int. Phantom resolves to int via
+            // origin, matches int formal, discharge succeeds.
+            let function_class = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Function", function_arg_names(), Semantic.BLOCK_SCOPE())
+            let candidate = Semantic.Types.FUNCTION(loc(), function_class, types(int_t, int_t))
+
+            is_true(c.try_discharge(candidate))
+        si
+
+        // Pin the per-slot skip path: an unresolved phantom captured
+        // arg no longer refutes the candidate. The discharge defers
+        // that slot (the phantom may settle on a later iter to
+        // anything) and accepts the candidate based on shape + arity.
+        // Previously this returned false on the contains_inferred
+        // axis, deadlocking iterative inference when the origin
+        // couldn't resolve without the constraint discharging first.
+        @test()
+        Calling__try_discharge__when_a_captured_arg_phantom_is_unresolved__should_return_true_on_a_callable_candidate() is
+            let int_class = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "int", empty_names(), Semantic.BLOCK_SCOPE())
+            let int_t = int_class.type!
+
+            // Origin without a type — represents a not-yet-resolved
+            // phantom.
+            let origin = INFERRED_TYPE_ARG_ORIGIN(loc(), Semantic.BLOCK_SCOPE(), "T")
+            let phantom_arg = INFERRED_VARIABLE_TYPE(origin)
+            let c = CALL_CONSTRAINT(types(phantom_arg))
+
+            let function_class = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Function", function_arg_names(), Semantic.BLOCK_SCOPE())
+            let candidate = Semantic.Types.FUNCTION(loc(), function_class, types(int_t, int_t))
+
+            is_true(c.try_discharge(candidate))
+        si
+
+        // Concrete actual that doesn't fit the candidate's formal
+        // still refutes the candidate. The look-through doesn't
+        // weaken this — only placeholder arms get skipped. Pin
+        // because a regression that also skipped concrete mismatches
+        // would let the LUB resolve a phantom to a type its call
+        // sites can't actually invoke.
+        @test()
+        Calling__try_discharge__when_a_concrete_arg_does_not_fit_the_candidate_formal__should_return_false() is
+            let int_class = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "int", empty_names(), Semantic.BLOCK_SCOPE())
+            let string_class = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "string", empty_names(), Semantic.BLOCK_SCOPE())
+
+            // Captured arg is string; candidate is int -> int.
+            // string doesn't fit the int formal → reject.
+            let c = CALL_CONSTRAINT(types(string_class.type!))
+
+            let function_class = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Function", function_arg_names(), Semantic.BLOCK_SCOPE())
+            let candidate = Semantic.Types.FUNCTION(loc(), function_class, types(int_class.type!, int_class.type!))
+
+            is_false(c.try_discharge(candidate))
+        si
+
+        // Equality + hash. Two CALL_CONSTRAINTs with structurally-
+        // equal captured argument lists collide so the SET
+        // accumulator on Variable folds re-emissions from re-walks.
+        // Two with different arity or different arg types stay
+        // distinct.
+        @test()
+        Two__CALL_CONSTRAINT__instances_with_same_empty_args__should_be_equal() is
+            let a = CALL_CONSTRAINT(types())
+            let b = CALL_CONSTRAINT(types())
+
+            is_true(a.equals(b))
+            are_equal(a.get_hash_code(), b.get_hash_code())
+        si
+
+        @test()
+        Two__CALL_CONSTRAINT__instances_with_different_arity__should_not_be_equal() is
+            let int_class = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "int", empty_names(), Semantic.BLOCK_SCOPE())
+            let int_t = int_class.type!
+
+            let a = CALL_CONSTRAINT(types(int_t))
+            let b = CALL_CONSTRAINT(types(int_t, int_t))
+
+            is_false(a.equals(b))
+        si
+
+        @test()
+        A__CALL_CONSTRAINT__should_not_be_equal_to_a_MEMBER_CONSTRAINT() is
+            let a = CALL_CONSTRAINT(types())
+            let b = MEMBER_CONSTRAINT("invoke")
+
+            is_false(a.equals(b))
+            is_false(b.equals(a))
+        si
+
+        @test()
+        Calling__equals__with_null_other__should_return_false() is
+            let a = CALL_CONSTRAINT(types())
+
+            is_false(a.equals(null))
+        si
+    si
+
+    // Tests for MEMBER_CONSTRAINT's arity-aware variant — emitted
+    // at CALL sites whose function is a MEMBER on a placeholder
+    // receiver. The variant differs from the name-only form by
+    // `call_arity != -1`. Equality + hash include arity so the
+    // SET accumulator can carry both versions (name-only is
+    // strictly weaker; arity-aware refines).
+    //
+    // The discharge path's arity filter against a candidate's
+    // Function / FUNCTION_GROUP is exercised indirectly through
+    // the full-pipeline integration tests; here we pin the
+    // identity / SET-collision behaviour that the accumulator
+    // depends on.
+    class MEMBER_CONSTRAINT_ARITY_TESTS is
+        init() is si
+
+        @test()
+        Two_member_constraints_with_same_name_but_different_arity__are_distinct() is
+            let a = MEMBER_CONSTRAINT("set", 1)
+            let b = MEMBER_CONSTRAINT("set", 2)
+
+            is_false(a.equals(b))
+        si
+
+        @test()
+        Name_only_and_arity_aware_constraints_with_same_name__are_distinct() is
+            // arity = -1 (the default name-only form) is the "no
+            // arity constraint" sentinel; explicit arity is strictly
+            // more restrictive. The set keeps both, with each
+            // discharging on its own.
+            let nameOnly = MEMBER_CONSTRAINT("set")
+            let arityAware = MEMBER_CONSTRAINT("set", 1)
+
+            is_false(nameOnly.equals(arityAware))
+        si
+
+        @test()
+        Two_arity_aware_constraints_with_same_name_and_arity__are_equal() is
+            let a = MEMBER_CONSTRAINT("set", 1)
+            let b = MEMBER_CONSTRAINT("set", 1)
+
+            is_true(a.equals(b))
+            are_equal(a.get_hash_code(), b.get_hash_code())
+        si
+
+        @test()
+        Default_constructor_sets_arity_to_minus_one() is
+            // The "no arity check" sentinel is -1. Pinning it here
+            // because the discharge path's check_arity short-circuits
+            // on call_arity < 0; changing the sentinel without
+            // updating both sites would silently break the
+            // name-only mode.
+            let c = MEMBER_CONSTRAINT("set")
+
+            are_equal(-1, c.call_arity)
+        si
+    si
+
+    // Tests for DESTRUCTURE_CONSTRAINT — emitted at destructure
+    // bindings `let (a, b, ...) = p` when p's type is still an
+    // INFERRED_VARIABLE_TYPE. Discharge checks that the candidate
+    // can supply at least `member_count` destructure positions —
+    // either via the value-tuple arity match, or via the
+    // conventional `find_destructure_member` protocol.
+    class DESTRUCTURE_CONSTRAINT_TESTS is
+        init() is si
+
+        loc() -> LOCATION => LOCATION("test.ghul", 1, 1, 1, 1)
+        empty_names() -> LIST[string] => LIST[string]()
+
+        @test()
+        Discharge__on_null_candidate__returns_false() is
+            let c = DESTRUCTURE_CONSTRAINT(2)
+
+            is_false(c.try_discharge(null))
+        si
+
+        @test()
+        Discharge__on_error_candidate__returns_false() is
+            let c = DESTRUCTURE_CONSTRAINT(2)
+
+            is_false(c.try_discharge(ERROR()))
+        si
+
+        @test()
+        Discharge__on_inferred_variable_candidate__returns_false() is
+            let origin = INFERRED_TYPE_ARG_ORIGIN(loc(), Semantic.BLOCK_SCOPE(), "T")
+            let placeholder = INFERRED_VARIABLE_TYPE(origin)
+            let c = DESTRUCTURE_CONSTRAINT(2)
+
+            is_false(c.try_discharge(placeholder))
+        si
+
+        @test()
+        Discharge__on_class_without_destructure_protocol__returns_false() is
+            // A plain class with no fields and no destructure-member
+            // names cannot supply position 0 — discharge rejects.
+            let k = Semantic.Symbols.CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Empty", empty_names(), Semantic.BLOCK_SCOPE())
+            let c = DESTRUCTURE_CONSTRAINT(2)
+
+            is_false(c.try_discharge(k.type))
+        si
+
+        @test()
+        Equality__same_count__returns_true() is
+            let a = DESTRUCTURE_CONSTRAINT(2)
+            let b = DESTRUCTURE_CONSTRAINT(2)
+
+            is_true(a.equals(b))
+            are_equal(a.get_hash_code(), b.get_hash_code())
+        si
+
+        @test()
+        Equality__different_count__returns_false() is
+            let a = DESTRUCTURE_CONSTRAINT(2)
+            let b = DESTRUCTURE_CONSTRAINT(3)
+
+            is_false(a.equals(b))
+        si
+
+        @test()
+        Equality__against_member_constraint__returns_false() is
+            let a = DESTRUCTURE_CONSTRAINT(2)
+            let b = MEMBER_CONSTRAINT("foo")
+
+            is_false(a.equals(b))
+            is_false(b.equals(a))
+        si
+
+        @test()
+        Equality__against_null__returns_false() is
+            let a = DESTRUCTURE_CONSTRAINT(2)
+
+            is_false(a.equals(null))
+        si
+    si
+
+    // Tests for ITERABLE_CONSTRAINT — emitted at `for x in t` sites
+    // when t's type is INFERRED_VARIABLE_TYPE. Carries no payload
+    // (every iterable-shape requirement is structurally identical);
+    // SET-accumulator dedupes to one entry per placeholder.
+    class ITERABLE_CONSTRAINT_TESTS is
+        init() is si
+
+        loc() -> LOCATION => LOCATION("test.ghul", 1, 1, 1, 1)
+        empty_names() -> LIST[string] => LIST[string]()
+
+        @test()
+        Discharge__on_null_candidate__returns_false() is
+            let c = ITERABLE_CONSTRAINT()
+
+            is_false(c.try_discharge(null))
+        si
+
+        @test()
+        Discharge__on_error_candidate__returns_false() is
+            let c = ITERABLE_CONSTRAINT()
+
+            is_false(c.try_discharge(ERROR()))
+        si
+
+        @test()
+        Discharge__on_inferred_placeholder__returns_false() is
+            let origin = INFERRED_TYPE_ARG_ORIGIN(loc(), Semantic.BLOCK_SCOPE(), "T")
+            let placeholder = INFERRED_VARIABLE_TYPE(origin)
+            let c = ITERABLE_CONSTRAINT()
+
+            is_false(c.try_discharge(placeholder))
+        si
+
+        @test()
+        Discharge__on_class_without_iterator__returns_false() is
+            // A class with no `move_next` / `$get_iterator` cannot
+            // satisfy the iterable shape — discharge rejects.
+            let k = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Plain", empty_names(), Semantic.BLOCK_SCOPE())
+            let c = ITERABLE_CONSTRAINT()
+
+            is_false(c.try_discharge(k.type))
+        si
+
+        @test()
+        Equality__two_iterable_constraints_are_equal() is
+            let a = ITERABLE_CONSTRAINT()
+            let b = ITERABLE_CONSTRAINT()
+
+            is_true(a.equals(b))
+            are_equal(a.get_hash_code(), b.get_hash_code())
+        si
+
+        @test()
+        Equality__against_member_constraint__returns_false() is
+            let a = ITERABLE_CONSTRAINT()
+            let b = MEMBER_CONSTRAINT("foo")
+
+            is_false(a.equals(b))
+            is_false(b.equals(a))
+        si
+
+        @test()
+        Equality__against_null__returns_false() is
+            let a = ITERABLE_CONSTRAINT()
+
+            is_false(a.equals(null))
+        si
+    si
+
+    // Tests for INDEX_CONSTRAINT — emitted at `t[i]` sites when
+    // t's type is INFERRED_VARIABLE_TYPE. Carries the index
+    // expression's type; equality + hash use it, so two index
+    // operations with the same index type dedupe but different
+    // index types coexist (rare in practice — usually a single
+    // call site, but the LUB-side accumulator wants set-correctness
+    // regardless).
+    class INDEX_CONSTRAINT_TESTS is
+        init() is si
+
+        loc() -> LOCATION => LOCATION("test.ghul", 1, 1, 1, 1)
+        empty_names() -> LIST[string] => LIST[string]()
+
+        int_type() -> Semantic.Types.Type is
+            let int_class = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "int", empty_names(), Semantic.BLOCK_SCOPE())
+            return int_class.type!
+        si
+
+        string_type() -> Semantic.Types.Type is
+            let string_class = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "string", empty_names(), Semantic.BLOCK_SCOPE())
+            return string_class.type!
+        si
+
+        @test()
+        Discharge__on_null_candidate__returns_false() is
+            let c = INDEX_CONSTRAINT(int_type())
+
+            is_false(c.try_discharge(null))
+        si
+
+        @test()
+        Discharge__on_error_candidate__returns_false() is
+            let c = INDEX_CONSTRAINT(int_type())
+
+            is_false(c.try_discharge(ERROR()))
+        si
+
+        @test()
+        Discharge__on_inferred_placeholder__returns_false() is
+            let origin = INFERRED_TYPE_ARG_ORIGIN(loc(), Semantic.BLOCK_SCOPE(), "T")
+            let placeholder = INFERRED_VARIABLE_TYPE(origin)
+            let c = INDEX_CONSTRAINT(int_type())
+
+            is_false(c.try_discharge(placeholder))
+        si
+
+        @test()
+        Discharge__when_index_type_is_inferred__returns_false() is
+            // The index type itself carries a placeholder. Discharge
+            // defers — the LUB will re-check on the next iteration
+            // once the index resolves.
+            let origin = INFERRED_TYPE_ARG_ORIGIN(loc(), Semantic.BLOCK_SCOPE(), "I")
+            let placeholder = INFERRED_VARIABLE_TYPE(origin)
+            let c = INDEX_CONSTRAINT(placeholder)
+
+            let some_class = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Plain", empty_names(), Semantic.BLOCK_SCOPE())
+
+            is_false(c.try_discharge(some_class.type))
+        si
+
+        @test()
+        Discharge__on_class_without_indexer__returns_false() is
+            let k = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Plain", empty_names(), Semantic.BLOCK_SCOPE())
+            let c = INDEX_CONSTRAINT(int_type())
+
+            is_false(c.try_discharge(k.type))
+        si
+
+        @test()
+        Discharge__on_class_without_indexer_that_a_range_index_slices__returns_true() is
+            // A range index that reaches no indexer takes a slice of the
+            // receiver, so a candidate the slice serves is indexable by it.
+            let k = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Plain", empty_names(), Semantic.BLOCK_SCOPE())
+            let c = INDEX_CONSTRAINT(int_type(), candidate => candidate == k.type)
+
+            is_true(c.try_discharge(k.type))
+        si
+
+        @test()
+        Discharge__on_class_without_indexer_that_a_range_index_does_not_slice__returns_false() is
+            let k = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Plain", empty_names(), Semantic.BLOCK_SCOPE())
+            let c = INDEX_CONSTRAINT(int_type(), candidate => false)
+
+            is_false(c.try_discharge(k.type))
+        si
+
+        @test()
+        Equality__same_index_type__returns_true() is
+            let t = int_type()
+            let a = INDEX_CONSTRAINT(t)
+            let b = INDEX_CONSTRAINT(t)
+
+            is_true(a.equals(b))
+            are_equal(a.get_hash_code(), b.get_hash_code())
+        si
+
+        @test()
+        Equality__different_index_types__returns_false() is
+            let a = INDEX_CONSTRAINT(int_type())
+            let b = INDEX_CONSTRAINT(string_type())
+
+            is_false(a.equals(b))
+        si
+
+        @test()
+        Equality__against_iterable_constraint__returns_false() is
+            let a = INDEX_CONSTRAINT(int_type())
+            let b = ITERABLE_CONSTRAINT()
+
+            is_false(a.equals(b))
+            is_false(b.equals(a))
+        si
+
+        @test()
+        Equality__against_null__returns_false() is
+            let a = INDEX_CONSTRAINT(int_type())
+
+            is_false(a.equals(null))
+        si
+    si
+si

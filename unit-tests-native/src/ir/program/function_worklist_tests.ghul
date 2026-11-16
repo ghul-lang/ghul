@@ -1,0 +1,137 @@
+namespace IR.Program.UnitTests is
+    use Collections.LIST
+    use Collections.MAP
+
+    use Source.LOCATION
+
+    use Semantic.Symbols.CLASS
+    use Semantic.Symbols.Function
+    use Semantic.Symbols.Symbol
+    use Semantic.Symbols.INSTANCE_METHOD
+
+    use Semantic.Types.Type
+
+    use Assertions
+
+    class FUNCTION_WORKLIST_TESTS is
+        _owner: CLASS
+
+        init() is
+            _owner = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "OWNER", LIST[string](), Semantic.BLOCK_SCOPE())
+        si
+
+        loc() -> LOCATION => LOCATION("test.ghul", 1, 1, 1, 1)
+
+        method(name: string) -> Function =>
+            INSTANCE_METHOD(loc(), loc(), _owner, name, Semantic.BLOCK_SCOPE())
+
+        worklist() -> FUNCTION_WORKLIST =>
+            FUNCTION_WORKLIST(f => !f.name.starts_with("bodiless"))
+
+        @test()
+        add__gives_ordinals_from_zero_in_the_order_asked() is
+            let functions = worklist()
+
+            are_equal(0, functions.add(method("a"))!)
+            are_equal(1, functions.add(method("b"))!)
+        si
+
+        @test()
+        add__the_same_function_twice__gives_the_same_ordinal() is
+            let functions = worklist()
+            let a = method("a")
+
+            are_equal(0, functions.add(a)!)
+            are_equal(0, functions.add(a)!)
+            are_equal(1, functions.count)
+        si
+
+        @test()
+        add__a_function_with_no_body__is_null_and_adds_nothing() is
+            let functions = worklist()
+
+            is_false(functions.add(method("bodiless"))?)
+            are_equal(0, functions.count)
+        si
+
+        @test()
+        ordinal_of__a_function_never_added__is_null_and_adds_nothing() is
+            let functions = worklist()
+
+            is_false(functions.ordinal_of(FUNCTION_INSTANCE.of(method("a")))?)
+            are_equal(0, functions.count)
+        si
+
+        @test()
+        next__hands_out_each_instance_once_and_skips_reserved_ones() is
+            let functions = worklist()
+            let a = method("a")
+            let b = method("b")
+
+            functions.add(a)
+            let reserved = functions.reserve()
+            functions.add(b)
+
+            are_equal(1, reserved)
+            is_false(functions.instance_at(reserved)?)
+
+            is_true(functions.next()!.definition == a)
+            is_true(functions.next()!.definition == b)
+            is_false(functions.next()?)
+        si
+
+        @test()
+        next__hands_out_an_instance_added_while_draining() is
+            let functions = worklist()
+            let a = method("a")
+            let b = method("b")
+
+            functions.add(a)
+
+            is_true(functions.next()!.definition == a)
+
+            functions.add(b)
+
+            is_true(functions.next()!.definition == b)
+            is_false(functions.next()?)
+        si
+
+        @test()
+        restart__walks_the_instances_again_with_the_same_ordinals() is
+            let functions = worklist()
+            let a = method("a")
+
+            functions.add(a)
+            functions.next()
+            functions.restart()
+
+            is_true(functions.next()!.definition == a)
+            are_equal(0, functions.add(a)!)
+            are_equal(1, functions.count)
+        si
+
+        @test()
+        add__an_instance_whose_type_arguments_nest_too_deeply__is_null() is
+            let functions = worklist()
+            let a = method("a")
+
+            let type_map = MAP[Symbol, Type]()
+
+            type_map[_owner] = nested(INSTANTIATION_LIMITS.MAXIMUM_TYPE_ARGUMENT_DEPTH + 1)
+
+            is_false(functions.add(FUNCTION_INSTANCE(a, type_map))?)
+            are_equal(0, functions.count)
+        si
+
+        nested(depth: int) -> Type is
+            let box = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "BOX", LIST[string](["T"]), Semantic.BLOCK_SCOPE())
+            let result: Type mut = _owner.type!
+
+            for _ in 0..depth do
+                result = Semantic.Types.GENERIC(loc(), box, LIST[Type]([result]))
+            od
+
+            return result
+        si
+    si
+si

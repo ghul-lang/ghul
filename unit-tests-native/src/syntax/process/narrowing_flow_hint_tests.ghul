@@ -1,0 +1,256 @@
+namespace Syntax.Process.UnitTests is
+    use Collections.LIST
+
+    use Source.LOCATION
+
+    use Semantic.Symbols.CLASS
+    use Semantic.Symbols.INSTANCE_FIELD
+    use Semantic.Symbols.INSTANCE_PROPERTY
+    use Semantic.Symbols.LOCAL_VARIABLE
+    use Semantic.Symbols.Symbol
+    use Semantic.Types.Type
+    use Assertions
+
+    // Pins NARROWING_FLOW's kill-hint emission: a HINT carrying the
+    // `narrowing-killed` code is produced at a kill site, but only in
+    // analysis mode and only for a file the client has declared open.
+    // Covers the type-narrow message branch (via the call kill) and the
+    // presence-fact branch (via the heap-store kill), plus both guards.
+    // The other narrowing_flow fixtures run with `is_analysis` false, so
+    // they never reach these paths.
+    class NARROWING_FLOW_HINT_TESTS is
+        init() is
+            Fixtures.enter_function()
+        si
+
+        loc() -> LOCATION => LOCATION("test.ghul", 1, 1, 1, 1)
+        empty_names() -> LIST[string] => LIST[string]()
+
+        owner() -> CLASS => CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "OWNER", empty_names(), Semantic.BLOCK_SCOPE())
+
+        class_type(name: string) -> Type is
+            let c = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), name, empty_names(), Semantic.BLOCK_SCOPE())
+            c.set_type(Semantic.Types.NAMED(c))
+            return c.type!
+        si
+
+        subclass_type(name: string, base: Type) -> Type is
+            let c = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), name, empty_names(), Semantic.BLOCK_SCOPE())
+            c.set_type(Semantic.Types.NAMED(c))
+            c.add_ancestor(base)
+            return c.type!
+        si
+
+        optional_class_type(name: string) -> Type =>
+            class_type(name).as_optional()
+
+        optional_property(name: string) -> INSTANCE_PROPERTY is
+            let p = INSTANCE_PROPERTY(loc(), loc(), owner(), name, false, false)
+            p.set_type(optional_class_type("P_{name}"))
+            return p
+        si
+
+        // A store already in analysis mode with `path` declared open.
+        analysing_store(path: string) -> Logging.DIAGNOSTICS_STORE is
+            let store = Logging.DIAGNOSTICS_STORE()
+            store.start_analysis()
+            store.set_open_files([path])
+            return store
+        si
+
+        rendered(store: Logging.DIAGNOSTICS_STORE) -> string is
+            let buffer = IO.StringWriter()
+            store.write_all_diagnostics(buffer, Logging.TAB_DELIMITED_DIAGNOSTIC_FORMATTER())
+            return buffer.to_string()
+        si
+
+        // Concatenation of every recorded inlay for `path`. Narrowing
+        // events land here — never in the tab-delimited diagnostic
+        // stream — because they are `INLAY` carriers, delivered by the
+        // dedicated inlay-hints query rather than as diagnostics.
+        rendered_inlays(store: Logging.DIAGNOSTICS_STORE, path: string) -> string is
+            let sb = System.Text.StringBuilder()
+            for i in store.inlays_for(path) do
+                sb.append("{i.code}\t{i.text}\t{i.detail ?? ""}\n")
+            od
+            return sb.to_string()
+        si
+
+        @test()
+        Call_on_open_file__emits_no_kill_hint() is
+            let store = analysing_store("test.ghul")
+            let flow = NARROWING_FLOW(store)
+
+            let base = class_type("BASE")
+            let sub = subclass_type("SUB", base)
+
+            let f = INSTANCE_FIELD(loc(), owner(), "_f")
+            f.set_type(base)
+
+            let env = NARROW_ENV()
+            env.set_narrow(f, sub)
+            flow.set_env(env)
+
+            flow.on_call(loc())
+
+            let text = rendered_inlays(store, "test.ghul")
+
+            // narrowing is optimistic: a call drops nothing, so there
+            // is no kill to hint at - the fact survives and any
+            // unproven reliance on it is an error at the use site
+            is_false(text.contains("narrowing-killed"), "expected no narrowing-killed inlay, got: {text}")
+        si
+
+        make_root(name: string) -> LOCAL_VARIABLE => LOCAL_VARIABLE(loc(), Semantic.BLOCK_SCOPE(), name)
+
+        path(root: Symbol, member: Symbol) -> ACCESS_PATH is
+            let members = LIST[Symbol]()
+            members.add(member)
+            return ACCESS_PATH(cast Semantic.Symbols.Variable(root), members)
+        si
+
+        @test()
+        Call_with_path_narrow_on_open_file__emits_no_kill_hint() is
+            let store = analysing_store("test.ghul")
+            let flow = NARROWING_FLOW(store)
+
+            let base = class_type("BASE")
+            let sub = subclass_type("SUB", base)
+
+            let root = make_root("r")
+            let f = INSTANCE_FIELD(loc(), owner(), "f")
+            f.set_type(base)
+
+            let env = NARROW_ENV()
+            env.set_path_narrow(path(root, f), sub)
+            flow.set_env(env)
+
+            flow.on_call(loc())
+
+            let text = rendered_inlays(store, "test.ghul")
+
+            is_false(text.contains("narrowing-killed"), "expected no narrowing-killed inlay, got: {text}")
+        si
+
+        @test()
+        Call_with_path_presence_on_open_file__emits_no_kill_hint() is
+            let store = analysing_store("test.ghul")
+            let flow = NARROWING_FLOW(store)
+
+            let root = make_root("r")
+            let f = INSTANCE_FIELD(loc(), owner(), "f")
+            f.set_type(optional_class_type("F"))
+
+            let env = NARROW_ENV()
+            env.set_non_null_path(path(root, f))
+            flow.set_env(env)
+
+            flow.on_call(loc())
+
+            let text = rendered_inlays(store, "test.ghul")
+
+            is_false(text.contains("narrowing-killed"), "expected no narrowing-killed inlay, got: {text}")
+        si
+
+        @test()
+        Heap_store_kill_of_getter_path_on_open_file__emits_hint() is
+            let store = analysing_store("test.ghul")
+            let flow = NARROWING_FLOW(store)
+
+            let root = make_root("r")
+            let p = INSTANCE_PROPERTY(loc(), loc(), owner(), "p", false, false)
+            p.set_type(optional_class_type("P"))
+
+            let env = NARROW_ENV()
+            env.set_non_null_path(path(root, p))
+            flow.set_env(env)
+
+            flow.on_heap_store(loc())
+
+            let text = rendered_inlays(store, "test.ghul")
+
+            is_true(text.contains("narrowing-killed"), "expected a narrowing-killed inlay, got: {text}")
+            is_true(text.contains("r.p\n\n"), "expected the path presence detail, got: {text}")
+        si
+
+        @test()
+        Heap_store_of_fields_only_path_on_open_file__emits_no_hint() is
+            let store = analysing_store("test.ghul")
+            let flow = NARROWING_FLOW(store)
+
+            let root = make_root("r")
+            let f = INSTANCE_FIELD(loc(), owner(), "f")
+            f.set_type(optional_class_type("F"))
+
+            let env = NARROW_ENV()
+            env.set_non_null_path(path(root, f))
+            flow.set_env(env)
+
+            flow.on_heap_store(loc())
+
+            is_false(rendered_inlays(store, "test.ghul").contains("narrowing-killed"), "a fields-only path survives a heap store, so no hint should be produced")
+        si
+
+        @test()
+        Heap_store_kill_on_open_file__emits_presence_hint() is
+            let store = analysing_store("test.ghul")
+            let flow = NARROWING_FLOW(store)
+
+            let env = NARROW_ENV()
+            env.set_non_null(optional_property("p"))
+            flow.set_env(env)
+
+            flow.on_heap_store(loc())
+
+            let text = rendered_inlays(store, "test.ghul")
+
+            is_true(text.contains("narrowing-killed"), "expected a narrowing-killed inlay, got: {text}")
+            is_true(text.contains("p\n    ◄ "), "expected the presence detail, got: {text}")
+        si
+
+        @test()
+        Kill_outside_analysis_mode__emits_no_hint() is
+            let store = Logging.DIAGNOSTICS_STORE()
+            store.set_open_files(["test.ghul"])
+
+            let flow = NARROWING_FLOW(store)
+            let env = NARROW_ENV()
+            env.set_non_null(optional_property("p"))
+            flow.set_env(env)
+
+            flow.on_heap_store(loc())
+
+            is_false(rendered_inlays(store, "test.ghul").contains("narrowing-killed"), "no hint should be produced outside analysis mode")
+        si
+
+        @test()
+        Reassign_of_non_optional_local_on_open_file__emits_no_hint() is
+            let store = analysing_store("test.ghul")
+            let flow = NARROWING_FLOW(store)
+
+            let f = INSTANCE_FIELD(loc(), owner(), "_f")
+            f.set_type(class_type("F"))
+
+            flow.mark_non_null(f)
+            flow.on_assignment(f, loc(), null)
+
+            is_false(rendered_inlays(store, "test.ghul").contains("narrowing-killed"), "no hint should be produced for a non-optional variable — the presence bit is redundant with its type")
+        si
+
+        @test()
+        Kill_on_file_not_open__emits_no_hint() is
+            let store = Logging.DIAGNOSTICS_STORE()
+            store.start_analysis()
+            store.set_open_files(["other.ghul"])
+
+            let flow = NARROWING_FLOW(store)
+            let env = NARROW_ENV()
+            env.set_non_null(optional_property("p"))
+            flow.set_env(env)
+
+            flow.on_heap_store(loc())
+
+            is_false(rendered_inlays(store, "test.ghul").contains("narrowing-killed"), "no hint should be produced for a file that is not open")
+        si
+    si
+si

@@ -1,0 +1,115 @@
+namespace Semantic.UnitTests is
+    use Collections.LIST
+
+    use Source.LOCATION
+
+    use Semantic.SETTLED_PLACEHOLDER_RESOLVER
+    use Semantic.Symbols.CLASS
+    use Semantic.Symbols.INFERRED_TYPE_ARG_ORIGIN
+    use Semantic.Types.INFERRED_VARIABLE_TYPE
+    use Semantic.Types.Type
+    use Assertions
+
+    // Tests for SETTLED_PLACEHOLDER_RESOLVER — the helper that swaps an
+    // inference placeholder for the concrete type its origin settled on,
+    // so a composite assembled mid-inference doesn't carry the
+    // placeholder into the type that reaches IL emission.
+    //
+    // The contract has three cases: a settled placeholder collapses, an
+    // unsettled one is preserved (it is still gathering constraints), and
+    // anything that isn't a placeholder passes through untouched.
+    class SETTLED_PLACEHOLDER_RESOLVER_TESTS is
+        init() is si
+
+        loc() -> LOCATION => LOCATION("test.ghul", 1, 1, 1, 1)
+
+        empty_names() -> LIST[string] => LIST[string]()
+
+        a_class(name: string) -> CLASS =>
+            CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), name, empty_names(), Semantic.BLOCK_SCOPE())
+
+        origin() -> INFERRED_TYPE_ARG_ORIGIN =>
+            INFERRED_TYPE_ARG_ORIGIN(loc(), Semantic.BLOCK_SCOPE(), "p")
+
+        @test()
+        Calling__resolve__on_a_non_placeholder__should_return_it_unchanged() is
+            let cat = a_class("cat")
+            let resolver = SETTLED_PLACEHOLDER_RESOLVER()
+
+            are_same(cat.type!, resolver.resolve(cat.type!))
+        si
+
+        @test()
+        Calling__resolve__on_an_unsettled_placeholder__should_return_the_placeholder() is
+            let placeholder = INFERRED_VARIABLE_TYPE(origin())
+            let resolver = SETTLED_PLACEHOLDER_RESOLVER()
+
+            are_same(placeholder, resolver.resolve(placeholder))
+        si
+
+        @test()
+        Calling__resolve__on_a_settled_placeholder__should_return_the_settled_type() is
+            let cat = a_class("cat")
+            let o = origin()
+
+            o.add_lower_bound(cat.type!)
+
+            let placeholder = INFERRED_VARIABLE_TYPE(o)
+            let resolver = SETTLED_PLACEHOLDER_RESOLVER()
+
+            are_same(cat.type!, resolver.resolve(placeholder))
+        si
+
+        box_class() -> CLASS is
+            let c = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "box", ["T"], Semantic.BLOCK_SCOPE())
+            return c
+        si
+
+        @test()
+        Calling__resolve__on_a_composite_with_a_settled_nested_placeholder__should_rebuild_it() is
+            let cat = a_class("cat")
+            let o = origin()
+
+            o.add_lower_bound(cat.type!)
+
+            let placeholder = INFERRED_VARIABLE_TYPE(o)
+            let composite = Semantic.Types.GENERIC(loc(), box_class(), LIST[Type]([cast Type(placeholder)]))
+
+            let resolver = SETTLED_PLACEHOLDER_RESOLVER()
+            let result = resolver.resolve(composite)
+
+            is_true(result.is_settled)
+            are_same(cat.type!, (cast Semantic.Types.GENERIC(result)).arguments[0])
+        si
+
+        @test()
+        Calling__resolve__on_a_composite_with_an_unsettled_nested_placeholder__should_return_it_unchanged() is
+            let placeholder = INFERRED_VARIABLE_TYPE(origin())
+            let composite = Semantic.Types.GENERIC(loc(), box_class(), LIST[Type]([cast Type(placeholder)]))
+
+            let resolver = SETTLED_PLACEHOLDER_RESOLVER()
+
+            are_same(composite, resolver.resolve(composite))
+        si
+
+        @test()
+        Calling__resolve_all__should_collapse_only_the_settled_placeholders() is
+            let cat = a_class("cat")
+            let dog = a_class("dog")
+
+            let settled_origin = origin()
+            settled_origin.add_lower_bound(dog.type!)
+
+            let settled = INFERRED_VARIABLE_TYPE(settled_origin)
+            let unsettled = INFERRED_VARIABLE_TYPE(origin())
+
+            let resolver = SETTLED_PLACEHOLDER_RESOLVER()
+            let result = resolver.resolve_all(LIST[Type]([cat.type!, settled, unsettled]))
+
+            are_equal(3, result.count)
+            are_same(cat.type!, result[0])
+            are_same(dog.type!, result[1])
+            are_same(unsettled, result[2])
+        si
+    si
+si

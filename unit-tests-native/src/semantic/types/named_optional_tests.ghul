@@ -1,0 +1,120 @@
+namespace Semantic.Types.UnitTests is
+    use Collections.LIST
+    use Collections.List
+
+    use Source.LOCATION
+
+    use Semantic.Symbols.CLASS
+    use Semantic.Types.NAMED
+    use Semantic.Types.Type
+    use Assertions
+
+    // Tests for NAMED's optionality transforms — `as_optional` (the
+    // `T?` form) and `as_non_optional` (its inverse). The latter is
+    // what optional-narrowing uses to re-type a use-site load once
+    // flow analysis has established the variable is non-null.
+    //
+    // These tests assert on `is_optional` and on reference identity;
+    // the `=~` truth table (including its optional-flag rules) lives
+    // in equivalence_optional_tests.ghul.
+    class NAMED_OPTIONAL_TESTS is
+        init() is si
+
+        loc() -> LOCATION => LOCATION("test.ghul", 1, 1, 1, 1)
+
+        empty_names() -> LIST[string] => LIST[string]()
+
+        // A plain (non-struct) class — a reference type, so its `T?`
+        // form carries the optional flag rather than wrapping in
+        // NULLABLE[T].
+        a_reference_class() -> CLASS =>
+            CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Foo", empty_names(), Semantic.BLOCK_SCOPE())
+
+        @test()
+        as_non_optional__on_an_optional_reference__drops_the_flag() is
+            let bare = cast NAMED(a_reference_class().type)
+            is_false(bare.is_optional)
+
+            let optional = bare.as_optional()
+            is_true(optional.is_optional)
+
+            let non_optional = optional.as_non_optional()
+            is_false(non_optional.is_optional)
+        si
+
+        @test()
+        as_non_optional__on_an_already_non_optional_type__returns_self() is
+            let bare = cast NAMED(a_reference_class().type)
+
+            are_same(bare, bare.as_non_optional())
+        si
+
+        @test()
+        as_non_optional__preserves_the_underlying_symbol() is
+            let the_class = a_reference_class()
+            let optional = (cast NAMED(the_class.type)).as_optional()
+
+            let non_optional = cast NAMED(optional.as_non_optional())
+
+            are_same(the_class, non_optional.symbol)
+        si
+
+        @test()
+        optional_inner_type__on_a_flagged_optional_reference__is_the_bare_form() is
+            let the_class = a_reference_class()
+            let bare = cast NAMED(the_class.type)
+
+            let optional = bare.as_optional()
+            let inner = optional.optional_inner_type
+
+            assert inner?
+            is_false(inner.is_optional)
+            are_same(the_class, (cast NAMED(inner)).symbol)
+        si
+
+        @test()
+        optional_inner_type__on_a_bare_reference__is_null() is
+            let bare = cast NAMED(a_reference_class().type)
+
+            is_null(bare.optional_inner_type)
+        si
+
+        @test()
+        compare__T_against_T__is_SAME() is
+            let bare = cast NAMED(a_reference_class().type)
+
+            are_equal(Types.MATCH.SAME, bare.compare(bare))
+        si
+
+        @test()
+        compare__T_optional_against_T_optional__is_SAME() is
+            let bare = cast NAMED(a_reference_class().type)
+            let optional = bare.as_optional()
+
+            are_equal(Types.MATCH.SAME, optional.compare(optional))
+        si
+
+        @test()
+        compare__T_optional_slot_against_T_value__is_ASSIGNABLE() is
+            // T? slot accepts T value via implicit widening: a non-null
+            // T reference satisfies T?'s shape (the absent discriminator
+            // simply doesn't get used).
+            let bare = cast NAMED(a_reference_class().type)
+            let optional = bare.as_optional()
+
+            are_equal(Types.MATCH.ASSIGNABLE, optional.compare(bare))
+        si
+
+        @test()
+        compare__T_slot_against_T_optional_value__is_DIFFERENT() is
+            // T slot rejects T? value: the caller must narrow first
+            // (`x!`, `if let`, `if x?`, `??`) before flowing into a
+            // non-optional slot. This is the directional rule the
+            // strict-optional model rests on.
+            let bare = cast NAMED(a_reference_class().type)
+            let optional = bare.as_optional()
+
+            are_equal(Types.MATCH.DIFFERENT, bare.compare(optional))
+        si
+    si
+si

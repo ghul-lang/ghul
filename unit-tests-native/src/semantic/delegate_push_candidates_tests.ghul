@@ -1,0 +1,248 @@
+namespace Semantic.UnitTests is
+    use Collections.LIST
+
+    use Source.LOCATION
+
+    use Semantic.Types.Type
+
+    use Semantic.Symbols.CLASS
+    use Semantic.Symbols.STATIC_METHOD
+    use Semantic.Symbols.INSTANCE_METHOD
+    use Semantic.Symbols.FUNCTION_GROUP
+    use Assertions
+
+    // Tests for DELEGATE_PUSH_CANDIDATES - the helper that decides
+    // whether a named-delegate formal a plain assignability check
+    // rejected is worth pushing as a constraint onto a bare function
+    // reference or un-pushed lambda literal, and which arity-matching
+    // overload to push it onto when more than one candidate exists
+    // (`T[].sort` has both `Sort(Comparison[T])` and
+    // `Sort(IComparer[T])` at arity 1).
+    class DELEGATE_PUSH_CANDIDATES_TESTS is
+        init() is si
+
+        loc() -> LOCATION => LOCATION("test.ghul", 1, 1, 1, 1)
+
+        // Reuses TEST_INNATE_SYMBOL_LOOKUP from
+        // function_reference_resolver_tests.ghul (same namespace).
+        lookup() -> Lookups.InnateSymbolLookup => TEST_INNATE_SYMBOL_LOOKUP()
+
+        // See function_reference_resolver_tests.ghul's `delegate_type`
+        // helper for why the shared MulticastDelegate stand-in as an
+        // ancestor is enough to satisfy DELEGATE_SHAPE.is_named_delegate
+        // without real reflection.
+        delegate_type(name: string, argument_types: Type[], return_type: Type) -> CLASS is
+            let d = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), name, LIST[string](), Semantic.BLOCK_SCOPE())
+
+            d.add_ancestor(TEST_INNATE_SYMBOL_LOOKUP.multicast_delegate.type!)
+
+            let invoke = INSTANCE_METHOD(loc(), loc(), d, "invoke", Semantic.BLOCK_SCOPE())
+            invoke.arguments = argument_types
+            invoke.return_type = return_type
+            d.add_member(invoke)
+
+            return d
+        si
+
+        static_method(owner: CLASS, name: string, argument_types: Type[], return_type: Type) -> STATIC_METHOD is
+            let f = STATIC_METHOD(loc(), loc(), owner, name, Semantic.BLOCK_SCOPE())
+            f.arguments = argument_types
+            f.return_type = return_type
+            return f
+        si
+
+        // === is_push_candidate ===
+
+        // A plain non-delegate formal never pushes, whatever the
+        // actual is - the fast-path most calls take.
+        @test()
+        Calling__is_push_candidate__with_a_non_delegate_formal__returns_false() is
+            let l = lookup()
+            let int_type = l.get_int_type()
+            let candidates = Semantic.DELEGATE_PUSH_CANDIDATES(Semantic.DELEGATE_SHAPE(), l)
+
+            let owner = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Owner", LIST[string](), Semantic.BLOCK_SCOPE())
+            let f = static_method(owner, "compare", LIST[Type]([int_type, int_type]), int_type)
+            let actual = f.get_full_type(l)
+
+            is_false(candidates.is_push_candidate(int_type, actual))
+        si
+
+        // A `Func`/`Action`-shaped slot is exactly what
+        // DELEGATE_SHAPE.is_named_delegate excludes (it's already a
+        // ghūl function type) - it takes the ordinary assignability
+        // path, never this one, even though the shapes match.
+        @test()
+        Calling__is_push_candidate__with_a_function_typed_formal__returns_false() is
+            let l = lookup()
+            let int_type = l.get_int_type()
+            let candidates = Semantic.DELEGATE_PUSH_CANDIDATES(Semantic.DELEGATE_SHAPE(), l)
+
+            let formal = l.get_function_type(LIST[Type]([int_type, int_type, int_type]))
+            let actual = l.get_function_type(LIST[Type]([int_type, int_type, int_type]))
+
+            is_false(candidates.is_push_candidate(formal, actual))
+        si
+
+        // Already assignable: nothing to push.
+        @test()
+        Calling__is_push_candidate__when_formal_already_accepts_the_actual__returns_false() is
+            let l = lookup()
+            let int_type = l.get_int_type()
+            let candidates = Semantic.DELEGATE_PUSH_CANDIDATES(Semantic.DELEGATE_SHAPE(), l)
+
+            let comparison = delegate_type("Comparison", LIST[Type]([int_type, int_type]), int_type)
+
+            is_false(candidates.is_push_candidate(comparison.type!, comparison.type!))
+        si
+
+        // The actual isn't function-shaped at all (a plain object, not
+        // a bare function reference or lambda) - nothing a push could
+        // fix.
+        @test()
+        Calling__is_push_candidate__when_the_actual_is_not_function_shaped__returns_false() is
+            let l = lookup()
+            let int_type = l.get_int_type()
+            let candidates = Semantic.DELEGATE_PUSH_CANDIDATES(Semantic.DELEGATE_SHAPE(), l)
+
+            let comparison = delegate_type("Comparison", LIST[Type]([int_type, int_type]), int_type)
+            let not_a_function = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "NotAFunction", LIST[string](), Semantic.BLOCK_SCOPE())
+
+            is_false(candidates.is_push_candidate(comparison.type!, not_a_function.type!))
+        si
+
+        // The actual is function-shaped but the wrong shape (extra
+        // argument) - a genuine mismatch, not a recoverable gap.
+        @test()
+        Calling__is_push_candidate__when_the_actuals_shape_does_not_match_the_invoke_shape__returns_false() is
+            let l = lookup()
+            let int_type = l.get_int_type()
+            let candidates = Semantic.DELEGATE_PUSH_CANDIDATES(Semantic.DELEGATE_SHAPE(), l)
+
+            let comparison = delegate_type("Comparison", LIST[Type]([int_type, int_type]), int_type)
+            let actual = l.get_function_type(LIST[Type]([int_type, int_type, int_type, int_type]))
+
+            is_false(candidates.is_push_candidate(comparison.type!, actual))
+        si
+
+        // The central positive case: a bare function reference's
+        // native shape agrees with the delegate's invoke shape, so
+        // pushing is worth attempting.
+        @test()
+        Calling__is_push_candidate__when_the_actuals_shape_matches_the_invoke_shape__returns_true() is
+            let l = lookup()
+            let int_type = l.get_int_type()
+            let candidates = Semantic.DELEGATE_PUSH_CANDIDATES(Semantic.DELEGATE_SHAPE(), l)
+
+            let comparison = delegate_type("Comparison", LIST[Type]([int_type, int_type]), int_type)
+            let actual = l.get_function_type(LIST[Type]([int_type, int_type, int_type]))
+
+            is_true(candidates.is_push_candidate(comparison.type!, actual))
+        si
+
+        // === has_push_mismatch ===
+
+        @test()
+        Calling__has_push_mismatch__with_a_pushable_argument__returns_true() is
+            let l = lookup()
+            let int_type = l.get_int_type()
+            let candidates = Semantic.DELEGATE_PUSH_CANDIDATES(Semantic.DELEGATE_SHAPE(), l)
+
+            let comparison = delegate_type("Comparison", LIST[Type]([int_type, int_type]), int_type)
+            let owner = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Owner", LIST[string](), Semantic.BLOCK_SCOPE())
+            let candidate = static_method(owner, "sort", LIST[Type]([comparison.type!]), l.get_void_type())
+
+            let actual = l.get_function_type(LIST[Type]([int_type, int_type, int_type]))
+
+            is_true(candidates.has_push_mismatch(candidate, LIST[Type]([actual])))
+        si
+
+        @test()
+        Calling__has_push_mismatch__with_no_pushable_argument__returns_false() is
+            let l = lookup()
+            let int_type = l.get_int_type()
+            let candidates = Semantic.DELEGATE_PUSH_CANDIDATES(Semantic.DELEGATE_SHAPE(), l)
+
+            let owner = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Owner", LIST[string](), Semantic.BLOCK_SCOPE())
+            let candidate = static_method(owner, "add", LIST[Type]([int_type, int_type]), int_type)
+
+            is_false(candidates.has_push_mismatch(candidate, LIST[Type]([int_type, int_type])))
+        si
+
+        // === find_single_pushable_candidate ===
+
+        // The `T[].sort` shape: two arity-1 overloads, only one
+        // delegate-shaped and push-worthy for the actual in hand - the
+        // mismatched-but-not-pushable IComparer overload is rejected
+        // outright rather than counted as ambiguous.
+        @test()
+        Calling__find_single_pushable_candidate__with_one_delegate_shaped_overload__returns_it() is
+            let l = lookup()
+            let int_type = l.get_int_type()
+            let candidates = Semantic.DELEGATE_PUSH_CANDIDATES(Semantic.DELEGATE_SHAPE(), l)
+
+            let owner = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Owner", LIST[string](), Semantic.BLOCK_SCOPE())
+            let not_delegate = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "IComparer", LIST[string](), Semantic.BLOCK_SCOPE())
+            let comparison = delegate_type("Comparison", LIST[Type]([int_type, int_type]), int_type)
+
+            let group = FUNCTION_GROUP(loc(), owner, "sort")
+            let via_comparer = static_method(owner, "sort", LIST[Type]([not_delegate.type!]), l.get_void_type())
+            let via_comparison = static_method(owner, "sort", LIST[Type]([comparison.type!]), l.get_void_type())
+            group.add(via_comparer)
+            group.add(via_comparison)
+
+            let actual = l.get_function_type(LIST[Type]([int_type, int_type, int_type]))
+
+            let result = candidates.find_single_pushable_candidate(group, LIST[Type]([actual]), true)
+
+            are_same(via_comparison, result)
+        si
+
+        // Genuine ambiguity: two arity-matching overloads whose
+        // formals are BOTH named delegates the actual can satisfy -
+        // this must fall through to null rather than guess, the same
+        // as an ordinary ambiguous overload.
+        @test()
+        Calling__find_single_pushable_candidate__with_two_delegate_shaped_overloads__returns_null() is
+            let l = lookup()
+            let int_type = l.get_int_type()
+            let candidates = Semantic.DELEGATE_PUSH_CANDIDATES(Semantic.DELEGATE_SHAPE(), l)
+
+            let owner = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Owner", LIST[string](), Semantic.BLOCK_SCOPE())
+            let comparison_a = delegate_type("ComparisonA", LIST[Type]([int_type, int_type]), int_type)
+            let comparison_b = delegate_type("ComparisonB", LIST[Type]([int_type, int_type]), int_type)
+
+            let group = FUNCTION_GROUP(loc(), owner, "sort")
+            group.add(static_method(owner, "sort", LIST[Type]([comparison_a.type!]), l.get_void_type()))
+            group.add(static_method(owner, "sort", LIST[Type]([comparison_b.type!]), l.get_void_type()))
+
+            let actual = l.get_function_type(LIST[Type]([int_type, int_type, int_type]))
+
+            let result = candidates.find_single_pushable_candidate(group, LIST[Type]([actual]), true)
+
+            is_null(result)
+        si
+
+        // No overload is delegate-pushable for this actual at all -
+        // null, not a guess.
+        @test()
+        Calling__find_single_pushable_candidate__with_no_pushable_overload__returns_null() is
+            let l = lookup()
+            let int_type = l.get_int_type()
+            let string_type = l.get_string_type()
+            let candidates = Semantic.DELEGATE_PUSH_CANDIDATES(Semantic.DELEGATE_SHAPE(), l)
+
+            let owner = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Owner", LIST[string](), Semantic.BLOCK_SCOPE())
+            let not_delegate = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "IComparer", LIST[string](), Semantic.BLOCK_SCOPE())
+
+            let group = FUNCTION_GROUP(loc(), owner, "sort")
+            group.add(static_method(owner, "sort", LIST[Type]([not_delegate.type!]), l.get_void_type()))
+
+            let actual = l.get_function_type(LIST[Type]([int_type, int_type, int_type]))
+
+            let result = candidates.find_single_pushable_candidate(group, LIST[Type]([actual]), true)
+
+            is_null(result)
+        si
+    si
+si

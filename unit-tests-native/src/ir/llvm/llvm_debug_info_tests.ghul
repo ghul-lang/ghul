@@ -1,0 +1,81 @@
+namespace IR.LLVMTarget.UnitTests is
+    use Source.LOCATION
+
+    use LLVM.FUNCTION
+    use LLVM.MODULE
+    use LLVM.Types
+    use LLVM.WRITER
+
+    use Assertions
+
+    class LLVM_DEBUG_INFO_TESTS is
+        init() is si
+
+        @test()
+        subprogram__should_be_attached_to_the_function_and_name_its_file_and_line() is
+            let module = MODULE()
+            let function = FUNCTION("f", LLVM.Type.VOID, [])
+
+            module.add_function(function)
+            function.add_block("entry").return_void()
+
+            LLVM_DEBUG_INFO(module).subprogram(function, "Test.f", LOCATION("dir/test.ghul", 7, 5, 7, 9))
+
+            let text = WRITER.module_text(module)
+
+            is_true(text.contains("define void @f() !dbg !"))
+            is_true(text.contains("!DIFile(filename: \"test.ghul\""))
+            is_true(text.contains("!DISubprogram(name: \"Test.f\""))
+            is_true(text.contains("line: 7"))
+        si
+
+        @test()
+        location__should_hold_the_line_and_column_in_the_scope() is
+            let module = MODULE()
+            let function = FUNCTION("f", LLVM.Type.VOID, [])
+
+            module.add_function(function)
+
+            let info = LLVM_DEBUG_INFO(module)
+            let scope = info.subprogram(function, "Test.f", LOCATION("test.ghul", 1, 1, 1, 1))
+            let block = function.add_block("entry")
+
+            block.debug_location = info.location(LOCATION("test.ghul", 3, 11, 3, 20), scope)
+            block.return_void()
+
+            let text = WRITER.module_text(module)
+
+            is_true(text.contains("ret void, !dbg !"))
+            is_true(text.contains("!DILocation(line: 3, column: 11, scope: !"))
+        si
+
+        @test()
+        finish__should_add_the_module_flags_and_list_the_compile_unit() is
+            let module = MODULE()
+            let function = FUNCTION("f", LLVM.Type.VOID, [])
+
+            module.add_function(function)
+            function.add_block("entry").return_void()
+
+            let info = LLVM_DEBUG_INFO(module)
+
+            info.subprogram(function, "Test.f", LOCATION("test.ghul", 1, 1, 1, 1))
+            info.finish()
+
+            let text = WRITER.module_text(module)
+
+            is_true(text.contains("!\"Debug Info Version\", i32 3"))
+            is_true(text.contains("!llvm.dbg.cu = !{{"))
+            is_true(text.contains("!DICompileUnit(language: DW_LANG_C"))
+        si
+
+        @test()
+        finish__with_no_function__should_add_nothing() is
+            let module = MODULE()
+
+            LLVM_DEBUG_INFO(module).finish()
+
+            is_false(WRITER.module_text(module).contains("llvm.dbg.cu"))
+        si
+    si
+si

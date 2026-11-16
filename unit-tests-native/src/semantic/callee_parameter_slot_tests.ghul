@@ -1,0 +1,91 @@
+namespace Semantic.UnitTests is
+    use Collections.LIST
+
+    use Source.LOCATION
+
+    use Semantic.CALLEE_PARAMETER_SLOT
+
+    use Semantic.Symbols.CLASS
+    use Semantic.Symbols.CLASSY_GENERIC_ARGUMENT
+    use Semantic.Symbols.FUNCTION_GENERIC_ARGUMENT
+    use Semantic.Symbols.INFERRED_TYPE_ARG_ORIGIN
+    use Semantic.Symbols.INSTANCE_METHOD
+
+    use Semantic.Types.INFERRED_VARIABLE_TYPE
+    use Semantic.Types.Type
+
+    use Assertions
+
+    // Pins which call arguments are left unbounded by the formal they
+    // are passed to: a placeholder in a slot typed by the callee's own
+    // type parameter, whose binding was made without it.
+    class CALLEE_PARAMETER_SLOT_TESTS is
+        _subject: CALLEE_PARAMETER_SLOT
+
+        init() is
+            _subject = CALLEE_PARAMETER_SLOT()
+        si
+
+        loc() -> LOCATION => LOCATION("test.ghul", 1, 1, 1, 1)
+
+        new_class(name: string) -> CLASS =>
+            CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), name, LIST[string](["T"]), Semantic.BLOCK_SCOPE())
+
+        method_of(owner: CLASS, name: string) -> INSTANCE_METHOD =>
+            INSTANCE_METHOD(loc(), loc(), owner, name, Semantic.BLOCK_SCOPE())
+
+        placeholder() -> Type =>
+            INFERRED_VARIABLE_TYPE(INFERRED_TYPE_ARG_ORIGIN(loc(), Semantic.BLOCK_SCOPE(), "x"))
+
+        @test()
+        should_accept_a_placeholder_in_a_slot_typed_by_the_callee_type_parameter() is
+            let owner = new_class("HOLDER")
+            let callee = method_of(owner, "pick")
+            let caller = method_of(owner, "entry")
+            let parameter = FUNCTION_GENERIC_ARGUMENT(loc(), callee, "T", 0)
+
+            is_true(_subject.binds_placeholder(parameter.type!, placeholder(), caller))
+        si
+
+        @test()
+        should_reject_a_concrete_actual_in_a_slot_typed_by_the_callee_type_parameter() is
+            let owner = new_class("HOLDER")
+            let callee = method_of(owner, "pick")
+            let caller = method_of(owner, "entry")
+            let parameter = FUNCTION_GENERIC_ARGUMENT(loc(), callee, "T", 0)
+
+            is_false(_subject.binds_placeholder(parameter.type!, new_class("CAT").type!, caller))
+        si
+
+        @test()
+        should_reject_a_placeholder_in_a_concretely_typed_slot() is
+            let owner = new_class("HOLDER")
+            let caller = method_of(owner, "entry")
+
+            is_false(_subject.binds_placeholder(new_class("CAT").type!, placeholder(), caller))
+        si
+
+        // A type parameter the caller itself declares already stands
+        // for a definite type in the caller's body, so it bounds the
+        // placeholder like a concrete type would.
+        @test()
+        should_reject_a_placeholder_in_a_slot_typed_by_the_caller_type_parameter() is
+            let owner = new_class("HOLDER")
+            let caller = method_of(owner, "entry")
+            let parameter = FUNCTION_GENERIC_ARGUMENT(loc(), caller, "U", 0)
+
+            is_false(_subject.binds_placeholder(parameter.type!, placeholder(), caller))
+        si
+
+        // A class type parameter of the callee's owner is bound from the
+        // receiver, not from the arguments, so it is a genuine bound.
+        @test()
+        should_reject_a_placeholder_in_a_slot_typed_by_a_class_type_parameter() is
+            let owner = new_class("BOX")
+            let caller = method_of(new_class("HOLDER"), "entry")
+            let parameter = CLASSY_GENERIC_ARGUMENT(loc(), owner, "T", 0)
+
+            is_false(_subject.binds_placeholder(parameter.type!, placeholder(), caller))
+        si
+    si
+si

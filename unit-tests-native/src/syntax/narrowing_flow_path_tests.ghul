@@ -1,0 +1,252 @@
+namespace Syntax.UnitTests is
+    use Collections.LIST
+
+    use Source.LOCATION
+
+    use Syntax.Process.ACCESS_PATH
+    use Syntax.Process.NARROW_ENV
+    use Syntax.Process.NARROWING_FLOW
+
+    use Semantic.Symbols.CLASS
+    use Semantic.Symbols.INSTANCE_FIELD
+    use Semantic.Symbols.INSTANCE_PROPERTY
+    use Semantic.Symbols.LOCAL_VARIABLE
+    use Semantic.Symbols.Symbol
+    use Assertions
+
+    // Pins the path-fact lifetime rules: every path dies on a
+    // possibly-storing call; getter-bearing paths die on any heap
+    // store while fields-only paths survive; a member store kills
+    // the paths that read through or are rooted at the stored member
+    // — receiver-independent, so aliased receivers are covered — and
+    // the member's own symbol fact; reassigning a root kills its
+    // paths. Also pins the heap epoch the controlled walks consult.
+    class NARROWING_FLOW_PATH_TESTS is
+        init() is
+            Fixtures.enter_function()
+        si
+
+        loc() -> LOCATION => LOCATION("test.ghul", 1, 1, 1, 1)
+
+        logger() -> Logging.Logger => Logging.DIAGNOSTICS_STORE()
+
+        owner() -> CLASS => CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "OWNER", LIST[string](), Semantic.BLOCK_SCOPE())
+
+        local_symbol(name: string) -> LOCAL_VARIABLE => LOCAL_VARIABLE(loc(), Semantic.BLOCK_SCOPE(), name)
+
+        field_symbol(name: string) -> INSTANCE_FIELD => INSTANCE_FIELD(loc(), owner(), name)
+
+        property_symbol(name: string) -> INSTANCE_PROPERTY =>
+            INSTANCE_PROPERTY(loc(), loc(), owner(), name, false, false)
+
+        path(root: Semantic.Symbols.Variable, hops: LIST[Symbol]) -> ACCESS_PATH =>
+            ACCESS_PATH(root, hops)
+
+        hops(a: Symbol?, b: Symbol?) -> LIST[Symbol] is
+            let result = LIST[Symbol]()
+            if a? then result.add(a); fi
+            if b? then result.add(b); fi
+            return result
+        si
+
+        flow_with_paths(paths: Collections.Iterable[ACCESS_PATH]) -> NARROWING_FLOW is
+            let flow = NARROWING_FLOW(logger())
+            let env = NARROW_ENV()
+
+            for p in paths do
+                env.set_non_null_path(p)
+            od
+
+            flow.set_env(env)
+
+            return flow
+        si
+
+        @test()
+        Call_transfer__keeps_paths_and_records_the_crossing() is
+            let x = local_symbol("x")
+            let f = field_symbol("f")
+            let p = property_symbol("p")
+
+            let fields_only = path(x, hops(f, null))
+            let getter_bearing = path(x, hops(p, null))
+
+            let flow = flow_with_paths([fields_only, getter_bearing])
+
+            flow.on_call(loc())
+
+            // narrowing is optimistic: the facts survive the call, but
+            // the unattributed crossing leaves them unvalidated - a
+            // use would be a reliance error
+            is_true(flow.is_non_null_path(fields_only))
+            is_true(flow.is_non_null_path(getter_bearing))
+            is_false(flow.path_fact_validated(fields_only))
+            is_false(flow.path_fact_validated(getter_bearing))
+        si
+
+        @test()
+        Heap_store_transfer__forgets_getter_bearing_paths_only() is
+            let x = local_symbol("x")
+            let f = field_symbol("f")
+            let g = field_symbol("g")
+            let p = property_symbol("p")
+
+            let fields_only = path(x, hops(f, g))
+            let getter_bearing = path(x, hops(f, p))
+
+            let flow = flow_with_paths([fields_only, getter_bearing])
+
+            flow.on_heap_store(loc())
+
+            is_true(flow.is_non_null_path(fields_only))
+            is_false(flow.is_non_null_path(getter_bearing))
+        si
+
+        @test()
+        Member_store_transfer__forgets_paths_through_the_member_on_any_receiver() is
+            let x = local_symbol("x")
+            let y = local_symbol("y")
+            let f = field_symbol("f")
+            let g = field_symbol("g")
+            let other = field_symbol("other")
+
+            let through_f = path(x, hops(f, g))
+            let also_through_f = path(y, hops(g, f))
+            let unrelated = path(x, hops(g, other))
+
+            let flow = flow_with_paths([through_f, also_through_f, unrelated])
+
+            flow.on_member_store(f)
+
+            is_false(flow.is_non_null_path(through_f))
+            is_false(flow.is_non_null_path(also_through_f))
+            is_true(flow.is_non_null_path(unrelated))
+        si
+
+        @test()
+        Member_store_transfer__forgets_the_members_own_symbol_fact() is
+            let f = field_symbol("f")
+
+            let flow = NARROWING_FLOW(logger())
+            let env = NARROW_ENV()
+            env.set_non_null(f)
+            flow.set_env(env)
+
+            flow.on_member_store(f)
+
+            is_false(flow.is_non_null(f))
+        si
+
+        @test()
+        Member_store_transfer__forgets_paths_rooted_at_a_field_root() is
+            let f = field_symbol("f")
+            let g = field_symbol("g")
+
+            let rooted_at_f = path(f, hops(g, null))
+
+            let flow = flow_with_paths([rooted_at_f])
+
+            flow.on_member_store(f)
+
+            is_false(flow.is_non_null_path(rooted_at_f))
+        si
+
+        @test()
+        Assignment_transfer__forgets_paths_rooted_at_the_target() is
+            let x = local_symbol("x")
+            let y = local_symbol("y")
+            let f = field_symbol("f")
+
+            let rooted_at_x = path(x, hops(f, null))
+            let rooted_at_y = path(y, hops(f, null))
+
+            let flow = flow_with_paths([rooted_at_x, rooted_at_y])
+
+            flow.on_assignment(x, loc(), null)
+
+            is_false(flow.is_non_null_path(rooted_at_x))
+            is_true(flow.is_non_null_path(rooted_at_y))
+        si
+
+        @test()
+        Assignment_transfer__to_a_field_forgets_paths_through_it() is
+            let x = local_symbol("x")
+            let f = field_symbol("f")
+            let g = field_symbol("g")
+
+            let through_f = path(x, hops(g, f))
+
+            let flow = flow_with_paths([through_f])
+
+            flow.on_assignment(f, loc(), null)
+
+            is_false(flow.is_non_null_path(through_f))
+        si
+
+        @test()
+        Env_copy_and_join__paths_survive_copy_and_join_by_intersection() is
+            let x = local_symbol("x")
+            let f = field_symbol("f")
+            let g = field_symbol("g")
+
+            let common = path(x, hops(f, null))
+            let only_a = path(x, hops(g, null))
+
+            let a = NARROW_ENV()
+            a.set_non_null_path(common)
+            a.set_non_null_path(only_a)
+
+            let b = a.copy()
+            is_true(b.is_non_null_path(common))
+            is_true(b.is_non_null_path(only_a))
+
+            let c = NARROW_ENV()
+            c.set_non_null_path(common)
+
+            let joined = NARROW_ENV.join(a, c)
+            is_true(joined.is_non_null_path(common))
+            is_false(joined.is_non_null_path(only_a))
+        si
+
+        @test()
+        Drop_heap_facts__spares_local_facts_only() is
+            let x = local_symbol("x")
+            let f = field_symbol("f")
+            let p = property_symbol("p")
+
+            let env = NARROW_ENV()
+            env.set_non_null(x)
+            env.set_non_null(f)
+            env.set_non_null(p)
+            env.set_non_null_path(path(x, hops(f, null)))
+
+            env.drop_heap_facts()
+
+            is_true(env.is_non_null(x))
+            is_false(env.is_non_null(f))
+            is_false(env.is_non_null(p))
+            is_false(env.is_non_null_path(path(x, hops(f, null))))
+        si
+
+        @test()
+        Heap_epoch__bumps_on_stores_but_not_calls() is
+            let flow = NARROWING_FLOW(logger())
+            let start = flow.heap_epoch
+
+            is_false(flow.heap_killed_since(start))
+
+            // a call is a crossing, not a kill: snapshot-derived
+            // environments keep their facts and adopt the crossing
+            flow.on_call(loc())
+            is_false(flow.heap_killed_since(start))
+
+            let after_call = flow.heap_epoch
+            flow.on_heap_store(loc())
+            is_true(flow.heap_killed_since(after_call))
+
+            let after_store = flow.heap_epoch
+            flow.on_member_store(field_symbol("f"))
+            is_true(flow.heap_killed_since(after_store))
+        si
+    si
+si

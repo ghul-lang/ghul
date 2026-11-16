@@ -1,0 +1,90 @@
+namespace Semantic.UnitTests is
+
+    use Source.LOCATION
+
+    use Semantic.Symbols.CLASS
+    use Semantic.Symbols.FRAME
+    use Semantic.Symbols.NAMESPACE
+    use Semantic.Symbols.STATIC_CLOSURE
+
+    use Semantic.Types.Type
+    use Assertions
+
+    // Pins `Closure.is_emitted_with_receiver`, which decides whether the
+    // method emitted for a function literal takes one.
+    //
+    // It is not the same question as `is_instance`: a closure is not an
+    // instance member of anything the language can see, so `is_instance`
+    // says no, while the method emitted for one whose captures live on a
+    // frame does take that frame. Its flags and its calling convention
+    // both turn on this, and a disagreement would produce a static method
+    // whose body reads argument 0 as a receiver.
+    class CLOSURE_EMITTED_RECEIVER_TESTS is
+        init() is si
+
+        loc() -> LOCATION => LOCATION("test.ghul", 1, 1, 1, 1)
+
+        namespace_owner() -> NAMESPACE => NAMESPACE(loc(), "Test", null, ".Test", false)
+
+        settled_type() -> Type =>
+            CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Concrete", Collections.LIST[string]().to_array(), Semantic.BLOCK_SCOPE()).type!
+
+        // A literal that captures nothing and is not built as a delegate:
+        // emitted as a static method of the enclosing `$globals`.
+        anonymous_function() -> STATIC_CLOSURE is
+            let owner = namespace_owner()
+            let closure = STATIC_CLOSURE(loc(), owner, "$anon_0", owner, false)
+            closure.type = settled_type()
+            return closure
+        si
+
+        @test()
+        Calling__is_emitted_with_receiver__for_a_plain_anonymous_function__returns_false() is
+            is_false(anonymous_function().is_emitted_with_receiver)
+        si
+
+        @test()
+        Calling__is_emitted_with_receiver__for_a_closure_with_a_frame__returns_true() is
+            // Captures live on a frame, and the method reaches them
+            // through it, so the frame is the receiver.
+            let closure = anonymous_function()
+            closure.set_captured_values_for_testing(Collections.SET[Semantic.Symbols.Symbol?]())
+            closure.set_frame_for_testing(FRAME(closure.owner!, closure))
+
+            is_true(closure.is_emitted_with_receiver)
+        si
+
+        @test()
+        Calling__is_emitted_with_receiver__for_a_delegate__returns_true() is
+            let closure = anonymous_function()
+            closure.set_is_delegate_for_testing(true)
+
+            is_true(closure.is_emitted_with_receiver)
+        si
+
+        @test()
+        Calling__is_emitted_with_receiver__for_a_delegate_cached_on_a_frame__returns_true() is
+            // A cached literal that captures nothing is built over an empty
+            // frame, and the frame is the receiver of the method it calls.
+            let closure = anonymous_function()
+            closure.set_is_delegate_for_testing(true)
+            closure.set_is_cached_on_frame_for_testing(true)
+            closure.set_captured_values_for_testing(Collections.SET[Semantic.Symbols.Symbol?]())
+            closure.set_frame_for_testing(FRAME(closure.owner!, closure))
+
+            is_true(closure.is_emitted_with_receiver)
+        si
+
+        @test()
+        Calling__is_memoizable_delegate__once_cached_on_a_frame__returns_true() is
+            // The frame makes the literal look like one that captures, which
+            // is not cacheable; the latch keeps the decision already made.
+            let closure = anonymous_function()
+            closure.set_is_cached_on_frame_for_testing(true)
+            closure.set_captured_values_for_testing(Collections.SET[Semantic.Symbols.Symbol?]())
+            closure.set_frame_for_testing(FRAME(closure.owner!, closure))
+
+            is_true(closure.is_memoizable_delegate)
+        si
+    si
+si

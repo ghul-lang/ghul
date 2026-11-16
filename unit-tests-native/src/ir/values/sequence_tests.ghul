@@ -1,0 +1,61 @@
+namespace IR.Values.UnitTests is
+    use Collections.LIST
+
+    use Source.LOCATION
+
+    use IR.UnitTests.Support.STUB_VALUE
+    use IR.Values.SEQUENCE
+
+    use Semantic.Symbols.CLASSY_GENERIC_ARGUMENT
+    use Assertions
+
+    // SEQUENCE.gen calls IoC.CONTAINER.instance.value_boxer.box_if_needed,
+    // which would need IoC bootstrap to test. These tests pin the structure
+    // SEQUENCE preserves — type, element type, and the value list — without
+    // touching gen.
+    class SEQUENCE_TESTS is
+        init() is si
+
+        loc() -> LOCATION => LOCATION("test.ghul", 1, 1, 1, 1)
+
+        type_named(name: string, index: int) -> Semantic.Types.Type =>
+            CLASSY_GENERIC_ARGUMENT(loc(), Semantic.BLOCK_SCOPE(), name, index).type!
+
+        @test()
+        Type_and_element_type__should_be_distinct_fields() is
+            // SEQUENCE represents a T[]: `type` is the List, `element_type`
+            // is T. They must not collapse — gen emits `newarr {element_type}`,
+            // not `newarr {type}`, and confusing them produces malformed IL.
+            let list_type = type_named("List", 0)
+            let element_type = type_named("T", 1)
+            let values = LIST[IR.Values.Value]()
+
+            let sequence = SEQUENCE(list_type, element_type, values)
+
+            are_same(list_type, sequence.type)
+            are_same(element_type, sequence.element_type)
+        si
+
+        @test()
+        Values_list__should_preserve_input_list_identity() is
+            // SEQUENCE holds the exact list passed in (no copy) — callers
+            // can append to it before gen runs, and tests / dump output
+            // see the same list.
+            let values = LIST[IR.Values.Value]()
+            values.add(STUB_VALUE())
+            values.add(STUB_VALUE())
+
+            let sequence = SEQUENCE(type_named("List", 0), type_named("T", 1), values)
+
+            are_same(values, sequence.values)
+            are_equal(2, sequence.values.count)
+        si
+
+        @test()
+        has_type__should_be_true_when_type_is_set() is
+            let sequence = SEQUENCE(type_named("List", 0), type_named("T", 1), LIST[IR.Values.Value]())
+
+            is_true(sequence.type?)
+        si
+    si
+si

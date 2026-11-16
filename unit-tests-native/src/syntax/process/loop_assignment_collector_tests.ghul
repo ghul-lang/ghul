@@ -1,0 +1,159 @@
+namespace Syntax.Process.UnitTests is
+    use Collections.LIST
+
+    use Source.LOCATION
+    use Assertions
+
+    // Tests for LOOP_ASSIGNMENT_COLLECTOR — the visitor that powers
+    // loop_kept_env's kill-set. Per-iteration narrows on a variable
+    // a loop writes cannot survive the back-edge; the collector
+    // surfaces the write-set so loop_kept_env can drop those
+    // narrows. Builds plain ASSIGNMENT / REFERENCE trees and walks
+    // them; no semantic resolution required.
+    class LOOP_ASSIGNMENT_COLLECTOR_TESTS is
+        init() is si
+
+        loc() -> LOCATION => LOCATION("test.ghul", 1, 1, 1, 1)
+
+        ident_expr(name: string) -> Trees.Expressions.IDENTIFIER =>
+            Trees.Expressions.IDENTIFIER(loc(), Trees.Identifiers.Identifier(loc(), name))
+
+        simple_left(name: string) -> Trees.Expressions.SIMPLE_LEFT_EXPRESSION =>
+            Trees.Expressions.SIMPLE_LEFT_EXPRESSION(loc(), ident_expr(name))
+
+        assign(target: string, value: Trees.Expressions.Expression) -> Trees.Statements.ASSIGNMENT =>
+            Trees.Statements.ASSIGNMENT(loc(), simple_left(target), value)
+
+        int_literal(value: int) -> Trees.Expressions.Literals.INTEGER =>
+            Trees.Expressions.Literals.INTEGER(loc(), "{value}")
+
+        @test()
+        Empty_body_should_produce_empty_kill_set() is
+            let collector = LOOP_ASSIGNMENT_COLLECTOR()
+            let body = Trees.Statements.LIST(loc(), LIST[Trees.Statements.Statement]())
+
+            body.walk(collector)
+
+            are_equal(0, collector.names.count)
+        si
+
+        @test()
+        Single_assignment_should_be_in_kill_set() is
+            let collector = LOOP_ASSIGNMENT_COLLECTOR()
+
+            let body =
+                Trees.Statements.LIST(
+                    loc(),
+                    LIST[Trees.Statements.Statement]([
+                        assign("a", int_literal(1))
+                    ])
+                )
+
+            body.walk(collector)
+
+            is_true(collector.names.contains("a"))
+            are_equal(1, collector.names.count)
+        si
+
+        @test()
+        Read_only_use_should_not_be_in_kill_set() is
+            let collector = LOOP_ASSIGNMENT_COLLECTOR()
+
+            // `let _ = a;` — read of `a` with no write.
+            let body =
+                Trees.Statements.LIST(
+                    loc(),
+                    LIST[Trees.Statements.Statement]([
+                        assign("b", ident_expr("a"))
+                    ])
+                )
+
+            body.walk(collector)
+
+            is_true(collector.names.contains("b"))
+            is_false(collector.names.contains("a"))
+        si
+
+        @test()
+        Ref_argument_should_be_in_kill_set() is
+            let collector = LOOP_ASSIGNMENT_COLLECTOR()
+            let reference = Trees.Expressions.REFERENCE(loc(), ident_expr("x"))
+
+            reference.walk(collector)
+
+            is_true(collector.names.contains("x"))
+        si
+
+        @test()
+        Multiple_assignments_should_all_be_collected() is
+            let collector = LOOP_ASSIGNMENT_COLLECTOR()
+
+            let body =
+                Trees.Statements.LIST(
+                    loc(),
+                    LIST[Trees.Statements.Statement]([
+                        assign("a", int_literal(1)),
+                        assign("b", int_literal(2)),
+                        assign("c", int_literal(3))
+                    ])
+                )
+
+            body.walk(collector)
+
+            is_true(collector.names.contains("a"))
+            is_true(collector.names.contains("b"))
+            is_true(collector.names.contains("c"))
+            are_equal(3, collector.names.count)
+        si
+
+        @test()
+        Nested_loop_assignments_should_be_collected() is
+            // Inner loops' writes happen on each outer iteration too,
+            // so a narrow on the outer-loop variable cannot survive
+            // the inner-loop body either — collector must descend.
+            let collector = LOOP_ASSIGNMENT_COLLECTOR()
+
+            let inner_body =
+                Trees.Statements.LIST(
+                    loc(),
+                    LIST[Trees.Statements.Statement]([
+                        assign("inner_write", int_literal(1))
+                    ])
+                )
+            let inner_loop = Trees.Statements.DO(loc(), null, inner_body)
+
+            let outer_body =
+                Trees.Statements.LIST(
+                    loc(),
+                    LIST[Trees.Statements.Statement]([
+                        assign("outer_write", int_literal(2)),
+                        inner_loop
+                    ])
+                )
+
+            outer_body.walk(collector)
+
+            is_true(collector.names.contains("outer_write"))
+            is_true(collector.names.contains("inner_write"))
+        si
+
+        @test()
+        Repeated_writes_of_same_name_should_be_set_collapsed() is
+            let collector = LOOP_ASSIGNMENT_COLLECTOR()
+
+            let body =
+                Trees.Statements.LIST(
+                    loc(),
+                    LIST[Trees.Statements.Statement]([
+                        assign("a", int_literal(1)),
+                        assign("a", int_literal(2))
+                    ])
+                )
+
+            body.walk(collector)
+
+            are_equal(1, collector.names.count)
+            is_true(collector.names.contains("a"))
+        si
+    si
+si

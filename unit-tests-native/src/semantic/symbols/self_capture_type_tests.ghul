@@ -1,0 +1,126 @@
+namespace Semantic.Symbols.UnitTests is
+    use Collections.Iterable
+    use Collections.LIST
+
+    use Source.LOCATION
+
+    use Semantic.Symbols.CLASS
+    use Semantic.Symbols.Classy
+    use Semantic.Symbols.SELF_CAPTURE_TYPE
+
+    use Semantic.Types.Type
+    use Assertions
+
+    // Tests for SELF_CAPTURE_TYPE — the type a frame's captured-receiver
+    // field takes.
+    //
+    // Pinned here because the failure it guards against is invisible
+    // until run time: a bare generic type name is accepted by every
+    // stage up to and including ilasm, and only the CLR rejects it,
+    // with a TypeLoadException naming a type that looks like it exists.
+    class SELF_CAPTURE_TYPE_TESTS is
+        init() is si
+
+        loc() -> LOCATION => LOCATION("test.ghul", 1, 1, 1, 1)
+
+        names_for(values: Iterable[string]) -> LIST[string] is
+            let result = LIST[string]()
+
+            for v in values do
+                result.add(v)
+            od
+
+            return result
+        si
+
+        // Names the lookup was asked for, in the order it was asked.
+        asked: LIST[string]
+
+        // Resolve each parameter to the class's own declared one, as the
+        // closure-frame caller does.
+        resolve_declared(context: Classy) -> Type? is
+            asked = LIST[string]()
+
+            return SELF_CAPTURE_TYPE(
+                (classy, name) =>
+                    val
+                        asked.add(name)
+
+                        classy.find_direct(name)?.type
+                    lav
+            ).of(context)
+        si
+
+        // `class BOX is ... si` — nothing to instantiate.
+        build_non_generic_box() -> CLASS =>
+            CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "BOX", names_for([]), Semantic.BLOCK_SCOPE())
+
+        // `class PAIR[K, V] is ... si`, with both parameters declared
+        // into the class scope so `find_direct` reaches them.
+        build_generic_pair() -> CLASS is
+            let pair = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "PAIR", names_for(["K", "V"]), Semantic.BLOCK_SCOPE())
+
+            pair.declare_type(loc(), "K", 0, null)
+            pair.declare_type(loc(), "V", 1, null)
+
+            return pair
+        si
+
+        @test()
+        Calling__of__on_a_non_generic_class_should_return_the_class_type() is
+            let box = build_non_generic_box()
+
+            let result = resolve_declared(box)
+
+            are_same(box.type, result)
+            are_equal(0, asked.count)
+        si
+
+        @test()
+        Calling__of__on_a_generic_class_should_instantiate_it_with_its_own_type_parameters() is
+            let pair = build_generic_pair()
+
+            let result = resolve_declared(pair)
+
+            is_true(result?)
+
+            let generic = cast Semantic.Symbols.GENERIC?(result!.symbol)
+
+            is_true(generic?)
+            are_same(pair, generic!.symbol)
+            are_equal(2, result.arguments.count)
+            are_same(pair.find_direct("K")!.type, result.arguments[0])
+            are_same(pair.find_direct("V")!.type, result.arguments[1])
+        si
+
+        // A parameter the lookup cannot resolve leaves nothing to
+        // instantiate with, so the bare type comes back rather than a
+        // reference with a missing argument.
+        @test()
+        Calling__of__with_an_unresolvable_type_parameter_should_return_the_class_type() is
+            let pair = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "PAIR", names_for(["K", "V"]), Semantic.BLOCK_SCOPE())
+
+            pair.declare_type(loc(), "K", 0, null)
+
+            let result = resolve_declared(pair)
+
+            are_same(pair.type, result)
+        si
+
+        // The lookup decides where the arguments come from, so a caller
+        // that maps them elsewhere — as a state machine maps them onto
+        // its own mirrored parameters — gets those instead.
+        @test()
+        Calling__of__should_take_each_argument_from_the_supplied_lookup() is
+            let pair = build_generic_pair()
+            let other = build_non_generic_box()
+
+            let result = SELF_CAPTURE_TYPE((classy, name) => other.type).of(pair)
+
+            is_true(result?)
+            are_equal(2, result!.arguments.count)
+            are_same(other.type, result.arguments[0])
+            are_same(other.type, result.arguments[1])
+        si
+    si
+si

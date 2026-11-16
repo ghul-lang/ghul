@@ -1,0 +1,245 @@
+namespace Semantic.UnitTests is
+    use Collections.LIST
+
+    use Source.LOCATION
+
+    use Semantic.INFERENCE_HELPERS
+
+    use Semantic.Symbols.CLASS
+    use Semantic.Symbols.CLASSY_GENERIC_ARGUMENT
+    use Semantic.Symbols.FUNCTION_GENERIC_ARGUMENT
+    use Semantic.Symbols.Symbol
+    use Semantic.Symbols.UNION
+    use Semantic.Symbols.VARIANT
+
+    use Semantic.Types.GENERIC
+    use Semantic.Types.Type
+    use Assertions
+
+    // INFERENCE_HELPERS pins two pure helpers used by the
+    // placeholder-formal match propagation (COMPILE_CALLS.visit_call) and the
+    // closure-arg inference path (CLOSURE_ARG_RESOLVER): widening a
+    // closed-root alternative (union variant or closed-class
+    // subclass) to its declaring closed root, and collecting the
+    // method-level type-variables embedded in a Type.
+    class INFERENCE_HELPERS_TESTS is
+        init() is si
+
+        loc() -> LOCATION => LOCATION("test.ghul", 1, 1, 1, 1)
+
+        empty_names() -> LIST[string] => LIST[string]()
+
+        names_for_T() -> LIST[string] is
+            let result = LIST[string]()
+            result.add("T")
+            return result
+        si
+
+        int_class() -> CLASS => CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "int", empty_names(), Semantic.BLOCK_SCOPE())
+
+        // === widen_to_closed_root ===
+
+        // Build a closed Animal hierarchy: `Animal` (closed,
+        // abstract), `Cat: Animal`, `Dog: Animal`. Mirrors a
+        // user-written `class Animal abstract is si; class Cat:
+        // Animal is si`. Uses CLASS for the root and subclasses
+        // since unions can't have user-written subclasses outside
+        // their variant set.
+        build_animal_hierarchy() -> (animal: CLASS, cat: CLASS, dog: CLASS) is
+            let object_class = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "object", empty_names(), Semantic.BLOCK_SCOPE())
+            object_class.mark_is_object()
+
+            let animal = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Animal", empty_names(), Semantic.BLOCK_SCOPE())
+            animal.mark_closed()
+            animal.mark_abstract()
+            animal.add_ancestor(object_class.type!)
+
+            let cat = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Cat", empty_names(), Semantic.BLOCK_SCOPE())
+            cat.add_ancestor(animal.type!)
+            animal.add_implementor(cat)
+
+            let dog = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Dog", empty_names(), Semantic.BLOCK_SCOPE())
+            dog.add_ancestor(animal.type!)
+            animal.add_implementor(dog)
+
+            return (animal, cat, dog)
+        si
+
+        // Null is a no-op — the call site may pass a half-resolved
+        // type and the helper must not NRE.
+        @test()
+        Calling__widen_to_closed_root__with_null__returns_null() is
+            is_null(INFERENCE_HELPERS.widen_to_closed_root(null))
+        si
+
+        // A plain non-variant concrete class type passes through.
+        @test()
+        Calling__widen_to_closed_root__with_a_non_variant_class__returns_the_class() is
+            let t = int_class().type!
+            are_same(t, INFERENCE_HELPERS.widen_to_closed_root(t))
+        si
+
+        // Build the variant/union shape:
+        //   union T[] is
+        //       NIL;
+        //       CONS(head: T, tail: T[]);
+        //   si
+        // Each variant's parent ancestor is the specialised
+        // `T_var[]` where `T_var` is the variant's own type
+        // parameter — this mirrors what `declare-symbols` records in
+        // production. With that wiring, `Symbols.GENERIC.get_ancestor`
+        // can substitute the call-site type-arg through the variant's
+        // type-map to produce the specialised union.
+        build_list_union() -> (union_symbol: UNION, cons_symbol: VARIANT, nil_symbol: VARIANT) is
+            let union_symbol = UNION(loc(), loc(), Semantic.BLOCK_SCOPE(), "List", names_for_T(), Semantic.BLOCK_SCOPE())
+
+            let cons_symbol = VARIANT(loc(), loc(), Semantic.BLOCK_SCOPE(), "CONS", names_for_T(), Semantic.BLOCK_SCOPE())
+            let cons_t = cons_symbol.declare_type(loc(), "T", 0, null)
+            cons_symbol.add_ancestor(cast Type(GENERIC(loc(), union_symbol, types(cons_t.type!))))
+
+            let nil_symbol = VARIANT(loc(), loc(), Semantic.BLOCK_SCOPE(), "NIL", names_for_T(), Semantic.BLOCK_SCOPE())
+            let nil_t = nil_symbol.declare_type(loc(), "T", 0, null)
+            nil_symbol.add_ancestor(cast Type(GENERIC(loc(), union_symbol, types(nil_t.type!))))
+
+            return (union_symbol, cons_symbol, nil_symbol)
+        si
+
+        @test()
+        Calling__widen_to_closed_root__with_a_named_variant__returns_the_declaring_union() is
+            let h = build_list_union()
+            let widened = INFERENCE_HELPERS.widen_to_closed_root(h.cons_symbol.type!)
+
+            assert widened?
+            are_same(h.union_symbol, widened.symbol.root_unspecialized_symbol)
+        si
+
+        // A generic wrapper over a non-variant passes through. Pin
+        // that the variant check guards against widening any generic
+        // — only union variants travel up to their declaring union.
+        @test()
+        Calling__widen_to_closed_root__on_a_generic_wrapper_of_a_non_variant__returns_the_input() is
+            let plain = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Box", names_for_T(), Semantic.BLOCK_SCOPE())
+            let int_t = int_class().type!
+            let box_of_int = cast Type(GENERIC(loc(), plain, types(int_t)))
+
+            are_same(box_of_int, INFERENCE_HELPERS.widen_to_closed_root(box_of_int))
+        si
+
+        // The motivating case: a specialised variant `CONS[int]` widens
+        // to the specialised union `int[]` carrying the same
+        // type-arg substitution. Exercises the `Symbols.GENERIC` cast,
+        // is_variant detection, and the specialised-ancestor lookup —
+        // the production shape `let xs = CONS(...)` produces and the
+        // match propagation site widens before recording onto a lambda-arg
+        // placeholder.
+        @test()
+        Calling__widen_to_closed_root__with_a_specialised_variant__returns_the_specialised_union() is
+            let h = build_list_union()
+            let int_t = int_class().type!
+
+            let cons_of_int = cast Type(GENERIC(loc(), h.cons_symbol, types(int_t)))
+            let widened = INFERENCE_HELPERS.widen_to_closed_root(cons_of_int)
+
+            is_not_null(widened)
+            let widened_generic = cast GENERIC(widened)
+            is_not_null(widened_generic)
+            are_same(h.union_symbol, widened_generic.symbol.root_unspecialized_symbol)
+            are_equal(1, widened_generic.arguments.count)
+            are_same(int_t, widened_generic.arguments[0])
+        si
+
+        // Closed-class subclass widens to its closed root. Mirrors a
+        // recursive lambda over a closed `Animal` hierarchy: pushing
+        // `Cat` would pin the lambda to Cat even though the call
+        // graph would later infer `Animal`.
+        @test()
+        Calling__widen_to_closed_root__with_a_closed_class_subclass__returns_the_closed_root() is
+            let h = build_animal_hierarchy()
+
+            let widened = INFERENCE_HELPERS.widen_to_closed_root(h.cat.type!)
+
+            assert widened?
+            are_same(h.animal, widened.symbol)
+        si
+
+        // An open-class subclass does NOT widen — extending an open
+        // root admits unknown sibling classes across assemblies, so
+        // widening would be unsound for the same monotonicity
+        // argument that motivates the original variant case.
+        @test()
+        Calling__widen_to_closed_root__with_an_open_class_subclass__returns_the_subclass() is
+            let object_class = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "object", empty_names(), Semantic.BLOCK_SCOPE())
+            object_class.mark_is_object()
+
+            let shape = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Shape", empty_names(), Semantic.BLOCK_SCOPE())
+            shape.mark_open()
+            shape.add_ancestor(object_class.type!)
+
+            let circle = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Circle", empty_names(), Semantic.BLOCK_SCOPE())
+            circle.add_ancestor(shape.type!)
+            shape.add_implementor(circle)
+
+            are_same(circle.type!, INFERENCE_HELPERS.widen_to_closed_root(circle.type!))
+        si
+
+        // === collect_method_level_type_variables ===
+
+        // Concrete-only types contribute nothing.
+        @test()
+        Calling__collect_method_level_type_variables__on_a_concrete_class__returns_empty() is
+            let result = LIST[Symbol]()
+            INFERENCE_HELPERS.collect_method_level_type_variables(int_class().type!, result)
+
+            are_equal(0, result.count)
+        si
+
+        // Class-level type variables (CLASSY_GENERIC_ARGUMENT) are
+        // explicitly excluded — the closure's enclosing instance
+        // carries them via `!N`, not `!!N`.
+        @test()
+        Calling__collect_method_level_type_variables__on_a_class_level_type_variable__returns_empty() is
+            let host = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Host", names_for_T(), Semantic.BLOCK_SCOPE())
+            let t = CLASSY_GENERIC_ARGUMENT(loc(), host, "T", 0)
+
+            let result = LIST[Symbol]()
+            INFERENCE_HELPERS.collect_method_level_type_variables(t.type!, result)
+
+            are_equal(0, result.count)
+        si
+
+        // A method-level type variable IS collected. Mirrors the
+        // shape `f[T](x: T)` where `T` is a method-generic argument.
+        @test()
+        Calling__collect_method_level_type_variables__on_a_method_level_type_variable__returns_it() is
+            let function_t = FUNCTION_GENERIC_ARGUMENT(loc(), Semantic.BLOCK_SCOPE(), "T", 0)
+
+            let result = LIST[Symbol]()
+            INFERENCE_HELPERS.collect_method_level_type_variables(function_t.type!, result)
+
+            are_equal(1, result.count)
+            are_same(function_t, result[0])
+        si
+
+        // Recurses into a generic's arguments — the `T` of `T[]`
+        // when `T` is a method-generic param shows up in the output.
+        @test()
+        Calling__collect_method_level_type_variables__inside_a_generic__returns_inner_method_T() is
+            let h = build_list_union()
+            let function_t = FUNCTION_GENERIC_ARGUMENT(loc(), Semantic.BLOCK_SCOPE(), "T", 0)
+
+            let list_of_method_t = cast Type(GENERIC(loc(), h.union_symbol, types(function_t.type!)))
+
+            let result = LIST[Symbol]()
+            INFERENCE_HELPERS.collect_method_level_type_variables(list_of_method_t, result)
+
+            are_equal(1, result.count)
+            are_same(function_t, result[0])
+        si
+
+        types(a: Type) -> LIST[Type] is
+            let result = LIST[Type]()
+            result.add(a)
+            return result
+        si
+    si
+si

@@ -1,0 +1,175 @@
+namespace Semantic.Symbols.UnitTests is
+    use Collections.LIST
+
+    use Source.LOCATION
+
+    use Semantic.Types.Type
+
+    use Ghul.Pipes
+
+    use Assertions
+
+    // A member matching an inherited one on name and argument types but
+    // differing in return type overrides or implements it when its return
+    // is a narrower reference type. Otherwise it hides an inherited class
+    // member, with a warning, and is an error for a trait member.
+    class OVERRIDE_RETURN_TYPE_TESTS is
+        init() is si
+
+        loc() -> LOCATION => LOCATION("test.ghul", 1, 1, 1, 1)
+
+        make_class(name: string) -> CLASS =>
+            CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), name, LIST[string](), Semantic.BLOCK_SCOPE())
+
+        make_method(name: string, return_type: Type) -> INSTANCE_METHOD is
+            let result = INSTANCE_METHOD(loc(), loc(), Semantic.BLOCK_SCOPE(), name, Semantic.BLOCK_SCOPE())
+
+            result.arguments = LIST[Type]()
+            result.return_type = return_type
+
+            return result
+        si
+
+        severities(logger: Logging.DIAGNOSTICS_STORE) -> string =>
+            logger.diagnostics_for(loc().file_name)
+                |> map(d => "{d.severity}")
+                |> join(",")
+
+        @test()
+        Calling__ensure_return_type_matches__when_the_return_type_is_unrelated_should_error() is
+            let into = make_class("INTO")
+
+            let overridee = make_method("run", make_class("RESULT").type!)
+            let overrider = make_method("run", make_class("OTHER").type!)
+
+            let logger = Logging.DIAGNOSTICS_STORE()
+
+            is_false(overrider.ensure_return_type_matches(into, overridee, true, logger))
+
+            are_equal("ERROR", severities(logger))
+        si
+
+        @test()
+        Calling__ensure_return_type_matches__when_the_return_type_is_narrower_should_override() is
+            let into = make_class("INTO")
+
+            let animal = make_class("ANIMAL")
+            let cat = make_class("CAT")
+
+            cat.add_ancestor(animal.type!)
+
+            let overridee = make_method("pet", animal.type!)
+            let overrider = make_method("pet", cat.type!)
+
+            let logger = Logging.DIAGNOSTICS_STORE()
+
+            is_true(overrider.ensure_return_type_matches(into, overridee, true, logger))
+
+            are_equal("", severities(logger))
+        si
+
+        @test()
+        Calling__ensure_return_type_matches__when_implementing_with_a_narrower_return_type_should_implement() is
+            let into = make_class("INTO")
+
+            let animal = make_class("ANIMAL")
+            let cat = make_class("CAT")
+
+            cat.add_ancestor(animal.type!)
+
+            let overridee = make_method("pet", animal.type!)
+            let overrider = make_method("pet", cat.type!)
+
+            let logger = Logging.DIAGNOSTICS_STORE()
+
+            is_true(overrider.ensure_return_type_matches(into, overridee, false, logger))
+
+            are_equal("", severities(logger))
+        si
+
+        @test()
+        Calling__ensure_return_type_matches__when_implementing_with_an_unrelated_return_type_should_error() is
+            let into = make_class("INTO")
+
+            let overridee = make_method("run", make_class("RESULT").type!)
+            let overrider = make_method("run", make_class("OTHER").type!)
+
+            let logger = Logging.DIAGNOSTICS_STORE()
+
+            is_false(overrider.ensure_return_type_matches(into, overridee, false, logger))
+
+            are_equal("ERROR", severities(logger))
+        si
+
+        @test()
+        Calling__has_covariant_return_over__should_hold_only_for_a_strictly_narrower_reference() is
+            let animal = make_class("ANIMAL")
+            let cat = make_class("CAT")
+
+            cat.add_ancestor(animal.type!)
+
+            is_true(make_method("pet", cat.type!).has_covariant_return_over(make_method("pet", animal.type!)))
+            is_false(make_method("pet", animal.type!).has_covariant_return_over(make_method("pet", cat.type!)))
+            is_false(make_method("pet", cat.type!).has_covariant_return_over(make_method("pet", cat.type!)))
+            is_false(make_method("pet", make_class("DOG").type!).has_covariant_return_over(make_method("pet", animal.type!)))
+        si
+
+        make_owned_method(owner: Classy, name: string, return_type: Type) -> INSTANCE_METHOD is
+            let result = INSTANCE_METHOD(loc(), loc(), owner, name, Semantic.BLOCK_SCOPE())
+
+            result.arguments = LIST[Type]()
+            result.return_type = return_type
+
+            return result
+        si
+
+        @test()
+        Calling__has_overriding_return_type__should_accept_the_same_or_a_narrower_reference_only() is
+            let animal = make_class("ANIMAL")
+            let cat = make_class("CAT")
+
+            cat.add_ancestor(animal.type!)
+
+            let overridee = make_method("pet", animal.type!)
+
+            is_true(make_method("pet", animal.type!).has_overriding_return_type(overridee))
+            is_true(make_method("pet", cat.type!).has_overriding_return_type(overridee))
+            is_false(make_method("pet", make_class("OTHER").type!).has_overriding_return_type(overridee))
+        si
+
+        @test()
+        Calling__try_override__with_an_unrelated_return_over_a_class_member__should_warn_and_record_no_override() is
+            let base = make_class("BASE")
+            let derived = make_class("DERIVED")
+
+            derived.add_ancestor(base.type!)
+
+            let overridee = make_owned_method(base, "make", make_class("RESULT").type!)
+            let overrider = make_owned_method(derived, "make", make_class("OTHER").type!)
+
+            let logger = Logging.DIAGNOSTICS_STORE()
+
+            overrider.try_override(derived, overridee, logger)
+
+            are_equal("WARN", severities(logger))
+            let overridees = overrider.overridees
+
+            is_true(!overridees? \/ !(overridees |> any(o => o == overridee)))
+        si
+
+        @test()
+        Calling__try_override__with_an_unrelated_return_over_a_trait_member__should_error_and_still_record_it() is
+            let maker = TRAIT(loc(), loc(), Semantic.BLOCK_SCOPE(), "Maker", LIST[string](), Semantic.BLOCK_SCOPE())
+            let into = make_class("MAKER")
+
+            let overridee = make_owned_method(maker, "make", make_class("RESULT").type!)
+            let overrider = make_owned_method(into, "make", make_class("OTHER").type!)
+
+            let logger = Logging.DIAGNOSTICS_STORE()
+
+            overrider.try_override(into, overridee, logger)
+
+            is_true(severities(logger).contains("ERROR"))
+        si
+    si
+si

@@ -1,0 +1,99 @@
+namespace Analysis.UnitTests is
+
+    use Source.LOCATION
+    use Collections.LIST
+    use Collections.Iterable
+
+    use Logging.INLAY
+    use Protocol = Analysis.Protocol
+
+    use Analysis.INLAY_RANGE
+    use Analysis.NARROWING_INLAY_MERGER
+    use Assertions
+
+    class INLAY_RANGE_TESTS is
+        init() is si
+
+        inlay(line: int, column: int, code: string, detail: string) -> INLAY =>
+            INLAY(true, true, LOCATION("test.ghul", line, column, line, column + 1), code, "►", detail)
+
+        request(
+            start_line: int?,
+            start_column: int?,
+            end_line: int?,
+            end_column: int?
+        ) -> Protocol.Request.INLAY_HINTS =>
+            Protocol.Request.INLAY_HINTS("test.ghul", start_line, start_column, end_line, end_column)
+
+        @test()
+        range_is_start_inclusive() is
+            let i = inlay(3, 5, "narrowing-isa", "CAT")
+
+            is_true(INLAY_RANGE.within(i, 3, 5, 9, 1), "a hint at the range's start is inside it")
+        si
+
+        @test()
+        range_is_end_exclusive() is
+            let i = inlay(4, 1, "narrowing-isa", "CAT")
+
+            is_false(INLAY_RANGE.within(i, 2, 1, 4, 1), "a hint at the range's end belongs to the next viewport")
+            is_true(INLAY_RANGE.within(i, 2, 1, 4, 2), "one column in from the end is inside")
+        si
+
+        @test()
+        same_line_compares_column() is
+            let i = inlay(2, 8, "narrowing-isa", "CAT")
+
+            is_false(INLAY_RANGE.within(i, 2, 9, 3, 1), "a column before the range's start column is outside")
+            is_true(INLAY_RANGE.within(i, 2, 8, 3, 1), "the start column itself is inside")
+        si
+
+        @test()
+        absent_range_means_whole_file() is
+            let inlays = [
+                inlay(1, 1, "narrowing-isa", "CAT"),
+                inlay(500, 20, "narrowing-isa", "DOG")
+            ]
+
+            are_equal(2, INLAY_RANGE.filter(inlays, request(null, null, null, null)).count)
+        si
+
+        @test()
+        filter_limits_to_the_range() is
+            let inlays = [
+                inlay(1, 1, "narrowing-isa", "CAT"),
+                inlay(3, 5, "narrowing-isa", "DOG"),
+                inlay(9, 2, "narrowing-isa", "BIRD")
+            ]
+
+            let filtered = INLAY_RANGE.filter(inlays, request(2, 1, 4, 1))
+
+            are_equal(1, filtered.count)
+            are_equal(3, filtered[0].location.start_line)
+        si
+
+        // Filtering before the mergers is only sound because both group
+        // on exact position: a range either contains a whole group or
+        // none of it. A future merger grouping by enclosing scope would
+        // see a group cut in half by the range and must change this
+        // ordering - this test is the tripwire.
+        @test()
+        filter_before_merge_keeps_whole_groups() is
+            let pair = [
+                inlay(3, 5, "narrowing-isa", "CONS[int]"),
+                inlay(3, 5, "narrowing-isa-complement", "NIL")
+            ]
+
+            let inside = NARROWING_INLAY_MERGER().merge(
+                INLAY_RANGE.filter(pair, request(2, 1, 4, 1))
+            )
+            are_equal(1, inside.count, "an edge pair inside the range merges as it does unfiltered")
+            are_equal("► CONS[int]\n> NIL", inside[0].detail)
+
+            let outside = NARROWING_INLAY_MERGER().merge(
+                INLAY_RANGE.filter(pair, request(4, 1, 6, 1))
+            )
+            are_equal(0, outside.count, "an edge pair outside the range is gone entirely")
+        si
+    si
+si

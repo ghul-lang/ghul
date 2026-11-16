@@ -1,0 +1,97 @@
+namespace Semantic.Types.UnitTests is
+    use Collections.LIST
+    use Collections.List
+
+    use Source.LOCATION
+
+    use Semantic.Symbols.CLASS
+    use Semantic.Symbols.FUNCTION_GENERIC_ARGUMENT
+    use Semantic.Types.GENERIC
+    use Semantic.Types.Type
+    use Assertions
+
+    // Type.has_function_generic_argument_foreign_to distinguishes a
+    // method-level generic type-parameter that legitimately names one of
+    // the currently-compiling function's own generic parameters (or one
+    // lexically in scope from an enclosing function, when the owner is
+    // a nested closure) from one left over from a different (possibly
+    // discarded) overload specialization. A local variable's committed
+    // declared type must never carry the latter — its index has no
+    // meaning outside the specialization that produced it.
+    class FUNCTION_GENERIC_ARGUMENT_OWNERSHIP_TESTS is
+        init() is si
+
+        loc() -> LOCATION => LOCATION("test.ghul", 1, 1, 1, 1)
+        empty_names() -> LIST[string] => LIST[string]()
+
+        make_owner(name: string) -> CLASS => CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), name, empty_names(), Semantic.BLOCK_SCOPE())
+
+        make_class_type(name: string) -> Type is
+            let c = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), name, empty_names(), Semantic.BLOCK_SCOPE())
+            c.set_type(Semantic.Types.NAMED(c))
+            return c.type!
+        si
+
+        @test()
+        bare_argument_is_foreign_to_a_different_owner() is
+            let declaring = make_owner("declaring")
+            let compiling = make_owner("compiling")
+            let c = FUNCTION_GENERIC_ARGUMENT(loc(), declaring, "C", 0)
+
+            is_true(c.type!.has_function_generic_argument_foreign_to(compiling))
+        si
+
+        @test()
+        bare_argument_is_not_foreign_to_its_own_owner() is
+            let declaring = make_owner("declaring")
+            let c = FUNCTION_GENERIC_ARGUMENT(loc(), declaring, "C", 0)
+
+            is_false(c.type!.has_function_generic_argument_foreign_to(declaring))
+        si
+
+        @test()
+        bare_argument_is_foreign_when_owner_is_null() is
+            let declaring = make_owner("declaring")
+            let c = FUNCTION_GENERIC_ARGUMENT(loc(), declaring, "C", 0)
+
+            is_true(c.type!.has_function_generic_argument_foreign_to(null))
+        si
+
+        @test()
+        nested_in_generic_is_still_detected() is
+            let declaring = make_owner("declaring")
+            let compiling = make_owner("compiling")
+            let c = FUNCTION_GENERIC_ARGUMENT(loc(), declaring, "C", 0)
+
+            let func = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "func", ["A", "C"], Semantic.BLOCK_SCOPE())
+            let args = LIST[Type]([make_class_type("int"), c.type!])
+            let g = GENERIC(loc(), func, args)
+
+            is_true(g.has_function_generic_argument_foreign_to(compiling))
+        si
+
+        @test()
+        type_with_no_function_generic_argument_is_never_foreign() is
+            let animal = make_class_type("animal")
+            let compiling = make_owner("compiling")
+
+            is_false(animal.has_function_generic_argument_foreign_to(compiling))
+            is_false(animal.has_function_generic_argument_foreign_to(null))
+        si
+
+        // A type parameter declared on an enclosing function is in
+        // scope from a nested scope that chains to it via
+        // enclosing_scope — the same path a closure body uses to see
+        // the outer method's type parameters.
+        @test()
+        argument_of_enclosing_scope_is_not_foreign() is
+            let enclosing = make_owner("enclosing")
+            let nested = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "nested", empty_names(), enclosing)
+
+            let t = FUNCTION_GENERIC_ARGUMENT(loc(), enclosing, "T", 0)
+            enclosing.add_member(t)
+
+            is_false(t.type!.has_function_generic_argument_foreign_to(nested))
+        si
+    si
+si

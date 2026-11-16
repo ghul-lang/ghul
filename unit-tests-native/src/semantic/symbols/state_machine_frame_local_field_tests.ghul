@@ -1,0 +1,118 @@
+namespace Semantic.Symbols.UnitTests is
+
+    use Source.LOCATION
+    use Assertions
+
+    // declare_local_field snapshots the source local's type at the
+    // walk moment; flow narrowing can retype the local later in
+    // compile-expressions, so IL emission re-reads the settled types
+    // through refresh_local_field_types before emitting the frame.
+    class STATE_MACHINE_FRAME_LOCAL_FIELD_TESTS is
+        _scope: Semantic.BLOCK_SCOPE
+
+        init() is
+            Fixtures.enter_function()
+
+            _scope = Semantic.BLOCK_SCOPE()
+
+            Fixtures.use_test_innate_symbol_lookup()
+        si
+
+        loc() -> LOCATION => LOCATION("test.ghul", 1, 1, 1, 1)
+
+        make_frame() -> STATE_MACHINE_FRAME is
+            let owner = CLASS(loc(), loc(), _scope, "Owner", Collections.LIST[string]().to_array(), Semantic.BLOCK_SCOPE())
+            let function = STATIC_METHOD(loc(), loc(), owner, "generate", Semantic.BLOCK_SCOPE())
+            let element_type =
+                CLASSY_GENERIC_ARGUMENT(loc(), Semantic.BLOCK_SCOPE(), "element", 0).type!
+
+            return STATE_MACHINE_FRAME(owner, function, element_type)
+        si
+
+        @test()
+        Calling__refresh_local_field_types__should_re_read_the_local_s_settled_type() is
+            let frame = make_frame()
+            let local = LOCAL_VARIABLE(loc(), _scope, "present")
+            let original = CLASSY_GENERIC_ARGUMENT(loc(), _scope, "first", 0).type!
+            local.set_type(original)
+
+            let `field = frame.declare_local_field(local)!
+
+            // The retype narrowing performs after the registration walk.
+            let settled = CLASSY_GENERIC_ARGUMENT(loc(), _scope, "second", 0).type!
+            local.set_type(settled)
+
+            are_same(original, `field.type!)
+
+            frame.refresh_local_field_types()
+
+            are_same(settled, `field.type!)
+        si
+
+        @test()
+        Calling__declare_local_field__twice_on_the_same_local__should_keep_one_field() is
+            let frame = make_frame()
+            let local = LOCAL_VARIABLE(loc(), _scope, "present")
+            local.set_type(CLASSY_GENERIC_ARGUMENT(loc(), _scope, "first", 0).type!)
+
+            let first = frame.declare_local_field(local)!
+            let second = frame.declare_local_field(local)!
+
+            are_same(first, second)
+
+            let count mut = 0
+            for f in frame.local_fields do
+                count = count + 1
+            od
+
+            are_equal(1, count)
+        si
+
+        @test()
+        Calling__declare_local_field__on_an_untyped_local__should_declare_nothing() is
+            let frame = make_frame()
+            let local = LOCAL_VARIABLE(loc(), _scope, "unsettled")
+
+            is_null(frame.declare_local_field(local))
+
+            let count mut = 0
+            for f in frame.local_fields do
+                count = count + 1
+            od
+
+            are_equal(0, count)
+        si
+
+        @test()
+        Calling__declare_or_retype_anonymous_field__twice__should_keep_one_field_at_the_later_type() is
+            let frame = make_frame()
+            let original = CLASSY_GENERIC_ARGUMENT(loc(), _scope, "first", 0).type!
+            let settled = CLASSY_GENERIC_ARGUMENT(loc(), _scope, "second", 0).type!
+
+            let first = frame.declare_or_retype_anonymous_field(null, "for_iterator", original)
+            let second = frame.declare_or_retype_anonymous_field(first, "for_iterator", settled)
+
+            are_same(first, second)
+            are_same(settled, second.type!)
+
+            let count mut = 0
+            for f in frame.local_fields do
+                count = count + 1
+            od
+
+            are_equal(1, count)
+        si
+
+        @test()
+        Calling__declare_or_retype_anonymous_field__with_another_frame_s_field__should_declare_a_new_one() is
+            let frame = make_frame()
+            let other = make_frame()
+            let type = CLASSY_GENERIC_ARGUMENT(loc(), _scope, "first", 0).type!
+
+            let foreign = other.declare_or_retype_anonymous_field(null, "for_iterator", type)
+            let mine = frame.declare_or_retype_anonymous_field(foreign, "for_iterator", type)
+
+            are_not_same(foreign, mine)
+        si
+    si
+si

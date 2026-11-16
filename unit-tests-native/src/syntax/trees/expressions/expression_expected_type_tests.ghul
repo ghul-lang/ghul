@@ -1,0 +1,141 @@
+namespace Syntax.Trees.UnitTests is
+    use Collections.LIST
+
+    use Source.LOCATION
+
+    use Semantic.Symbols.CLASS
+
+    use Trees.Expressions.SEQUENCE
+    use ExpressionList = Trees.Expressions.LIST
+    use Trees.Expressions.Expression
+    use Assertions
+
+    // Tests for the TypeConstrained contract on Expression subclasses.
+    // Constraint storage and the polymorphic `set_constraint` /
+    // `clear_constraint` overrides live on concrete subclasses
+    // (SEQUENCE, TUPLE, ...). Expression itself ships a default
+    // `upgrade_constraint` that calls back through the polymorphic
+    // set, so subclasses with real storage get upgrade semantics for
+    // free. These tests pin both halves of that arrangement.
+    class EXPRESSION_EXPECTED_TYPE_TESTS is
+        init() is si
+
+        loc() -> LOCATION => LOCATION("test.ghul", 1, 1, 1, 1)
+
+        empty_names() -> LIST[string] => LIST[string]()
+
+        empty_elements() -> ExpressionList
+            => ExpressionList(loc(), LIST[Expression]())
+
+        // Build a tiny class hierarchy:
+        //
+        //   object
+        //     └── animal
+        //           ├── cat
+        //           └── dog
+        //
+        // Returned as a tuple so each test can pull the single level
+        // it needs.
+        build_types() -> (animal: CLASS, cat: CLASS, dog: CLASS) is
+            let object_class = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "object", empty_names(), Semantic.BLOCK_SCOPE())
+            object_class.mark_is_object()
+
+            let animal = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "animal", empty_names(), Semantic.BLOCK_SCOPE())
+            animal.add_ancestor(object_class.type!)
+
+            let cat = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "cat", empty_names(), Semantic.BLOCK_SCOPE())
+            cat.add_ancestor(animal.type!)
+
+            let dog = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "dog", empty_names(), Semantic.BLOCK_SCOPE())
+            dog.add_ancestor(animal.type!)
+
+            return (animal, cat, dog)
+        si
+
+        new_sequence() -> SEQUENCE
+            => SEQUENCE(loc(), empty_elements(), Trees.TypeExpressions.INFER(loc()))
+
+        @test()
+        Calling__expected_type__on_a_freshly_created_SEQUENCE__should_return_null() is
+            is_null(new_sequence().expected_type)
+        si
+
+        @test()
+        Calling__set_expected_type__should_install_the_supplied_type() is
+            let h = build_types()
+            let seq = new_sequence()
+
+            seq.set_expected_type(h.animal.type!, "expected animal")
+
+            are_same(h.animal.type, seq.expected_type)
+        si
+
+        @test()
+        Calling__clear_expected_type__after_set__should_drop_the_expected_type() is
+            let h = build_types()
+            let seq = new_sequence()
+
+            seq.set_expected_type(h.animal.type!, "expected animal")
+            seq.clear_expected_type()
+
+            is_null(seq.expected_type)
+        si
+
+        @test()
+        Calling__upgrade_expected_type__on_a_clean_node__should_install() is
+            let h = build_types()
+            let seq = new_sequence()
+
+            seq.upgrade_expected_type(h.animal.type!, "expected animal")
+
+            are_same(h.animal.type, seq.expected_type)
+        si
+
+        @test()
+        Calling__upgrade_expected_type__with_a_narrower_type__should_install() is
+            let h = build_types()
+            let seq = new_sequence()
+
+            seq.set_expected_type(h.animal.type!, "expected animal")
+            seq.upgrade_expected_type(h.cat.type!, "expected cat")
+
+            are_same(h.cat.type, seq.expected_type)
+        si
+
+        @test()
+        Calling__upgrade_expected_type__with_a_wider_type__should_be_a_no_op() is
+            let h = build_types()
+            let seq = new_sequence()
+
+            seq.set_expected_type(h.cat.type!, "expected cat")
+            seq.upgrade_expected_type(h.animal.type!, "expected animal")
+
+            are_same(h.cat.type, seq.expected_type)
+        si
+
+        @test()
+        Calling__upgrade_expected_type__with_a_sibling_type__should_be_a_no_op() is
+            // Cat and Dog are unrelated under Animal — neither is
+            // assignable from the other — so upgrade should reject
+            // the swap.
+            let h = build_types()
+            let seq = new_sequence()
+
+            seq.set_expected_type(h.cat.type!, "expected cat")
+            seq.upgrade_expected_type(h.dog.type!, "expected dog")
+
+            are_same(h.cat.type, seq.expected_type)
+        si
+
+        @test()
+        Calling__upgrade_expected_type__with_null__should_be_a_no_op() is
+            let h = build_types()
+            let seq = new_sequence()
+
+            seq.set_expected_type(h.cat.type!, "expected cat")
+            seq.upgrade_expected_type(null, null)
+
+            are_same(h.cat.type, seq.expected_type)
+        si
+    si
+si

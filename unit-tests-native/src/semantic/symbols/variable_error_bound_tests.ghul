@@ -1,0 +1,58 @@
+namespace Semantic.UnitTests is
+    use Collections.LIST
+
+    use Source.LOCATION
+
+    use Semantic.Symbols.CLASS
+    use Semantic.Symbols.INFERRED_TYPE_ARG_ORIGIN
+    use Semantic.Types.ERROR
+    use Semantic.Types.Type
+
+    use Assertions
+
+    // A lower bound is never withdrawn, so a composite offered while one of
+    // its elements is still ERROR is not recorded: it would stay in the join
+    // after the element's own walk has settled it.
+    class VARIABLE_ERROR_BOUND_TESTS is
+        init() is si
+
+        loc() -> LOCATION => LOCATION("test.ghul", 1, 1, 1, 1)
+
+        a_class(name: string) -> CLASS =>
+            CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), name, LIST[string](), Semantic.BLOCK_SCOPE())
+
+        box_of(element: Type) -> Type =>
+            Semantic.Types.GENERIC(loc(), CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Box", LIST[string](["U"]), Semantic.BLOCK_SCOPE()), LIST[Type]([element]))
+
+        origin() -> INFERRED_TYPE_ARG_ORIGIN =>
+            INFERRED_TYPE_ARG_ORIGIN(loc(), Semantic.BLOCK_SCOPE(), "v")
+
+        @test()
+        Calling__add_lower_bound__with_a_composite_holding_error__should_not_record_it() is
+            let variable = origin()
+
+            is_false(variable.add_lower_bound(box_of(ERROR())))
+            is_null(variable.try_get_inferred_type())
+        si
+
+        @test()
+        Calling__try_get_inferred_type__after_a_bound_then_a_composite_holding_error__should_return_the_bound() is
+            let variable = origin()
+            let bound = box_of(a_class("cat").type!)
+
+            is_true(variable.add_lower_bound(bound))
+            is_false(variable.add_lower_bound(box_of(ERROR())))
+
+            are_same(bound, variable.try_get_inferred_type())
+        si
+
+        @test()
+        Calling__add_lower_bound__with_a_settled_bound_already_held__should_return_false() is
+            let variable = origin()
+            let cat = a_class("cat").type!
+
+            is_true(variable.add_lower_bound(cat))
+            is_false(variable.add_lower_bound(cat))
+        si
+    si
+si

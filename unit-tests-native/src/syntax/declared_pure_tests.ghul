@@ -1,0 +1,123 @@
+namespace Syntax.UnitTests is
+    use Collections.MAP
+
+    use Source.LOCATION
+
+    use Syntax.Process.NARROWING_FLOW
+    use Syntax.Process.STORE_FREE_FACTS
+    use Syntax.Process.STORE_FREE_FIXPOINT
+
+    use Semantic.Symbols.CLASS
+    use Semantic.Symbols.GLOBAL_FUNCTION
+    use Semantic.Symbols.INSTANCE_FIELD
+
+    use Function = Semantic.Symbols.Function
+    use Assertions
+
+    // Pins the declared-pure trust rules: the flag answers
+    // store-free without proof, the fixpoint accepts a declared-pure
+    // callee that would otherwise make its caller unsafe, and the
+    // literal-purity frames record exactly the innermost literal's
+    // heap-visible operations.
+    class DECLARED_PURE_TESTS is
+        init() is si
+
+        loc() -> LOCATION => LOCATION("test.ghul", 1, 1, 1, 1)
+
+        logger() -> Logging.Logger => Logging.DIAGNOSTICS_STORE()
+
+        global_function(name: string) -> GLOBAL_FUNCTION =>
+            GLOBAL_FUNCTION(loc(), loc(), Semantic.BLOCK_SCOPE(), name, Semantic.BLOCK_SCOPE())
+
+        @test()
+        Declared_pure_should_read_as_store_free_without_proof() is
+            let f = global_function("f")
+
+            is_false(f.is_store_free)
+
+            f.mark_declared_pure()
+
+            is_true(f.is_declared_pure)
+            is_true(f.is_store_free)
+
+            // the solve's write-back must not defeat the declaration
+            f.set_proven_store_free(false)
+
+            is_true(f.is_store_free)
+        si
+
+        @test()
+        Fixpoint_should_trust_a_declared_pure_callee_with_an_unsafe_body() is
+            let callee = global_function("callee")
+            let caller = global_function("caller")
+
+            callee.mark_declared_pure()
+
+            let callee_facts = STORE_FREE_FACTS()
+            callee_facts.is_disqualified = true
+
+            let caller_facts = STORE_FREE_FACTS()
+            caller_facts.callees.add(callee)
+
+            let facts = MAP[Function, STORE_FREE_FACTS]()
+            facts[callee] = callee_facts
+            facts[caller] = caller_facts
+
+            let solved = STORE_FREE_FIXPOINT().solve(facts)
+
+            is_false(solved.unsafe.contains(cast Function(caller)))
+        si
+
+        @test()
+        Fixpoint_should_still_demote_a_caller_of_an_undeclared_unsafe_callee() is
+            let callee = global_function("callee")
+            let caller = global_function("caller")
+
+            let callee_facts = STORE_FREE_FACTS()
+            callee_facts.is_disqualified = true
+
+            let caller_facts = STORE_FREE_FACTS()
+            caller_facts.callees.add(callee)
+
+            let facts = MAP[Function, STORE_FREE_FACTS]()
+            facts[callee] = callee_facts
+            facts[caller] = caller_facts
+
+            let solved = STORE_FREE_FIXPOINT().solve(facts)
+
+            is_true(solved.unsafe.contains(cast Function(caller)))
+        si
+
+        @test()
+        Literal_frame_should_record_a_call_and_a_heap_store() is
+            let flow = NARROWING_FLOW(logger())
+
+            flow.push_literal_frame()
+            is_false(flow.pop_literal_frame())
+
+            flow.push_literal_frame()
+            flow.on_call(loc())
+            is_true(flow.pop_literal_frame())
+
+            flow.push_literal_frame()
+            flow.on_heap_store(loc())
+            is_true(flow.pop_literal_frame())
+        si
+
+        @test()
+        Literal_frame_should_charge_only_the_innermost_literal() is
+            let owner = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "OWNER", Collections.LIST[string](), Semantic.BLOCK_SCOPE())
+            let f = INSTANCE_FIELD(loc(), owner, "f")
+
+            let flow = NARROWING_FLOW(logger())
+
+            flow.push_literal_frame()
+            flow.push_literal_frame()
+
+            flow.on_member_store(f)
+
+            is_true(flow.pop_literal_frame())
+            is_false(flow.pop_literal_frame())
+        si
+    si
+si

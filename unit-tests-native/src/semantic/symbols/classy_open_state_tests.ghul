@@ -1,0 +1,128 @@
+namespace Semantic.Symbols.UnitTests is
+    use Collections.LIST
+
+    use Source.LOCATION
+    use Assertions
+
+    // Tests for Classy.is_open — whether a type may be extended from
+    // another assembly.
+    //
+    // Three answers are in play and only one of them is written down at
+    // the declaration. A ghūl-declared class or trait is closed unless
+    // `open` calls mark_open; an imported one is open unless the
+    // CLOSED_ATTRIBUTE marker calls mark_closed, because an assembly
+    // built before the marker existed carries none; and every other kind
+    // is closed, since none of them can be extended from outside their
+    // declaring assembly at all - structs cannot be subclassed, a
+    // union's only subclasses are its own compiler-generated variants,
+    // and members reach a union or a variant only through same-assembly
+    // partial and impl blocks. Getting the reflected fallback backwards
+    // would reject every implementation of every imported interface, and
+    // getting the source default backwards would let the closure be
+    // extended silently.
+    class CLASSY_OPEN_STATE_TESTS is
+        init() is si
+
+        loc() -> LOCATION => LOCATION("test.ghul", 1, 1, 1, 1)
+
+        no_arguments() -> LIST[string] => LIST[string]()
+
+        source_trait() -> TRAIT =>
+            TRAIT(loc(), loc(), Semantic.BLOCK_SCOPE(), "Test", no_arguments(), Semantic.BLOCK_SCOPE())
+
+        source_class() -> CLASS =>
+            CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Test", no_arguments(), Semantic.BLOCK_SCOPE())
+
+        imported_trait() -> TRAIT is
+            return TRAIT(
+                LOCATION.reflected,
+                LOCATION.reflected,
+                Semantic.BLOCK_SCOPE(),
+                "Test",
+                no_arguments(),
+                Semantic.BLOCK_SCOPE()
+            )
+        si
+
+        // A submission opens its classes and traits without the source
+        // saying so, and a rule about what the author wrote has to tell
+        // the two apart.
+        @test()
+        is_declared_open__should_be_true_once_marked_declared_open() is
+            let subject = source_class()
+
+            subject.mark_declared_open()
+
+            is_true(subject.is_declared_open)
+            is_true(subject.is_open)
+        si
+
+        @test()
+        is_declared_open__should_stay_false_for_a_class_opened_without_the_modifier() is
+            let subject = source_class()
+
+            subject.mark_open()
+
+            is_false(subject.is_declared_open)
+            is_true(subject.is_open)
+        si
+
+        @test()
+        is_declared_open__should_be_false_for_a_class_that_was_never_opened() is
+            is_false(source_class().is_declared_open)
+        si
+
+        @test()
+        is_open__should_be_false_for_a_source_declared_trait() is
+            is_false(source_trait().is_open)
+        si
+
+        @test()
+        is_open__should_be_true_for_a_source_declared_trait_marked_open() is
+            let symbol = source_trait()
+
+            symbol.mark_open()
+
+            is_true(symbol.is_open)
+        si
+
+        @test()
+        is_open__should_be_true_for_an_imported_trait_with_no_marker() is
+            is_true(imported_trait().is_open)
+        si
+
+        @test()
+        is_open__should_be_false_for_an_imported_trait_marked_closed() is
+            let symbol = imported_trait()
+
+            symbol.mark_closed()
+
+            is_false(symbol.is_open)
+        si
+
+        @test()
+        is_open__should_be_false_for_a_source_declared_class() is
+            is_false(source_class().is_open)
+        si
+
+        // Neither kind can be extended from outside its declaring
+        // assembly: structs cannot be subclassed at all, and a union's
+        // only subclasses are its own compiler-generated variants. That
+        // is what makes union members provable in the store-free
+        // fixpoint, where an openly dispatchable method is assumed to
+        // have an override this compilation cannot see.
+        @test()
+        is_open__should_be_false_for_a_source_declared_struct() is
+            let symbol = STRUCT(loc(), loc(), Semantic.BLOCK_SCOPE(), "TEST", no_arguments(), Semantic.BLOCK_SCOPE())
+
+            is_false(symbol.is_open)
+        si
+
+        @test()
+        is_open__should_be_false_for_a_source_declared_union() is
+            let symbol = UNION(loc(), loc(), Semantic.BLOCK_SCOPE(), "Test", no_arguments(), Semantic.BLOCK_SCOPE())
+
+            is_false(symbol.is_open)
+        si
+    si
+si

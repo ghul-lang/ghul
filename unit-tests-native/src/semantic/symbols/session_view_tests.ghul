@@ -1,0 +1,130 @@
+namespace Semantic.Symbols.UnitTests is
+    use Collections.LIST
+
+    use Source.LOCATION
+    use Syntax.Process.EXPAND_NAMESPACES
+    use Assertions
+
+    // The per-cell view a --session build compiles each cell against:
+    // an alternative a later cell declares is invisible to the
+    // closed-hierarchy decisions of an earlier cell's code, and what
+    // those decisions could not see is carried by the guards a session
+    // emits. An ordinary build, and any file that is not a cell, sees
+    // everything.
+    class SESSION_VIEW_TESTS is
+        init() is si
+
+        in_cell(name: string, line: int) -> LOCATION =>
+            LOCATION("{name}.ghul", line, 1, line, 1)
+
+        no_arguments() -> LIST[string] => LIST[string]()
+
+        a_class(name: string, at: LOCATION) -> CLASS =>
+            CLASS(at, at, Semantic.BLOCK_SCOPE(), name, no_arguments(), Semantic.BLOCK_SCOPE())
+
+        in_a_session(cells: LIST[string], body: () -> void) is
+            let flags = IoC.CONTAINER.instance.build_flags
+            let was_session = flags.want_session
+            let was_cells = flags.session_cell_names
+
+            flags.want_session = true
+
+            for name in cells do
+                if !flags.session_cell_names.contains(name) then
+                    flags.session_cell_names.add(name)
+                fi
+            od
+
+            try
+                body()
+            finally
+                flags.want_session = was_session
+                flags.session_cell_names.clear()
+
+                for name in was_cells do
+                    flags.session_cell_names.add(name)
+                od
+            yrt
+        si
+
+        @test()
+        an_alternative_a_later_cell_declares__is_invisible_to_an_earlier_cells_site() is
+            let bird = a_class("BIRD", in_cell("cell2", 3))
+            let visible mut = true
+
+            in_a_session(
+                LIST[string](["cell1", "cell2"]),
+                () -> void is visible = SESSION_VIEW.is_visible(bird, in_cell("cell1", 10)); si)
+
+            assert !visible else "an alternative cell2 declares is not part of cell1's view"
+        si
+
+        @test()
+        an_alternative_the_site_cell_declares__is_visible() is
+            let cat = a_class("CAT", in_cell("cell1", 3))
+            let visible mut = false
+
+            in_a_session(
+                LIST[string](["cell1", "cell2"]),
+                () -> void is visible = SESSION_VIEW.is_visible(cat, in_cell("cell1", 10)); si)
+
+            assert visible else "the site's own cell's alternatives are in view"
+        si
+
+        @test()
+        an_alternative_an_earlier_cell_declares__is_visible_to_a_later_site() is
+            let cat = a_class("CAT", in_cell("cell1", 3))
+            let visible mut = false
+
+            in_a_session(
+                LIST[string](["cell1", "cell2"]),
+                () -> void is visible = SESSION_VIEW.is_visible(cat, in_cell("cell2", 10)); si)
+
+            assert visible else "a later cell was written against every earlier one"
+        si
+
+        @test()
+        a_file_that_is_not_a_cell__sees_everything() is
+            let bird = a_class("BIRD", in_cell("cell2", 3))
+            let visible mut = false
+
+            in_a_session(
+                LIST[string](["cell1", "cell2"]),
+                () -> void is visible = SESSION_VIEW.is_visible(bird, in_cell("runner", 10)); si)
+
+            assert visible else "the host's own code is compiled with the whole session in view"
+        si
+
+        @test()
+        an_alternative_no_cell_declares__is_visible_everywhere() is
+            let imported = a_class("LIST", in_cell("library", 3))
+            let visible mut = false
+
+            in_a_session(
+                LIST[string](["cell1", "cell2"]),
+                () -> void is visible = SESSION_VIEW.is_visible(imported, in_cell("cell1", 10)); si)
+
+            assert visible else "a session cannot extend what another assembly declared"
+        si
+
+        @test()
+        a_cell_whose_file_stem_needs_converting__is_still_found() is
+            let bird = a_class("BIRD", LOCATION("cell-2.ghul", 3, 1, 3, 1))
+            let visible mut = true
+
+            in_a_session(
+                LIST[string]([EXPAND_NAMESPACES.convert_file_name_to_identifier("cell-1"), EXPAND_NAMESPACES.convert_file_name_to_identifier("cell-2")]),
+                () -> void is visible = SESSION_VIEW.is_visible(bird, LOCATION("cell-1.ghul", 10, 1, 10, 1)); si)
+
+            assert !visible else "a stem with '-' converts to the namespace name, or the view fails open"
+        si
+
+        @test()
+        without_the_session_flag__everything_is_visible() is
+            let bird = a_class("BIRD", in_cell("cell2", 3))
+
+            assert SESSION_VIEW.is_visible(bird, in_cell("cell1", 10)) else
+                "an ordinary build knows the whole program"
+        si
+    si
+si

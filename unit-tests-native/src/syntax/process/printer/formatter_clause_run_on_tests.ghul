@@ -1,0 +1,111 @@
+namespace Syntax.Process.Printer.UnitTests is
+    use Collections.LIST
+
+    use Syntax.Process.Printer.FORMATTER
+    use Assertions
+
+    // A statement whose rendering ends in a block terminator - `od`, `esac`,
+    // `fi` - leaves the line open, so whatever follows has to start a line
+    // of its own. That holds for the keyword continuing an enclosing
+    // construct as much as for the next statement: `catch`, `finally`,
+    // `elif` and `else` all follow a body that may have ended that way, and
+    // writing one straight onto the open line produces `odcatch` or
+    // `odelif`, which does not parse back.
+    class FORMATTER_CLAUSE_RUN_ON_TESTS is
+        init() is si
+
+        loc: Source.LOCATION => Source.LOCATION("test.ghul", 1, 1, 1, 1)
+
+        format(node: Trees.Node) -> string =>
+            FORMATTER(LIST[Lexical.TRIVIA](), 100).format(node)
+
+        identifier(name: string) -> Trees.Identifiers.Identifier =>
+            Trees.Identifiers.Identifier(loc, identifier_name(name))
+
+        identifier_name(name: string) -> string => name
+
+        name_expression(name: string) -> Trees.Expressions.Expression =>
+            Trees.Expressions.IDENTIFIER(loc, identifier(name))
+
+        empty_list() -> Trees.Statements.LIST =>
+            Trees.Statements.LIST(loc, LIST[Trees.Statements.Statement]())
+
+        // A statement list whose only statement is a `for`, so the body
+        // ends on the `od` that closes it.
+        body_ending_in_a_block() -> Trees.Statements.LIST is
+            let statements = LIST[Trees.Statements.Statement]()
+
+            statements.add(
+                Trees.Statements.FOR(loc, null, name_expression("xs"), empty_list())
+            )
+
+            return Trees.Statements.LIST(loc, statements)
+        si
+
+        @test()
+        catch_starts_a_line_after_a_body_ending_in_a_block() is
+            let catches = LIST[Trees.Statements.CATCH]()
+
+            catches.add(
+                Trees.Statements.CATCH(loc, null, empty_list())
+            )
+
+            let formatted =
+                format(Trees.Statements.TRY(loc, loc, body_ending_in_a_block(), catches, null))
+
+            is_false(formatted.contains("odcatch"), formatted)
+        si
+
+        @test()
+        finally_starts_a_line_after_a_body_ending_in_a_block() is
+            let formatted =
+                format(
+                    Trees.Statements.TRY(
+                        loc,
+                        loc,
+                        body_ending_in_a_block(),
+                        LIST[Trees.Statements.CATCH](),
+                        empty_list()
+                    )
+                )
+
+            is_false(formatted.contains("odfinally"), formatted)
+        si
+
+        @test()
+        elif_starts_a_line_after_a_branch_ending_in_a_block() is
+            let branches = LIST[Trees.Statements.IF_BRANCH]()
+
+            branches.add(
+                Trees.Statements.IF_BRANCH(
+                    loc, name_expression("a"), body_ending_in_a_block()
+                )
+            )
+            branches.add(
+                Trees.Statements.IF_BRANCH(loc, name_expression("b"), empty_list())
+            )
+
+            let formatted = format(Trees.Statements.IF(loc, branches))
+
+            is_false(formatted.contains("odelif"), formatted)
+        si
+
+        @test()
+        else_starts_a_line_after_a_branch_ending_in_a_block() is
+            let branches = LIST[Trees.Statements.IF_BRANCH]()
+
+            branches.add(
+                Trees.Statements.IF_BRANCH(
+                    loc, name_expression("a"), body_ending_in_a_block()
+                )
+            )
+            branches.add(
+                Trees.Statements.IF_BRANCH(loc, null, empty_list())
+            )
+
+            let formatted = format(Trees.Statements.IF(loc, branches))
+
+            is_false(formatted.contains("odelse"), formatted)
+        si
+    si
+si
