@@ -5,7 +5,9 @@
 #
 # An llvm build links the program against musl and libghul statically, so
 # it should need nothing from the machine it runs on: no dynamic loader, no
-# shared libraries, no files. `collect` gathers each program ghul-test kept
+# shared libraries, no files. A test whose ghulflags ask for
+# `--llvm-link-mode dynamic` is linked against the system's glibc on purpose,
+# and is left out. `collect` gathers each program ghul-test kept
 # (run with GHUL_TEST_KEEP_ARTIFACTS set) with its arguments, input and
 # expected output and exit status. `run` copies them into a `FROM scratch`
 # image and runs each there, with no network, comparing what it writes to
@@ -38,6 +40,12 @@ collect() {
         # A session is answered as the program prompts, which only the test
         # runner does; the suite has already run it.
         if [ -f "$dir/run.session" ]; then
+            continue
+        fi
+
+        # A program linked dynamically needs the system's C library, which an
+        # empty image does not have.
+        if grep -qs -e '--llvm-link-mode dynamic' "$dir/ghulflags" "$dir/../../ghulflags"; then
             continue
         fi
 
