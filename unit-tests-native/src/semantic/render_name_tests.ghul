@@ -1,11 +1,6 @@
 namespace Semantic.UnitTests is
     use Collections.LIST
 
-    use Microsoft.VisualStudio.TestTools.UnitTesting.Assert
-
-    use NSubstitute
-    use NSubstitute.SubstituteExtensions.returns
-
     use Source.LOCATION
 
     use Semantic.Scope
@@ -19,19 +14,16 @@ namespace Semantic.UnitTests is
     use Semantic.Symbols.LABEL
 
     use Semantic.Types.Type
-    use TestClass = Microsoft.VisualStudio.TestTools.UnitTesting.TestClassAttribute
-    use Test = Microsoft.VisualStudio.TestTools.UnitTesting.TestMethodAttribute
     use Assertions
 
     // Exercises Symbol.render_name branch by branch.
     //
-    // The render scope is stubbed: `find_enclosing` is the only thing the
-    // rule asks of it, so a substitute that resolves a chosen name back to
-    // a chosen symbol models exactly "this name is in scope here" — the
-    // same signal a real scope produces for an in-scope declaration or a
-    // `use` import. The symbols under test are real, so their owner chain,
-    // name, and qualified_name are the genuine article.
-    @TestClass()
+    // The render scope is a bare block scope: `find_enclosing` is the only
+    // thing the rule asks of it, so a block declaring a chosen symbol models
+    // exactly "this name is in scope here" — the same signal a real scope
+    // produces for an in-scope declaration or a `use` import. The symbols
+    // under test are real, so their owner chain, name, and qualified_name
+    // are the genuine article.
     class RENDER_NAME_TESTS is
         init() is si
 
@@ -70,37 +62,40 @@ namespace Semantic.UnitTests is
         // A scope that resolves nothing — models a render position from
         // which the target is not visible.
         empty_scope() -> Scope =>
-            Substitute.`for`[Scope](System.Array.empty`[object]())
+            Semantic.BLOCK_SCOPE()
 
         // A scope in which `name` resolves back to `symbol`.
+        // A real block scope declaring `symbol`, so `name` resolves to it.
         scope_resolving(name: string, symbol: Symbol) -> Scope is
-            let scope = Substitute.`for`[Scope](System.Array.empty`[object]())
-            scope.find_enclosing(name) |> returns(symbol, null)
+            assert symbol.name =~ name else "a block scope resolves a symbol by its own name"
+
+            let scope = Semantic.BLOCK_SCOPE()
+            scope.declare(loc(), symbol, null)
             return scope
         si
 
-        @Test()
+        @test()
         Calling__name_for__with_null_scope__returns_qualified_name() is
             let c = a_class(symbols_namespace())
 
             are_equal(c.qualified_name, c.render_name(null))
         si
 
-        @Test()
+        @test()
         Calling__name_for__on_in_scope_type__returns_bare_name() is
             let c = a_class(symbols_namespace())
 
             are_equal("INSTANCE_METHOD", c.render_name(scope_resolving("INSTANCE_METHOD", c)))
         si
 
-        @Test()
+        @test()
         Calling__name_for__on_out_of_scope_type__returns_full_namespace() is
             let c = a_class(symbols_namespace())
 
             are_equal("Semantic.Symbols.INSTANCE_METHOD", c.render_name(empty_scope()))
         si
 
-        @Test()
+        @test()
         Calling__name_for__on_member_with_in_scope_owner__returns_type_dot_member() is
             let c = a_class(symbols_namespace())
             let m = INSTANCE_METHOD(loc(), loc(), c, "describe", Semantic.BLOCK_SCOPE())
@@ -108,7 +103,7 @@ namespace Semantic.UnitTests is
             are_equal("INSTANCE_METHOD.describe", m.render_name(scope_resolving("INSTANCE_METHOD", c)))
         si
 
-        @Test()
+        @test()
         Calling__name_for__on_member_with_out_of_scope_owner__returns_full_path() is
             let c = a_class(symbols_namespace())
             let m = INSTANCE_METHOD(loc(), loc(), c, "describe", Semantic.BLOCK_SCOPE())
@@ -116,14 +111,14 @@ namespace Semantic.UnitTests is
             are_equal("Semantic.Symbols.INSTANCE_METHOD.describe", m.render_name(empty_scope()))
         si
 
-        @Test()
+        @test()
         Calling__name_for__on_in_scope_global__returns_bare_name() is
             let g = GLOBAL_FUNCTION(loc(), loc(), symbols_namespace(), "write_line", Semantic.BLOCK_SCOPE())
 
             are_equal("write_line", g.render_name(scope_resolving("write_line", g)))
         si
 
-        @Test()
+        @test()
         Calling__name_for__on_out_of_scope_global__returns_full_namespace() is
             let g = GLOBAL_FUNCTION(loc(), loc(), symbols_namespace(), "write_line", Semantic.BLOCK_SCOPE())
 
@@ -132,7 +127,7 @@ namespace Semantic.UnitTests is
 
         // A symbol owned by a function (local, parameter, or label) is
         // always bare — its owner is neither a type nor a namespace.
-        @Test()
+        @test()
         Calling__name_for__on_function_owned_symbol__returns_bare_name() is
             let c = a_class(symbols_namespace())
             let m = INSTANCE_METHOD(loc(), loc(), c, "describe", Semantic.BLOCK_SCOPE())
@@ -143,14 +138,14 @@ namespace Semantic.UnitTests is
 
         // A specialised generic named on its own shortens only its head;
         // the type arguments are always kept.
-        @Test()
+        @test()
         Calling__render_name__on_in_scope_generic__shortens_head_keeps_arguments() is
             let g = a_generic()
 
             are_equal("CCCC[arg]", g.render_name(scope_resolving("CCCC", g.symbol)))
         si
 
-        @Test()
+        @test()
         Calling__render_name__on_out_of_scope_generic__qualifies_head_keeps_arguments() is
             let g = a_generic()
 
@@ -160,7 +155,7 @@ namespace Semantic.UnitTests is
         // Cause #3: a member whose owner is a specialised generic renders
         // `owner.member`, routed through the owner's own render_name so the
         // head shortens while the arguments stay.
-        @Test()
+        @test()
         Calling__render_name__on_member_of_generic_owner__returns_generic_dot_member() is
             let g = a_generic()
             let m = INSTANCE_METHOD(loc(), loc(), g, "test", Semantic.BLOCK_SCOPE())
@@ -172,14 +167,14 @@ namespace Semantic.UnitTests is
         a_generic_class() -> CLASS =>
             CLASS(loc(), loc(), symbols_namespace(), "BOX", names_for(["T"]), Semantic.BLOCK_SCOPE())
 
-        @Test()
+        @test()
         Calling__render_name__on_generic_class__appends_type_parameters() is
             let c = a_generic_class()
 
             are_equal("BOX[T]", c.render_name(scope_resolving("BOX", c)))
         si
 
-        @Test()
+        @test()
         Calling__render_name__on_member_of_generic_class__keeps_owner_type_parameters() is
             let c = a_generic_class()
             let m = INSTANCE_METHOD(loc(), loc(), c, "get", Semantic.BLOCK_SCOPE())

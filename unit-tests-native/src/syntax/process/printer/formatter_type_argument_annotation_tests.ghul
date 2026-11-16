@@ -3,34 +3,36 @@ namespace Syntax.Process.Printer.UnitTests is
 
     use Syntax.Process.Printer.FORMATTER
     use Syntax.Process.Printer.InferredAnnotations
-    use TestClass = Microsoft.VisualStudio.TestTools.UnitTesting.TestClassAttribute
-    use Test = Microsoft.VisualStudio.TestTools.UnitTesting.TestMethodAttribute
     use Assertions
 
-    use NSubstitute.SubstituteExtensions.returns_for_any_args
+    // Answers type arguments for the callee starting at one position, and
+    // nothing else.
+    class TYPE_ARGUMENTS_AT: InferredAnnotations is
+        _line: int
+        _column: int
+        _arguments: string
+
+        init(line: int, column: int, arguments: string) is
+            _line = line
+            _column = column
+            _arguments = arguments
+        si
+
+        parameter_type(location: LOCATION) -> string? => null
+        return_type(location: LOCATION) -> string? => null
+        local_type(location: LOCATION) -> string? => null
+
+        type_arguments(callee: LOCATION) -> string? =>
+            if callee.start_line == _line /\ callee.start_column == _column then _arguments else null fi
+    si
 
     // The formatter writes a call's inferred type arguments after its
     // callee, and leaves a callee that already has them as written.
-    @TestClass()
     class FORMATTER_TYPE_ARGUMENT_ANNOTATION_TESTS is
         init() is si
 
-        // Answers type arguments for the callee starting at one position,
-        // and nothing else.
-        type_arguments_at(line: int, column: int, arguments: string) -> InferredAnnotations is
-            let annotations = NSubstitute.Substitute.`for`[InferredAnnotations](System.Array.empty`[object]())
-
-            annotations.type_arguments(LOCATION("annotate.ghul", 1, 1, 1, 1)) |> returns_for_any_args(
-                (call: NSubstitute.Core.CallInfo) -> string? is
-                    let callee = call.arg`[LOCATION]()
-
-                    return if callee.start_line == line /\ callee.start_column == column then arguments else null fi
-                si,
-                System.Array.empty`[(NSubstitute.Core.CallInfo) -> string?]()
-            )
-
-            return annotations
-        si
+        type_arguments_at(line: int, column: int, arguments: string) -> InferredAnnotations =>
+            TYPE_ARGUMENTS_AT(line, column, arguments)
 
         format(source: string, annotations: InferredAnnotations) -> string is
             let logger = Logging.DIAGNOSTICS_STORE()
@@ -54,21 +56,21 @@ namespace Syntax.Process.Printer.UnitTests is
             return formatter.format(source_file.definition)
         si
 
-        @Test()
+        @test()
         Formatting__a_call_with_inferred_type_arguments__should_write_them_after_the_callee() is
             let text = format("namespace Test is\n    f() -> int => identity(3)\nsi\n", type_arguments_at(2, 19, "int"))
 
             is_true(text.contains("identity[int](3)"), text)
         si
 
-        @Test()
+        @test()
         Formatting__a_thread_first_call_with_inferred_type_arguments__should_write_them_after_the_callee() is
             let text = format("namespace Test is\n    f() -> int => 3 |> identity()\nsi\n", type_arguments_at(2, 24, "int"))
 
             is_true(text.contains("3 |> identity[int]()"), text)
         si
 
-        @Test()
+        @test()
         Formatting__a_call_that_writes_its_type_arguments__should_leave_them_as_written() is
             let text = format("namespace Test is\n    f() -> int => identity[int](3)\nsi\n", type_arguments_at(2, 19, "long"))
 

@@ -7,18 +7,16 @@ namespace Semantic.Symbols.UnitTests is
     use Semantic.SYMBOL_LOADER
     use Semantic.SYMBOL_TABLE
     use Semantic.Symbols.CLASS
-    use Semantic.Symbols.Function
+    use Semantic.Symbols.INSTANCE_METHOD
     use Semantic.Symbols.LOCAL_VARIABLE
 
-    use TestClass = Microsoft.VisualStudio.TestTools.UnitTesting.TestClassAttribute
-    use Test = Microsoft.VisualStudio.TestTools.UnitTesting.TestMethodAttribute
+    use IR.Values.Load.REFERENCE_SELF
+
     use Assertions
-    use NSubstitute.SubstituteExtensions.returns_for_any_args
 
     // A literal inlined into a function's body has no frame of its own:
     // it reads the receiver as the function it is inlined into does, and
     // captures nothing to do it.
-    @TestClass()
     class CLOSURE_INLINED_RECEIVER_TESTS is
         init() is si
 
@@ -31,14 +29,22 @@ namespace Semantic.Symbols.UnitTests is
             return SYMBOL_LOADER(logger, symbol_table, Semantic.FUNCTION_CALLER(symbol_table, IR.VALUE_BOXER(logger)), IR.VALUE_BOXER(logger), Semantic.UnitTests.TEST_INNATE_SYMBOL_LOOKUP())
         si
 
-        @Test()
+        // Pushes `owner` as the current instance context, where a method
+        // finds the receiver it loads.
+        enter(owner: CLASS) is
+            IoC.CONTAINER.instance.set_symbol_table_for_testing(SYMBOL_TABLE(DIAGNOSTICS_STORE()))
+            IoC.CONTAINER.instance.symbol_table.enter_scope(owner)
+        si
+
+        @test()
         Calling__load_self__on_an_inlined_closure__should_answer_what_the_function_it_is_inlined_into_answers() is
             let host = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "HOST", LIST[string](), Semantic.BLOCK_SCOPE())
-            let method = NSubstitute.Substitute.`for`[Function]([loc(), loc(), host, "m", Semantic.BLOCK_SCOPE()]:object)
-            let receiver = cast IR.Values.Value(IR.Values.DUMMY(Semantic.Types.ERROR(), loc()))
-            let symbol_loader = loader()
+            host.set_type(Semantic.Types.NAMED(host))
 
-            method.load_self(loc(), symbol_loader) |> returns_for_any_args(receiver, null)
+            enter(host)
+
+            let method = INSTANCE_METHOD(loc(), loc(), host, "m", Semantic.BLOCK_SCOPE())
+            let symbol_loader = loader()
 
             let closure = Semantic.Symbols.STATIC_CLOSURE(loc(), host, "$anon_0", host, false)
             let local_ids = IoC.CONTAINER.instance.local_id_generator
@@ -52,7 +58,15 @@ namespace Semantic.Symbols.UnitTests is
 
             closure.inlined_into = (method, parameter, local)
 
-            are_same(receiver, closure.load_self(loc(), symbol_loader))
+            let expected = cast REFERENCE_SELF(method.load_self(loc(), symbol_loader))
+            let actual = closure.load_self(loc(), symbol_loader)
+
+            is_true(isa REFERENCE_SELF(actual))
+
+            let receiver = cast REFERENCE_SELF(actual)
+
+            are_same(expected.`self, receiver.`self)
+            are_same(expected.type, receiver.type)
             is_false(closure.is_self_captured)
         si
     si
