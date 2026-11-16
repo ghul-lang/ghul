@@ -1,8 +1,6 @@
 namespace Semantic.UnitTests is
     use Collections.LIST
 
-    use NSubstitute
-    use NSubstitute.SubstituteExtensions.returns
 
     use Source.LOCATION
 
@@ -17,15 +15,12 @@ namespace Semantic.UnitTests is
     use Semantic.Symbols.INSTANCE_PROPERTY
 
     use Semantic.Types.Type
-    use TestClass = Microsoft.VisualStudio.TestTools.UnitTesting.TestClassAttribute
-    use Test = Microsoft.VisualStudio.TestTools.UnitTesting.TestMethodAttribute
     use Assertions
 
     // Pins AWAITABLE_RESOLVER's decision table: which members make a
     // type awaitable, which of them are refused, and how the notify
     // interface picks the builder registration. The IL the resolved
     // members drive is covered by the `await-*` integration tests.
-    @TestClass()
     class AWAITABLE_RESOLVER_TESTS is
         _bool_type: Type
         _int_type: Type
@@ -43,11 +38,10 @@ namespace Semantic.UnitTests is
             _critical = new_class("ICriticalNotifyCompletion")
             _critical.add_ancestor(_notify.type!)
 
-            let arguments = System.Array.empty`[object]()
-            let lookup = NSubstitute.Substitute.`for`[InnateSymbolLookup](arguments)
-            lookup.get_bool_type() |> returns(_bool_type, null)
-            lookup.get_notify_completion_type() |> returns(_notify.type!, null)
-            lookup.get_critical_notify_completion_type() |> returns(_critical.type!, null)
+            let lookup = Semantic.UnitTests.STUB_INNATE_SYMBOL_LOOKUP()
+            lookup.get_bool_type_answer = _bool_type
+            lookup.get_notify_completion_type_answer = _notify.type!
+            lookup.get_critical_notify_completion_type_answer = _critical.type!
 
             _logger = DIAGNOSTICS_STORE()
             _resolver = AWAITABLE_RESOLVER(lookup, _logger)
@@ -114,7 +108,7 @@ namespace Semantic.UnitTests is
             return ""
         si
 
-        @Test()
+        @test()
         Resolving__a_complete_critical_awaitable__yields_its_members() is
             let a = awaiter(_int_type, _critical)
             let t = awaitable(a.type)
@@ -130,7 +124,7 @@ namespace Semantic.UnitTests is
             are_equal(0, _logger.error_count)
         si
 
-        @Test()
+        @test()
         Resolving__an_awaiter_that_is_only_INotifyCompletion__is_not_critical() is
             let t = awaitable(awaiter(_int_type, _notify).type)
 
@@ -140,7 +134,7 @@ namespace Semantic.UnitTests is
             is_false(result.is_critical, "INotifyCompletion alone selects the safe registration")
         si
 
-        @Test()
+        @test()
         Resolving__an_awaiter_with_a_void_get_result__yields_a_void_result_type() is
             let t = awaitable(awaiter(_void_type, _critical).type)
 
@@ -150,7 +144,7 @@ namespace Semantic.UnitTests is
             is_true(result.result_type.is_void, "void get_result makes the await void")
         si
 
-        @Test()
+        @test()
         Resolving__an_awaiter_implementing_neither_interface__reports_it() is
             let t = awaitable(awaiter(_int_type, null).type)
 
@@ -161,7 +155,7 @@ namespace Semantic.UnitTests is
             is_true(first_error().contains("INotifyCompletion"), first_error())
         si
 
-        @Test()
+        @test()
         Resolving__a_type_with_no_get_awaiter__reports_it() is
             let t = new_class("PLAIN")
 
@@ -174,7 +168,7 @@ namespace Semantic.UnitTests is
         // A static `get_awaiter` is not the pattern: the member is
         // called on the operand as its receiver, which a static has
         // no slot for.
-        @Test()
+        @test()
         Resolving__a_type_whose_only_get_awaiter_is_static__reports_no_get_awaiter() is
             let t = new_class("STATIC_ONLY")
             add_static_method(t, "get_awaiter", awaiter(_int_type, _critical).type!)
@@ -187,7 +181,7 @@ namespace Semantic.UnitTests is
 
         // With several overloads, the parameterless instance one is
         // the awaiter accessor; the others are unrelated.
-        @Test()
+        @test()
         Resolving__an_overloaded_get_awaiter__picks_the_parameterless_instance_overload() is
             let a = awaiter(_int_type, _critical)
             let t = new_class("OVERLOADED")
@@ -200,7 +194,7 @@ namespace Semantic.UnitTests is
             are_same(wanted, result.get_awaiter)
         si
 
-        @Test()
+        @test()
         Resolving__a_get_awaiter_returning_void__reports_it() is
             let t = awaitable(_void_type)
 
@@ -210,7 +204,7 @@ namespace Semantic.UnitTests is
             is_true(first_error().contains("'get_awaiter' returns no value"), first_error())
         si
 
-        @Test()
+        @test()
         Resolving__an_awaiter_with_no_is_completed__reports_it() is
             let a = new_class("AWAITER")
             add_method(a, "get_result", LIST[Type](), _int_type)
@@ -225,7 +219,7 @@ namespace Semantic.UnitTests is
 
         // A write-only `is_completed` has no getter to call, so it is
         // reported the same way as a missing property.
-        @Test()
+        @test()
         Resolving__an_awaiter_whose_is_completed_is_write_only__reports_no_is_completed() is
             let a = new_class("AWAITER")
             add_property(a, "is_completed", null)
@@ -239,7 +233,7 @@ namespace Semantic.UnitTests is
             is_true(first_error().contains("has no 'is_completed' property"), first_error())
         si
 
-        @Test()
+        @test()
         Resolving__an_awaiter_whose_is_completed_is_not_bool__reports_it() is
             let a = new_class("AWAITER")
             add_property(a, "is_completed", _int_type)
@@ -253,7 +247,7 @@ namespace Semantic.UnitTests is
             is_true(first_error().contains("'is_completed' is not 'bool'"), first_error())
         si
 
-        @Test()
+        @test()
         Resolving__an_awaiter_with_no_get_result__reports_it() is
             let a = new_class("AWAITER")
             add_property(a, "is_completed", _bool_type)
@@ -268,7 +262,7 @@ namespace Semantic.UnitTests is
 
         // A `get_result` whose return type never resolved is refused
         // rather than typing the await as nothing.
-        @Test()
+        @test()
         Resolving__an_awaiter_whose_get_result_has_no_return_type__reports_it() is
             let a = new_class("AWAITER")
             add_property(a, "is_completed", _bool_type)

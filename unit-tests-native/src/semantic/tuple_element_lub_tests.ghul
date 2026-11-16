@@ -1,9 +1,6 @@
 namespace Semantic.UnitTests is
     use Collections.LIST
 
-    use NSubstitute
-    use NSubstitute.SubstituteExtensions.returns
-    use NSubstitute.SubstituteExtensions.returns_for_any_args
 
     use Source.LOCATION
 
@@ -16,8 +13,6 @@ namespace Semantic.UnitTests is
     use Semantic.Types.NULL
     use Semantic.Types.ERROR
 
-    use TestClass = Microsoft.VisualStudio.TestTools.UnitTesting.TestClassAttribute
-    use Test = Microsoft.VisualStudio.TestTools.UnitTesting.TestMethodAttribute
     use Assertions
 
     // Tests for the per-position least upper bound TUPLE_ELEMENT_LUB
@@ -28,10 +23,9 @@ namespace Semantic.UnitTests is
     // which no back end can encode as a field or local's static type.
     // ARM_NULL_JOIN's own tests pin the widening decision in isolation;
     // these pin how `combine` feeds it and builds the result from it.
-    @TestClass()
     class TUPLE_ELEMENT_LUB_TESTS is
         _pair_symbol: STRUCT
-        _captured_element_types: LIST[Type]?
+        _captured_element_types: Type[]?
 
         init() is
             _pair_symbol = STRUCT(loc(), loc(), Semantic.BLOCK_SCOPE(), "Pair", LIST[string](["0", "1"]), Semantic.BLOCK_SCOPE())
@@ -66,30 +60,24 @@ namespace Semantic.UnitTests is
         // building a real tuple type — `combine`'s only remaining job
         // after computing those is to hand them to the lookup.
         build_lookup() -> InnateSymbolLookup is
-            let lookup = Substitute.`for`[InnateSymbolLookup](System.Array.empty`[object]())
+            let lookup = Semantic.UnitTests.STUB_INNATE_SYMBOL_LOOKUP()
             let object_type = ref_type("Object")
 
-            lookup.get_object_type() |> returns(object_type, null)
+            lookup.get_object_type_answer = object_type
 
-            lookup.get_optional_type(object_type) |> returns_for_any_args(
-                (call: NSubstitute.Core.CallInfo) -> Type => call.arg`[Type]().as_optional(),
-                null
-            )
+            lookup.get_optional_type_answer = (t: Type) -> Type? => t.as_optional()
 
-            lookup.get_tuple_type(LIST[Type](), null) |> returns_for_any_args(
-                (call: NSubstitute.Core.CallInfo) -> Type is
-                    _captured_element_types = call.arg`[LIST[Type]]()
-                    return object_type
-                si,
-                null
-            )
+            lookup.get_tuple_type_answer = (types: Type[], names: string?[]?) -> Type? is
+                _captured_element_types = types
+                return object_type
+            si
 
             return lookup
         si
 
         // A position still being inferred is not an absent one: the
         // placeholder is the join at that position, not object.
-        @Test()
+        @test()
         combine__a_placeholder_position__keeps_the_placeholder() is
             IoC.CONTAINER.instance.set_logger_for_testing(Logging.DIAGNOSTICS_STORE())
             let score = val_type("Score")
@@ -104,7 +92,7 @@ namespace Semantic.UnitTests is
             are_same(score, _captured_element_types![1])
         si
 
-        @Test()
+        @test()
         combine__matching_positions_with_no_null__keep_their_type() is
             let key = ref_type("Key")
             let score = val_type("Score")
@@ -118,7 +106,7 @@ namespace Semantic.UnitTests is
             are_same(score, _captured_element_types![1])
         si
 
-        @Test()
+        @test()
         combine__value_position_with_a_genuine_null_sibling__widens_to_value_optional() is
             let key = ref_type("Key")
             let score = val_type("Score")
@@ -133,7 +121,7 @@ namespace Semantic.UnitTests is
             are_same(score.as_optional(), _captured_element_types![1])
         si
 
-        @Test()
+        @test()
         combine__reference_position_with_a_genuine_null_sibling__widens_to_reference_optional() is
             let key = ref_type("Key")
             let label = ref_type("Label")
@@ -146,7 +134,7 @@ namespace Semantic.UnitTests is
             is_true(_captured_element_types![1].is_optional)
         si
 
-        @Test()
+        @test()
         combine__position_where_every_contributor_is_null__settles_at_object_optional() is
             // Deliberate corner case, not chased down here: with no
             // non-null contributor at a position, `get_result()` is
@@ -164,7 +152,7 @@ namespace Semantic.UnitTests is
             is_true(_captured_element_types![1].is_optional)
         si
 
-        @Test()
+        @test()
         combine__type_variable_position_with_a_genuine_null_sibling__is_left_unwidened() is
             // Deliberate corner case, not chased down here: ARM_NULL_JOIN
             // answers INCOMPATIBLE for a type-variable LUB against a
@@ -185,7 +173,7 @@ namespace Semantic.UnitTests is
             are_same(element, _captured_element_types![1])
         si
 
-        @Test()
+        @test()
         combine__value_position_with_only_a_sentinel_null_sibling__is_left_unwidened() is
             // Deliberate corner case, not chased down here: an unsettled
             // (non-genuine) null — an in-progress inferred sentinel, or
