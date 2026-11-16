@@ -1,0 +1,139 @@
+namespace Semantic.Symbols.UnitTests is
+    use Collections.LIST
+
+    use Source.LOCATION
+
+    use Semantic.Types.Type
+    use Assertions
+
+    // The synthesis answers for a type that implements Iterator[T] and
+    // declares no reset of its own. Everything else it must leave
+    // alone: a declared reset is the author's, and a type that never
+    // implements the trait is owed nothing.
+    // An iterator trait that asks for no reset, as one a library
+    // declares can, is owed nothing either.
+    // The shared test lookup answers the iterator type with a class,
+    // which is not what a type's trait ancestors hold.
+    class ITERATOR_TRAIT_LOOKUP: Semantic.UnitTests.TEST_INNATE_SYMBOL_LOOKUP is
+        _iterator: Type
+
+        init(iterator: Type) is
+            super.init()
+
+            _iterator = iterator
+        si
+
+        get_unspecialized_iterator_type() -> Type => _iterator
+    si
+
+    class ITERATOR_RESET_SYNTHESIS_TESTS is
+        _scope: Semantic.BLOCK_SCOPE
+
+        init() is
+            _scope = Semantic.BLOCK_SCOPE()
+
+            Fixtures.use_test_innate_symbol_lookup()
+        si
+
+        loc() -> LOCATION => LOCATION("test.ghul", 1, 1, 1, 1)
+
+        // The shared test lookup answers with a class; the production
+        // one answers with the reflected interface, and the synthesis
+        // reads the type's own trait ancestors, so the fixture supplies
+        // a trait.
+        _iterator: TRAIT static
+
+        iterator_trait() -> TRAIT is
+            if !_iterator? then
+                let iterator = make_trait()
+
+                let reset = ABSTRACT_METHOD(loc(), loc(), iterator, "reset", iterator)
+
+                reset.set_arguments(LIST[string](), LIST[Type]())
+                reset.set_void_return_type()
+
+                iterator.add_member(reset)
+
+                _iterator = iterator
+            fi
+
+            return _iterator
+        si
+
+        make_trait() -> TRAIT =>
+            TRAIT(
+                loc(),
+                loc(),
+                _scope,
+                "Iterator",
+                Collections.LIST[string](["T"]),
+                Semantic.BLOCK_SCOPE())
+
+        synthesis() -> ITERATOR_RESET_SYNTHESIS =>
+            ITERATOR_RESET_SYNTHESIS(ITERATOR_TRAIT_LOOKUP(iterator_trait().type!))
+
+        make_class(name: string) -> CLASS =>
+            CLASS(
+                loc(),
+                loc(),
+                _scope,
+                name,
+                Collections.LIST[string]().to_array(),
+                Semantic.BLOCK_SCOPE())
+
+        // The trait the innate lookup answers with, so the type's
+        // ancestors reach exactly what the synthesis looks for.
+        make_iterator_implementor(name: string) -> CLASS is
+            let implementor = make_class(name)
+
+            implementor.add_ancestor(iterator_trait().type!)
+
+            return implementor
+        si
+
+        declare_reset(into: CLASS) is
+            let reset =
+                INSTANCE_METHOD(loc(), loc(), into, "reset", into)
+
+            reset.set_arguments(LIST[string](), LIST[Type]())
+            reset.set_void_return_type()
+
+            into.add_member(reset)
+        si
+
+        @test()
+        Synthesizing_for_an_implementor_without_reset__should_give_it_a_throwing_one() is
+            let implementor = make_iterator_implementor("WALKER")
+
+            let reset = synthesis().try_synthesize(implementor)
+
+            is_not_null(reset)
+            is_true(reset!.throws_not_supported)
+            are_equal("reset", reset.name)
+        si
+
+        @test()
+        Synthesizing_for_an_implementor_that_declares_reset__should_leave_it_alone() is
+            let implementor = make_iterator_implementor("REWINDS")
+
+            declare_reset(implementor)
+
+            is_null(synthesis().try_synthesize(implementor))
+        si
+
+        @test()
+        Synthesizing_for_a_type_that_does_not_implement_the_trait__should_do_nothing() is
+            is_null(synthesis().try_synthesize(make_class("PLAIN")))
+        si
+
+        @test()
+        Synthesizing_for_an_implementor_of_a_trait_without_reset__should_do_nothing() is
+            let iterator = make_trait()
+            let implementor = make_class("STEPS")
+
+            implementor.add_ancestor(iterator.type!)
+
+            is_null(ITERATOR_RESET_SYNTHESIS(ITERATOR_TRAIT_LOOKUP(iterator.type!)).try_synthesize(implementor))
+        si
+    si
+si

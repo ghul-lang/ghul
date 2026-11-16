@@ -1,0 +1,139 @@
+namespace Semantic.Symbols.UnitTests is
+    use Collections.Iterable
+    use Collections.LIST
+
+    use Source.LOCATION
+
+    use Logging.DIAGNOSTICS_STORE
+
+    use Semantic.Symbols.CLASS
+    use Semantic.Symbols.CLASSY_GENERIC_ARGUMENT
+    use Semantic.Symbols.FUNCTION_GENERIC_ARGUMENT
+    use Semantic.Symbols.GENERIC
+    use Semantic.Symbols.INSTANCE_METHOD
+    use Semantic.Symbols.STATIC_METHOD
+
+    use Semantic.Types.Type
+
+    use Assertions
+
+    // A static virtual interface member has no body on its declaring
+    // interface, so the CLR reaches the implementation through the
+    // `constrained.` prefix and the type behind it. Reached as an
+    // operator, or imported into scope by name, there is no receiver
+    // and the type comes from the owner instantiation's first type
+    // argument.
+    //
+    // That argument is a type variable under a generic bound and a
+    // concrete type where the interface is instantiated at one, and
+    // `constrained.` takes either. Both halves are pinned because
+    // narrowing the rule to type variables alone still compiles, and
+    // costs only the concrete half, which then reports an inference
+    // failure at a call where nothing was left to infer.
+    class STATIC_INTERFACE_DISPATCH_TYPE_TESTS is
+        init() is si
+
+        loc() -> LOCATION => LOCATION("test.ghul", 1, 1, 1, 1)
+
+        names_for(values: Iterable[string]) -> LIST[string] is
+            let result = LIST[string]()
+            for v in values do result.add(v); od
+            return result
+        si
+
+        types(values: Iterable[Type]) -> LIST[Type] is
+            let result = LIST[Type]()
+            for v in values do result.add(v); od
+            return result
+        si
+
+        // `trait Adds[TSelf, TOther, TResult] is +(left: TSelf, right: TOther) -> TResult si`
+        adds() -> CLASS is
+            let adds = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Adds", names_for(["TSelf", "TOther", "TResult"]), Semantic.BLOCK_SCOPE())
+
+            adds.declare_type(loc(), "TSelf", 0, null)
+            adds.declare_type(loc(), "TOther", 1, null)
+            adds.declare_type(loc(), "TResult", 2, null)
+
+            return adds
+        si
+
+        // A plain concrete class, standing for System.Int128.
+        concrete(name: string) -> Type is
+            let c = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), name, LIST[string](), Semantic.BLOCK_SCOPE())
+
+            c.set_type(Semantic.Types.NAMED(c))
+
+            return c.type!
+        si
+
+        variable(name: string) -> Type is
+            let holder = INSTANCE_METHOD(loc(), loc(), Semantic.BLOCK_SCOPE(), "total", Semantic.BLOCK_SCOPE())
+
+            return FUNCTION_GENERIC_ARGUMENT(loc(), holder, name, 0).type!
+        si
+
+        caller() -> Semantic.FUNCTION_CALLER is
+            let logger = DIAGNOSTICS_STORE()
+
+            IoC.CONTAINER.instance.set_symbol_table_for_testing(Semantic.SYMBOL_TABLE(logger))
+
+            return Semantic.FUNCTION_CALLER(IoC.CONTAINER.instance.symbol_table, IR.VALUE_BOXER(logger))
+        si
+
+        // The member as reached with no receiver, owned by the given
+        // instantiation of Adds.
+        operator_on(owner: GENERIC) -> STATIC_METHOD is
+            let method = STATIC_METHOD(loc(), loc(), owner, "+", Semantic.BLOCK_SCOPE())
+
+            method.is_static_interface_virtual = true
+
+            return method
+        si
+
+        call_with_no_receiver(method: STATIC_METHOD, result: Type) -> IR.Values.Value =>
+            method.call(loc(), null, LIST[IR.Values.Value](), result, caller())
+
+        @test()
+        Calling__a_static_interface_member__owned_by_a_concrete_instantiation__constrains_to_the_concrete_type() is
+            let int128 = concrete("Int128")
+            let owner = GENERIC(loc(), adds(), types([int128, int128, int128]))
+
+            let call = cast IR.Values.Call.STATIC?(call_with_no_receiver(operator_on(owner), int128))
+
+            is_true(call?)
+            are_same(int128, call!.constrained_receiver!)
+        si
+
+        @test()
+        Calling__a_static_interface_member__owned_by_a_bound_instantiation__constrains_to_the_type_variable() is
+            let t = variable("T")
+            let owner = GENERIC(loc(), adds(), types([t, t, t]))
+
+            let call = cast IR.Values.Call.STATIC?(call_with_no_receiver(operator_on(owner), t))
+
+            is_true(call?)
+            are_same(t, call!.constrained_receiver!)
+        si
+
+        // Nothing to dispatch through: the owner is not an
+        // instantiation, so there is no self type to constrain to and
+        // the call cannot be emitted.
+        @test()
+        Calling__a_static_interface_member__owned_by_an_uninstantiated_type__reports_rather_than_emitting() is
+            let owner = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Plain", LIST[string](), Semantic.BLOCK_SCOPE())
+            let logger = DIAGNOSTICS_STORE()
+
+            IoC.CONTAINER.instance.set_logger_for_testing(logger)
+
+            let method = STATIC_METHOD(loc(), loc(), owner, "+", Semantic.BLOCK_SCOPE())
+
+            method.is_static_interface_virtual = true
+
+            let result = method.call(loc(), null, LIST[IR.Values.Value](), concrete("Int128"), caller())
+
+            is_true(cast IR.Values.DUMMY?(result)?)
+            is_true(logger.error_count > 0)
+        si
+    si
+si

@@ -1,0 +1,85 @@
+namespace Semantic.Symbols.UnitTests is
+    use System.Text.StringBuilder
+
+    use Collections.LIST
+
+    use Source.LOCATION
+
+    use Semantic.Types.Type
+    use Assertions
+
+    // Tests for Field.gen_reference — the fieldref emitter that bug #987
+    // also depended on. Like Function.gen_actual_arguments_list, it prefers
+    // `unspecialized_type` over `type` when both are populated, so that the
+    // open-generic form (e.g. `!0`) reaches the IL even though `type`
+    // carries the substituted concrete type. These tests pin that
+    // preference; without it, fieldref signatures from inherited fields on
+    // a constructed-generic base regress to the buggy substituted form.
+    class FIELD_TESTS is
+        init() is si
+
+        loc() -> LOCATION => LOCATION("test.ghul", 1, 1, 1, 1)
+
+        empty_names() -> LIST[string] => LIST[string]()
+        @test()
+        Calling__specialize__should_record_pre_specialize_type_as_unspecialized() is
+            // The owner has to be generic: specialize is only ever
+            // handed the constructed form of a type that takes arguments.
+            let names = LIST[string]()
+            names.add("T")
+
+            let owner = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Test", names, Semantic.BLOCK_SCOPE())
+            let t = CLASSY_GENERIC_ARGUMENT(loc(), Semantic.BLOCK_SCOPE(), "T", 0)
+
+            let f = INSTANCE_FIELD(loc(), owner, "thing")
+            f.set_type(t.type!)
+
+            // Empty type_map — substitution is a no-op for the type, but
+            // specialize() should still copy the original type into
+            // unspecialized_type so later lookups via gen_reference pick up
+            // the open form (the contract Field.gen_reference depends on).
+            let empty_map = Collections.MAP[Symbols.Symbol,Type]()
+
+            let arguments = LIST[Type]()
+            arguments.add(t.type!)
+
+            let specialized =
+                cast Field(f.specialize(empty_map, Semantic.Symbols.GENERIC(loc(), owner, arguments)))
+
+            are_same(t.type, specialized.unspecialized_type)
+        si
+    si
+
+    // A top-level `let` is declared as a static field on the globals
+    // container rather than as a local of the synthesised entry, so it is a
+    // GLOBAL_VARIABLE. Its signature has to carry the type all the same:
+    // inheriting Symbol's name-only default left hover on a top-level `let`
+    // showing the bare name where a local shows `name: type`.
+    class GLOBAL_VARIABLE_DESCRIBE_TESTS is
+        init() is si
+
+        loc() -> LOCATION => LOCATION("test.ghul", 1, 1, 1, 1)
+
+        a_type() -> Type is
+            let owner = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "THING", LIST[string](), Semantic.BLOCK_SCOPE())
+
+            return owner.type!
+        si
+
+        @test()
+        Reading__signature__of_a_global_variable_should_include_its_type() is
+            let v = GLOBAL_VARIABLE(loc(), Semantic.BLOCK_SCOPE(), "counter")
+            v.set_type(a_type())
+
+            are_equal("counter: THING", v.signature)
+        si
+
+        @test()
+        Reading__signature__of_a_top_level_variable_should_include_its_type() is
+            let v = TOP_LEVEL_VARIABLE(loc(), Semantic.BLOCK_SCOPE(), "greeting")
+            v.set_type(a_type())
+
+            are_equal("greeting: THING", v.signature)
+        si
+    si
+si

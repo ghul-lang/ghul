@@ -1,0 +1,201 @@
+namespace Syntax.Process.UnitTests is
+    use Collections.LIST
+
+    use Source.LOCATION
+
+    use IR.Values.DUMMY
+    use IR.Values.Value
+
+    use Semantic.Symbols.CLASS
+    use Semantic.Types.ERROR
+
+    use Syntax.Process.COMPILE_CALLS
+
+    use Trees.Expressions.CAST
+    use Trees.Expressions.DEFAULT
+    use Trees.Expressions.Expression
+    use Trees.Expressions.IDENTIFIER
+    use Trees.Identifiers.Identifier
+    use Trees.TypeExpressions.INFER
+    use Assertions
+
+    // Tests for COMPILE_CALLS.is_argument_awaiting_context_type and
+    // has_argument_awaiting_context_type — the gates that decide
+    // whether a call's argument walk needs a retry to give an argument
+    // its callee-supplied type. Two argument shapes take their type
+    // from the context: a bare `_`, and a `cast(v)` written without a
+    // target type. A `cast(v)` counts as waiting when its first-walk
+    // value is missing or ERROR-typed; a bare `_` counts as waiting
+    // until a formal has been pushed into it, whatever its own named
+    // unknown has typed it meanwhile, since the formal also supplies a
+    // declared default value. `_[T]` and `cast T(v)` are never retried,
+    // and an argument a formal has reached (a synthesised `_` filling
+    // an omitted named argument, or a second walk that already
+    // succeeded) is left alone.
+    class CONTEXT_TYPED_CALL_ARGUMENT_TESTS is
+        init() is si
+
+        loc() -> LOCATION => LOCATION("test.ghul", 1, 1, 1, 1)
+
+        int_class() -> CLASS => CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "int", LIST[string](), Semantic.BLOCK_SCOPE())
+
+        make_identifier(name: string) -> IDENTIFIER =>
+            IDENTIFIER(loc(), Identifier(loc(), name))
+
+        make_bare_default() -> DEFAULT => DEFAULT(loc(), null)
+
+        make_explicit_default() -> DEFAULT => DEFAULT(loc(), INFER(loc()))
+
+        make_untyped_cast() -> CAST => CAST(loc(), null, make_identifier("x"), true)
+
+        make_typed_cast() -> CAST => CAST(loc(), INFER(loc()), make_identifier("x"), true)
+
+        resolve_with_error(expression: Expression) is
+            expression.compile_expressions_state.value = DUMMY(cast Semantic.Types.Type(ERROR()), loc())
+        si
+
+        resolve_with_concrete_type(expression: Expression) is
+            expression.compile_expressions_state.value = DUMMY(int_class().type!, loc())
+        si
+
+        // The state a formal pushed into the argument leaves it in.
+        resolve_with_formal(expression: Expression) is
+            expression.set_expected_type(int_class().type!, null)
+            resolve_with_concrete_type(expression)
+        si
+
+        @test()
+        Calling__is_argument_awaiting_context_type__with_a_non_default_expression__returns_false() is
+            is_false(COMPILE_CALLS.is_argument_awaiting_context_type(make_identifier("x")))
+        si
+
+        @test()
+        Calling__is_argument_awaiting_context_type__with_an_unwalked_bare_default__returns_true() is
+            is_true(COMPILE_CALLS.is_argument_awaiting_context_type(make_bare_default()))
+        si
+
+        @test()
+        Calling__is_argument_awaiting_context_type__with_an_error_typed_bare_default__returns_true() is
+            let `default = make_bare_default()
+            resolve_with_error(`default)
+
+            is_true(COMPILE_CALLS.is_argument_awaiting_context_type(`default))
+        si
+
+        // A bare `_` typed by its own named unknown, with no formal pushed
+        // yet, is still waiting: the formal gives it a declared default
+        // value as well as its type.
+        @test()
+        Calling__is_argument_awaiting_context_type__with_a_bare_default_typed_without_a_formal__returns_true() is
+            let `default = make_bare_default()
+            resolve_with_concrete_type(`default)
+
+            is_true(COMPILE_CALLS.is_argument_awaiting_context_type(`default))
+        si
+
+        @test()
+        Calling__is_argument_awaiting_context_type__with_a_resolved_bare_default__returns_false() is
+            let `default = make_bare_default()
+            resolve_with_formal(`default)
+
+            is_false(COMPILE_CALLS.is_argument_awaiting_context_type(`default))
+        si
+
+        // `default[T]` always means the literal `default(T)` - never
+        // retried, regardless of whether it has been walked yet.
+        @test()
+        Calling__is_argument_awaiting_context_type__with_an_unwalked_explicit_default__returns_false() is
+            is_false(COMPILE_CALLS.is_argument_awaiting_context_type(make_explicit_default()))
+        si
+
+        @test()
+        Calling__is_argument_awaiting_context_type__with_an_error_typed_explicit_default__returns_false() is
+            let `default = make_explicit_default()
+            resolve_with_error(`default)
+
+            is_false(COMPILE_CALLS.is_argument_awaiting_context_type(`default))
+        si
+
+        // `cast(v)` reaches resolution with no type of its own, for the
+        // same reason a bare `_` does, and is retried the same way.
+        @test()
+        Calling__is_argument_awaiting_context_type__with_an_unwalked_untyped_cast__returns_true() is
+            is_true(COMPILE_CALLS.is_argument_awaiting_context_type(make_untyped_cast()))
+        si
+
+        @test()
+        Calling__is_argument_awaiting_context_type__with_an_error_typed_untyped_cast__returns_true() is
+            let `cast = make_untyped_cast()
+            resolve_with_error(`cast)
+
+            is_true(COMPILE_CALLS.is_argument_awaiting_context_type(`cast))
+        si
+
+        @test()
+        Calling__is_argument_awaiting_context_type__with_a_resolved_untyped_cast__returns_false() is
+            let `cast = make_untyped_cast()
+            resolve_with_concrete_type(`cast)
+
+            is_false(COMPILE_CALLS.is_argument_awaiting_context_type(`cast))
+        si
+
+        // `cast T(v)` says what it converts to, so it never waits on
+        // the callee — even before it has been walked.
+        @test()
+        Calling__is_argument_awaiting_context_type__with_an_unwalked_typed_cast__returns_false() is
+            is_false(COMPILE_CALLS.is_argument_awaiting_context_type(make_typed_cast()))
+        si
+
+        @test()
+        Calling__is_argument_awaiting_context_type__with_an_error_typed_typed_cast__returns_false() is
+            let `cast = make_typed_cast()
+            resolve_with_error(`cast)
+
+            is_false(COMPILE_CALLS.is_argument_awaiting_context_type(`cast))
+        si
+
+        @test()
+        Calling__has_argument_awaiting_context_type__with_one_untyped_cast__returns_true() is
+            let args = LIST[Expression]()
+            args.add(make_identifier("a"))
+            args.add(make_untyped_cast())
+
+            is_true(COMPILE_CALLS.has_argument_awaiting_context_type(args))
+        si
+
+        @test()
+        Calling__has_argument_awaiting_context_type__with_only_identifiers__returns_false() is
+            let args = LIST[Expression]()
+            args.add(make_identifier("a"))
+            args.add(make_identifier("b"))
+
+            is_false(COMPILE_CALLS.has_argument_awaiting_context_type(args))
+        si
+
+        @test()
+        Calling__has_argument_awaiting_context_type__with_empty_list__returns_false() is
+            is_false(COMPILE_CALLS.has_argument_awaiting_context_type(LIST[Expression]()))
+        si
+
+        @test()
+        Calling__has_argument_awaiting_context_type__with_a_resolved_default_only__returns_false() is
+            let `default = make_bare_default()
+            resolve_with_formal(`default)
+
+            let args = LIST[Expression]()
+            args.add(make_identifier("a"))
+            args.add(`default)
+
+            is_false(COMPILE_CALLS.has_argument_awaiting_context_type(args))
+        si
+
+        @test()
+        Calling__has_argument_awaiting_context_type__with_one_unresolved_default__returns_true() is
+            let args = LIST[Expression]()
+            args.add(make_identifier("a"))
+            args.add(make_bare_default())
+
+            is_true(COMPILE_CALLS.has_argument_awaiting_context_type(args))
+        si
+    si
+si

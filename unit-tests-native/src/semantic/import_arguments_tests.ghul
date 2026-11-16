@@ -1,0 +1,178 @@
+namespace Semantic.UnitTests is
+    use Collections.LIST
+
+    use Source.LOCATION
+
+    use Semantic.Symbols.CLASS
+    use Semantic.Symbols.ENUM_STRUCT
+    use Semantic.Symbols.GLOBAL_FUNCTION
+    use Semantic.Symbols.INSTANCE_METHOD
+    use Semantic.Symbols.NAMESPACE
+    use Semantic.Symbols.STATIC_METHOD
+    use IMPORT_ARGUMENTS = Semantic.Symbols.IMPORT_ARGUMENTS
+    use NAMED = Semantic.Types.NAMED
+    use Type = Semantic.Types.Type
+    use Assertions
+
+    class IMPORT_ARGUMENTS_TESTS is
+        init() is si
+
+        loc() -> LOCATION is
+            return LOCATION.reflected
+        si
+
+        // A reflected member of the named owner. A member called
+        // `init` with no IL name of its own reads as a constructor. The fixture declares no parameters, which is
+        // the case the trust turns on and which needs no innate
+        // lookup to answer; the argument classification itself is
+        // covered by integration-tests/semantic/import-construction-keeps-narrow
+        // against the real imported signatures.
+        reflected_member(namespace_name: string, class_name: string, member_name: string) -> INSTANCE_METHOD is
+            let ns = NAMESPACE(loc(), namespace_name, null, ".{namespace_name}", false)
+            let owner = CLASS(loc(), loc(), ns, class_name, LIST[string](), Semantic.BLOCK_SCOPE())
+
+            return INSTANCE_METHOD(loc(), loc(), owner, member_name, Semantic.BLOCK_SCOPE())
+        si
+
+        @test()
+        Reflected_parameterless_constructor__constructs_store_free() is
+            is_true(reflected_member("Collections", "MAP", "init").constructs_store_free)
+            is_true(reflected_member("Collections", "SET", "init").constructs_store_free)
+            is_true(reflected_member("System.Text", "StringBuilder", "init").constructs_store_free)
+        si
+
+        @test()
+        Reflected_constructor__is_still_not_store_free() is
+            // The trust holds only where the receiver is fresh. A
+            // constructor reached any other way — a chained
+            // `super.init` on an object that already exists — must
+            // stay outside it, so the stronger bit is unchanged.
+            is_false(reflected_member("Collections", "MAP", "init").is_store_free)
+        si
+
+        @test()
+        Reflected_method__does_not_construct_store_free() is
+            // Nothing about the argument test is specific to
+            // constructors, but the fresh-receiver half of the
+            // argument is, so an ordinary imported member is left
+            // where it was.
+            is_false(reflected_member("Collections", "LIST", "add").constructs_store_free)
+        si
+
+        @test()
+        Constructor_declared_in_source__is_left_to_the_solve() is
+            let source_location = LOCATION("test.ghul", 1, 1, 1, 1)
+            let ns = NAMESPACE(loc(), "Example", null, ".Example", false)
+            let owner = CLASS(loc(), loc(), ns, "THING", LIST[string](), Semantic.BLOCK_SCOPE())
+
+            let declared =
+                INSTANCE_METHOD(source_location, source_location, owner, "init", Semantic.BLOCK_SCOPE())
+
+            is_false(declared.constructs_store_free)
+        si
+
+        @test()
+        Reflected_static_method__is_trusted_store_free() is
+            let ns = NAMESPACE(loc(), "System", null, ".System", false)
+            let owner = CLASS(loc(), loc(), ns, "Convert", LIST[string](), Semantic.BLOCK_SCOPE())
+
+            let m = STATIC_METHOD(loc(), loc(), owner, "to_boolean", Semantic.BLOCK_SCOPE())
+
+            is_true(m.is_store_free)
+        si
+
+        @test()
+        Static_interface_virtual_slot__is_not_store_free() is
+            let ns = NAMESPACE(loc(), "System", null, ".System", false)
+            let iface = CLASS(loc(), loc(), ns, "IParsable", LIST[string](), Semantic.BLOCK_SCOPE())
+
+            let m = STATIC_METHOD(loc(), loc(), iface, "parse", Semantic.BLOCK_SCOPE())
+            m.is_static_interface_virtual = true
+
+            is_false(m.is_store_free)
+        si
+
+        @test()
+        Reflected_global_function__is_not_trusted_store_free() is
+            // A cross-assembly global function is arbitrary ghūl
+            // source, not a BCL surface: it can write its own
+            // assembly's globals and dispatch into this assembly
+            // through an object stored there, which a parameter-only
+            // reading cannot see. Only `STATIC_METHOD` earns the
+            // static tier's trust; `pure` is how a function like this
+            // one earns it instead.
+            let ns = NAMESPACE(loc(), "Ghul.Internal", null, ".Internal", false)
+
+            let f = GLOBAL_FUNCTION(loc(), loc(), ns, "write_line", ns)
+
+            is_false(f.is_store_free)
+        si
+
+        @test()
+        Statically_bound_reflected_member__keeps_field_facts_only() is
+            let m = reflected_member("System.Text", "StringBuilder", "get_year")
+
+            m.cannot_be_overridden = true
+
+            is_true(m.writes_only_receiver_interior)
+            is_false(m.is_store_free)
+        si
+
+        // A delegate member satisfies every clause of the instance
+        // tier - reflected, not generic, no parameters, bound
+        // statically because the type is sealed - and must still
+        // decline, because what it runs is its target rather than
+        // anything its shape describes.
+        @test()
+        Delegate_member__stays_untrusted() is
+            let m = reflected_member("System.Threading", "ThreadStart", "invoke")
+
+            m.cannot_be_overridden = true
+
+            let owner = cast CLASS?(m.owner)!
+
+            owner.mark_delegate()
+
+            is_false(m.writes_only_receiver_interior)
+            is_false(m.is_store_free)
+        si
+
+        // The same member without the delegate mark is trusted, so the
+        // test above is observing the mark rather than some other
+        // clause declining.
+        @test()
+        Statically_bound_member_of_a_plain_owner__keeps_field_facts() is
+            let m = reflected_member("System.Threading", "PLAIN", "run")
+
+            m.cannot_be_overridden = true
+
+            is_true(m.writes_only_receiver_interior)
+        si
+
+        @test()
+        Unstamped_reflected_member__stays_untrusted() is
+            // The instance tier needs the CLR dispatch facts stamped at
+            // import; a fixture that skipped the import path presents
+            // exactly as a member whose overridability is unknown, and
+            // must decline.
+            let m = reflected_member("System", "Exception", "get_message")
+
+            is_false(m.writes_only_receiver_interior)
+            is_false(m.is_store_free)
+        si
+
+        @test()
+        Enum_argument__counts_as_scalar() is
+            let ns = NAMESPACE(loc(), "System", null, ".System", false)
+            let kind = ENUM_STRUCT(loc(), loc(), ns, "DateTimeKind", ns)
+
+            let args mut = Collections.LIST[Type]()
+            args.add(NAMED(kind))
+
+            let m = reflected_member("System", "DateTime", "build")
+            m.arguments = args
+
+            is_true(IMPORT_ARGUMENTS.all_arguments_scalar(m))
+        si
+    si
+si

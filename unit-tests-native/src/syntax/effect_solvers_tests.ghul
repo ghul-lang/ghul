@@ -1,0 +1,459 @@
+namespace Syntax.UnitTests is
+    use Collections.LIST
+    use Collections.MAP
+
+    use Source.LOCATION
+
+    use Syntax.Process.EFFECT_FACTS
+    use Syntax.Process.EFFECT_SOLVERS
+    use Syntax.Process.EFFECTS
+    use Syntax.Process.STORE_FREE_FACTS
+
+    use Semantic.Symbols.CLASS
+    use Semantic.Symbols.GLOBAL_FUNCTION
+    use Semantic.Symbols.INSTANCE_METHOD
+    use Semantic.Symbols.NAMESPACE
+
+    use Function = Semantic.Symbols.Function
+    use Symbol = Semantic.Symbols.Symbol
+    use Assertions
+
+    // Pins the whole-program effect solvers' graph behaviour: the
+    // member-granular write, nulling and read closures, unbounded
+    // propagation and its short-circuit, the trusted unwalked-callee
+    // tiers, override and passed-function-value edges, and the EFFECTS
+    // registry's query tiers over the solved sets.
+    class EFFECT_SOLVERS_TESTS is
+        init() is si
+
+        loc() -> LOCATION => LOCATION("test.ghul", 1, 1, 1, 1)
+
+        global_function(name: string) -> GLOBAL_FUNCTION =>
+            GLOBAL_FUNCTION(loc(), loc(), Semantic.BLOCK_SCOPE(), name, Semantic.BLOCK_SCOPE())
+
+        method(name: string, owner: CLASS) -> INSTANCE_METHOD =>
+            INSTANCE_METHOD(loc(), loc(), owner, name, Semantic.BLOCK_SCOPE())
+
+        closed_class(name: string) -> CLASS is
+            let result = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), name, LIST[string](), Semantic.BLOCK_SCOPE())
+            result.mark_closed()
+            return result
+        si
+
+        member(name: string) -> Symbol => method(name, closed_class("OWNER_OF_{name}"))
+
+        // A reflected member whose owner renders the given ghūl
+        // qualified name — the shape the curated import lists match.
+        reflected_member(namespace_name: string, class_name: string, member_name: string) -> INSTANCE_METHOD is
+            let ns = NAMESPACE(loc(), namespace_name, null, ".{namespace_name}", false)
+            let owner = CLASS(LOCATION.reflected, LOCATION.reflected, ns, class_name, LIST[string](), Semantic.BLOCK_SCOPE())
+            return INSTANCE_METHOD(LOCATION.reflected, LOCATION.reflected, owner, member_name, Semantic.BLOCK_SCOPE())
+        si
+
+        facts_for(functions: Collections.Iterable[Function]) -> MAP[Function, STORE_FREE_FACTS] is
+            let result = MAP[Function, STORE_FREE_FACTS]()
+            for f in functions do
+                result[f] = STORE_FREE_FACTS()
+            od
+            return result
+        si
+
+        // Open a fresh registry generation and hand back a record for
+        // each function, so a test's facts cannot leak into the next.
+        begin() is
+            EFFECT_FACTS.collecting = true
+            EFFECT_FACTS.begin_generation("test")
+        si
+
+        record(f: Function) -> Syntax.Process.FUNCTION_EFFECT_FACTS is
+            EFFECT_FACTS.note_function(f, f.name, "", "", "")
+            return EFFECT_FACTS.record_for(f)!
+        si
+
+        // A body marked @trusted_store_free() contributes nothing of its
+        // own, however much it writes, so neither it nor its caller takes
+        // its writes.
+        @test()
+        Trusted_store_free_body__writes_nothing_of_its_own() is
+            begin()
+
+            let m = member("m")
+            let marked = method("describe", closed_class("MARKED"))
+            let caller = global_function("caller")
+
+            marked.mark_trusted_store_free()
+
+            let marked_record = record(marked)
+            marked_record.writes.add(m)
+            marked_record.writes_unbounded = true
+            record(caller)
+
+            let facts = facts_for([cast Function(caller), cast Function(marked)])
+            facts[caller].add_callee(marked)
+
+            let solved = EFFECT_SOLVERS(facts).write_sets(false, false)
+
+            is_false(solved.sets[caller].contains(m))
+            is_false(solved.sets[marked].contains(m))
+            are_equal(0, solved.unbounded.count)
+        si
+
+        // Its overriders in the program are judged: what they write is
+        // what a call to the marked member can reach, including writes an
+        // overrider only takes from its own callees.
+        @test()
+        Trusted_store_free_body__takes_its_judged_overriders_writes() is
+            begin()
+
+            let m = member("m")
+            let base_class = closed_class("BASE")
+            let marked = method("describe", base_class)
+            let overrider = method("describe", closed_class("DERIVED"))
+            let leaf = global_function("leaf")
+            let caller = global_function("caller")
+
+            marked.mark_trusted_store_free()
+            marked.add_overrider(overrider)
+
+            record(marked)
+            record(overrider)
+            record(leaf).writes.add(m)
+            record(caller)
+
+            let facts = facts_for([cast Function(caller), cast Function(marked), cast Function(overrider), cast Function(leaf)])
+            facts[caller].add_callee(marked)
+            facts[overrider].add_callee(leaf)
+
+            let solved = EFFECT_SOLVERS(facts).write_sets(false, false)
+
+            is_true(solved.sets[marked].contains(m))
+            is_true(solved.sets[caller].contains(m))
+        si
+
+        @test()
+        Callee_writes__absorb_into_caller_write_set() is
+            begin()
+
+            let m = member("m")
+            let callee = global_function("callee")
+            let caller = global_function("caller")
+
+            record(callee).writes.add(m)
+            record(caller)
+
+            let facts = facts_for([cast Function(caller), cast Function(callee)])
+            facts[caller].add_callee(callee)
+
+            let solved = EFFECT_SOLVERS(facts).write_sets(false, false)
+
+            is_true(solved.sets[caller].contains(m))
+            are_equal(0, solved.unbounded.count)
+        si
+
+        @test()
+        Transitive_callee_writes__reach_the_root_caller() is
+            begin()
+
+            let m = member("m")
+            let a = global_function("a")
+            let b = global_function("b")
+            let c = global_function("c")
+
+            record(a)
+            record(b)
+            record(c).writes.add(m)
+
+            let facts = facts_for([cast Function(a), cast Function(b), cast Function(c)])
+            facts[a].add_callee(b)
+            facts[b].add_callee(c)
+
+            let solved = EFFECT_SOLVERS(facts).write_sets(false, false)
+
+            is_true(solved.sets[a].contains(m))
+        si
+
+        @test()
+        Unwalked_untrusted_callee__makes_the_caller_unbounded() is
+            begin()
+
+            let caller = global_function("caller")
+            let stranger = global_function("stranger")
+
+            record(caller)
+
+            let facts = facts_for([cast Function(caller)])
+            facts[caller].add_callee(stranger)
+
+            let solved = EFFECT_SOLVERS(facts).write_sets(false, false)
+
+            is_true(solved.unbounded.contains(caller))
+        si
+
+        @test()
+        Unboundedness__propagates_through_the_call_graph() is
+            begin()
+
+            let a = global_function("a")
+            let b = global_function("b")
+            let stranger = global_function("stranger")
+
+            record(a)
+            record(b)
+
+            let facts = facts_for([cast Function(a), cast Function(b)])
+            facts[a].add_callee(b)
+            facts[b].add_callee(stranger)
+
+            let solved = EFFECT_SOLVERS(facts).write_sets(false, false)
+
+            is_true(solved.unbounded.contains(b))
+            is_true(solved.unbounded.contains(a))
+        si
+
+        @test()
+        Receiver_interior_callee__keeps_the_caller_bounded() is
+            begin()
+
+            let caller = global_function("caller")
+            let add = reflected_member("Collections", "LIST", "add")
+
+            record(caller)
+
+            let facts = facts_for([cast Function(caller)])
+            facts[caller].add_callee(add)
+
+            let solved = EFFECT_SOLVERS(facts).write_sets(false, false)
+
+            is_false(solved.unbounded.contains(caller))
+            are_equal(0, solved.sets[caller].count)
+        si
+
+        @test()
+        Declared_pure_callee__contributes_nothing() is
+            begin()
+
+            let caller = global_function("caller")
+            let pure_import = global_function("pure_import")
+            pure_import.mark_declared_pure()
+
+            record(caller)
+
+            let facts = facts_for([cast Function(caller)])
+            facts[caller].add_callee(pure_import)
+
+            let solved = EFFECT_SOLVERS(facts).write_sets(false, false)
+
+            is_false(solved.unbounded.contains(caller))
+            are_equal(0, solved.sets[caller].count)
+        si
+
+        @test()
+        Overrider_writes__absorb_into_the_overridden_base() is
+            begin()
+
+            let m = member("m")
+            let owner = closed_class("BASE")
+            let base = method("visit", owner)
+            let overrider = method("visit", closed_class("DERIVED"))
+            base.add_overrider(overrider)
+
+            let caller = global_function("caller")
+
+            record(caller)
+            record(base)
+            record(overrider).writes.add(m)
+
+            let facts = facts_for([cast Function(caller), cast Function(base), cast Function(overrider)])
+            facts[caller].add_callee(base)
+
+            let solved = EFFECT_SOLVERS(facts).write_sets(false, false)
+
+            is_true(solved.sets[base].contains(m))
+            is_true(solved.sets[caller].contains(m))
+        si
+
+        @test()
+        Passed_function_values__bound_a_param_invoker() is
+            begin()
+
+            let m = member("m")
+            let invoker = global_function("invoker")
+            let value = global_function("value")
+
+            record(invoker).invokes_function_param = true
+            record(value).writes.add(m)
+            EFFECT_FACTS.note_passed_function(invoker, value, "")
+
+            let facts = facts_for([cast Function(invoker), cast Function(value)])
+
+            let solved = EFFECT_SOLVERS(facts).write_sets(false, false)
+
+            is_false(solved.unbounded.contains(invoker))
+            is_true(solved.sets[invoker].contains(m))
+        si
+
+        @test()
+        Opaque_function_value__makes_the_param_invoker_unbounded() is
+            begin()
+
+            let invoker = global_function("invoker")
+
+            record(invoker).invokes_function_param = true
+            EFFECT_FACTS.note_passed_opaque(invoker, "")
+
+            let facts = facts_for([cast Function(invoker)])
+
+            let solved = EFFECT_SOLVERS(facts).write_sets(false, false)
+
+            is_true(solved.unbounded.contains(invoker))
+        si
+
+        @test()
+        Nulling_writes__propagate_and_write_unbounded_implies_null_unbounded() is
+            begin()
+
+            let m = member("m")
+            let caller = global_function("caller")
+            let nuller = global_function("nuller")
+            let wild = global_function("wild")
+
+            record(caller)
+            record(nuller).nulling_writes.add(m)
+            record(wild).writes_unbounded = true
+
+            let facts = facts_for([cast Function(caller), cast Function(nuller), cast Function(wild)])
+            facts[caller].add_callee(nuller)
+
+            let solved = EFFECT_SOLVERS(facts).may_null_sets(false, false)
+
+            is_true(solved.sets[caller].contains(m))
+            is_true(solved.unbounded.contains(wild))
+        si
+
+        @test()
+        Read_closure__propagates_and_trusted_tiers_set_element_flags() is
+            begin()
+
+            let m = member("m")
+            let getter = global_function("getter")
+            let helper = global_function("helper")
+            let appender = global_function("appender")
+
+            record(getter)
+            record(helper).reads.add(m)
+            record(appender)
+
+            let facts = facts_for([cast Function(getter), cast Function(helper), cast Function(appender)])
+            facts[getter].add_callee(helper)
+            facts[appender].add_callee(reflected_member("Collections", "LIST", "add"))
+
+            let solved = EFFECT_SOLVERS(facts).read_sets()
+
+            is_true(solved.sets[getter].contains(m))
+            is_false(solved.unbounded.contains(getter))
+
+            // the receiver-interior mutator reads and writes elements,
+            // but bounds the member read closure
+            is_false(solved.unbounded.contains(appender))
+            is_true(solved.reads_elements.contains(appender))
+            is_true(solved.writes_elements.contains(appender))
+        si
+
+        @test()
+        Declared_pure_import__makes_the_read_closure_unbounded() is
+            begin()
+
+            let getter = global_function("getter")
+            let pure_import = global_function("pure_import")
+            pure_import.mark_declared_pure()
+
+            record(getter)
+
+            let facts = facts_for([cast Function(getter)])
+            facts[getter].add_callee(pure_import)
+
+            let solved = EFFECT_SOLVERS(facts).read_sets()
+
+            // pure promises no stores, not bounded reads
+            is_true(solved.unbounded.contains(getter))
+        si
+
+        @test()
+        Effects_queries__answer_from_the_solved_sets() is
+            begin()
+
+            let m = member("m")
+            let other = member("other")
+            let writer = global_function("writer")
+            let clean = global_function("clean")
+
+            record(writer).writes.add(m)
+            record(clean)
+
+            let facts = facts_for([cast Function(writer), cast Function(clean)])
+            facts[writer].is_disqualified = true
+
+            let solvers = EFFECT_SOLVERS(facts)
+            let writes = solvers.write_sets(false, false)
+            let nulls = solvers.may_null_sets(false, false)
+            let solved = solvers.solve()
+            let reads = solvers.read_sets()
+
+            EFFECTS.install(
+                writes.sets, writes.unbounded,
+                nulls.sets, nulls.unbounded,
+                solved.store_free, solved.constructs_store_free,
+                reads.sets, reads.unbounded, reads.reads_elements, reads.writes_elements, true)
+
+            is_true(EFFECTS.is_solved)
+            is_true(EFFECTS.may_write(writer, m))
+            is_false(EFFECTS.may_write(writer, other))
+            is_false(EFFECTS.may_write(clean, m))
+            is_true(EFFECTS.is_store_free(clean))
+            is_false(EFFECTS.is_store_free(writer))
+
+            EFFECTS.clear()
+
+            // cleared, every query answers conservatively again
+            is_false(EFFECTS.is_solved)
+            is_true(EFFECTS.may_write(clean, m))
+            is_false(EFFECTS.is_store_free(clean))
+        si
+
+        @test()
+        Unwalked_receiver_interior_import__is_not_a_may_write_after_install() is
+            begin()
+
+            let m = member("m")
+            let walked = global_function("walked")
+
+            record(walked)
+
+            let facts = facts_for([cast Function(walked)])
+
+            let solvers = EFFECT_SOLVERS(facts)
+            let writes = solvers.write_sets(false, false)
+            let nulls = solvers.may_null_sets(false, false)
+            let solved = solvers.solve()
+            let reads = solvers.read_sets()
+
+            EFFECTS.install(
+                writes.sets, writes.unbounded,
+                nulls.sets, nulls.unbounded,
+                solved.store_free, solved.constructs_store_free,
+                reads.sets, reads.unbounded, reads.reads_elements, reads.writes_elements, true)
+
+            // unwalked callees answer by tier: a curated
+            // receiver-interior mutator writes no ghūl member, an
+            // unknown import could write anything, and a source
+            // function the solve never saw - declared since it ran -
+            // is taken as harmless until the next complete solve
+            is_false(EFFECTS.may_write(reflected_member("Collections", "LIST", "add"), m))
+            is_true(EFFECTS.may_write(reflected_member("Collections", "LIST", "sort"), m))
+            is_false(EFFECTS.may_write(global_function("stranger"), m))
+            is_true(EFFECTS.may_write_elements(reflected_member("Collections", "LIST", "add")))
+
+            EFFECTS.clear()
+        si
+    si
+si

@@ -1,0 +1,348 @@
+namespace Semantic.Symbols.UnitTests is
+    use System.Text.StringBuilder
+
+    use Collections.Iterable
+    use Collections.LIST
+
+    use Source.LOCATION
+    use Assertions
+
+    // Tests for the IL emission of Classy's generic-argument lists.
+    //
+    // gen_actual_type_arguments writes a class's *own* type-parameter list
+    // as `!0,!1,...` — used wherever the IL needs a self-reference to the
+    // open-generic class (e.g. `class Foo`1<!0>` in field signatures of
+    // generic types). gen_formal_type_arguments writes the same list as
+    // single-quoted *names* (`'T','U'`) — the form required only inside
+    // the `.class` directive that *declares* the generic class.
+    //
+    // Mixing these up — emitting names where indices belong, or vice versa
+    // — produces malformed IL the runtime either rejects at load time or
+    // can't resolve. These tests anchor each call site's expected output
+    // shape.
+    class CLASSY_TESTS is
+        init() is si
+
+        loc() -> LOCATION => LOCATION("test.ghul", 1, 1, 1, 1)
+
+        names_for(values: Iterable[string]) -> LIST[string] is
+            let result = LIST[string]()
+            for v in values do result.add(v); od
+            return result
+        si
+        @test()
+        remove_ancestor__should_remove_the_instance_added_and_keep_an_equal_one() is
+            let base = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "BASE", LIST[string](), Semantic.BLOCK_SCOPE())
+            let symbol = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Test", LIST[string](), Semantic.BLOCK_SCOPE())
+
+            let first = Semantic.Types.NAMED(base)
+            let second = Semantic.Types.NAMED(base)
+
+            symbol.add_ancestor(first)
+            symbol.add_ancestor(second)
+
+            symbol.remove_ancestor(second)
+
+            are_equal(1, symbol.ancestors.count)
+            is_true(symbol.ancestors[0] == first)
+        si
+
+        @test()
+        is_generic__should_be_false_for_class_with_no_arguments() is
+            let names = LIST[string]()
+            let symbol = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Test", names, Semantic.BLOCK_SCOPE())
+
+            is_false(symbol.is_generic)
+        si
+
+        @test()
+        is_generic__should_be_true_for_class_with_arguments() is
+            let names = names_for(["T"])
+            let symbol = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Test", names, Semantic.BLOCK_SCOPE())
+
+            is_true(symbol.is_generic)
+        si
+
+        @test()
+        get_argument_constraint_kind__should_be_NONE_when_no_constraint_kinds_list() is
+            let symbol = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Test", names_for(["T"]), Semantic.BLOCK_SCOPE())
+
+            is_true(symbol.get_argument_constraint_kind(0) == TypeParameterConstraintKind.NONE)
+        si
+
+        @test()
+        get_argument_constraint_kind__should_read_the_constraint_kinds_list() is
+            let symbol = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Test", names_for(["T"]), Semantic.BLOCK_SCOPE())
+
+            symbol.argument_constraint_kinds = [TypeParameterConstraintKind.VALUE]
+
+            is_true(symbol.get_argument_constraint_kind(0) == TypeParameterConstraintKind.VALUE)
+        si
+
+        // Implicit-abstract from body-less methods. The marking
+        // happens in DECLARE_SYMBOLS — the symbol-level test pins
+        // that the signal flows through `is_abstract` once set.
+        // The DECLARE_SYMBOLS-side exclusions (property accessors,
+        // static methods, `init`) are exercised by the integration
+        // tests `integration-tests/execution/concrete-class-with-
+        // write-only-property` and `concrete-class-with-body-less-
+        // static-method`.
+        @test()
+        is_abstract__is_false_on_a_fresh_class_with_no_bodyless_marker() is
+            let symbol = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Test", LIST[string](), Semantic.BLOCK_SCOPE())
+
+            is_false(symbol.is_abstract)
+        si
+
+        @test()
+        is_abstract__is_true_after_mark_has_bodyless_method() is
+            let symbol = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Test", LIST[string](), Semantic.BLOCK_SCOPE())
+            symbol.mark_has_bodyless_method()
+
+            is_true(symbol.is_abstract)
+        si
+
+        @test()
+        is_abstract__is_true_after_explicit_mark_abstract() is
+            let symbol = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Test", LIST[string](), Semantic.BLOCK_SCOPE())
+            symbol.mark_abstract()
+
+            is_true(symbol.is_abstract)
+        si
+
+        // is_closed_root: closed-by-default applies to ghūl-declared
+        // CLASS — bare class out of the box is a closed root. Open
+        // classes, traits, and structs are not. Unions are covered
+        // by the union_tests fixture.
+        @test()
+        is_closed_root__is_true_for_a_default_class() is
+            let symbol = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Test", LIST[string](), Semantic.BLOCK_SCOPE())
+
+            is_true(symbol.is_closed_root)
+        si
+
+        @test()
+        is_closed_root__is_false_for_an_open_class() is
+            let symbol = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Test", LIST[string](), Semantic.BLOCK_SCOPE())
+            symbol.mark_open()
+
+            is_false(symbol.is_closed_root)
+        si
+
+        // closed_alternatives: walks _implementors, filtered to ghūl-
+        // declared CLASS subclasses. Mirrors closed_subclasses (same
+        // underlying mechanism) but with a polymorphic name for the
+        // shared narrowing/constraint code paths.
+        @test()
+        closed_alternatives__on_a_class_with_no_implementors__is_empty() is
+            let symbol = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Test", LIST[string](), Semantic.BLOCK_SCOPE())
+
+            let count mut = 0
+            for s in symbol.closed_alternatives do
+                count = count + 1
+            od
+
+            are_equal(0, count)
+        si
+
+        @test()
+        closed_alternatives__on_a_class_with_subclasses__yields_them() is
+            let root = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Root", LIST[string](), Semantic.BLOCK_SCOPE())
+            let sub_a = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "SubA", LIST[string](), Semantic.BLOCK_SCOPE())
+            let sub_b = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "SubB", LIST[string](), Semantic.BLOCK_SCOPE())
+
+            root.add_implementor(sub_a)
+            root.add_implementor(sub_b)
+
+            let collected = LIST[Classy]()
+            for s in root.closed_alternatives do
+                collected.add(s)
+            od
+
+            are_equal(2, collected.count)
+        si
+
+        // own_instantiation is what a type is called from inside itself
+        // and from anything that extends it. A generic's open form names
+        // no type at run time, so getting this wrong produces metadata
+        // that loads and then faults on first use rather than failing
+        // where it was written.
+        @test()
+        A_non_generic_type_is_its_own_instantiation() is
+            let c = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Plain", LIST[string](), Semantic.BLOCK_SCOPE())
+            c.set_type(Types.NAMED(c))
+
+            are_same(c.type!, c.own_instantiation)
+        si
+
+        @test()
+        A_generic_type_is_instantiated_over_its_own_parameters() is
+            let c = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Pair", names_for(["T", "U"]), Semantic.BLOCK_SCOPE())
+            c.set_type(Types.NAMED(c))
+
+            c.declare_type(loc(), "T", 0, null)
+            c.declare_type(loc(), "U", 1, null)
+
+            let instantiation = c.own_instantiation
+
+            // A constructed generic's symbol wraps the open definition
+            // rather than being it.
+            let constructed = cast Semantic.Symbols.GENERIC?(instantiation.symbol)
+
+            is_true(constructed?)
+            are_same(cast Symbol(c), cast Symbol(constructed!.symbol))
+
+            are_equal(2, instantiation.arguments.count)
+            are_same(c.find_direct("T")!.type!, instantiation.arguments[0])
+            are_same(c.find_direct("U")!.type!, instantiation.arguments[1])
+        si
+
+        // An imported generic carries its parameters positionally and
+        // declares none of them into its own scope, so the lookup by
+        // name finds nothing and the index is the whole answer. Without
+        // this a consumer cannot name an imported generic at all.
+        @test()
+        An_imported_generic_answers_for_its_parameters_by_position() is
+            let c =
+                CLASS(
+                    LOCATION.reflected,
+                    LOCATION.reflected,
+                    Semantic.BLOCK_SCOPE(),
+                    "Imported",
+                    names_for(["T", "U"]),
+                    Semantic.BLOCK_SCOPE())
+
+            c.set_type(Types.NAMED(c))
+
+            is_true(c.is_reflected)
+            is_false(c.find_direct("T")?)
+
+            let first = c.type_parameter_at(0)
+            let second = c.type_parameter_at(1)
+
+            is_true(first?)
+            is_true(second?)
+
+            are_equal(2, c.own_instantiation.arguments.count)
+        si
+
+        // The parameters are looked up by the names the type declared,
+        // so a type declared here that names a parameter it never
+        // declared has no instantiation to give rather than a half-built
+        // one. The positional fallback above is for imported types only:
+        // widening it would silently answer for a local type that failed
+        // to declare a parameter it should have.
+        @test()
+        A_generic_type_whose_parameter_was_never_declared_takes_a_positional_one() is
+            let c = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Missing", names_for(["T"]), Semantic.BLOCK_SCOPE())
+            c.set_type(Types.NAMED(c))
+
+            // Several kinds of generic never declare their parameters
+            // into their own scope - an imported one (an imported union
+            // variant included), an innate one, a tuple - so a parameter
+            // is minted for the position instead. The same symbol
+            // answers every request, which is what substitution matches
+            // on.
+            let parameter = c.type_parameter_at(0)
+
+            assert parameter?
+            are_same(parameter, c.type_parameter_at(0))
+            are_equal("T", parameter.name)
+        si
+
+        // il_qualified_name is the emitted fully-qualified name the
+        // custom-attribute blob carries for a typeof argument. It mirrors
+        // what the renderer produced, unquoted: the owner chain dotted
+        // together, the type's IL name, and a `N arity suffix.
+
+        @test()
+        il_qualified_name__is_the_bare_name_for_a_top_level_type() is
+            let symbol = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Test", LIST[string](), Semantic.BLOCK_SCOPE())
+
+            are_equal("Test", symbol.il_qualified_name)
+        si
+
+        @test()
+        il_qualified_name__omits_arity_for_a_generic_with_no_argument_count_siblings() is
+            let symbol = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Box", names_for(["T"]), Semantic.BLOCK_SCOPE())
+
+            // Matches the renderer: the arity suffix appears only when a
+            // same-named overload of a different arity exists.
+            are_equal("Box", symbol.il_qualified_name)
+        si
+
+        @test()
+        il_qualified_name__appends_arity_for_a_generic_with_argument_count_siblings() is
+            let symbol = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Box", names_for(["T"]), Semantic.BLOCK_SCOPE())
+
+            symbol.has_argument_count_siblings = true
+
+            are_equal("Box`1", symbol.il_qualified_name)
+        si
+
+        @test()
+        il_qualified_name__joins_an_enclosing_type() is
+            let outer = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Outer", LIST[string](), Semantic.BLOCK_SCOPE())
+            let inner = CLASS(loc(), loc(), outer, "Inner", LIST[string](), Semantic.BLOCK_SCOPE())
+
+            are_equal("Outer.Inner", inner.il_qualified_name)
+        si
+
+        @test()
+        il_qualified_name__joins_a_namespace_owner_stripping_its_root_marker() is
+            let ns = NAMESPACE(loc(), "MyNs", null, ".MyNs", false)
+            let symbol = CLASS(loc(), loc(), ns, "Test", LIST[string](), Semantic.BLOCK_SCOPE())
+
+            are_equal("MyNs.Test", symbol.il_qualified_name)
+        si
+
+        @test()
+        il_qualified_name__takes_a_bracketed_il_name_override_verbatim_past_the_bracket() is
+            let symbol = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Test", LIST[string](), Semantic.BLOCK_SCOPE())
+
+            symbol.il_name_override = "[System.Runtime]Full.Name"
+
+            are_equal("Full.Name", symbol.il_qualified_name)
+        si
+
+        // il_metadata_name is the unqualified name the TypeDef row is
+        // written under. il_qualified_name is built from it, so the name
+        // a consumer resolves the type by and the name the blob spells
+        // cannot come apart.
+
+        @test()
+        il_metadata_name__is_the_bare_name_for_a_non_generic_type() is
+            let symbol = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Test", LIST[string](), Semantic.BLOCK_SCOPE())
+
+            are_equal("Test", symbol.il_metadata_name)
+        si
+
+        @test()
+        il_metadata_name__omits_arity_for_a_generic_with_no_argument_count_siblings() is
+            let symbol = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Box", names_for(["T"]), Semantic.BLOCK_SCOPE())
+
+            are_equal("Box", symbol.il_metadata_name)
+        si
+
+        @test()
+        il_metadata_name__appends_arity_for_a_generic_with_argument_count_siblings() is
+            let symbol = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Box", names_for(["T", "U"]), Semantic.BLOCK_SCOPE())
+
+            symbol.has_argument_count_siblings = true
+
+            are_equal("Box`2", symbol.il_metadata_name)
+        si
+
+        // The sibling taking no type arguments shares the flag with the
+        // generic one, and must not pick up a suffix from it: `Box`0` is
+        // not a name anything resolves.
+        @test()
+        il_metadata_name__omits_arity_for_the_no_argument_sibling() is
+            let symbol = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Box", LIST[string](), Semantic.BLOCK_SCOPE())
+
+            symbol.has_argument_count_siblings = true
+
+            are_equal("Box", symbol.il_metadata_name)
+        si
+    si
+si

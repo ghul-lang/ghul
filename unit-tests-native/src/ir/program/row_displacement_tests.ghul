@@ -1,0 +1,107 @@
+namespace IR.Program.UnitTests is
+    use Collections.LIST
+    use Collections.SET
+
+    use Assertions
+
+    class ROW_DISPLACEMENT_TESTS is
+        init() is si
+
+        rows() -> LIST[(key: string, columns: ARRAY[int])] =>
+            LIST[(key: string, columns: ARRAY[int])]([
+                ("a", [0, 1, 2, 3]),
+                ("b", [1, 3]),
+                ("c", [0, 2]),
+                ("d", [5]),
+                ("e", [0, 1, 2, 3, 4, 5])
+            ])
+
+        packed() -> ROW_DISPLACEMENT[string] is
+            let packing = ROW_DISPLACEMENT[string]()
+
+            for (key, columns) in rows() do
+                packing.add(key, columns)
+            od
+
+            packing.pack()
+
+            return packing
+        si
+
+        @test()
+        pack__gives_no_two_rows_the_same_slot() is
+            let packing = packed()
+            let claimed = SET[int]()
+
+            for (key, columns) in rows() do
+                for column in columns do
+                    is_true(claimed.add(packing.offset(key) + column))
+                od
+            od
+        si
+
+        @test()
+        pack__keeps_every_slot_inside_the_table() is
+            let packing = packed()
+
+            for (key, columns) in rows() do
+                for column in columns do
+                    is_true(packing.offset(key) + column < packing.size)
+                od
+            od
+        si
+
+        @test()
+        pack__fits_interleaving_rows_into_each_other_s_gaps() is
+            let packing = ROW_DISPLACEMENT[string]()
+
+            packing.add("odd", [1, 3, 5])
+            packing.add("even", [0, 2, 4])
+
+            packing.pack()
+
+            are_equal(6, packing.size)
+        si
+
+        @test()
+        pack__places_the_largest_row_first_at_offset_zero() is
+            are_equal(0, packed().offset("e"))
+        si
+
+        @test()
+        pack__gives_an_empty_row_an_offset_and_no_slots() is
+            let packing = ROW_DISPLACEMENT[string]()
+
+            packing.add("empty", LIST[int]())
+            packing.add("one", [2])
+
+            packing.pack()
+
+            are_equal(3, packing.size)
+            are_equal(0, packing.offset("empty"))
+        si
+
+        @test()
+        pack__places_each_row_at_the_lowest_offset_where_it_fits() is
+            let packing = packed()
+
+            are_equal(0, packing.offset("e"))
+            are_equal(6, packing.offset("a"))
+            are_equal(9, packing.offset("d"))
+            are_equal(15, packing.size)
+        si
+
+        @test()
+        pack__a_row_whose_lowest_column_is_not_zero__can_fill_slots_below_others() is
+            let packing = ROW_DISPLACEMENT[string]()
+
+            packing.add("wide", [0, 1, 2, 3, 5])
+            packing.add("late", [4, 6])
+
+            packing.pack()
+
+            are_equal(0, packing.offset("late"))
+            are_equal(7, packing.size)
+        si
+    si
+si

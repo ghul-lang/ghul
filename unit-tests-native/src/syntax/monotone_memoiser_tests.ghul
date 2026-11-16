@@ -1,0 +1,225 @@
+namespace Syntax.UnitTests is
+    use Collections.LIST
+    use Collections.MAP
+
+    use Source.LOCATION
+
+    use Syntax.Process.CROSSING
+    use Syntax.Process.EFFECT_FACTS
+    use Syntax.Process.EFFECT_SOLVERS
+    use Syntax.Process.EFFECTS
+    use Syntax.Process.MONOTONE_MEMOISER
+    use Syntax.Process.RELIANCES
+    use Syntax.Process.STORE_FREE_FACTS
+
+    use Semantic.Symbols.CLASS
+    use Semantic.Symbols.GLOBAL_FUNCTION
+    use Semantic.Symbols.INSTANCE_FIELD
+    use Semantic.Symbols.INSTANCE_PROPERTY
+    use Semantic.Symbols.NAMESPACE
+
+    use Function = Semantic.Symbols.Function
+    use Symbol = Semantic.Symbols.Symbol
+    use Assertions
+
+    // Pins the monotone-memoiser presence discharge: a getter whose
+    // shape was classified monotone discharges a presence fact against
+    // its own call, never a type fact, and only while nothing it can
+    // reach writes an absent value to the memoised member and every
+    // getter dispatch can reach qualifies the same way.
+    class MONOTONE_MEMOISER_TESTS is
+        init() is si
+
+        loc() -> LOCATION => LOCATION("test.ghul", 1, 1, 1, 1)
+
+        owner() -> CLASS => CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "OWNER", LIST[string](), Semantic.BLOCK_SCOPE())
+
+        global_function(name: string) -> GLOBAL_FUNCTION =>
+            GLOBAL_FUNCTION(loc(), loc(), Semantic.BLOCK_SCOPE(), name, Semantic.BLOCK_SCOPE())
+
+        field_symbol(name: string) -> INSTANCE_FIELD => INSTANCE_FIELD(loc(), owner(), name)
+
+        property_symbol(name: string) -> INSTANCE_PROPERTY =>
+            INSTANCE_PROPERTY(loc(), loc(), owner(), name, false, false)
+
+        crossing_of(callee: Function?) -> CROSSING => CROSSING(loc(), callee)
+
+        begin() is
+            EFFECT_FACTS.collecting = true
+            EFFECT_FACTS.begin_generation("test")
+            MONOTONE_MEMOISER.clear_file("unit-tests")
+        si
+
+        record(f: Function) -> Syntax.Process.FUNCTION_EFFECT_FACTS is
+            EFFECT_FACTS.note_function(f, f.name, "", "", "")
+            return EFFECT_FACTS.record_for(f)!
+        si
+
+        install(facts: MAP[Function, STORE_FREE_FACTS]) is
+            let solvers = EFFECT_SOLVERS(facts)
+            let writes = solvers.write_sets(false, false)
+            let nulls = solvers.may_null_sets(false, false)
+            let solved = solvers.solve()
+            let reads = solvers.read_sets()
+
+            EFFECTS.install(
+                writes.sets, writes.unbounded,
+                nulls.sets, nulls.unbounded,
+                solved.store_free, solved.constructs_store_free,
+                reads.sets, reads.unbounded, reads.reads_elements, reads.writes_elements, true)
+        si
+
+        facts_for(functions: Collections.Iterable[Function]) -> MAP[Function, STORE_FREE_FACTS] is
+            let result = MAP[Function, STORE_FREE_FACTS]()
+            for f in functions do
+                result[f] = STORE_FREE_FACTS()
+            od
+            return result
+        si
+
+        // A property whose getter reads and writes `member` - the
+        // memoiser shape - registered as monotone.
+        monotone_property(member: INSTANCE_FIELD) -> (INSTANCE_PROPERTY, GLOBAL_FUNCTION) is
+            let property = property_symbol("memo")
+            let getter = global_function("get_memo")
+            property.read_function = getter
+
+            record(getter).reads.add(member)
+            record(getter).writes.add(member)
+
+            MONOTONE_MEMOISER.note_getter(
+                cast Function(getter),
+                cast Symbol?(member),
+                "unit-tests")
+
+            return (property, getter)
+        si
+
+        @test()
+        Monotone_memoiser_own_call__discharges_a_presence_fact() is
+            begin()
+
+            let member = field_symbol("_memo")
+            let (property, getter) = monotone_property(member)
+
+            let facts = facts_for([cast Function(getter)])
+            facts[getter].is_disqualified = true
+            install(facts)
+
+            is_true(RELIANCES.crossing_discharged(crossing_of(getter), cast Symbol?(property), null, true))
+            is_false(RELIANCES.crossing_discharged(crossing_of(getter), cast Symbol?(property), null, false))
+
+            EFFECTS.clear()
+        si
+
+        @test()
+        Unregistered_memoiser__keeps_the_ordinary_getter_route() is
+            begin()
+
+            let member = field_symbol("_memo")
+            let property = property_symbol("memo")
+            let getter = global_function("get_memo")
+            property.read_function = getter
+
+            record(getter).reads.add(member)
+            record(getter).writes.add(member)
+
+            let facts = facts_for([cast Function(getter)])
+            facts[getter].is_disqualified = true
+            install(facts)
+
+            is_false(RELIANCES.crossing_discharged(crossing_of(getter), cast Symbol?(property), null, true))
+
+            EFFECTS.clear()
+        si
+
+        @test()
+        Memoiser_that_nulls_its_member__is_not_monotone() is
+            begin()
+
+            let member = field_symbol("_memo")
+            let (property, getter) = monotone_property(member)
+
+            record(getter).nulling_writes.add(member)
+
+            let facts = facts_for([cast Function(getter)])
+            facts[getter].is_disqualified = true
+            install(facts)
+
+            is_false(RELIANCES.crossing_discharged(crossing_of(getter), cast Symbol?(property), null, true))
+
+            EFFECTS.clear()
+        si
+
+        @test()
+        Another_callee_nulling_the_member__still_fails_presence() is
+            begin()
+
+            let member = field_symbol("_memo")
+            let (property, getter) = monotone_property(member)
+
+            let hostile = global_function("hostile")
+            record(hostile).writes.add(member)
+            record(hostile).nulling_writes.add(member)
+
+            let facts = facts_for([cast Function(getter), cast Function(hostile)])
+            facts[getter].is_disqualified = true
+            facts[hostile].is_disqualified = true
+            install(facts)
+
+            is_false(RELIANCES.crossing_discharged(crossing_of(hostile), cast Symbol?(property), null, true))
+
+            EFFECTS.clear()
+        si
+
+        @test()
+        Presence_question__passes_a_monotone_memoiser() is
+            begin()
+
+            let member = field_symbol("_memo")
+            let (property, getter) = monotone_property(member)
+
+            let facts = facts_for([cast Function(getter)])
+            facts[getter].is_disqualified = true
+            install(facts)
+
+            is_null(RELIANCES.first_unproven_getter(cast Symbol?(property), null, true))
+            are_same(cast Symbol?(property), RELIANCES.first_unproven_getter(cast Symbol?(property), null, false))
+
+            EFFECTS.clear()
+        si
+
+        @test()
+        Overriding_getter__must_also_be_monotone() is
+            begin()
+
+            let member = field_symbol("_memo")
+            let (property, getter) = monotone_property(member)
+
+            let overrider_property = property_symbol("memo_override")
+            let overrider_getter = global_function("get_memo_override")
+            overrider_property.read_function = overrider_getter
+
+            record(overrider_getter).reads.add(member)
+            record(overrider_getter).writes.add(member)
+
+            property.add_overrider(cast Symbol(overrider_property))
+
+            let facts = facts_for([cast Function(getter), cast Function(overrider_getter)])
+            facts[getter].is_disqualified = true
+            facts[overrider_getter].is_disqualified = true
+            install(facts)
+
+            is_false(MONOTONE_MEMOISER.is_presence_monotone(property))
+
+            MONOTONE_MEMOISER.note_getter(
+                cast Function(overrider_getter),
+                cast Symbol?(member),
+                "unit-tests")
+
+            is_true(MONOTONE_MEMOISER.is_presence_monotone(property))
+
+            EFFECTS.clear()
+        si
+    si
+si

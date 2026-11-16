@@ -1,0 +1,205 @@
+namespace Semantic.Types.UnitTests is
+    use Collections.Iterable
+    use Collections.LIST
+    use Collections.List
+
+    use Source.LOCATION
+
+    use Semantic.Symbols.CLASS
+    use Semantic.Symbols.CLASSY_GENERIC_ARGUMENT
+    use Semantic.Types.GENERIC
+    use Semantic.Types.NAMED
+    use Semantic.Types.Type
+    use Semantic.Types.MATCH
+    use Semantic.Types.INTERSECTION
+    use Assertions
+
+    // Pins the strict non-nullable-by-default rule landed in
+    // `NAMED.compare`. The contract: a non-optional `T` slot rejects
+    // a `T?` value at every subtype relationship — same symbol,
+    // direct ancestor, transitive ancestor — uniformly. The earlier
+    // form only checked same-symbol, so a `Derived?` value flowed
+    // into a `Base` slot via the ancestor walk and downstream
+    // codegen emitted a non-narrowed load that crashed at runtime.
+    //
+    // Companion test for `INTERSECTION._add_member`'s precision
+    // tradeoff at the bottom: the dedup compares stripped-optional
+    // forms so an already-narrowed intersection doesn't accumulate
+    // both `A` and `A?` members.
+    class STRICT_NON_NULLABLE_TESTS is
+        init() is si
+
+        loc() -> LOCATION => LOCATION("test.ghul", 1, 1, 1, 1)
+
+        empty_names() -> LIST[string] => LIST[string]()
+
+        names_for(values: Iterable[string]) -> LIST[string] is
+            let result = LIST[string]()
+            for v in values do result.add(v); od
+            return result
+        si
+
+        // Reference class (non-struct) — `T?` is the bare-with-flag
+        // form, which is what the strict check guards.
+        a_reference_class(name: string) -> CLASS =>
+            CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), name, empty_names(), Semantic.BLOCK_SCOPE())
+
+        // Same symbol, slot non-optional, value optional → DIFFERENT.
+        @test()
+        compare__T_slot_T_optional_value__rejects_same_symbol() is
+            let symbol = a_reference_class("Foo")
+            let bare = cast NAMED(symbol.type!)
+            let optional = bare.as_optional()
+
+            are_equal(cast int(MATCH.DIFFERENT), cast int(bare.compare(optional)))
+        si
+
+        // Same symbol, slot optional, value non-optional → ASSIGNABLE
+        // (the implicit widening, unchanged by the new rule).
+        @test()
+        compare__T_optional_slot_T_value__accepts_same_symbol() is
+            let symbol = a_reference_class("Foo")
+            let bare = cast NAMED(symbol.type!)
+            let optional = bare.as_optional()
+
+            are_equal(cast int(MATCH.ASSIGNABLE), cast int(optional.compare(bare)))
+        si
+
+        // Subtype relationship, slot non-optional Base, value `Derived?`
+        // — the loophole the rule closed. The earlier form silently
+        // dropped the optional flag through the ancestor walk.
+        @test()
+        compare__base_slot_derived_optional_value__rejects_via_ancestor_walk() is
+            let base_symbol = a_reference_class("Base")
+            let derived_symbol = a_reference_class("Derived")
+            derived_symbol.add_ancestor(base_symbol.type!)
+
+            let base = cast NAMED(base_symbol.type!)
+            let derived_optional = (cast NAMED(derived_symbol.type!)).as_optional()
+
+            are_equal(cast int(MATCH.DIFFERENT), cast int(base.compare(derived_optional)))
+        si
+
+        // Same subtype relationship but both sides non-optional —
+        // still ASSIGNABLE via the ancestor walk. Pins that the
+        // strict check didn't break the normal subtype path.
+        @test()
+        compare__base_slot_derived_value__accepts_via_ancestor_walk() is
+            let base_symbol = a_reference_class("Base")
+            let derived_symbol = a_reference_class("Derived")
+            derived_symbol.add_ancestor(base_symbol.type!)
+
+            let base = cast NAMED(base_symbol.type!)
+            let derived = cast NAMED(derived_symbol.type!)
+
+            are_equal(cast int(MATCH.ASSIGNABLE), cast int(base.compare(derived)))
+        si
+
+        // Generic container with one type parameter — its type is a
+        // GENERIC, whose optional widening to a non-optional supertype
+        // is the case `GENERIC.compare` had to close (NAMED already
+        // guarded the plain-reference case above).
+        // Declares its `T` into its own scope, as declare-symbols does.
+        // Substitution matches a type parameter by symbol, so a class
+        // whose parameter was only named and never declared cannot have
+        // it substituted.
+        a_generic_class(name: string) -> CLASS is
+            let result = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), name, names_for(["T"]), Semantic.BLOCK_SCOPE())
+
+            result.declare_type(loc(), "T", 0, null)
+
+            return result
+        si
+
+        generic_over(container: CLASS, argument: Type) -> GENERIC is
+            let arguments = LIST[Type]()
+            arguments.add(argument)
+            return GENERIC(loc(), container, arguments)
+        si
+
+        // The generic parallel of the ancestor-walk rejection above:
+        // `Base[X]` slot, `Derived[X]?` value. Without the guard in
+        // GENERIC.compare the ancestor walk reaches the bare `Base[X]`
+        // ancestor and silently drops the optional flag.
+        @test()
+        compare__base_generic_slot_derived_generic_optional_value__rejects_via_ancestor_walk() is
+            let argument = (cast NAMED(a_reference_class("X").type!)).as_non_optional()
+
+            let base = generic_over(a_generic_class("BaseGeneric"), argument)
+
+            let derived_symbol = a_generic_class("DerivedGeneric")
+            derived_symbol.add_ancestor(base)
+
+            let derived_optional = generic_over(derived_symbol, argument).as_optional()
+
+            are_equal(cast int(MATCH.DIFFERENT), cast int(base.compare(derived_optional)))
+        si
+
+        // Same rejection when the slot's type argument is still an
+        // unbound type variable, as it is for `f[T](i: Base[T])`
+        // before the call site pins `T`. A construction's own optional
+        // flag is fixed whatever its arguments turn out to be, so the
+        // wildness of an argument must not stand the check down.
+        @test()
+        compare__wild_argument_generic_slot_optional_value__rejects_via_ancestor_walk() is
+            let base_container = a_generic_class("BaseGeneric")
+            let type_variable = cast CLASSY_GENERIC_ARGUMENT(base_container.type_parameter_at(0))
+
+            let base = generic_over(base_container, type_variable.type!)
+
+            is_true(base.is_wild)
+
+            let derived_symbol = a_generic_class("DerivedGeneric")
+            derived_symbol.add_ancestor(base)
+
+            let argument = (cast NAMED(a_reference_class("X").type!)).as_non_optional()
+            let derived_optional = generic_over(derived_symbol, argument).as_optional()
+
+            are_equal(cast int(MATCH.DIFFERENT), cast int(base.compare(derived_optional)))
+        si
+
+        // The same pair with a present value still matches — as WILD,
+        // which overload resolution's first pass accepts and then
+        // binds. Pins that the rejection above is about the optional
+        // flag rather than the unbound argument matching nothing.
+        @test()
+        compare__wild_argument_generic_slot_value__matches() is
+            let base_container = a_generic_class("BaseGeneric")
+            let type_variable = cast CLASSY_GENERIC_ARGUMENT(base_container.type_parameter_at(0))
+
+            let base = generic_over(base_container, type_variable.type!)
+
+            // `DerivedGeneric[T]: BaseGeneric[T]` — the ancestor is
+            // written with the derived class's own parameter, which is
+            // what the derived class's type map substitutes.
+            let derived_symbol = a_generic_class("DerivedGeneric")
+            let derived_t = cast CLASSY_GENERIC_ARGUMENT(derived_symbol.type_parameter_at(0))
+            derived_symbol.add_ancestor(generic_over(base_container, derived_t.type!))
+
+            let argument = (cast NAMED(a_reference_class("X").type!)).as_non_optional()
+            let derived = generic_over(derived_symbol, argument)
+
+            are_equal(cast int(MATCH.WILD), cast int(base.compare(derived)))
+        si
+
+        // INTERSECTION dedup with the optional-strip: combining `A?`
+        // with `A` collapses to a single survivor (the precision
+        // tradeoff documented inline in `intersection._add_member`).
+        // Without the strip, the new strict rule would reject the
+        // subtype probe and both would survive as distinct members.
+        @test()
+        intersection_dedup__strips_optional_on_existing_supertype() is
+            let foo_symbol = a_reference_class("Foo")
+            let bare = cast NAMED(foo_symbol.type!)
+            let optional = bare.as_optional()
+
+            let result = INTERSECTION.create(bare, optional)
+
+            is_not_null(result)
+            // `create` collapses a singleton survivor to the plain
+            // underlying type; we only need to assert the result
+            // isn't an INTERSECTION carrying both members.
+            is_false(isa INTERSECTION(result))
+        si
+    si
+si

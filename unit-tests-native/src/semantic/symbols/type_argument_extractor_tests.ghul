@@ -1,0 +1,149 @@
+namespace Semantic.Symbols.UnitTests is
+    use Collections.LIST
+
+    use Source.LOCATION
+
+    use Semantic.Types.Type
+    use Semantic.Symbols.TYPE_ARGUMENT_EXTRACTOR
+    use Assertions
+
+    // TYPE_ARGUMENT_EXTRACTOR pulls the first type argument out of a
+    // type viewed as an instantiation of one of a set of candidate
+    // generic classes — used by the generator + async state-machine
+    // setup to extract `T` from `Iterable[T]` / `Tasks.TASK[T]`.
+    //
+    // Four failure modes the helper has to handle and these tests
+    // pin:
+    //   - the type-of-interest is the candidate itself, not a
+    //     subtype (find_ancestor doesn't self-match);
+    //   - the type's symbol is wrapped in `Symbols.GENERIC` and has
+    //     to be unwrapped before comparison;
+    //   - the candidate is reached as an ancestor of a closed
+    //     instantiation, so the ancestor has to be read through that
+    //     instantiation rather than off the unspecialised symbol;
+    //   - the type doesn't match any candidate (returns null).
+    class TYPE_ARGUMENT_EXTRACTOR_TESTS is
+        init() is si
+
+        loc() -> LOCATION => LOCATION("test.ghul", 1, 1, 1, 1)
+
+        names_for(values: Collections.Iterable[string]) -> LIST[string] is
+            let result = LIST[string]()
+            for v in values do result.add(v); od
+            return result
+        si
+
+        @test()
+        Calling__extract__on_a_direct_instantiation__should_return_its_first_type_argument() is
+            // Box[T] — a generic class with one type parameter.
+            let box = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Box", names_for(["T"]), Semantic.BLOCK_SCOPE())
+
+            // The thing we'll feed in: Box[int_arg]. We don't have
+            // ints in test fixtures, so use a CLASSY_GENERIC_ARGUMENT
+            // as the type argument — the extractor doesn't care.
+            let int_arg = CLASSY_GENERIC_ARGUMENT(loc(), Semantic.BLOCK_SCOPE(), "int_arg", 0)
+            let args = LIST[Type]()
+            args.add(int_arg.type!)
+
+            let constructed = Types.GENERIC(loc(), box, args)
+
+            let result = TYPE_ARGUMENT_EXTRACTOR.extract(constructed, box.type!)
+
+            are_same(int_arg.type, result)
+        si
+
+        @test()
+        Calling__extract__on_a_closed_instantiation__should_return_the_supplied_argument() is
+            // T[] — the candidate — and LIST[E]: E[], the class
+            // that implements it at its own type parameter.
+            let list_trait = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "List", names_for(["T"]), Semantic.BLOCK_SCOPE())
+            let list_class = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "LIST", names_for(["E"]), Semantic.BLOCK_SCOPE())
+
+            let element = cast GenericArgument?(list_class.type_parameter_at(0))!
+
+            let trait_arguments = LIST[Type]()
+            trait_arguments.add(element.type!)
+
+            list_class.add_ancestor(Types.GENERIC(loc(), list_trait, trait_arguments))
+
+            let int_arg = CLASSY_GENERIC_ARGUMENT(loc(), Semantic.BLOCK_SCOPE(), "int_arg", 0)
+            let args = LIST[Type]()
+            args.add(int_arg.type!)
+
+            // LIST[int_arg] viewed as ...[] is int_arg[], not
+            // E[]: the ancestor has to be read through the
+            // instantiation rather than off the unspecialised symbol.
+            let constructed = Types.GENERIC(loc(), list_class, args)
+
+            let result = TYPE_ARGUMENT_EXTRACTOR.extract(constructed, list_trait.type!)
+
+            are_same(int_arg.type, result)
+        si
+
+        @test()
+        Calling__extract__on_a_non_matching_type__should_return_null() is
+            let box = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Box", names_for(["T"]), Semantic.BLOCK_SCOPE())
+            let other = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Other", names_for(["T"]), Semantic.BLOCK_SCOPE())
+
+            let int_arg = CLASSY_GENERIC_ARGUMENT(loc(), Semantic.BLOCK_SCOPE(), "int_arg", 0)
+            let args = LIST[Type]()
+            args.add(int_arg.type!)
+
+            let constructed_box = Types.GENERIC(loc(), box, args)
+
+            // Asking for Other[T]'s argument from a Box[T] value — no match.
+            let result = TYPE_ARGUMENT_EXTRACTOR.extract(constructed_box, other.type!)
+
+            is_null(result)
+        si
+
+        @test()
+        Calling__extract_from_any__with_two_candidates__should_match_the_first_one_present() is
+            let iterable = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Iterable", names_for(["T"]), Semantic.BLOCK_SCOPE())
+            let iterator = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Iterator", names_for(["T"]), Semantic.BLOCK_SCOPE())
+
+            let int_arg = CLASSY_GENERIC_ARGUMENT(loc(), Semantic.BLOCK_SCOPE(), "int_arg", 0)
+            let args = LIST[Type]()
+            args.add(int_arg.type!)
+
+            let constructed_iterable = Types.GENERIC(loc(), iterable, args)
+
+            let candidates = LIST[Type]()
+            candidates.add(iterator.type!)
+            candidates.add(iterable.type!)
+
+            let result = TYPE_ARGUMENT_EXTRACTOR.extract_from_any(constructed_iterable, candidates)
+
+            are_same(int_arg.type, result)
+        si
+
+        @test()
+        Calling__extract_from_any__with_no_matching_candidate__should_return_null() is
+            let box = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Box", names_for(["T"]), Semantic.BLOCK_SCOPE())
+            let other_a = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "OtherA", names_for(["T"]), Semantic.BLOCK_SCOPE())
+            let other_b = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "OtherB", names_for(["T"]), Semantic.BLOCK_SCOPE())
+
+            let int_arg = CLASSY_GENERIC_ARGUMENT(loc(), Semantic.BLOCK_SCOPE(), "int_arg", 0)
+            let args = LIST[Type]()
+            args.add(int_arg.type!)
+
+            let constructed_box = Types.GENERIC(loc(), box, args)
+
+            let candidates = LIST[Type]()
+            candidates.add(other_a.type!)
+            candidates.add(other_b.type!)
+
+            let result = TYPE_ARGUMENT_EXTRACTOR.extract_from_any(constructed_box, candidates)
+
+            is_null(result)
+        si
+
+        @test()
+        Calling__extract__on_a_null_input_or_null_candidate__should_return_null() is
+            let box = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Box", names_for(["T"]), Semantic.BLOCK_SCOPE())
+
+            is_null(TYPE_ARGUMENT_EXTRACTOR.extract(null, box.type!))
+            is_null(TYPE_ARGUMENT_EXTRACTOR.extract(box.type!, null))
+        si
+    si
+si

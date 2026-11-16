@@ -1,0 +1,127 @@
+namespace Semantic.Symbols.UnitTests is
+    use Collections.LIST
+
+    use Source.LOCATION
+    use Assertions
+
+    // What each cell of the override dispatch does when the overrider
+    // is a class member written with no body. The overrider's kind
+    // picks the method; the overridee's kind provides it. These pin the
+    // four answers a cell can give - record the override, withdraw a
+    // default, give the overrider a throwing body, or leave the pair
+    // alone - directly, rather than through a snapshot of the whole
+    // pipeline.
+    class ABSTRACT_OVERRIDE_DISPATCH_TESTS is
+        _returned: Semantic.Types.Type
+
+        init() is
+            _returned =
+                Semantic.Types.NAMED(
+                    CLASS(
+                        LOCATION("test.ghul", 1, 1, 1, 1),
+                        LOCATION("test.ghul", 1, 1, 1, 1),
+                        Semantic.BLOCK_SCOPE(),
+                        "RETURNED",
+                        LIST[string](),
+                        Semantic.BLOCK_SCOPE()))
+        si
+
+        loc() -> LOCATION => LOCATION("test.ghul", 1, 1, 1, 1)
+
+        no_arguments() -> LIST[string] => LIST[string]()
+
+        source_class() -> CLASS =>
+            CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "INTO", no_arguments(), Semantic.BLOCK_SCOPE())
+
+        source_trait() -> TRAIT =>
+            TRAIT(loc(), loc(), Semantic.BLOCK_SCOPE(), "Into", no_arguments(), Semantic.BLOCK_SCOPE())
+
+        abstract_method(name: string) -> ABSTRACT_METHOD is
+            let result = ABSTRACT_METHOD(loc(), loc(), Semantic.BLOCK_SCOPE(), name, Semantic.BLOCK_SCOPE())
+
+            result.arguments = LIST[Semantic.Types.Type]()
+            result.return_type = _returned
+
+            return result
+        si
+
+        instance_method(name: string) -> INSTANCE_METHOD is
+            let result = INSTANCE_METHOD(loc(), loc(), Semantic.BLOCK_SCOPE(), name, Semantic.BLOCK_SCOPE())
+
+            result.arguments = LIST[Semantic.Types.Type]()
+            result.return_type = _returned
+
+            return result
+        si
+
+        default_trait_method(name: string) -> DEFAULT_TRAIT_METHOD is
+            let result = DEFAULT_TRAIT_METHOD(loc(), loc(), Semantic.BLOCK_SCOPE(), name, Semantic.BLOCK_SCOPE())
+
+            result.arguments = LIST[Semantic.Types.Type]()
+            result.return_type = _returned
+
+            return result
+        si
+
+        logger() -> Logging.Logger => IoC.CONTAINER.instance.logger
+
+        // A class redeclaring an abstract member is overriding it, so
+        // the relation has to be recorded: everything that reads it -
+        // the contracts, the editor, the covariant-return slot - hangs
+        // off this.
+        @test()
+        abstract_over_abstract_in_a_class__should_record_the_override() is
+            let overridee = abstract_method("render")
+            let overrider = abstract_method("render")
+
+            overrider.try_override(source_class(), overridee, logger())
+
+            is_true(overrider.has_overridees, "the overrider should name what it overrides")
+            is_true(!overridee.has_no_overriders, "the overridee should name its overrider")
+        si
+
+        // A trait restating a member it inherits is the same slot, so the
+        // pair is linked: whatever implements the restatement implements
+        // the member it restates.
+        @test()
+        abstract_over_abstract_in_a_trait__should_link_the_pair() is
+            let overridee = abstract_method("render")
+            let overrider = abstract_method("render")
+
+            overrider.try_override(source_trait(), overridee, logger())
+
+            is_true(overrider.has_overridees, "the restatement should name what it restates")
+            is_true(!overridee.has_no_overriders, "the restated member should name its restatement")
+        si
+
+        // A trait's default is withdrawn by a class that writes the
+        // member again with no body: the override is recorded and the
+        // member stays abstract rather than being given a body.
+        @test()
+        abstract_over_a_trait_default__should_record_it_and_stay_abstract() is
+            let overridee = default_trait_method("render")
+            let overrider = abstract_method("render")
+
+            overrider.try_override(source_class(), overridee, logger())
+
+            is_true(overrider.has_overridees)
+            is_false(overridee.has_no_overriders)
+            is_false(overrider.throws_unimplemented, "a withdrawn default is not a throwing body")
+            is_true(overrider.is_abstract)
+        si
+
+        // A class member with a body is the case that cannot go back to
+        // an abstract row, so the overrider carries a throwing body.
+        @test()
+        abstract_over_a_bodied_class_method__should_throw_rather_than_abstract() is
+            let overridee = instance_method("render")
+            let overrider = abstract_method("render")
+
+            overrider.try_override(source_class(), overridee, logger())
+
+            is_true(overrider.throws_unimplemented)
+            is_false(overrider.is_abstract)
+            is_true(overrider.has_overridees, "it is still an override")
+        si
+    si
+si

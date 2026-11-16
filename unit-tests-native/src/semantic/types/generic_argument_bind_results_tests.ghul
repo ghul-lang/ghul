@@ -1,0 +1,560 @@
+namespace Semantic.Types.UnitTests is
+    use Collections.LIST
+
+    use Source.LOCATION
+
+    use Semantic.Symbols.CLASS
+    use Semantic.Symbols.CLASSY_GENERIC_ARGUMENT
+    use Semantic.Symbols.INFERRED_TYPE_ARG_ORIGIN
+    use Semantic.Symbols.LOCAL_ARGUMENT
+    use Semantic.Symbols.LOCAL_VARIABLE
+    use Semantic.Types.GENERIC
+    use Semantic.Types.GENERIC_ARGUMENT_BIND_RESULTS
+    use Semantic.Types.GenericArgument
+    use Semantic.Types.INFERRED_VARIABLE_TYPE
+    use Semantic.Types.Type
+    use Assertions
+
+    // Tests for GENERIC_ARGUMENT_BIND_RESULTS.bind — the per-binding
+    // accumulator used during overload resolution to infer concrete
+    // generic-argument types from actual call-site argument types.
+    //
+    // The contract: when `bind(T, X)` is called repeatedly across the
+    // arguments of a generic-method call, the binding for T should converge
+    // on the least upper bound of all the X values seen. The current
+    // pairwise-widening implementation handles the "one is assignable from
+    // the other" case correctly but gives up on siblings — it sets the
+    // binding to NONE and returns false, killing the overload match. These
+    // tests pin both the working cases and the failing siblings case so
+    // future changes to the binding logic don't silently regress overload
+    // resolution.
+    class GENERIC_ARGUMENT_BIND_RESULTS_TESTS is
+        init() is
+            Fixtures.enter_function()
+        si
+
+        loc() -> LOCATION => LOCATION("test.ghul", 1, 1, 1, 1)
+
+        empty_names() -> LIST[string] => LIST[string]()
+
+        // The same animal/plant hierarchy used in the LUB tests:
+        //
+        //   object_class
+        //     ├── animal
+        //     │     ├── cat
+        //     │     └── dog
+        //     └── plant
+        build_hierarchy() -> (object_class: CLASS, animal: CLASS, cat: CLASS, dog: CLASS, plant: CLASS) is
+            let object_class = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "object", empty_names(), Semantic.BLOCK_SCOPE())
+            object_class.mark_is_object()
+
+            let animal = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "animal", empty_names(), Semantic.BLOCK_SCOPE())
+            animal.add_ancestor(object_class.type!)
+
+            let cat = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "cat", empty_names(), Semantic.BLOCK_SCOPE())
+            cat.add_ancestor(animal.type!)
+
+            let dog = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "dog", empty_names(), Semantic.BLOCK_SCOPE())
+            dog.add_ancestor(animal.type!)
+
+            let plant = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "plant", empty_names(), Semantic.BLOCK_SCOPE())
+            plant.add_ancestor(object_class.type!)
+
+            return (object_class, animal, cat, dog, plant)
+        si
+
+        type_param() -> GenericArgument =>
+            cast GenericArgument(CLASSY_GENERIC_ARGUMENT(loc(), Semantic.BLOCK_SCOPE(), "T", 0).type)
+
+        // Two-element tuples over one shared tuple class and element type,
+        // so that any two of them are each assignable from the other
+        // whatever their element names.
+        pair_tuples() -> ((LIST[string?]?) -> Type) =>
+            let
+                pair = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "TUPLE_2", LIST[string](["T1", "T2"]), Semantic.BLOCK_SCOPE()),
+                element = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "int", empty_names(), Semantic.BLOCK_SCOPE()).type!
+            in
+                (names: LIST[string?]?) => Semantic.Types.TUPLE(loc(), pair, LIST[Type]([element, element]), names)
+
+        // The element names the binding of `t` ended up with.
+        bound_names(r: GENERIC_ARGUMENT_BIND_RESULTS, t: GenericArgument) -> string?[] =>
+            r.bindings[t.symbol].actual_type.tuple_element_names!
+
+        has_names(names: string?[], first: string, second: string) is
+            are_equal(first, names[0])
+            are_equal(second, names[1])
+        si
+
+        @test()
+        Calling__bind__with_a_named_tuple_then_an_unnamed_one__should_keep_the_names() is
+            let tuple = pair_tuples()
+            let r = GENERIC_ARGUMENT_BIND_RESULTS()
+            let t = type_param()
+
+            is_true(r.bind(t, tuple(LIST[string?](["low", "high"]))))
+            is_true(r.bind(t, tuple(null)))
+
+            has_names(bound_names(r, t), "low", "high")
+        si
+
+        @test()
+        Calling__bind__with_an_unnamed_tuple_then_a_named_one__should_take_the_names() is
+            let tuple = pair_tuples()
+            let r = GENERIC_ARGUMENT_BIND_RESULTS()
+            let t = type_param()
+
+            is_true(r.bind(t, tuple(null)))
+            is_true(r.bind(t, tuple(LIST[string?](["low", "high"]))))
+
+            has_names(bound_names(r, t), "low", "high")
+        si
+
+        @test()
+        Calling__bind__with_tuples_naming_different_elements__should_keep_both_names() is
+            let tuple = pair_tuples()
+            let r = GENERIC_ARGUMENT_BIND_RESULTS()
+            let t = type_param()
+
+            is_true(r.bind(t, tuple(LIST[string?](["low", null]))))
+            is_true(r.bind(t, tuple(LIST[string?]([null, "high"]))))
+
+            has_names(bound_names(r, t), "low", "high")
+        si
+
+        @test()
+        Calling__bind__with_tuples_giving_one_element_the_same_name__should_keep_it() is
+            let tuple = pair_tuples()
+            let r = GENERIC_ARGUMENT_BIND_RESULTS()
+            let t = type_param()
+
+            is_true(r.bind(t, tuple(LIST[string?](["low", null]))))
+            is_true(r.bind(t, tuple(LIST[string?](["low", "high"]))))
+
+            has_names(bound_names(r, t), "low", "high")
+        si
+
+        @test()
+        Calling__bind__with_a_written_name_and_a_different_name_taken_from_an_identifier__should_keep_the_written_one() is
+            let tuple = pair_tuples()
+            let r = GENERIC_ARGUMENT_BIND_RESULTS()
+            let t = type_param()
+
+            let projected = tuple(LIST[string?](["other", "high"])).with_projected_names(LIST[bool]([true, true]))
+
+            is_true(r.bind(t, tuple(LIST[string?](["low", "high"]))))
+            is_true(r.bind(t, projected))
+
+            has_names(bound_names(r, t), "low", "high")
+        si
+
+        @test()
+        Calling__bind__with_two_different_names_taken_from_identifiers__should_leave_the_element_unnamed() is
+            let tuple = pair_tuples()
+            let r = GENERIC_ARGUMENT_BIND_RESULTS()
+            let t = type_param()
+
+            let first = tuple(LIST[string?](["x", "y"])).with_projected_names(LIST[bool]([true, true]))
+            let second = tuple(LIST[string?](["b", "y"])).with_projected_names(LIST[bool]([true, true]))
+
+            is_true(r.bind(t, first))
+            is_true(r.bind(t, second))
+
+            has_names(bound_names(r, t), "0", "y")
+        si
+
+        @test()
+        Calling__bind__with_tuples_giving_one_element_different_names__should_fail() is
+            let tuple = pair_tuples()
+            let r = GENERIC_ARGUMENT_BIND_RESULTS()
+            let t = type_param()
+
+            is_true(r.bind(t, tuple(LIST[string?](["low", "high"]))))
+            is_false(r.bind(t, tuple(LIST[string?](["first", "high"]))))
+        si
+
+        @test()
+        Calling__bind__twice_with_the_same_type__should_resolve_to_that_type() is
+            let h = build_hierarchy()
+            let r = GENERIC_ARGUMENT_BIND_RESULTS()
+            let t = type_param()
+
+            is_true(r.bind(t, h.cat.type!))
+            is_true(r.bind(t, h.cat.type!))
+
+            are_same(h.cat.type!, r.bindings[t.symbol].actual_type)
+        si
+
+        @test()
+        Calling__bind__with_subtype_then_ancestor__should_widen_to_ancestor() is
+            let h = build_hierarchy()
+            let r = GENERIC_ARGUMENT_BIND_RESULTS()
+            let t = type_param()
+
+            is_true(r.bind(t, h.cat.type!))
+            is_true(r.bind(t, h.animal.type!))
+
+            are_same(h.animal.type!, r.bindings[t.symbol].actual_type)
+        si
+
+        @test()
+        Calling__bind__with_ancestor_then_subtype__should_keep_ancestor() is
+            let h = build_hierarchy()
+            let r = GENERIC_ARGUMENT_BIND_RESULTS()
+            let t = type_param()
+
+            is_true(r.bind(t, h.animal.type!))
+            is_true(r.bind(t, h.cat.type!))
+
+            are_same(h.animal.type!, r.bindings[t.symbol].actual_type)
+        si
+
+        @test()
+        Calling__bind__with_two_siblings__should_resolve_to_their_common_ancestor() is
+            // This is the failing case that #1173 calls out: when two
+            // arguments of a generic method have sibling types (Cat and
+            // Dog), the binding currently sets actual_type to NONE and
+            // returns false, killing the overload match. After applying
+            // LUB, the binding should resolve to their common ancestor.
+            let h = build_hierarchy()
+            let r = GENERIC_ARGUMENT_BIND_RESULTS()
+            let t = type_param()
+
+            is_true(r.bind(t, h.cat.type!))
+            is_true(r.bind(t, h.dog.type!))
+
+            are_same(h.animal.type!, r.bindings[t.symbol].actual_type)
+        si
+
+        // The next four tests pin the match propagation behaviour added for
+        // no-arg generic constructor calls inside another generic call —
+        // e.g. `CONS(x, NIL())` where NIL is a no-arg union variant.
+        // NIL's owner type-arg is a phantom Variable (no value args to
+        // pin it from). When `bind` sees that phantom paired against an
+        // already-bound concrete (from the x sibling), the concrete
+        // gets pushed back onto the phantom's origin via add_constraint
+        // so the body-retry resolves the phantom to the same concrete
+        // rather than defaulting to object.
+
+        @test()
+        Calling__bind__with_existing_concrete_then_phantom__should_propagate_concrete_to_phantom() is
+            let h = build_hierarchy()
+            let r = GENERIC_ARGUMENT_BIND_RESULTS()
+            let t = type_param()
+
+            let origin = INFERRED_TYPE_ARG_ORIGIN(loc(), Semantic.BLOCK_SCOPE(), "phantom")
+            let placeholder = INFERRED_VARIABLE_TYPE(origin)
+
+            is_true(r.bind(t, h.cat.type!))
+            is_true(r.bind(t, placeholder))
+
+            r.offer_bindings_to_placeholders()
+
+            are_same(h.cat.type!, r.bindings[t.symbol].actual_type)
+            are_same(h.cat.type!, origin.try_get_inferred_type())
+        si
+
+        // Binding alone records nothing on a placeholder: the caller offers
+        // the bindings once it has accepted them, so a candidate it rejects
+        // leaves no bound behind.
+        @test()
+        Calling__bind__without_offering_the_bindings__should_not_propagate_to_phantom() is
+            let h = build_hierarchy()
+            let r = GENERIC_ARGUMENT_BIND_RESULTS()
+            let t = type_param()
+
+            let origin = INFERRED_TYPE_ARG_ORIGIN(loc(), Semantic.BLOCK_SCOPE(), "phantom")
+
+            is_true(r.bind(t, h.cat.type!))
+            is_true(r.bind(t, INFERRED_VARIABLE_TYPE(origin)))
+
+            is_null(origin.try_get_inferred_type())
+        si
+
+        // The phantom arriving before the concrete is paired all the same,
+        // so it takes the binding whichever order the arguments came in.
+        @test()
+        Calling__bind__with_phantom_first_then_concrete__should_propagate_concrete_to_phantom() is
+            let h = build_hierarchy()
+            let r = GENERIC_ARGUMENT_BIND_RESULTS()
+            let t = type_param()
+
+            let origin = INFERRED_TYPE_ARG_ORIGIN(loc(), Semantic.BLOCK_SCOPE(), "phantom")
+            let placeholder = INFERRED_VARIABLE_TYPE(origin)
+
+            is_true(r.bind(t, placeholder))
+            is_true(r.bind(t, h.cat.type!))
+
+            r.offer_bindings_to_placeholders()
+
+            are_same(h.cat.type!, r.bindings[t.symbol].actual_type)
+            are_same(h.cat.type!, origin.try_get_inferred_type())
+        si
+
+        // A local variable's type comes from its initializer and its
+        // assignments, so a call it is passed to offers it nothing.
+        @test()
+        Calling__offer_bindings_to_placeholders__with_a_local_variable_placeholder__should_not_propagate() is
+            let h = build_hierarchy()
+            let r = GENERIC_ARGUMENT_BIND_RESULTS()
+            let t = type_param()
+
+            let origin = LOCAL_VARIABLE(loc(), Semantic.BLOCK_SCOPE(), "x")
+
+            is_true(r.bind(t, INFERRED_VARIABLE_TYPE(origin)))
+            is_true(r.bind(t, h.cat.type!))
+
+            r.offer_bindings_to_placeholders()
+
+            is_null(origin.try_get_inferred_type())
+        si
+
+        // A literal's parameter has no assignments of its own, so it takes
+        // the type the call binds for it.
+        @test()
+        Calling__offer_bindings_to_placeholders__with_a_parameter_placeholder__should_propagate() is
+            let h = build_hierarchy()
+            let r = GENERIC_ARGUMENT_BIND_RESULTS()
+            let t = type_param()
+
+            let origin = LOCAL_ARGUMENT(loc(), Semantic.BLOCK_SCOPE(), "a")
+
+            is_true(r.bind(t, INFERRED_VARIABLE_TYPE(origin)))
+            is_true(r.bind(t, h.cat.type!))
+
+            r.offer_bindings_to_placeholders()
+
+            are_same(h.cat.type!, origin.try_get_inferred_type())
+        si
+
+        @test()
+        Calling__bind__with_two_phantoms__should_not_propagate_either() is
+            // Back-feeding one unresolved placeholder into another's
+            // LUB would just propagate uncertainty. Skip in that case.
+            let r = GENERIC_ARGUMENT_BIND_RESULTS()
+            let t = type_param()
+
+            let origin_a = INFERRED_TYPE_ARG_ORIGIN(loc(), Semantic.BLOCK_SCOPE(), "phantom_a")
+            let origin_b = INFERRED_TYPE_ARG_ORIGIN(loc(), Semantic.BLOCK_SCOPE(), "phantom_b")
+
+            is_true(r.bind(t, INFERRED_VARIABLE_TYPE(origin_a)))
+            is_true(r.bind(t, INFERRED_VARIABLE_TYPE(origin_b)))
+
+            is_null(origin_a.try_get_inferred_type())
+            is_null(origin_b.try_get_inferred_type())
+        si
+
+        @test()
+        Calling__bind__with_three_args_concrete_phantom_concrete__should_propagate_widest_to_phantom() is
+            // Three-arg generic call like `f[T](a: T, b: T, c: T)` with
+            // actuals (cat, NIL_phantom, dog): after the third bind the
+            // concrete binding has widened to animal via LUB. The phantom
+            // is offered the binding once all three are bound, so it settles
+            // where T does.
+            let h = build_hierarchy()
+            let r = GENERIC_ARGUMENT_BIND_RESULTS()
+            let t = type_param()
+
+            let origin = INFERRED_TYPE_ARG_ORIGIN(loc(), Semantic.BLOCK_SCOPE(), "phantom")
+            let placeholder = INFERRED_VARIABLE_TYPE(origin)
+
+            is_true(r.bind(t, h.cat.type!))
+            is_true(r.bind(t, placeholder))
+            is_true(r.bind(t, h.dog.type!))
+
+            r.offer_bindings_to_placeholders()
+
+            are_same(h.animal.type!, r.bindings[t.symbol].actual_type)
+            are_same(h.animal.type!, origin.try_get_inferred_type())
+        si
+
+        // `reduce(seed, (running, token) => ...)`: the seed binds the
+        // accumulator's type argument to a subtype, the literal's parameter
+        // pairs with it, and the literal's return widens the binding to the
+        // supertype. The parameter takes the widened binding.
+        @test()
+        Calling__bind__with_concrete_then_phantom_then_wider_concrete__should_propagate_the_wider_type_to_phantom() is
+            let h = build_hierarchy()
+            let r = GENERIC_ARGUMENT_BIND_RESULTS()
+            let t = type_param()
+
+            let origin = INFERRED_TYPE_ARG_ORIGIN(loc(), Semantic.BLOCK_SCOPE(), "phantom")
+            let placeholder = INFERRED_VARIABLE_TYPE(origin)
+
+            is_true(r.bind(t, h.cat.type!))
+            is_true(r.bind(t, placeholder))
+            is_true(r.bind(t, h.animal.type!))
+
+            r.offer_bindings_to_placeholders()
+
+            are_same(h.animal.type!, r.bindings[t.symbol].actual_type)
+            are_same(h.animal.type!, origin.try_get_inferred_type())
+        si
+
+        @test()
+        Calling__bind_type_variables__with_an_optional_reference_actual__binds_T_to_the_actual_whole() is
+            // Formal T (a bare GenericArgument) bound against an optional
+            // reference like `Cat?` binds T to the full `Cat?` — we do
+            // not peel `?` off the actual at bind time. The directional
+            // `compare` (T? slot vs T value → ASSIGNABLE; T slot vs T?
+            // value → DIFFERENT) is what keeps optional/non-optional
+            // distinct during overload resolution; the binding step
+            // stays faithful to the actual.
+            let h = build_hierarchy()
+            let r = GENERIC_ARGUMENT_BIND_RESULTS()
+            let t = type_param()
+
+            let cat_optional = h.cat.type!.as_optional()
+
+            is_true(t.bind_type_variables(cat_optional, r))
+
+            are_same(cat_optional, r.bindings[t.symbol].actual_type)
+        si
+
+        @test()
+        Calling__default_null_only_unbound__defaults_a_null_only_variable_to_object() is
+            // `f[T](x: T?)` called `f(null)`: the only actual for T is null,
+            // which binds nothing. Defaulting resolves T to object so the
+            // overload can be fully specialized rather than left with a free
+            // type parameter.
+            let h = build_hierarchy()
+            let r = GENERIC_ARGUMENT_BIND_RESULTS()
+            let t = type_param()
+
+            is_true(r.bind(t, Types.NULL()))
+            is_false(r.bindings.contains_key(t.symbol))
+
+            r.default_null_only_unbound(LIST[Type]([t]), h.object_class.type!)
+
+            are_same(h.object_class.type!, r.bindings[t.symbol].actual_type)
+        si
+
+        @test()
+        Calling__default_null_only_unbound__leaves_a_concretely_bound_variable_alone() is
+            // When a concrete actual pinned T (here via a second argument),
+            // defaulting must not overwrite it — null carried no information,
+            // the concrete type did.
+            let h = build_hierarchy()
+            let r = GENERIC_ARGUMENT_BIND_RESULTS()
+            let t = type_param()
+
+            is_true(r.bind(t, Types.NULL()))
+            is_true(r.bind(t, h.cat.type!))
+
+            r.default_null_only_unbound(LIST[Type]([t]), h.object_class.type!)
+
+            are_same(h.cat.type!, r.bindings[t.symbol].actual_type)
+        si
+
+        @test()
+        Calling__default_null_only_unbound__ignores_a_variable_that_never_saw_null() is
+            // A type argument that was never even attempted (no null, no
+            // concrete) is not a null-only case and must stay unbound — the
+            // defaulting is deliberately narrow.
+            let r = GENERIC_ARGUMENT_BIND_RESULTS()
+            let t = type_param()
+            let object_class = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "object", empty_names(), Semantic.BLOCK_SCOPE())
+            object_class.mark_is_object()
+
+            r.default_null_only_unbound(LIST[Type]([t]), object_class.type!)
+
+            is_false(r.bindings.contains_key(t.symbol))
+        si
+
+        @test()
+        Calling__bind__with_an_actual_that_has_type_arguments__leaves_them_unsubstituted() is
+            // bind() must not re-substitute an actual's type-arguments
+            // against the function's own binding map. An actual can carry a
+            // reference to an enclosing scope's type parameter that shares a
+            // name with one of the function's own — a generic class CALC[T]
+            // calling a generic free function map[T,U] whose argument type
+            // names Op[T], where the two Ts live in separate binding scopes.
+            // Substituting the actual against the function's name-keyed
+            // bindings would conflate them and corrupt the enclosing
+            // reference. Two distinct GenericArguments both named "T" stand
+            // in for those scopes: t_key is the function's T (the binding
+            // slot), t_ref is the same-named reference inside the actual.
+            // After binding t_key to cat, binding U against container<t_ref>
+            // must store container<t_ref> unchanged, not container<cat>.
+            let h = build_hierarchy()
+            let r = GENERIC_ARGUMENT_BIND_RESULTS()
+            let t_key = type_param()
+
+            let t_ref = cast GenericArgument(CLASSY_GENERIC_ARGUMENT(loc(), Semantic.BLOCK_SCOPE(), "T", 0).type)
+            let u_key = cast GenericArgument(CLASSY_GENERIC_ARGUMENT(loc(), Semantic.BLOCK_SCOPE(), "U", 0).type)
+
+            let container = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "container", ["T"], Semantic.BLOCK_SCOPE())
+            let actual = GENERIC(loc(), container, LIST[Type]([t_ref]))
+
+            is_true(r.bind(t_key, h.cat.type!))
+            is_true(r.bind(u_key, actual))
+
+            are_same(actual, r.bindings[u_key.symbol].actual_type)
+        si
+
+        // === restricting which type arguments a bind may pin ===
+
+        // Constructed with a list of the type arguments the caller is
+        // entitled to pin, bind() accepts a variable outside that list
+        // without recording a binding for it. The call still matches -
+        // the formal was satisfiable - but the variable stays as
+        // written, so specializing with the resulting map leaves it in
+        // place.
+        @test()
+        Calling__bind__with_a_type_argument_outside_the_bindable_list__records_no_binding() is
+            let h = build_hierarchy()
+
+            let own = type_param()
+            let foreign = cast GenericArgument(CLASSY_GENERIC_ARGUMENT(loc(), Semantic.BLOCK_SCOPE(), "E", 0).type)
+
+            let r = GENERIC_ARGUMENT_BIND_RESULTS(LIST[Type]([cast Type(own)]))
+
+            is_true(r.bind(foreign, h.cat.type!))
+
+            is_false(r.bindings.contains_key(foreign.symbol))
+        si
+
+        @test()
+        Calling__bind__with_a_type_argument_in_the_bindable_list__records_the_binding() is
+            let h = build_hierarchy()
+
+            let own = type_param()
+
+            let r = GENERIC_ARGUMENT_BIND_RESULTS(LIST[Type]([cast Type(own)]))
+
+            is_true(r.bind(own, h.cat.type!))
+
+            are_same(h.cat.type!, r.bindings[own.symbol].actual_type)
+        si
+
+        // Membership is by symbol, not by name: a same-named variable
+        // from another scope is a different type argument and must not
+        // be pinned in place of the one the list names.
+        @test()
+        Calling__bind__with_a_same_named_type_argument_from_another_scope__records_no_binding() is
+            let h = build_hierarchy()
+
+            let own = type_param()
+            let same_name_elsewhere = type_param()
+
+            let r = GENERIC_ARGUMENT_BIND_RESULTS(LIST[Type]([cast Type(own)]))
+
+            is_true(r.bind(same_name_elsewhere, h.cat.type!))
+
+            is_false(r.bindings.contains_key(same_name_elsewhere.symbol))
+        si
+
+        // The no-argument construction keeps the unrestricted
+        // behaviour every other caller relies on.
+        @test()
+        Calling__bind__with_no_bindable_list__records_every_binding() is
+            let h = build_hierarchy()
+
+            let r = GENERIC_ARGUMENT_BIND_RESULTS()
+            let foreign = cast GenericArgument(CLASSY_GENERIC_ARGUMENT(loc(), Semantic.BLOCK_SCOPE(), "E", 0).type)
+
+            is_true(r.bind(foreign, h.cat.type!))
+
+            are_same(h.cat.type!, r.bindings[foreign.symbol].actual_type)
+        si
+    si
+si

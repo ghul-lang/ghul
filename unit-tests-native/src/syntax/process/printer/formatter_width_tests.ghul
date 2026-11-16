@@ -1,0 +1,75 @@
+namespace Syntax.Process.Printer.UnitTests is
+
+    use Syntax.Process.Printer.FORMATTER
+    use Assertions
+
+    // The column the formatter wraps at is a parameter, and --format-width is
+    // how a caller sets it. Source is read in narrower places than an editor -
+    // a fixed-width block on a web page, a prose column beside it - so what
+    // fits is the caller's to say rather than the formatter's.
+    class FORMATTER_WIDTH_TESTS is
+        init() is si
+
+        // LOCATION.internal and friends are statics the IoC container
+        // populates, and a unit test that does not bring the container up
+        // leaves them null.
+        location() -> Source.LOCATION => Source.LOCATION("test.ghul", 1, 1, 1, 1)
+
+        format(node: Trees.Node, width: int) -> string =>
+            FORMATTER(Collections.LIST[Lexical.TRIVIA](), width).format(node)
+
+        identifier(name: string) -> Trees.Expressions.Expression =>
+            Trees.Expressions.IDENTIFIER(
+                location(),
+                Trees.Identifiers.Identifier(location(), name)
+            )
+
+        // A call with enough arguments that it fits on one line at a generous
+        // width and has to break at a narrow one.
+        call() -> Trees.Expressions.Expression =>
+            Trees.Expressions.CALL(
+                location(),
+                identifier("some_function"),
+                Trees.Expressions.LIST(
+                    location(),
+                    [
+                        identifier("first_argument"),
+                        identifier("second_argument"),
+                        identifier("third_argument")
+                    ] |> ARRAY()
+                )
+            )
+
+        @test()
+        Formatting__at_a_generous_width__should_not_break_a_line_that_fits() is
+            let formatted = format(call(), 100)
+
+            is_false(
+                formatted.trim().contains("\n"),
+                "expected one line at width 100, got: {formatted}"
+            )
+        si
+
+        @test()
+        Formatting__at_a_narrow_width__should_break_a_line_that_does_not_fit() is
+            let formatted = format(call(), 30)
+
+            is_true(
+                formatted.contains("\n"),
+                "expected a break at width 30, got: {formatted}"
+            )
+        si
+
+        @test()
+        Formatting__at_a_narrow_width__should_keep_every_line_within_it() is
+            let formatted = format(call(), 30)
+
+            for line in formatted.split(['\n']) do
+                is_true(
+                    line.length <= 30,
+                    "expected every line within 30 columns, got {line.length}: {line}"
+                )
+            od
+        si
+    si
+si

@@ -1,0 +1,112 @@
+namespace Semantic.Symbols.UnitTests is
+    use Collections.LIST
+
+    use Source.LOCATION
+
+    use Logging.DIAGNOSTICS_STORE
+    use Assertions
+
+    // Pins which enclosing literal captures self when a literal that
+    // captured only self becomes a delegate. The delegate is bound to the
+    // receiver where it is constructed, in the enclosing literal's body;
+    // when that literal keeps a frame its body is a method of the frame,
+    // so the frame has to hold the receiver for the target to load from.
+    class CLOSURE_DELEGATE_SELF_CAPTURE_TESTS is
+        init() is si
+
+        loc() -> LOCATION => LOCATION("test.ghul", 1, 1, 1, 1)
+
+        a_class() -> CLASS is
+            let result = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "OWNER", LIST[string](), Semantic.BLOCK_SCOPE())
+
+            result.set_type(Types.NAMED(result))
+
+            return result
+        si
+
+        // Installs a fresh symbol table with the class as the instance
+        // context, then the enclosing literal and the nested one on the
+        // scope stack, innermost last.
+        nest(owner: CLASS, enclosing: Closure, nested: Closure) is
+            IoC.CONTAINER.instance.set_symbol_table_for_testing(SYMBOL_TABLE(DIAGNOSTICS_STORE()))
+
+            let symbol_table = IoC.CONTAINER.instance.symbol_table
+
+            symbol_table.enter_scope(owner)
+            symbol_table.enter_scope(enclosing)
+            symbol_table.enter_scope(nested)
+        si
+
+        closure_in(owner: CLASS, name: string) -> INSTANCE_CLOSURE =>
+            INSTANCE_CLOSURE(loc(), owner, name, owner, false)
+
+        @test()
+        Converting_a_self_only_literal__makes_the_enclosing_literal_capture_self() is
+            let owner = a_class()
+            let enclosing = closure_in(owner, "$anon_0")
+            let nested = closure_in(owner, "$anon_1")
+
+            nest(owner, enclosing, nested)
+
+            nested.find_or_add_capture_self()
+
+            nested.convert_to_delegate()
+
+            is_true(enclosing.is_self_captured)
+            is_true(enclosing.frame?)
+        si
+
+        @test()
+        Converting_a_literal_that_captured_nothing__leaves_the_enclosing_literal_alone() is
+            let owner = a_class()
+            let enclosing = closure_in(owner, "$anon_0")
+            let nested = closure_in(owner, "$anon_1")
+
+            nest(owner, enclosing, nested)
+
+            nested.convert_to_delegate()
+
+            is_false(enclosing.is_self_captured)
+            is_false(enclosing.frame?)
+        si
+
+        @test()
+        Converting_a_self_only_literal__leaves_an_enclosing_delegate_alone() is
+            let owner = a_class()
+            let enclosing = closure_in(owner, "$anon_0")
+            let nested = closure_in(owner, "$anon_1")
+
+            nest(owner, enclosing, nested)
+
+            enclosing.convert_to_delegate()
+
+            nested.find_or_add_capture_self()
+
+            nested.convert_to_delegate()
+
+            // The enclosing body is a method of the owner, where the
+            // receiver is `ldarg.0`: there is no frame to hold it.
+            is_false(enclosing.is_self_captured)
+            is_false(enclosing.frame?)
+        si
+
+        @test()
+        Converting_a_self_only_literal__reaches_only_the_innermost_enclosing_literal() is
+            let owner = a_class()
+            let outermost = closure_in(owner, "$anon_0")
+            let middle = closure_in(owner, "$anon_1")
+            let nested = closure_in(owner, "$anon_2")
+
+            nest(owner, outermost, middle)
+
+            IoC.CONTAINER.instance.symbol_table.enter_scope(nested)
+
+            nested.find_or_add_capture_self()
+
+            nested.convert_to_delegate()
+
+            is_true(middle.is_self_captured)
+            is_false(outermost.is_self_captured)
+        si
+    si
+si

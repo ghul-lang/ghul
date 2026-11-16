@@ -1,0 +1,535 @@
+namespace Semantic.UnitTests is
+    use Collections.LIST
+
+    use Source.LOCATION
+
+    use Logging.DIAGNOSTICS_STORE
+    use Logging.Logger
+
+    use Semantic.MATCH_PROPAGATOR
+
+    use Semantic.Symbols.CLASS
+    use Semantic.Symbols.CLASSY_GENERIC_ARGUMENT
+    use Semantic.Symbols.INFERRED_TYPE_ARG_ORIGIN
+    use Semantic.Symbols.INSTANCE_METHOD
+    use Semantic.Symbols.Variable
+
+    use Semantic.SYMBOL_TABLE
+
+    use Semantic.Types.ERROR
+    use Semantic.Types.GENERIC
+    use Semantic.Types.INFERRED_VARIABLE_TYPE
+    use Semantic.Types.Type
+    use Assertions
+
+    // Tests for MATCH_PROPAGATOR — the helper that pushes constraints onto
+    // INFERRED_VARIABLE_TYPE placeholder origins by walking paired
+    // (formal, actual) types. Extracted from OVERLOAD_RESOLVER once
+    // it had three call sites (overload-resolver constructor + fn
+    // paths, closure-call path in compile_expressions).
+    //
+    // The contract being pinned here is small but load-bearing:
+    //   - constraints only push to placeholders, never to type
+    //     variables (the latter would break #1210 from the other
+    //     direction — see project_type_variable_back_feed_load_
+    //     bearing memory)
+    //   - on a successful constraint push, mark_consumed_any fires
+    //     so the iterative body-retry loop knows to walk again
+    //   - structural recursion descends paired type-args on
+    //     matching-head generics
+    //   - ancestor-walk on mismatched-head generics finds the
+    //     specialised ancestor whose head matches the formal's
+    class MATCH_PROPAGATOR_TESTS is
+        init() is si
+
+        loc() -> LOCATION => LOCATION("test.ghul", 1, 1, 1, 1)
+        empty_names() -> LIST[string] => LIST[string]()
+        names_for_T() -> LIST[string] is
+            let result = LIST[string]()
+            result.add("T")
+            return result
+        si
+
+        // Concrete non-generic class fixtures.
+        int_class() -> CLASS => CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "int", empty_names(), Semantic.BLOCK_SCOPE())
+        string_class() -> CLASS => CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "string", empty_names(), Semantic.BLOCK_SCOPE())
+
+        // Box[T] fixture — generic owner with one type-arg slot.
+        // Returns the CLASS so caller can build GENERIC types over it.
+        box_class() -> CLASS => CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Box", names_for_T(), Semantic.BLOCK_SCOPE())
+
+        phantom(name: string) -> Variable =>
+            INFERRED_TYPE_ARG_ORIGIN(loc(), Semantic.BLOCK_SCOPE(), name)
+
+        types(a: Type) -> LIST[Type] is
+            let result = LIST[Type]()
+            result.add(a)
+            return result
+        si
+
+        types(a: Type, b: Type) -> LIST[Type] is
+            let result = LIST[Type]()
+            result.add(a)
+            result.add(b)
+            return result
+        si
+
+        // === pair: null safety ===
+
+        // Either side null is a noop. Callers in the body-retry loop
+        // may pass null when the formal list was shorter than the
+        // actual list (or vice versa); propagator must not NRE.
+        @test()
+        Calling__propagate_match__with_null_formal__does_nothing() is
+            let logger = DIAGNOSTICS_STORE()
+            let propagator = MATCH_PROPAGATOR(logger)
+
+            propagator.propagate_match(null, int_class().type!)
+
+            is_false(logger.has_consumed_any)
+        si
+
+        @test()
+        Calling__propagate_match__with_null_actual__does_nothing() is
+            let logger = DIAGNOSTICS_STORE()
+            let propagator = MATCH_PROPAGATOR(logger)
+
+            propagator.propagate_match(int_class().type!, null)
+
+            is_false(logger.has_consumed_any)
+        si
+
+        // === pair: placeholder asymmetric ===
+
+        // Concrete formal + placeholder actual is the lambda-arg
+        // match propagation shape: `f(1)` where f's parameter is a placeholder.
+        // The formal `int` becomes a constraint on the placeholder's
+        // origin, and mark_consumed_any signals progress.
+        @test()
+        Calling__propagate_match__with_concrete_formal_and_placeholder_actual__pushes_constraint() is
+            let logger = DIAGNOSTICS_STORE()
+            let propagator = MATCH_PROPAGATOR(logger)
+
+            let origin = phantom("T_lambda")
+            let placeholder = cast Type(INFERRED_VARIABLE_TYPE(origin))
+            let int_t = int_class().type!
+
+            propagator.propagate_match(int_t, placeholder)
+
+            is_true(logger.has_consumed_any)
+            are_same(int_t, origin.try_get_inferred_type())
+        si
+
+        // Placeholder formal + concrete actual is the constructor-
+        // type-arg match propagation shape: `Box[placeholder].init(42)` where
+        // formal is the not-yet-bound owner type-arg and actual is
+        // the concrete int. Same push, opposite direction.
+        @test()
+        Calling__propagate_match__with_placeholder_formal_and_concrete_actual__pushes_constraint() is
+            let logger = DIAGNOSTICS_STORE()
+            let propagator = MATCH_PROPAGATOR(logger)
+
+            let origin = phantom("T_ctor")
+            let placeholder = cast Type(INFERRED_VARIABLE_TYPE(origin))
+            let string_t = string_class().type!
+
+            propagator.propagate_match(placeholder, string_t)
+
+            is_true(logger.has_consumed_any)
+            are_same(string_t, origin.try_get_inferred_type())
+        si
+
+        // === pair: concrete-only cases (no constraint push) ===
+
+        // Both sides concrete, mismatched heads: nothing to push.
+        // Pinned because a regression that tried to push int onto
+        // string (or vice versa) would corrupt every call site that
+        // type-checks with mismatched argument types — the compare
+        // already catches them, but match propagation must not interfere.
+        @test()
+        Calling__propagate_match__with_two_concrete_non_generic_types__pushes_nothing() is
+            let logger = DIAGNOSTICS_STORE()
+            let propagator = MATCH_PROPAGATOR(logger)
+
+            propagator.propagate_match(int_class().type!, string_class().type!)
+
+            is_false(logger.has_consumed_any)
+        si
+
+        // === pair: ERROR / placeholder guards on the other side ===
+
+        // ERROR actual paired with a placeholder formal must not
+        // push ERROR as a constraint — that would poison the
+        // placeholder. add_constraint also guards (`constraint.is_
+        // error` check), but pinning here keeps the MATCH_PROPAGATOR side's
+        // pre-check honest.
+        @test()
+        Calling__propagate_match__with_placeholder_formal_and_ERROR_actual__pushes_nothing() is
+            let logger = DIAGNOSTICS_STORE()
+            let propagator = MATCH_PROPAGATOR(logger)
+
+            let origin = phantom("T_safe")
+            let placeholder = cast Type(INFERRED_VARIABLE_TYPE(origin))
+            let err = cast Type(ERROR())
+
+            propagator.propagate_match(placeholder, err)
+
+            is_false(logger.has_consumed_any)
+            is_null(origin.try_get_inferred_type())
+        si
+
+        // Type-variable formal + concrete actual must not push the
+        // concrete actual as a constraint on the placeholder — there
+        // is no placeholder here, the formal is a *type variable*
+        // (an unbound generic parameter), not a placeholder. The
+        // !is_type_variable guard is load-bearing for the generic-
+        // function-argument-type-inference-2 case (see project_type
+        // _variable_back_feed_load_bearing memory).
+        //
+        // Build a CLASSY_GENERIC_ARGUMENT-typed formal to exercise
+        // the guard. CLASSY_GENERIC_ARGUMENT's .type IS a type
+        // variable. Pairing it with a concrete int should leave
+        // mark_consumed_any false.
+        @test()
+        Calling__propagate_match__with_type_variable_formal_and_concrete_actual__pushes_nothing() is
+            let logger = DIAGNOSTICS_STORE()
+            let propagator = MATCH_PROPAGATOR(logger)
+
+            let box = box_class()
+            let t = CLASSY_GENERIC_ARGUMENT(loc(), box, "T", 0)
+            let int_t = int_class().type!
+
+            propagator.propagate_match(t.type!, int_t)
+
+            is_false(logger.has_consumed_any)
+        si
+
+        // === pair: a type variable of an enclosing declaration ===
+        //
+        // A type variable of a declaration the paired site is written
+        // inside already stands for a definite type there, so it
+        // settles a placeholder as readily as a concrete type does.
+        // The bound recorded is a LOWER one from either side, which
+        // is what distinguishes these two from the guard above: there
+        // the variable belongs to the callee being resolved and
+        // nothing is pushed at all.
+
+        // Makes `method` the function the propagator reads as the
+        // site it is pairing types for.
+        enter(method: INSTANCE_METHOD) is
+            IoC.CONTAINER.instance.set_symbol_table_for_testing(SYMBOL_TABLE(DIAGNOSTICS_STORE()))
+            IoC.CONTAINER.instance.symbol_table.enter_scope(method)
+        si
+
+        method_of(owner: CLASS) -> INSTANCE_METHOD =>
+            INSTANCE_METHOD(loc(), loc(), owner, "m", Semantic.BLOCK_SCOPE())
+
+        @test()
+        Calling__propagate_match__with_placeholder_formal_and_enclosing_type_variable_actual__pushes_lower_bound() is
+            let logger = DIAGNOSTICS_STORE()
+            let propagator = MATCH_PROPAGATOR(logger)
+
+            let box = box_class()
+            enter(method_of(box))
+
+            let origin = phantom("T_element")
+            let placeholder = cast Type(INFERRED_VARIABLE_TYPE(origin))
+            let t = CLASSY_GENERIC_ARGUMENT(loc(), box, "T", 0).type!
+
+            propagator.propagate_match(placeholder, t)
+
+            is_true(logger.has_consumed_any)
+            are_same(t, origin.try_get_inferred_type())
+        si
+
+        @test()
+        Calling__propagate_match__with_enclosing_type_variable_formal_and_placeholder_actual__pushes_lower_bound() is
+            let logger = DIAGNOSTICS_STORE()
+            let propagator = MATCH_PROPAGATOR(logger)
+
+            let box = box_class()
+            enter(method_of(box))
+
+            let origin = phantom("T_element")
+            let placeholder = cast Type(INFERRED_VARIABLE_TYPE(origin))
+            let t = CLASSY_GENERIC_ARGUMENT(loc(), box, "T", 0).type!
+
+            propagator.propagate_match(t, placeholder)
+
+            is_true(logger.has_consumed_any)
+            are_same(t, origin.try_get_inferred_type())
+        si
+
+        // The variable belongs to a declaration the site is not
+        // written inside, so it stands for nothing yet and the
+        // placeholder is left unresolved for a later pairing to
+        // settle.
+        @test()
+        Calling__propagate_match__with_placeholder_formal_and_unrelated_type_variable_actual__pushes_nothing() is
+            let logger = DIAGNOSTICS_STORE()
+            let propagator = MATCH_PROPAGATOR(logger)
+
+            enter(method_of(box_class()))
+
+            let origin = phantom("T_element")
+            let placeholder = cast Type(INFERRED_VARIABLE_TYPE(origin))
+            let elsewhere = CLASSY_GENERIC_ARGUMENT(loc(), box_class(), "T", 0).type!
+
+            propagator.propagate_match(placeholder, elsewhere)
+
+            is_false(logger.has_consumed_any)
+            is_null(origin.try_get_inferred_type())
+        si
+
+        // A placeholder passed to a slot over a concrete type is bounded
+        // by it.
+        @test()
+        Calling__propagate_match__with_placeholder_actual_and_concrete_generic_formal__pushes_upper_bound() is
+            let logger = DIAGNOSTICS_STORE()
+            let propagator = MATCH_PROPAGATOR(logger)
+
+            let box = box_class()
+            enter(method_of(box))
+
+            let origin = phantom("v")
+            let placeholder = cast Type(INFERRED_VARIABLE_TYPE(origin))
+            let formal = cast Type(GENERIC(loc(), box, types(int_class().type!)))
+
+            propagator.propagate_match(formal, placeholder)
+
+            is_true(logger.has_consumed_any)
+            are_same(formal, origin.try_get_inferred_type())
+        si
+
+        // === pair: structural recursion on matching-head generics ===
+
+        // Both sides Box[...], one with a concrete int arg, one with
+        // a placeholder. The outer heads match so we recurse on the
+        // paired type-args: int and the placeholder → push int onto
+        // the placeholder's origin. This is the call-arg-as-
+        // constraint shape (#1212).
+        @test()
+        Calling__propagate_match__with_same_head_generics_and_inner_placeholder__pushes_inner_constraint() is
+            let logger = DIAGNOSTICS_STORE()
+            let propagator = MATCH_PROPAGATOR(logger)
+
+            let box = box_class()
+            let int_t = int_class().type!
+
+            let origin = phantom("T_inner")
+            let placeholder = cast Type(INFERRED_VARIABLE_TYPE(origin))
+
+            let formal = cast Type(GENERIC(loc(), box, types(int_t)))
+            let actual = cast Type(GENERIC(loc(), box, types(placeholder)))
+
+            propagator.propagate_match(formal, actual)
+
+            is_true(logger.has_consumed_any)
+            are_same(int_t, origin.try_get_inferred_type())
+        si
+
+        // === pair: ancestor-walk for mismatched generic heads ===
+        //
+        // Actual extends formal's head but the outer heads differ —
+        // MATCH_PROPAGATOR walks the actual's specialised ancestors looking
+        // for one whose head matches the formal's, then recurses on
+        // the formal's args paired against the specialised ancestor's
+        // args. The recurse hits the placeholder in the formal's args
+        // and pushes the concrete from the ancestor's matching slot.
+        //
+        // Real-world shape: a constraint `STREAM[<phantom>, int]` is
+        // pushed to an `if` whose branches return `STREAM.YIELD[char,
+        // int]` (different head, STREAM.YIELD extends STREAM). The
+        // match propagation walks YIELD's specialised STREAM[char, int]
+        // ancestor and pushes char onto the constraint's phantom slot.
+        // Without this leg the placeholder stays unresolved and the
+        // outer generic call latches a stale type-arg.
+        @test()
+        Calling__propagate_match__with_actual_extending_formals_head__pushes_via_ancestor() is
+            let logger = DIAGNOSTICS_STORE()
+            let propagator = MATCH_PROPAGATOR(logger)
+
+            // STREAM-like generic owner with one type-arg slot.
+            let outer = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Outer", names_for_T(), Semantic.BLOCK_SCOPE())
+
+            // YIELD-like subclass extending Outer[char].
+            let int_t = int_class().type!
+            let string_t = string_class().type!
+
+            let sub = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Sub", names_for_T(), Semantic.BLOCK_SCOPE())
+            sub.add_ancestor(GENERIC(loc(), outer, types(int_t)))
+
+            let origin = phantom("T_phantom")
+            let placeholder = cast Type(INFERRED_VARIABLE_TYPE(origin))
+
+            let formal = cast Type(GENERIC(loc(), outer, types(placeholder)))
+            let actual = cast Type(GENERIC(loc(), sub, types(string_t)))
+
+            propagator.propagate_match(formal, actual)
+
+            is_true(logger.has_consumed_any)
+            are_same(int_t, origin.try_get_inferred_type())
+        si
+
+        // A placeholder reached through an invariant type-argument slot
+        // must be the formal's argument exactly, so a lower bound that
+        // converts to it settles to it.
+        @test()
+        Calling__propagate_match__through_an_invariant_slot__settles_the_placeholder_to_the_formal_argument() is
+            let logger = DIAGNOSTICS_STORE()
+            let propagator = MATCH_PROPAGATOR(logger)
+
+            let animal = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Animal", empty_names(), Semantic.BLOCK_SCOPE())
+            let cat = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Cat", empty_names(), Semantic.BLOCK_SCOPE())
+            cat.add_ancestor(animal.type!)
+
+            let box = box_class()
+
+            let origin = phantom("T_phantom")
+            origin.add_lower_bound(cat.type!)
+
+            let placeholder = cast Type(INFERRED_VARIABLE_TYPE(origin))
+
+            propagator.propagate_match(GENERIC(loc(), box, types(animal.type!)), GENERIC(loc(), box, types(placeholder)))
+
+            are_same(animal.type!, origin.try_get_inferred_type())
+        si
+
+        // Through a covariant slot the formal's argument only has to admit
+        // the placeholder, so its lower-bound join stands.
+        @test()
+        Calling__propagate_match__through_a_covariant_slot__keeps_the_lower_bound() is
+            let logger = DIAGNOSTICS_STORE()
+            let propagator = MATCH_PROPAGATOR(logger)
+
+            let animal = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Animal", empty_names(), Semantic.BLOCK_SCOPE())
+            let cat = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Cat", empty_names(), Semantic.BLOCK_SCOPE())
+            cat.add_ancestor(animal.type!)
+
+            let box = box_class()
+            box.argument_variances = [Semantic.Types.TypeVariance.COVARIANT]
+
+            let origin = phantom("T_phantom")
+            origin.add_lower_bound(cat.type!)
+
+            let placeholder = cast Type(INFERRED_VARIABLE_TYPE(origin))
+
+            propagator.propagate_match(GENERIC(loc(), box, types(animal.type!)), GENERIC(loc(), box, types(placeholder)))
+
+            are_same(cat.type!, origin.try_get_inferred_type())
+        si
+
+        // === pairs: list-level conveniences ===
+
+        // pairs() truncates to the shorter list — defensive guard
+        // for partial overload-resolution cases where a candidate's
+        // argument count differs from the actual call's. Pinning so
+        // a future "throw on mismatch" change can't sneak in and
+        // break the body-retry loop's progress-on-prefix behaviour.
+        @test()
+        Calling__propagate_matches__with_more_actuals_than_formals__processes_only_the_prefix() is
+            let logger = DIAGNOSTICS_STORE()
+            let propagator = MATCH_PROPAGATOR(logger)
+
+            let origin = phantom("T_first")
+            let placeholder = cast Type(INFERRED_VARIABLE_TYPE(origin))
+            let int_t = int_class().type!
+            let string_t = string_class().type!
+
+            let formals = types(int_t)
+            let actuals = types(placeholder, string_t)
+
+            propagator.propagate_matches(formals, actuals)
+
+            is_true(logger.has_consumed_any)
+            are_same(int_t, origin.try_get_inferred_type())
+        si
+
+        // Null lists on either side are a noop. Caller protection —
+        // _propagate_chosen_match_args used to guard `!chosen.arguments?`
+        // before delegating; now it just calls pairs and relies on
+        // this null-safety contract.
+        @test()
+        Calling__propagate_matches__with_null_formals__does_nothing() is
+            let logger = DIAGNOSTICS_STORE()
+            let propagator = MATCH_PROPAGATOR(logger)
+
+            propagator.propagate_matches(null, types(int_class().type!))
+
+            is_false(logger.has_consumed_any)
+        si
+
+        @test()
+        Calling__propagate_matches__with_null_actuals__does_nothing() is
+            let logger = DIAGNOSTICS_STORE()
+            let propagator = MATCH_PROPAGATOR(logger)
+
+            propagator.propagate_matches(types(int_class().type!), null)
+
+            is_false(logger.has_consumed_any)
+        si
+
+        // A function type whose first argument is a parameter, and so varies
+        // contravariantly, and whose second is its result.
+        function_class() -> CLASS is
+            let names = LIST[string]()
+            names.add("P")
+            names.add("R")
+
+            let result = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Fn", names, Semantic.BLOCK_SCOPE())
+            result.argument_variances = [Semantic.Types.TypeVariance.CONTRAVARIANT, Semantic.Types.TypeVariance.COVARIANT]
+
+            return result
+        si
+
+        // A function passed into a `string -> int` slot is called with
+        // strings, so its parameter still being inferred takes string as a
+        // value it receives, as from a call.
+        @test()
+        Calling__propagate_match__with_a_parameter_placeholder_at_a_slot_parameter__bounds_it_from_below() is
+            let propagator = MATCH_PROPAGATOR(DIAGNOSTICS_STORE())
+            let fn = function_class()
+            let string_t = string_class().type!
+            let int_t = int_class().type!
+
+            let parameter = Semantic.Symbols.LOCAL_ARGUMENT(loc(), Semantic.BLOCK_SCOPE(), "text")
+
+            propagator.propagate_match(
+                GENERIC(loc(), fn, types(string_t, int_t)),
+                GENERIC(loc(), fn, types(INFERRED_VARIABLE_TYPE(parameter), int_t)))
+
+            are_equal(1, parameter.lower_bounds.count)
+            are_same(string_t, parameter.lower_bounds[0])
+        si
+
+        // A placeholder that is not a parameter receives nothing it is
+        // called with.
+        @test()
+        Calling__propagate_match__with_a_non_parameter_placeholder_at_a_slot_parameter__does_not_bound_it_from_below() is
+            let propagator = MATCH_PROPAGATOR(DIAGNOSTICS_STORE())
+            let fn = function_class()
+            let origin = phantom("T_phantom")
+
+            propagator.propagate_match(
+                GENERIC(loc(), fn, types(string_class().type!, int_class().type!)),
+                GENERIC(loc(), fn, types(INFERRED_VARIABLE_TYPE(origin), int_class().type!)))
+
+            are_equal(0, origin.lower_bounds.count)
+        si
+
+        // A covariant position is what the function produces, not what it
+        // receives.
+        @test()
+        Calling__propagate_match__with_a_parameter_placeholder_at_a_result_position__does_not_bound_it_from_below() is
+            let propagator = MATCH_PROPAGATOR(DIAGNOSTICS_STORE())
+            let fn = function_class()
+            let parameter = Semantic.Symbols.LOCAL_ARGUMENT(loc(), Semantic.BLOCK_SCOPE(), "result")
+
+            propagator.propagate_match(
+                GENERIC(loc(), fn, types(string_class().type!, int_class().type!)),
+                GENERIC(loc(), fn, types(string_class().type!, INFERRED_VARIABLE_TYPE(parameter))))
+
+            are_equal(0, parameter.lower_bounds.count)
+        si
+    si
+si

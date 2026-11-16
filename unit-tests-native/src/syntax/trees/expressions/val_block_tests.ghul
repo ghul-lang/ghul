@@ -1,0 +1,82 @@
+namespace Syntax.Trees.UnitTests is
+    use Collections.LIST
+
+    use Source.LOCATION
+
+    use Trees.Expressions.VAL_BLOCK
+    use Trees.Statements.Statement
+    use StatementList = Trees.Statements.LIST
+    use Assertions
+
+    // Pin the AST-level contract of Expressions.VAL_BLOCK. The block
+    // is the return target for `return E` resolved by compile-
+    // expressions; its want_value field drives whether the body's
+    // tail must yield a value (consumed context) or may be void
+    // (expression-statement, void-returning `=> body`).
+    class VAL_BLOCK_TESTS is
+        init() is si
+
+        loc() -> LOCATION => LOCATION("test.ghul", 1, 1, 1, 1)
+
+        empty_list() -> StatementList
+            => StatementList(loc(), LIST[Statement]())
+
+        new_block() -> VAL_BLOCK
+            => VAL_BLOCK(loc(), empty_list())
+
+        @test()
+        VAL_BLOCK__want_value__defaults_to_true() is
+            is_true(new_block().want_value)
+        si
+
+        @test()
+        VAL_BLOCK__want_value__honours_explicit_downgrade_to_void() is
+            let b = new_block()
+            b.want_value = false
+
+            is_false(b.want_value)
+        si
+
+        @test()
+        VAL_BLOCK__return_types__starts_empty() is
+            // The pool returns into is empty until pre_return /
+            // visit_return collects entries during the body walk;
+            // pin that no contribution leaks into the LUB by
+            // default.
+            are_equal(0, new_block().return_types.count)
+        si
+
+        @test()
+        VAL_BLOCK__clear__resets_want_value_and_collected_state() is
+            // clear() is the analysis-mode reset hook between
+            // walks. want_value sticking would let a void downgrade
+            // from a prior walk silently accept a value-required
+            // misuse; return_types sticking would inflate the LUB
+            // with prior-walk return-type entries.
+            let b = new_block()
+            b.want_value = false
+            b.return_types.add(Semantic.Types.ERROR())
+
+            b.clear()
+
+            is_true(b.want_value)
+            are_equal(0, b.return_types.count)
+        si
+
+        @test()
+        VAL_BLOCK__clear__drops_expected_type_and_il_state() is
+            // Outer-context pushed expected_type and the IL end-
+            // label are walk-local; clear() resets both so a
+            // subsequent EDIT recompile starts from a blank slate.
+            let b = new_block()
+            b.set_expected_type(Semantic.Types.ERROR(), "test")
+
+            b.clear()
+
+            is_null(b.expected_type)
+            is_null(b.expected_type_error_message)
+            is_null(b.end_label)
+        si
+
+    si
+si

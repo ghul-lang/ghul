@@ -1,0 +1,201 @@
+namespace Syntax.Process.UnitTests is
+    use Collections.LIST
+
+    use Source.LOCATION
+
+    use Semantic.Symbols.CLASS
+    use Semantic.Types.Type
+    use Syntax.Process.COMPREHENSION_ELEMENT_TYPE
+    use Assertions
+
+    // COMPREHENSION_ELEMENT_TYPE picks a list comprehension's element
+    // type: an explicit `[...]: T[]` annotation first, then the type
+    // the surrounding context expects, and only then the element
+    // expression's own type - with `fits` answering whether the
+    // element actually belongs in the chosen array.
+    class COMPREHENSION_ELEMENT_TYPE_TESTS is
+        _subject: COMPREHENSION_ELEMENT_TYPE
+
+        init() is
+            _subject = COMPREHENSION_ELEMENT_TYPE()
+        si
+
+        loc() -> LOCATION => LOCATION("test.ghul", 1, 1, 1, 1)
+
+        a_class(name: string) -> CLASS =>
+            CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), name, LIST[string](), Semantic.BLOCK_SCOPE())
+
+        array_of(element: Type) -> Type =>
+            Semantic.Types.ARRAY(
+                loc(),
+                CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Array", LIST[string](["T"]), Semantic.BLOCK_SCOPE()),
+                [element]
+            )
+
+        // === constraint ===
+
+        @test()
+        Calling__constraint__with_an_explicit_array_type_and_an_expected_type__prefers_the_explicit_one() is
+            let explicit_element = a_class("Explicit").type!
+            let expected_element = a_class("Expected").type!
+
+            let result = _subject.constraint(array_of(explicit_element), array_of(expected_element))
+
+            are_same(explicit_element, result)
+        si
+
+        @test()
+        Calling__constraint__with_no_explicit_array_type__falls_back_to_the_expected_type() is
+            let expected_element = a_class("Expected").type!
+
+            let result = _subject.constraint(null, array_of(expected_element))
+
+            are_same(expected_element, result)
+        si
+
+        @test()
+        Calling__constraint__with_an_expected_type_still_being_inferred__is_null() is
+            let placeholder = Semantic.Types.INFERRED_VARIABLE_TYPE(
+                Semantic.Symbols.INFERRED_TYPE_ARG_ORIGIN(loc(), Semantic.BLOCK_SCOPE(), "U"))
+
+            let result = _subject.constraint(null, array_of(placeholder))
+
+            is_null(result)
+        si
+
+        @test()
+        Calling__constraint__with_an_explicit_array_type_still_being_inferred__uses_it() is
+            let placeholder = Semantic.Types.INFERRED_VARIABLE_TYPE(
+                Semantic.Symbols.INFERRED_TYPE_ARG_ORIGIN(loc(), Semantic.BLOCK_SCOPE(), "U"))
+
+            let result = _subject.constraint(array_of(placeholder), null)
+
+            are_same(placeholder, result)
+        si
+
+        @test()
+        Calling__constraint__with_neither_an_explicit_array_type_nor_an_expected_type__is_null() is
+            let result = _subject.constraint(null, null)
+
+            is_null(result)
+        si
+
+        @test()
+        Calling__constraint__reads_the_element_type_of_the_array__not_the_array_itself() is
+            let element = a_class("Element").type!
+
+            let result = _subject.constraint(array_of(element), null)
+
+            are_same(element, result)
+        si
+
+        // === element_type ===
+
+        @test()
+        Calling__element_type__with_a_constraint__uses_the_constraint_regardless_of_the_value_type() is
+            let constraint = a_class("Constraint").type!
+
+            let result = _subject.element_type(constraint, Semantic.Types.ERROR())
+
+            are_same(constraint, result)
+        si
+
+        @test()
+        Calling__element_type__with_no_constraint__uses_the_value_type() is
+            let value_type = a_class("Value").type!
+
+            let result = _subject.element_type(null, value_type)
+
+            are_same(value_type, result)
+        si
+
+        // `null` is the one value with no type of its own to give an
+        // element - `Types.NULL` is the type of the `null` literal
+        // itself, not the absence of a value type.
+        @test()
+        Calling__element_type__with_no_constraint_and_a_value_type_of_null__is_null() is
+            let result = _subject.element_type(null, Semantic.Types.NULL())
+
+            is_null(result)
+        si
+
+        @test()
+        Calling__element_type__with_no_constraint_and_an_error_value_type__passes_the_error_through() is
+            let error_type = Semantic.Types.ERROR()
+
+            let result = _subject.element_type(null, error_type)
+
+            are_same(error_type, result)
+        si
+
+        @test()
+        Calling__element_type__with_neither_a_constraint_nor_a_value_type__is_an_error_type() is
+            let result = _subject.element_type(null, null)
+
+            is_true(result!.is_error, "expected an error type where neither a constraint nor a value type is given")
+        si
+
+        // === fits ===
+
+        @test()
+        Calling__fits__with_an_assignable_value__is_true() is
+            let cls = a_class("Same")
+
+            is_true(_subject.fits(cls.type!, cls.type!))
+        si
+
+        @test()
+        Calling__fits__with_an_unrelated_value__is_false() is
+            let constraint = a_class("String").type!
+            let value = a_class("Int").type!
+
+            is_false(_subject.fits(constraint, value))
+        si
+
+        @test()
+        Calling__fits__with_an_error_constraint__is_true() is
+            let value = a_class("Value").type!
+
+            is_true(_subject.fits(Semantic.Types.ERROR(), value))
+        si
+
+        @test()
+        Calling__fits__with_an_error_value__is_true() is
+            let constraint = a_class("Constraint").type!
+
+            is_true(_subject.fits(constraint, Semantic.Types.ERROR()))
+        si
+
+        @test()
+        Calling__fits__with_no_constraint__is_true() is
+            let value = a_class("Value").type!
+
+            is_true(_subject.fits(null, value))
+        si
+
+        @test()
+        Calling__fits__with_no_value_type__is_true() is
+            let constraint = a_class("Constraint").type!
+
+            is_true(_subject.fits(constraint, null))
+        si
+
+        // `is_assignable_from` walks the value's ancestor list looking
+        // for the constraint's symbol, which is the same mechanism a
+        // real `object` constraint accepting a real `int` value goes
+        // through - `int`'s ancestors include `object` in the actual
+        // symbol table. Reproducing that here with a hand-built
+        // ancestor edge, rather than the compiler's own scalar types,
+        // to keep the fixture independent of what those happen to be
+        // named.
+        @test()
+        Calling__fits__with_a_value_whose_ancestors_include_the_constraint__is_true() is
+            let object_class = a_class("Object")
+            let int_class = a_class("Int")
+
+            int_class.add_ancestor(object_class.type!)
+
+            is_true(_subject.fits(object_class.type!, int_class.type!))
+        si
+    si
+si

@@ -1,0 +1,161 @@
+namespace Semantic.Symbols.UnitTests is
+    use Collections.LIST
+
+    use Source.LOCATION
+
+    use Semantic.Types.Type
+    use Assertions
+
+    // Tests for GENERIC_ARGUMENT_MEMBER_LOOKUP - the member lookup behind
+    // a type variable with several `/\`-joined bounds: one result passes
+    // through, same-signature repeats collapse to the first bound's member
+    // (shared ancestry reaches the same member through two bounds), every
+    // distinct overload survives, and a mixed-kind clash falls back to the
+    // first bound's answer.
+    class GENERIC_ARGUMENT_MEMBER_LOOKUP_TESTS is
+        // A scope to own the symbols built here.
+        _scope: Semantic.BLOCK_SCOPE
+
+        init() is
+            _scope = Semantic.BLOCK_SCOPE()
+        si
+
+        loc() -> LOCATION => LOCATION("test.ghul", 1, 1, 1, 1)
+
+        zero_arg_method(name: string) -> INSTANCE_METHOD is
+            let result = INSTANCE_METHOD(loc(), loc(), _scope, name, Semantic.BLOCK_SCOPE())
+            result.arguments = LIST[Type]()
+            return result
+        si
+
+        one_arg_method(name: string, argument: Type) -> INSTANCE_METHOD is
+            let result = INSTANCE_METHOD(loc(), loc(), _scope, name, Semantic.BLOCK_SCOPE())
+
+            let arguments = LIST[Type]()
+            arguments.add(argument)
+            result.arguments = arguments
+
+            return result
+        si
+
+        class_with_method(class_name: string, method: INSTANCE_METHOD) -> CLASS is
+            let c = CLASS(loc(), loc(), _scope, class_name, LIST[string](), Semantic.BLOCK_SCOPE())
+            c.add_member(method)
+            return c
+        si
+
+        bound(c: CLASS) -> Semantic.Types.NAMED => Semantic.Types.NAMED(c)
+
+        lookup_over(bounds: ARRAY[Type]) -> GENERIC_ARGUMENT_MEMBER_LOOKUP is
+            let list = LIST[Type]()
+
+            for b in bounds do
+                list.add(b)
+            od
+
+            return GENERIC_ARGUMENT_MEMBER_LOOKUP(list)
+        si
+
+        @test()
+        Calling__find_member__should_return_null_when_no_bounds() is
+            let lookup = lookup_over([])
+
+            is_null(lookup.find_member("foo"))
+        si
+
+        @test()
+        Calling__find_member__should_return_null_when_no_bound_has_the_member() is
+            let a = bound(class_with_method("A", zero_arg_method("bar")))
+
+            let lookup = lookup_over([a])
+
+            is_null(lookup.find_member("foo"))
+        si
+
+        @test()
+        Calling__find_member__should_pass_a_single_bound_result_through() is
+            let method = zero_arg_method("foo")
+            let a = bound(class_with_method("A", method))
+
+            let result = lookup_over([a]).find_member("foo")
+
+            is_true(result?)
+            are_same(method, cast FUNCTION_GROUP(result!).functions[0])
+        si
+
+        @test()
+        Calling__find_member__should_keep_distinct_signatures_from_two_bounds() is
+            let t = CLASSY_GENERIC_ARGUMENT(loc(), _scope, "T", 0)
+
+            let zero = zero_arg_method("foo")
+            let one = one_arg_method("foo", t.type!)
+
+            let a = bound(class_with_method("A", zero))
+            let b = bound(class_with_method("B", one))
+
+            let result = lookup_over([a, b]).find_member("foo")
+
+            is_true(result?)
+            are_equal(2, cast FUNCTION_GROUP(result!).functions.count)
+        si
+
+        @test()
+        Calling__find_member__should_collapse_the_same_member_reached_twice() is
+            // Shared ancestry contributes the identical function object via
+            // two bounds; the merge keeps one copy.
+            let shared = zero_arg_method("foo")
+
+            let a = bound(class_with_method("A", shared))
+            let b = bound(class_with_method("B", shared))
+
+            let result = lookup_over([a, b]).find_member("foo")
+
+            is_true(result?)
+            are_equal(1, cast FUNCTION_GROUP(result!).functions.count)
+            are_same(shared, cast FUNCTION_GROUP(result).functions[0])
+        si
+
+        @test()
+        Calling__find_member__should_prefer_the_first_bound_on_a_mixed_kind_clash() is
+            let method = zero_arg_method("foo")
+
+            let a = bound(class_with_method("A", method))
+            let box = CLASS(loc(), loc(), _scope, "B", LIST[string](), Semantic.BLOCK_SCOPE())
+            box.add_member(INSTANCE_PROPERTY(loc(), loc(), box, "foo", false, false))
+            let b = bound(box)
+
+            let result = lookup_over([a, b]).find_member("foo")
+
+            is_true(result?)
+            is_true(isa FUNCTION_GROUP(result!))
+        si
+
+        @test()
+        Calling__find_member__over_three_bounds__should_fold_every_contribution() is
+            let t = CLASSY_GENERIC_ARGUMENT(loc(), _scope, "T", 0)
+            let u = CLASSY_GENERIC_ARGUMENT(loc(), _scope, "U", 1)
+
+            let zero = zero_arg_method("foo")
+            let one_t = one_arg_method("foo", t.type!)
+            let one_u = one_arg_method("foo", u.type!)
+            let shared = zero_arg_method("foo")
+            let second_zero = zero_arg_method("foo")
+
+            // The third bound repeats the first's signature with a
+            // different function object: the repeat is dropped.
+            let a = bound(class_with_method("A", zero))
+            let b = bound(class_with_method("B", one_t))
+            let c = bound(class_with_method("C", one_u))
+
+            let lookup_list = LIST[Type]()
+            lookup_list.add(a)
+            lookup_list.add(b)
+            lookup_list.add(c)
+
+            let result = GENERIC_ARGUMENT_MEMBER_LOOKUP(lookup_list).find_member("foo")
+
+            is_true(result?)
+            are_equal(3, cast FUNCTION_GROUP(result!).functions.count)
+        si
+    si
+si

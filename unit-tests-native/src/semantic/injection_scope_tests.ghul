@@ -1,0 +1,161 @@
+namespace Semantic.UnitTests is
+    use Collections.LIST
+
+    use Source.LOCATION
+
+    use Semantic.Symbols.CLASS
+    use Semantic.Symbols.CLASSY_GENERIC_ARGUMENT
+    use Semantic.Symbols.FUNCTION_GROUP
+    use Semantic.Symbols.INSTANCE_METHOD
+    use Semantic.Symbols.INSTANCE_PROPERTY
+    use Semantic.Types.Type
+    use Assertions
+
+    // Tests for INJECTION_SCOPE.find_enclosing - the name lookup inside an
+    // impl/partial block: the target's own members are found first, other
+    // names fall through to the block's write-site lexical scope, and a
+    // member function group joins with a lexical group of the same name so
+    // both sets of overloads stay callable.
+    class INJECTION_SCOPE_TESTS is
+        init() is si
+
+        loc() -> LOCATION => LOCATION("test.ghul", 1, 1, 1, 1)
+
+        target_class() -> CLASS => CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "TARGET", LIST[string](), Semantic.BLOCK_SCOPE())
+
+        property(owner: CLASS, name: string) -> INSTANCE_PROPERTY is
+            let result = INSTANCE_PROPERTY(loc(), loc(), owner, name, false, false)
+            owner.declare(loc(), result, null)
+            return result
+        si
+
+        property(owner: BLOCK_SCOPE, name: string) -> INSTANCE_PROPERTY is
+            let result = INSTANCE_PROPERTY(loc(), loc(), owner, name, false, false)
+            owner.declare(loc(), result, null)
+            return result
+        si
+
+        method(name: string, arguments: LIST[Type]) -> INSTANCE_METHOD is
+            let result = INSTANCE_METHOD(loc(), loc(), Semantic.BLOCK_SCOPE(), name, Semantic.BLOCK_SCOPE())
+            result.arguments = arguments
+            return result
+        si
+
+        group(owner: CLASS, function: Symbols.Function) -> FUNCTION_GROUP is
+            let result = FUNCTION_GROUP(loc(), owner, function.name)
+            result.add(function)
+            owner.declare(loc(), result, null)
+            return result
+        si
+
+        group(owner: BLOCK_SCOPE, function: Symbols.Function) -> FUNCTION_GROUP is
+            let result = FUNCTION_GROUP(loc(), owner, function.name)
+            result.add(function)
+            owner.declare(loc(), result, null)
+            return result
+        si
+
+        @test()
+        Calling__find_enclosing__should_prefer_a_target_member_over_a_lexical_symbol_of_the_same_name() is
+            let target = target_class()
+            let lexical = BLOCK_SCOPE()
+
+            let target_member = property(target, "x")
+            property(lexical, "x")
+
+            let scope = INJECTION_SCOPE(target, lexical)
+
+            are_same(target_member, scope.find_enclosing("x"))
+        si
+
+        @test()
+        Calling__find_enclosing__should_fall_through_to_the_lexical_scope_when_the_target_lacks_the_name() is
+            let target = target_class()
+            let lexical = BLOCK_SCOPE()
+
+            let lexical_symbol = property(lexical, "y")
+
+            let scope = INJECTION_SCOPE(target, lexical)
+
+            are_same(lexical_symbol, scope.find_enclosing("y"))
+        si
+
+        @test()
+        Calling__find_enclosing__should_return_null_when_neither_scope_has_the_name() is
+            let scope = INJECTION_SCOPE(target_class(), BLOCK_SCOPE())
+
+            is_null(scope.find_enclosing("missing"))
+        si
+
+        @test()
+        Calling__find_enclosing__should_return_the_target_group_unchanged_when_the_lexical_scope_lacks_the_name() is
+            let target = target_class()
+            let lexical = BLOCK_SCOPE()
+
+            let target_group = group(target, method("foo", LIST[Type]()))
+
+            let scope = INJECTION_SCOPE(target, lexical)
+
+            are_same(target_group, scope.find_enclosing("foo"))
+        si
+
+        @test()
+        Calling__find_enclosing__should_return_the_target_group_unchanged_when_the_lexical_symbol_is_not_a_group() is
+            let target = target_class()
+            let lexical = BLOCK_SCOPE()
+
+            let target_group = group(target, method("foo", LIST[Type]()))
+            property(lexical, "foo")
+
+            let scope = INJECTION_SCOPE(target, lexical)
+
+            are_same(target_group, scope.find_enclosing("foo"))
+        si
+
+        @test()
+        Calling__find_enclosing__should_merge_a_target_group_with_a_lexical_group_of_the_same_name() is
+            let t = CLASSY_GENERIC_ARGUMENT(loc(), Semantic.BLOCK_SCOPE(), "T", 0)
+
+            let target = target_class()
+            let lexical = BLOCK_SCOPE()
+
+            let member_function = method("foo", LIST[Type]())
+
+            let outer_arguments = LIST[Type]()
+            outer_arguments.add(t.type!)
+            let outer_function = method("foo", outer_arguments)
+
+            group(target, member_function)
+            group(lexical, outer_function)
+
+            let scope = INJECTION_SCOPE(target, lexical)
+
+            let result = cast FUNCTION_GROUP?(scope.find_enclosing("foo"))
+
+            is_true(result?)
+            are_equal(2, result!.functions.count)
+            are_same(member_function, result.functions[0])
+            are_same(outer_function, result.functions[1])
+        si
+
+        @test()
+        Calling__find_enclosing__should_prefer_the_target_overload_when_both_groups_have_the_same_shape() is
+            let target = target_class()
+            let lexical = BLOCK_SCOPE()
+
+            let member_function = method("foo", LIST[Type]())
+            let outer_function = method("foo", LIST[Type]())
+
+            group(target, member_function)
+            group(lexical, outer_function)
+
+            let scope = INJECTION_SCOPE(target, lexical)
+
+            let result = cast FUNCTION_GROUP?(scope.find_enclosing("foo"))
+
+            is_true(result?)
+            are_equal(1, result!.functions.count)
+            are_same(member_function, result.functions[0])
+        si
+    si
+si

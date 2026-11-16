@@ -1,0 +1,191 @@
+namespace Syntax.Process.UnitTests is
+    use Collections.LIST
+
+    use Source.LOCATION
+
+    use Semantic.Symbols.CLASS
+    use Semantic.Symbols.LOCAL_VARIABLE
+    use Semantic.Types.Type
+    use Assertions
+
+    // Tests for NARROWING_FLOW's speculation stack — the primitive that
+    // lets a speculative expression re-walk push a baseline, reset to it
+    // between retry attempts, and either commit (keep the walked facts)
+    // or roll back (discard them). `narrow_to_assigned_value` is used as
+    // an observable env mutation: it narrows a local to a strict subtype,
+    // mutating `Symbol.type` in place, so a restored baseline shows up as
+    // the type reverting to the declared one.
+    class NARROWING_FLOW_SPECULATION_TESTS is
+        init() is
+            Fixtures.enter_function()
+        si
+
+        loc() -> LOCATION => LOCATION("test.ghul", 1, 1, 1, 1)
+        logger() -> Logging.Logger => Logging.DIAGNOSTICS_STORE()
+        empty_names() -> LIST[string] => LIST[string]()
+
+        make_owner() -> CLASS => CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "TestOwner", empty_names(), Semantic.BLOCK_SCOPE())
+
+        make_local(owner: CLASS, name: string) -> LOCAL_VARIABLE =>
+            LOCAL_VARIABLE(loc(), owner, name)
+
+        make_class_type(name: string) -> Type is
+            let c = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), name, empty_names(), Semantic.BLOCK_SCOPE())
+            c.set_type(Semantic.Types.NAMED(c))
+            return c.type!
+        si
+
+        make_subclass_type(name: string, base: Type) -> Type is
+            let c = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), name, empty_names(), Semantic.BLOCK_SCOPE())
+            c.set_type(Semantic.Types.NAMED(c))
+            c.add_ancestor(base)
+            return c.type!
+        si
+
+        @test()
+        roll_back_restores_the_pre_speculation_type() is
+            let owner = make_owner()
+            let animal = make_class_type("Animal")
+            let cat = make_subclass_type("Cat", animal)
+            let x = make_local(owner, "x")
+            x.set_type(animal)
+
+            let flow = NARROWING_FLOW(logger())
+
+            flow.speculate()
+            flow.narrow_to_assigned_value(x, cat)
+            are_same(cat, x.type)
+
+            flow.roll_back()
+
+            are_same(animal, x.type)
+            is_false(flow.current_env.narrowed_type_of(x)?)
+        si
+
+        @test()
+        commit_keeps_the_speculative_type() is
+            let owner = make_owner()
+            let animal = make_class_type("Animal")
+            let cat = make_subclass_type("Cat", animal)
+            let x = make_local(owner, "x")
+            x.set_type(animal)
+
+            let flow = NARROWING_FLOW(logger())
+
+            flow.speculate()
+            flow.narrow_to_assigned_value(x, cat)
+
+            flow.commit()
+
+            are_same(cat, x.type)
+            are_same(cat, flow.current_env.narrowed_type_of(x))
+        si
+
+        @test()
+        restore_resets_to_the_baseline_but_keeps_the_frame() is
+            // The retry-re-walk shape: reset to the baseline, walk again,
+            // then commit the second walk's facts.
+            let owner = make_owner()
+            let animal = make_class_type("Animal")
+            let cat = make_subclass_type("Cat", animal)
+            let x = make_local(owner, "x")
+            x.set_type(animal)
+
+            let flow = NARROWING_FLOW(logger())
+
+            flow.speculate()
+            flow.narrow_to_assigned_value(x, cat)
+
+            flow.restore()
+
+            are_same(animal, x.type)
+
+            flow.narrow_to_assigned_value(x, cat)
+
+            flow.commit()
+
+            are_same(cat, x.type)
+        si
+
+        @test()
+        nested_roll_back_leaves_the_outer_speculation_intact() is
+            let owner = make_owner()
+            let animal = make_class_type("Animal")
+            let cat = make_subclass_type("Cat", animal)
+            let x = make_local(owner, "x")
+            let y = make_local(owner, "y")
+            x.set_type(animal)
+            y.set_type(animal)
+
+            let flow = NARROWING_FLOW(logger())
+
+            flow.speculate()
+            flow.narrow_to_assigned_value(x, cat)
+
+            flow.speculate()
+            flow.narrow_to_assigned_value(y, cat)
+
+            flow.roll_back()
+
+            are_same(animal, y.type)
+            are_same(cat, x.type)
+
+            flow.commit()
+
+            are_same(cat, x.type)
+        si
+
+        @test()
+        restore_is_a_no_op_when_no_speculation_is_active() is
+            let owner = make_owner()
+            let animal = make_class_type("Animal")
+            let cat = make_subclass_type("Cat", animal)
+            let x = make_local(owner, "x")
+            x.set_type(animal)
+
+            let flow = NARROWING_FLOW(logger())
+
+            flow.narrow_to_assigned_value(x, cat)
+
+            flow.restore()
+
+            are_same(cat, x.type)
+        si
+
+        @test()
+        disposable_commits_on_scope_exit() is
+            let owner = make_owner()
+            let animal = make_class_type("Animal")
+            let cat = make_subclass_type("Cat", animal)
+            let x = make_local(owner, "x")
+            x.set_type(animal)
+
+            let flow = NARROWING_FLOW(logger())
+
+            if true then
+                let use speculation = flow.speculate_then_commit()
+                flow.narrow_to_assigned_value(x, cat)
+            fi
+
+            are_same(cat, x.type)
+        si
+
+        @test()
+        disposable_rolls_back_on_scope_exit() is
+            let owner = make_owner()
+            let animal = make_class_type("Animal")
+            let cat = make_subclass_type("Cat", animal)
+            let x = make_local(owner, "x")
+            x.set_type(animal)
+
+            let flow = NARROWING_FLOW(logger())
+
+            if true then
+                let use speculation = flow.speculate_then_roll_back()
+                flow.narrow_to_assigned_value(x, cat)
+            fi
+
+            are_same(animal, x.type)
+        si
+    si
+si

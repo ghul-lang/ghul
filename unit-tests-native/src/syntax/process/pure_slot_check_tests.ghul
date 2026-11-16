@@ -1,0 +1,317 @@
+namespace Syntax.Process.UnitTests is
+    use Collections.LIST
+
+    use Source.LOCATION
+
+    use Logging.DIAGNOSTICS_STORE
+
+    use Semantic.Types.Type
+
+    use Semantic.Symbols.CLASS
+    use Semantic.Symbols.STATIC_METHOD
+    use Assertions
+
+    // Tests for the pure-slot machinery: PURE_SLOT_CHECK records
+    // values reaching pure function-typed slots while expressions
+    // compile, and PURE_SLOT_JUDGE reports the ones it cannot show
+    // store-free once the effect relations are solved.
+    class PURE_SLOT_CHECK_TESTS is
+        init() is si
+
+        loc() -> LOCATION => LOCATION("test.ghul", 1, 1, 1, 1)
+
+        build() -> (PURE_SLOT_CHECK, PURE_SLOT_JUDGE, DIAGNOSTICS_STORE) is
+            PURE_SLOTS.clear()
+
+            let logger = DIAGNOSTICS_STORE()
+            let check = PURE_SLOT_CHECK(NARROWING_FLOW(logger), Compiler.GLOBAL_BUILD_FLAGS())
+            let judge = PURE_SLOT_JUDGE(logger, FUNCTION_VALUES())
+
+            return (check, judge, logger)
+        si
+
+        owner() -> CLASS => CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Owner", LIST[string](), Semantic.BLOCK_SCOPE())
+
+        // A named function, store-free only if declared so — nothing
+        // here runs the effects walk or solve.
+        function(is_declared_pure: bool) -> STATIC_METHOD is
+            let f = STATIC_METHOD(loc(), loc(), owner(), "do_thing", Semantic.BLOCK_SCOPE())
+
+            f.arguments = LIST[Type]()
+            f.return_type = owner().type
+
+            if is_declared_pure then
+                f.mark_declared_pure()
+            fi
+
+            return f
+        si
+
+        // The shape a function reference reaches a slot in.
+        reference_to(f: Semantic.Symbols.Function, type: Type) -> IR.Values.Value =>
+            IR.Values.MAKE_CLOSURE(type, f, IR.Values.NULL(Semantic.Types.NULL()))
+
+        // A no-argument function type, whose sole type argument is
+        // its return type.
+        function_owner() -> CLASS => CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Fn", LIST[string](["R"]), Semantic.BLOCK_SCOPE())
+
+        return_types() -> LIST[Type] => LIST[Type]([owner().type!])
+
+        pure_function_type() -> Type =>
+            Semantic.Types.PURE_FUNCTION(loc(), function_owner(), return_types())
+
+        plain_function_type() -> Type =>
+            Semantic.Types.FUNCTION(loc(), function_owner(), return_types())
+
+        @test()
+        Calling__is_satisfied__with_no_value__should_be_satisfied() is
+            let (check, judge, logger) = build()
+
+            is_true(judge.is_satisfied(null))
+        si
+
+        @test()
+        Calling__is_satisfied__on_a_reference_to_a_declared_pure_function__should_be_satisfied() is
+            let (check, judge, logger) = build()
+
+            is_true(judge.is_satisfied(reference_to(function(true), pure_function_type())))
+        si
+
+        // The reference carries the slot's type, so reading the type
+        // rather than the function it names would report nothing.
+        @test()
+        Calling__is_satisfied__on_a_reference_to_a_function_that_is_not_store_free__should_not_be_satisfied_even_at_a_pure_type() is
+            let (check, judge, logger) = build()
+
+            is_false(judge.is_satisfied(reference_to(function(false), pure_function_type())))
+        si
+
+        @test()
+        Calling__is_satisfied__on_a_value_of_pure_function_type_naming_no_function__should_be_satisfied() is
+            let (check, judge, logger) = build()
+
+            is_true(judge.is_satisfied(IR.Values.DUMMY(pure_function_type(), loc())))
+        si
+
+        @test()
+        Calling__is_satisfied__on_a_value_of_plain_function_type__should_not_be_satisfied() is
+            let (check, judge, logger) = build()
+
+            is_false(judge.is_satisfied(IR.Values.DUMMY(plain_function_type(), loc())))
+        si
+
+        @test()
+        Judging__a_recorded_store_of_an_unsatisfied_value_into_a_pure_target__should_warn() is
+            let (check, judge, logger) = build()
+
+            check.check_store(loc(), pure_function_type(), IR.Values.DUMMY(plain_function_type(), loc()))
+            judge.judge()
+
+            is_true(logger.any_warnings)
+        si
+
+        @test()
+        Judging__a_recorded_store_of_a_satisfied_value__should_not_warn() is
+            let (check, judge, logger) = build()
+
+            check.check_store(loc(), pure_function_type(), reference_to(function(true), pure_function_type()))
+            judge.judge()
+
+            is_false(logger.any_warnings)
+        si
+
+        @test()
+        Judging__the_same_records_twice__should_warn_once() is
+            // take() hands the records over exactly once, so a second
+            // judge over the same state reports nothing new
+            let (check, judge, logger) = build()
+
+            check.check_store(loc(), pure_function_type(), IR.Values.DUMMY(plain_function_type(), loc()))
+            judge.judge()
+            judge.judge()
+
+            are_equal(1, warnings_written(logger))
+        si
+
+        @test()
+        Judging__a_re_recorded_slot__should_warn_once() is
+            // a body re-walked to convergence records the same slot
+            // once per walk; only the last record reports
+            let (check, judge, logger) = build()
+
+            check.check_store(loc(), pure_function_type(), IR.Values.DUMMY(plain_function_type(), loc()))
+            check.check_store(loc(), pure_function_type(), IR.Values.DUMMY(plain_function_type(), loc()))
+            judge.judge()
+
+            are_equal(1, warnings_written(logger))
+        si
+
+        @test()
+        Rolling_back_a_speculative_walk__should_drop_its_records() is
+            let (check, judge, logger) = build()
+
+            PURE_SLOTS.speculate()
+            check.check_store(loc(), pure_function_type(), IR.Values.DUMMY(plain_function_type(), loc()))
+            PURE_SLOTS.roll_back()
+
+            judge.judge()
+
+            is_false(logger.any_warnings)
+        si
+
+        at_in(file: string, line: int) -> LOCATION => LOCATION(file, line, 1, line, 1)
+
+        @test()
+        Rolling_back__should_leave_other_files_committed_records_alone() is
+            // records committed for one file before the mark must
+            // survive a rollback that discards another file's
+            // speculative record
+            let (check, judge, logger) = build()
+
+            check.check_store(at_in("a.ghul", 1), pure_function_type(), IR.Values.DUMMY(plain_function_type(), loc()))
+
+            PURE_SLOTS.speculate()
+            check.check_store(at_in("b.ghul", 1), pure_function_type(), IR.Values.DUMMY(plain_function_type(), loc()))
+            PURE_SLOTS.roll_back()
+
+            judge.judge()
+
+            are_equal(1, warnings_written(logger))
+        si
+
+        at(line: int, column: int) -> LOCATION => LOCATION("test.ghul", line, column, line, column)
+
+        // Two pure formals, so which argument the warning names is
+        // observable.
+        function_taking_two_pure_arguments() -> STATIC_METHOD is
+            let f = function(false)
+
+            f.arguments = LIST[Type]([pure_function_type(), pure_function_type()])
+
+            return f
+        si
+
+        // The first argument satisfies its slot, the second does not.
+        call_failing_on_its_second_argument() -> IR.Values.Value =>
+            IR.Values.Call.GLOBAL(
+                function_taking_two_pure_arguments(),
+                LIST[IR.Values.Value]([
+                    reference_to(function(true), pure_function_type()),
+                    IR.Values.DUMMY(plain_function_type(), loc())
+                ]),
+                owner().type
+            )
+
+        warnings_written(logger: DIAGNOSTICS_STORE) -> int is
+            let text = written(logger)
+            let needle = "must be a pure function"
+
+            let count mut = 0
+            let index mut = text.index_of(needle)
+
+            while index >= 0 do
+                count = count + 1
+                index = text.index_of(needle, index + 1)
+            od
+
+            return count
+        si
+
+        written(logger: DIAGNOSTICS_STORE) -> string is
+            let buffer = IO.StringWriter()
+
+            logger.write_all_diagnostics(buffer, Logging.TAB_DELIMITED_DIAGNOSTIC_FORMATTER())
+
+            return buffer.to_string()
+        si
+
+        @test()
+        Calling__check_call__with_the_written_arguments__should_report_against_the_failing_argument() is
+            let (check, judge, logger) = build()
+
+            check.check_call(
+                at(1, 1),
+                call_failing_on_its_second_argument(),
+                Trees.Expressions.LIST(
+                    at(3, 1),
+                    LIST[Trees.Expressions.Expression]([
+                        Trees.Expressions.NULL(at(4, 5)),
+                        Trees.Expressions.NULL(at(5, 9))
+                    ])
+                )
+            )
+            judge.judge()
+
+            is_true(
+                written(logger).contains("\t5\t9\t"),
+                "warning was not reported against the second argument:\n{written(logger)}"
+            )
+        si
+
+        // One extra built argument is the thread-first `|>` shape: the
+        // threaded value is the built call's first argument, and the
+        // written list supplies the rest.
+        @test()
+        Calling__check_call__with_one_more_built_argument__should_align_on_the_threaded_shape() is
+            let (check, judge, logger) = build()
+
+            check.check_call(
+                at(1, 1),
+                call_failing_on_its_second_argument(),
+                Trees.Expressions.LIST(
+                    at(3, 1),
+                    LIST[Trees.Expressions.Expression]([Trees.Expressions.NULL(at(4, 5))])
+                )
+            )
+            judge.judge()
+
+            is_true(
+                written(logger).contains("\t4\t5\t"),
+                "warning was not reported against the written argument:\n{written(logger)}"
+            )
+        si
+
+        // Any other misalignment is a lowering the check cannot see
+        // through, and blaming the wrong argument is worse than
+        // blaming the call.
+        @test()
+        Calling__check_call__with_a_written_argument_count_that_does_not_align__should_report_against_the_call() is
+            let (check, judge, logger) = build()
+
+            check.check_call(
+                at(1, 1),
+                call_failing_on_its_second_argument(),
+                Trees.Expressions.LIST(at(3, 1), LIST[Trees.Expressions.Expression]())
+            )
+            judge.judge()
+
+            is_true(
+                written(logger).contains("\t1\t1\t"),
+                "warning was not reported against the call:\n{written(logger)}"
+            )
+        si
+
+        @test()
+        Calling__check_call__with_no_written_arguments__should_report_against_the_call() is
+            let (check, judge, logger) = build()
+
+            check.check_call(at(1, 1), call_failing_on_its_second_argument(), null)
+            judge.judge()
+
+            is_true(
+                written(logger).contains("\t1\t1\t"),
+                "warning was not reported against the call:\n{written(logger)}"
+            )
+        si
+
+        @test()
+        Calling__check_store__with_a_target_that_is_not_a_pure_function_type__should_not_record() is
+            let (check, judge, logger) = build()
+
+            check.check_store(loc(), plain_function_type(), IR.Values.DUMMY(plain_function_type(), loc()))
+            judge.judge()
+
+            is_false(logger.any_warnings)
+        si
+    si
+si

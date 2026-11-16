@@ -1,0 +1,188 @@
+namespace Syntax.Process.UnitTests is
+    use Collections.LIST
+
+    use Source.LOCATION
+
+    use Semantic.Symbols.CLASS
+    use Semantic.Symbols.STRUCT
+    use Semantic.Types.ACTION
+    use Semantic.Types.FUNCTION
+    use Semantic.Types.MAYBE
+    use Semantic.Types.NULLABLE
+    use Semantic.Types.Type
+    use Assertions
+
+    // CARRIER_SHAPE decides whether a function value's own shape and
+    // the formal it is going into describe the same call and differ only
+    // in which carrier an optional position uses - the one mismatch a
+    // carrier thunk can bridge.
+    class CARRIER_SHAPE_TESTS is
+        _function_symbol: CLASS
+        _action_symbol: CLASS
+        _maybe_symbol: CLASS
+        _nullable_symbol: STRUCT
+
+        init() is
+            _function_symbol = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Func", LIST[string](["T", "R"]), Semantic.BLOCK_SCOPE())
+            _action_symbol = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Action", LIST[string](["T1", "T2"]), Semantic.BLOCK_SCOPE())
+            _maybe_symbol = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "MAYBE", LIST[string](["T"]), Semantic.BLOCK_SCOPE())
+            _nullable_symbol = STRUCT(loc(), loc(), Semantic.BLOCK_SCOPE(), "Nullable", LIST[string](["T"]), Semantic.BLOCK_SCOPE())
+        si
+
+        loc() -> LOCATION => LOCATION("test.ghul", 1, 1, 1, 1)
+
+        a_class(name: string) -> Type =>
+            CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), name, LIST[string](), Semantic.BLOCK_SCOPE()).type!
+
+        maybe_over(inner: Type) -> Type => MAYBE(loc(), _maybe_symbol, LIST[Type]([inner]))
+
+        nullable_over(inner: Type) -> Type => NULLABLE(loc(), _nullable_symbol, LIST[Type]([inner]))
+
+        // A reference `T?` is the class's own type carrying the
+        // optional flag rather than a carrier of its own.
+        optional_reference(of: Type) -> Type => of.as_optional()
+
+        shape(types: Type[]) -> Type =>
+            FUNCTION(loc(), _function_symbol, LIST[Type](types))
+
+        action(types: Type[]) -> Type =>
+            ACTION(loc(), _action_symbol, LIST[Type](types))
+
+        // `Cat` derives from `Animal`.
+        cat_and_animal() -> (Type, Type) is
+            let animal = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Animal", LIST[string](), Semantic.BLOCK_SCOPE())
+            let cat = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Cat", LIST[string](), Semantic.BLOCK_SCOPE())
+
+            cat.add_ancestor(animal.type!)
+
+            return (cat.type!, animal.type!)
+        si
+
+        @test()
+        an_action_s_last_parameter_wider_than_the_formal_s__is_a_carrier_mismatch() is
+            let fish = a_class("Fish")
+            let (cat, animal) = cat_and_animal()
+
+            is_true(
+                CARRIER_SHAPE.is_carrier_only_mismatch(
+                    action([maybe_over(fish), animal]),
+                    action([optional_reference(fish), cat])
+                )
+            )
+        si
+
+        @test()
+        an_action_s_last_parameter_narrower_than_the_formal_s__is_not_a_mismatch() is
+            let fish = a_class("Fish")
+            let (cat, animal) = cat_and_animal()
+
+            is_false(
+                CARRIER_SHAPE.is_carrier_only_mismatch(
+                    action([maybe_over(fish), cat]),
+                    action([optional_reference(fish), animal])
+                )
+            )
+        si
+
+        @test()
+        a_return_differing_only_in_carrier__is_a_carrier_mismatch() is
+            let cat = a_class("Cat")
+            let fish = a_class("Fish")
+
+            is_true(
+                CARRIER_SHAPE.is_carrier_only_mismatch(
+                    shape([cat, optional_reference(fish)]),
+                    shape([cat, maybe_over(fish)])
+                )
+            )
+        si
+
+        @test()
+        a_return_differing_only_in_carrier_the_other_way__is_a_carrier_mismatch() is
+            let cat = a_class("Cat")
+            let fish = a_class("Fish")
+
+            is_true(
+                CARRIER_SHAPE.is_carrier_only_mismatch(
+                    shape([cat, maybe_over(fish)]),
+                    shape([cat, nullable_over(fish)])
+                )
+            )
+        si
+
+        @test()
+        a_parameter_differing_only_in_carrier__is_a_carrier_mismatch() is
+            let cat = a_class("Cat")
+            let fish = a_class("Fish")
+
+            is_true(
+                CARRIER_SHAPE.is_carrier_only_mismatch(
+                    shape([maybe_over(fish), cat]),
+                    shape([nullable_over(fish), cat])
+                )
+            )
+        si
+
+        @test()
+        the_same_carrier_throughout__is_not_a_mismatch() is
+            let cat = a_class("Cat")
+            let fish = a_class("Fish")
+
+            is_false(
+                CARRIER_SHAPE.is_carrier_only_mismatch(
+                    shape([cat, maybe_over(fish)]),
+                    shape([cat, maybe_over(fish)])
+                )
+            )
+        si
+
+        @test()
+        two_optionals_over_different_inner_types__are_not_a_carrier_pair() is
+            let cat = a_class("Cat")
+
+            is_false(
+                CARRIER_SHAPE.is_carrier_only_mismatch(
+                    shape([cat, optional_reference(a_class("Fish"))]),
+                    shape([cat, maybe_over(a_class("Dog"))])
+                )
+            )
+        si
+
+        @test()
+        a_position_disagreeing_on_more_than_the_carrier__is_not_a_mismatch() is
+            let fish = a_class("Fish")
+
+            is_false(
+                CARRIER_SHAPE.is_carrier_only_mismatch(
+                    shape([a_class("Cat"), optional_reference(fish)]),
+                    shape([a_class("Dog"), maybe_over(fish)])
+                )
+            )
+        si
+
+        @test()
+        differing_arities__are_not_a_mismatch() is
+            let cat = a_class("Cat")
+            let fish = a_class("Fish")
+
+            is_false(
+                CARRIER_SHAPE.is_carrier_only_mismatch(
+                    shape([cat, optional_reference(fish)]),
+                    shape([cat, cat, maybe_over(fish)])
+                )
+            )
+        si
+
+        @test()
+        a_shape_that_is_not_a_function__is_not_a_mismatch() is
+            let cat = a_class("Cat")
+
+            is_false(
+                CARRIER_SHAPE.is_carrier_only_mismatch(
+                    cat,
+                    shape([cat, maybe_over(a_class("Fish"))])
+                )
+            )
+        si
+    si
+si

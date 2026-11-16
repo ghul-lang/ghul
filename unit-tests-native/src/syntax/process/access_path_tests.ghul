@@ -1,0 +1,163 @@
+namespace Syntax.Process.UnitTests is
+    use Collections.LIST
+
+    use Source.LOCATION
+
+    use Semantic.Symbols.CLASS
+    use Semantic.Symbols.INSTANCE_FIELD
+    use Semantic.Symbols.INSTANCE_PROPERTY
+    use Semantic.Symbols.LOCAL_VARIABLE
+    use Semantic.Symbols.Symbol
+    use Assertions
+
+    // Tests for ACCESS_PATH — the member-access path key behind the
+    // path-presence domain. Equality and hashing are by root + member
+    // symbol identity; contains_member drives the member-store
+    // invalidation and has_getter_hop the heap-store invalidation.
+    class ACCESS_PATH_TESTS is
+        init() is
+            Fixtures.enter_function()
+        si
+
+        loc() -> LOCATION => LOCATION("test.ghul", 1, 1, 1, 1)
+        make_owner() -> CLASS => CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "TestOwner", LIST[string](), Semantic.BLOCK_SCOPE())
+        make_root(name: string) -> LOCAL_VARIABLE => LOCAL_VARIABLE(loc(), Semantic.BLOCK_SCOPE(), name)
+        make_field(owner: CLASS, name: string) -> INSTANCE_FIELD => INSTANCE_FIELD(loc(), owner, name)
+        make_property(owner: CLASS, name: string) -> INSTANCE_PROPERTY => INSTANCE_PROPERTY(loc(), loc(), owner, name, false, false)
+
+        members(a: Symbol?, b: Symbol?) -> LIST[Symbol] is
+            let result = LIST[Symbol]()
+            if a? then result.add(a); fi
+            if b? then result.add(b); fi
+            return result
+        si
+
+        @test()
+        Equal_paths_should_be_equal_and_share_hash() is
+            let owner = make_owner()
+            let root = make_root("root")
+            let a = make_field(owner, "a")
+            let b = make_field(owner, "b")
+
+            let p = ACCESS_PATH(root, members(a, b))
+            let q = ACCESS_PATH(root, members(a, b))
+
+            is_true(p.equals(q))
+            are_equal(p.get_hash_code(), q.get_hash_code())
+        si
+
+        @test()
+        Paths_with_different_roots_should_differ() is
+            let owner = make_owner()
+            let a = make_field(owner, "a")
+
+            is_false(ACCESS_PATH(make_root("r1"), members(a, null)).equals(ACCESS_PATH(make_root("r2"), members(a, null))))
+        si
+
+        @test()
+        Paths_with_different_members_should_differ() is
+            let owner = make_owner()
+            let root = make_root("root")
+            let a = make_field(owner, "a")
+            let b = make_field(owner, "b")
+            let c = make_field(owner, "c")
+
+            is_false(ACCESS_PATH(root, members(a, b)).equals(ACCESS_PATH(root, members(a, c))))
+        si
+
+        @test()
+        Shorter_path_should_not_equal_its_extension() is
+            let owner = make_owner()
+            let root = make_root("root")
+            let a = make_field(owner, "a")
+            let b = make_field(owner, "b")
+
+            is_false(ACCESS_PATH(root, members(a, null)).equals(ACCESS_PATH(root, members(a, b))))
+        si
+
+        @test()
+        Contains_member_should_hit_every_hop_and_nothing_else() is
+            let owner = make_owner()
+            let root = make_root("root")
+            let a = make_field(owner, "a")
+            let b = make_field(owner, "b")
+            let other = make_field(owner, "other")
+
+            let path = ACCESS_PATH(root, members(a, b))
+
+            is_true(path.contains_member(a))
+            is_true(path.contains_member(b))
+            is_false(path.contains_member(other))
+            is_false(path.contains_member(null))
+        si
+
+        @test()
+        Getter_hop_should_be_detected_at_any_position() is
+            let owner = make_owner()
+            let root = make_root("root")
+            let f = make_field(owner, "f")
+            let g = make_field(owner, "g")
+            let p = make_property(owner, "p")
+
+            is_false(ACCESS_PATH(root, members(f, g)).has_getter_hop)
+            is_true(ACCESS_PATH(root, members(p, g)).has_getter_hop)
+            is_true(ACCESS_PATH(root, members(f, p)).has_getter_hop)
+        si
+
+        // The root counts as a hop for this purpose: a path rooted at
+        // a property of the enclosing instance is read through that
+        // property's getter, so a heap store can change what it holds
+        // just as it can for a getter further along. A field root is
+        // read directly and leaves the path fields-only, which
+        // survives a store to anything it does not read through.
+        @test()
+        Getter_root_should_make_the_path_getter_bearing() is
+            let owner = make_owner()
+            let f = make_field(owner, "f")
+            let g = make_field(owner, "g")
+
+            is_true(ACCESS_PATH(make_property(owner, "root"), members(f, g)).has_getter_hop)
+            is_false(ACCESS_PATH(make_field(owner, "root"), members(f, g)).has_getter_hop)
+            is_false(ACCESS_PATH(make_root("root"), members(f, g)).has_getter_hop)
+        si
+
+        // Simulate `GENERIC.find_member` returning fresh specialised
+        // Symbol instances on repeat calls by cloning a template Field
+        // and linking each clone via `specialized_from`. Two paths
+        // built from independent clones of the same template must
+        // still compare equal — otherwise a narrow set through one
+        // clone can't be looked up through the other.
+        @test()
+        Paths_over_specialised_clones_of_the_same_template_should_be_equal() is
+            let owner = make_owner()
+            let root = make_root("root")
+            let template = make_field(owner, "v")
+            let spec_a = make_field(owner, "v")
+            spec_a.specialized_from = template
+            let spec_b = make_field(owner, "v")
+            spec_b.specialized_from = template
+
+            let via_a = ACCESS_PATH(root, members(spec_a, null))
+            let via_b = ACCESS_PATH(root, members(spec_b, null))
+
+            is_true(via_a.equals(via_b))
+            are_equal(via_a.get_hash_code(), via_b.get_hash_code())
+        si
+
+        @test()
+        Contains_member_should_accept_a_specialised_form_of_a_canonical_hop() is
+            let owner = make_owner()
+            let root = make_root("root")
+            let template = make_field(owner, "v")
+            let specialised = make_field(owner, "v")
+            specialised.specialized_from = template
+
+            let path = ACCESS_PATH(root, members(template, null))
+
+            // A store transfer sees the specialised Symbol at the
+            // write site; it must still invalidate the canonical hop.
+            is_true(path.contains_member(specialised))
+            is_true(path.contains_member(template))
+        si
+    si
+si

@@ -1,0 +1,216 @@
+namespace Syntax.Process.UnitTests is
+    use Collections.LIST
+    use Collections.List
+
+    use Source.LOCATION
+
+    use Semantic.Symbols.CLASS
+    use Semantic.Symbols.FUNCTION_GENERIC_ARGUMENT
+    use Semantic.Symbols.STRUCT
+    use Semantic.Symbols.Symbol
+    use Semantic.Types.ERROR
+    use Semantic.Types.NAMED
+    use Semantic.Types.Type
+
+    use Syntax.Process.LOOP_RESULT_SETTLER
+
+    use Assertions
+
+    // Pins the contract of LOOP_RESULT_SETTLER.settle: which carrier the
+    // result takes for which element kind, that an already-optional LUB
+    // stands untouched, and the cannot-infer shape (nothing usable and
+    // no expected type). The injected maker answers a distinct marker
+    // type for each carrier OPTIONAL_CARRIER names, so every test
+    // asserts identity rather than structure.
+    class LOOP_RESULT_SETTLER_TESTS is
+        init() is si
+
+        loc() -> LOCATION => LOCATION("test.ghul", 1, 1, 1, 1)
+
+        empty_names() -> LIST[string] => LIST[string]()
+
+        a_reference_class() -> CLASS =>
+            CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Cat", empty_names(), Semantic.BLOCK_SCOPE())
+
+        a_value_struct() -> STRUCT =>
+            STRUCT(loc(), loc(), Semantic.BLOCK_SCOPE(), "Pixel", empty_names(), Semantic.BLOCK_SCOPE())
+
+        a_type_parameter(name: string) -> Type is
+            let symbol = Semantic.Symbols.FUNCTION_GENERIC_ARGUMENT(
+                loc(),
+                Semantic.BLOCK_SCOPE(),
+                name,
+                named_over(a_reference_class())
+            )
+
+            return Semantic.Types.FUNCTION_GENERIC_ARGUMENT(symbol)
+        si
+
+        named_over(symbol: Symbol) -> NAMED => cast NAMED(symbol.type)
+
+        _nullable: NAMED?
+        _maybe: NAMED?
+        _ref_opt: NAMED?
+
+        // Memoised so the maker lambdas and the tests compare against
+        // the same marker instances.
+        nullable_marker() -> NAMED is
+            if !_nullable? then
+                _nullable = cast NAMED(CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "$nullable", empty_names(), Semantic.BLOCK_SCOPE()).type)
+            fi
+
+            return _nullable
+        si
+
+        maybe_marker() -> NAMED is
+            if !_maybe? then
+                _maybe = cast NAMED(CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "$maybe", empty_names(), Semantic.BLOCK_SCOPE()).type)
+            fi
+
+            return _maybe
+        si
+
+        reference_optional_marker() -> NAMED is
+            if !_ref_opt? then
+                _ref_opt = cast NAMED(CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "$ref_opt", empty_names(), Semantic.BLOCK_SCOPE()).type)
+            fi
+
+            return _ref_opt
+        si
+
+        // A settler whose makers answer fixed marker types; `maybe`
+        // answers null when the caller wants the unavailable-runtime
+        // fallback exercised.
+        settler(maybe_answer: Type?) -> LOOP_RESULT_SETTLER =>
+            LOOP_RESULT_SETTLER(
+                (t: Type) -> Type? =>
+                    case Semantic.OPTIONAL_CARRIER.carrier_of(t)
+                    when Semantic.OptionalCarrier.NULLABLE then nullable_marker()
+                    when Semantic.OptionalCarrier.MAYBE then maybe_answer
+                    when Semantic.OptionalCarrier.REFERENCE then reference_optional_marker()
+                    else t
+                    esac
+            )
+
+        a_type_parameter_of_kind(kind: Semantic.Symbols.TypeParameterConstraintKind) -> Type is
+            let symbol = Semantic.Symbols.CLASSY_GENERIC_ARGUMENT(loc(), Semantic.BLOCK_SCOPE(), "T", 0)
+
+            symbol.set_constraint_kind(kind)
+
+            return symbol.type!
+        si
+
+        one(t: Type) -> LIST[Type] is
+            let result = LIST[Type]()
+            result.add(t)
+            return result
+        si
+
+        @test()
+        reference_element_widens_to_the_flagged_reference_optional() is
+            let settled = settler(maybe_marker()).settle(one(named_over(a_reference_class())), null)
+
+            are_same(reference_optional_marker(), cast Type?(settled)!)
+        si
+
+        @test()
+        value_element_widens_to_nullable() is
+            let settled = settler(maybe_marker()).settle(one(named_over(a_value_struct())), null)
+
+            are_same(nullable_marker(), cast Type?(settled)!)
+        si
+
+        @test()
+        type_element_prefers_maybe_where_the_runtime_is_available() is
+            let settled = settler(cast Type?(maybe_marker())).settle(
+                one(a_type_parameter("T")),
+                null
+            )
+
+            are_same(maybe_marker(), cast Type?(settled)!)
+        si
+
+        @test()
+        struct_constrained_type_element_widens_to_nullable_as_a_written_optional_does() is
+            let settled = settler(maybe_marker()).settle(
+                one(a_type_parameter_of_kind(Semantic.Symbols.TypeParameterConstraintKind.VALUE)),
+                null
+            )
+
+            are_same(nullable_marker(), cast Type?(settled)!)
+        si
+
+        @test()
+        class_constrained_type_element_widens_to_the_reference_optional_as_a_written_optional_does() is
+            let settled = settler(maybe_marker()).settle(
+                one(a_type_parameter_of_kind(Semantic.Symbols.TypeParameterConstraintKind.REFERENCE)),
+                null
+            )
+
+            are_same(reference_optional_marker(), cast Type?(settled)!)
+        si
+
+        @test()
+        type_element_falls_back_to_the_reference_optional_without_a_runtime() is
+            let t = a_type_parameter("T")
+
+            let settled = cast Type?(settler(null).settle(one(t), null))!
+
+            is_true(settled.is_optional)
+            is_true(settled.is_type_variable)
+            are_same(t.symbol, settled.symbol)
+        si
+
+        @test()
+        an_already_optional_lub_stands_untouched() is
+            let cat = named_over(a_reference_class())
+            let optional_cat = cat.as_optional()
+
+            let settled = settler(maybe_marker()).settle(one(optional_cat), null)
+
+            are_same(optional_cat, cast Type?(settled)!)
+        si
+
+        @test()
+        nothing_contributing_returns_the_expected_type_unchanged() is
+            let expected = named_over(a_reference_class()).as_optional()
+
+            let settled = settler(maybe_marker()).settle(LIST[Type](), expected)
+
+            are_same(expected, cast Type?(settled)!)
+        si
+
+        @test()
+        nothing_at_all_settles_null_for_the_caller_to_report() is
+            let settled = settler(maybe_marker()).settle(LIST[Type](), null)
+
+            is_null(settled)
+        si
+
+        @test()
+        null_only_contributions_behave_like_none() is
+            let expected = named_over(a_value_struct()).as_optional()
+
+            let with_expected = settler(maybe_marker()).settle(one(Semantic.Types.NULL()), expected)
+
+            are_same(expected, cast Type?(with_expected)!)
+
+            let without_expected = settler(maybe_marker()).settle(one(Semantic.Types.NULL()), null)
+
+            is_null(without_expected)
+        si
+
+        @test()
+        error_only_contributions_behave_like_none() is
+            let expected = named_over(a_reference_class()).as_optional()
+
+            let with_expected = settler(maybe_marker()).settle(one(Semantic.Types.ERROR()), expected)
+
+            are_same(expected, cast Type?(with_expected)!)
+
+            let without_expected = settler(maybe_marker()).settle(one(Semantic.Types.ERROR()), null)
+
+            is_null(without_expected)
+        si
+    si
+si

@@ -1,0 +1,208 @@
+namespace Semantic.UnitTests is
+
+    use Source.LOCATION
+
+    use Semantic.Symbols.CLASS
+    use Semantic.Symbols.CLASSY_GENERIC_ARGUMENT
+    use Semantic.Symbols.FUNCTION_GENERIC_ARGUMENT
+    use Semantic.Symbols.INSTANCE_CLOSURE
+    use Semantic.Symbols.NAMESPACE
+    use Semantic.Symbols.TRAIT
+    use Assertions
+
+    // Pins which type parameters a closure reaches through the class it
+    // is emitted into rather than through one of its own.
+    //
+    // A frame is a class of its own and declares every parameter the
+    // closure's signature names. A delegate's method is emitted on the
+    // enclosing class instead, which already supplies that class's
+    // parameters, and declaring them again would leave the emitted
+    // method taking more arguments than the construction site gives it.
+    class CLOSURE_CARRIED_TYPE_ARGUMENT_TESTS is
+        init() is si
+
+        loc() -> LOCATION => LOCATION("test.ghul", 1, 1, 1, 1)
+
+        namespace_owner() -> NAMESPACE => NAMESPACE(loc(), "Test", null, ".Test", false)
+
+        a_class() -> CLASS =>
+            CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "OWNER", Collections.LIST[string]().to_array(), Semantic.BLOCK_SCOPE())
+
+        a_trait() -> TRAIT =>
+            TRAIT(loc(), loc(), Semantic.BLOCK_SCOPE(), "Owner", Collections.LIST[string]().to_array(), Semantic.BLOCK_SCOPE())
+
+        closure_in(owner: Semantic.Scope) -> INSTANCE_CLOSURE =>
+            INSTANCE_CLOSURE(loc(), owner, "$anon_0", owner, false)
+
+        @test()
+        A_parameter_of_the_emitting_class_should_be_carried() is
+            let emitting = a_class()
+            let subject = closure_in(emitting)
+
+            let x = CLASSY_GENERIC_ARGUMENT(loc(), emitting, "X", 0)
+
+            is_true(subject.is_type_argument_carried_by_emitting_class(x))
+        si
+
+        @test()
+        A_parameter_of_an_enclosing_method_should_not_be_carried() is
+            let emitting = a_class()
+            let subject = closure_in(emitting)
+
+            let y = FUNCTION_GENERIC_ARGUMENT(loc(), namespace_owner(), "Y", 0)
+
+            is_false(subject.is_type_argument_carried_by_emitting_class(y))
+        si
+
+        @test()
+        A_parameter_of_another_class_should_not_be_carried() is
+            let subject = closure_in(a_class())
+
+            let other = CLASSY_GENERIC_ARGUMENT(loc(), a_class(), "X", 0)
+
+            is_false(subject.is_type_argument_carried_by_emitting_class(other))
+        si
+
+        @test()
+        A_traits_own_parameter_should_not_be_carried() is
+            // The closure is not emitted on the trait, so the trait
+            // supplies it nothing.
+            let emitting = a_trait()
+            let subject = closure_in(emitting)
+
+            let x = CLASSY_GENERIC_ARGUMENT(loc(), emitting, "X", 0)
+
+            is_false(subject.is_type_argument_carried_by_emitting_class(x))
+        si
+
+        @test()
+        A_closure_outside_any_class_should_carry_nothing() is
+            let subject = closure_in(namespace_owner())
+
+            let x = CLASSY_GENERIC_ARGUMENT(loc(), a_class(), "X", 0)
+
+            is_false(subject.is_type_argument_carried_by_emitting_class(x))
+        si
+
+        index_of(closure: INSTANCE_CLOSURE, parameter: Semantic.Symbols.Symbol) -> int =>
+            closure.captured_type_arguments![parameter].index
+
+        @test()
+        Converting_to_a_delegate_should_drop_the_emitting_classs_parameter() is
+            let emitting = a_class()
+            let subject = closure_in(emitting)
+
+            let x = CLASSY_GENERIC_ARGUMENT(loc(), emitting, "X", 0)
+            let y = FUNCTION_GENERIC_ARGUMENT(loc(), namespace_owner(), "Y", 0)
+
+            subject.add_type_argument_reference(x)
+            subject.add_type_argument_reference(y)
+
+            subject.convert_to_delegate()
+
+            are_equal(1, subject.captured_type_arguments!.count)
+            is_false(subject.captured_type_arguments!.contains_key(x))
+        si
+
+        @test()
+        Converting_to_a_delegate_should_renumber_the_slots_that_remain() is
+            // The index a slot holds is its position in the emitted
+            // method's own parameter list, so dropping the first leaves
+            // the rest numbering from zero.
+            let emitting = a_class()
+            let subject = closure_in(emitting)
+
+            let method_owner = namespace_owner()
+
+            let x = CLASSY_GENERIC_ARGUMENT(loc(), emitting, "X", 0)
+            let y = FUNCTION_GENERIC_ARGUMENT(loc(), method_owner, "Y", 0)
+            let z = FUNCTION_GENERIC_ARGUMENT(loc(), method_owner, "Z", 1)
+
+            subject.add_type_argument_reference(x)
+            subject.add_type_argument_reference(y)
+            subject.add_type_argument_reference(z)
+
+            are_equal(0, index_of(subject, x))
+            are_equal(1, index_of(subject, y))
+            are_equal(2, index_of(subject, z))
+
+            subject.convert_to_delegate()
+
+            are_equal(2, subject.captured_type_arguments!.count)
+            are_equal(0, index_of(subject, y))
+            are_equal(1, index_of(subject, z))
+        si
+
+        @test()
+        Converting_to_a_delegate_should_keep_every_uncarried_parameter() is
+            // Renumbering must not go back through the rule that treats
+            // a frozen copy of a parameter as that parameter: two
+            // survivors that answer alike to it are still two slots.
+            let emitting = a_class()
+            let subject = closure_in(emitting)
+
+            let method_owner = namespace_owner()
+
+            let y = FUNCTION_GENERIC_ARGUMENT(loc(), method_owner, "Y", 0)
+            let z = FUNCTION_GENERIC_ARGUMENT(loc(), method_owner, "Z", 1)
+
+            subject.add_type_argument_reference(y)
+            subject.add_type_argument_reference(z)
+
+            subject.convert_to_delegate()
+
+            are_equal(2, subject.captured_type_arguments!.count)
+        si
+
+        @test()
+        Converting_to_a_delegate_with_only_carried_parameters_should_leave_none() is
+            let emitting = a_class()
+            let subject = closure_in(emitting)
+
+            subject.add_type_argument_reference(
+                CLASSY_GENERIC_ARGUMENT(loc(), emitting, "X", 0))
+
+            subject.convert_to_delegate()
+
+            is_null(subject.captured_type_arguments)
+        si
+
+        @test()
+        A_traits_captured_parameter_should_stop_a_delegate() is
+            // Neither dropped at conversion nor declarable by the
+            // emitted method, so the literal keeps its frame, which
+            // declares every parameter its signature names.
+            let emitting = a_trait()
+            let subject = closure_in(emitting)
+
+            subject.add_type_argument_reference(
+                CLASSY_GENERIC_ARGUMENT(loc(), emitting, "T", 0))
+
+            is_false(subject.could_be_delegate)
+        si
+
+        @test()
+        The_emitting_classs_captured_parameter_should_not_stop_a_delegate() is
+            // Dropped at conversion, because the receiver carries it.
+            let emitting = a_class()
+            let subject = closure_in(emitting)
+
+            subject.add_type_argument_reference(
+                CLASSY_GENERIC_ARGUMENT(loc(), emitting, "X", 0))
+
+            is_true(subject.could_be_delegate)
+        si
+
+        @test()
+        Captured_type_arguments_should_not_stop_a_delegate() is
+            // The method-level ones are what a delegate's own method
+            // declares, so they are no reason to keep it off that path.
+            let subject = closure_in(a_class())
+
+            subject.add_type_argument_reference(
+                FUNCTION_GENERIC_ARGUMENT(loc(), namespace_owner(), "Y", 0))
+
+            is_true(subject.could_be_delegate)
+        si
+    si
+si

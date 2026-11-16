@@ -1,0 +1,189 @@
+namespace Semantic.UnitTests is
+    use Collections.LIST
+
+    use Source.LOCATION
+
+    use Semantic.LAMBDA_RETURN_CONSTRAINT
+
+    use Semantic.Symbols.CLASS
+    use Semantic.Symbols.CLASSY_GENERIC_ARGUMENT
+    use Semantic.Symbols.FUNCTION_GENERIC_ARGUMENT
+
+    use Semantic.Types.ERROR
+    use Semantic.Types.GENERIC
+    use Semantic.Types.INFERRED_RETURN_TYPE
+    use Semantic.Types.Type
+    use Assertions
+
+    // Pins for LAMBDA_RETURN_CONSTRAINT.should_push — the guard that
+    // decides whether a call slot's return-type argument is real enough
+    // to push down onto a lambda-literal body as its expected type.
+    //
+    // The load-bearing distinction: a bare or nested method-level type
+    // argument that the in-flight overload resolution has not yet bound
+    // (FUNCTION_GENERIC_ARGUMENT, e.g. `U` in `map[U](f: T -> U)`) must
+    // be excluded, or an if-expression body's own arm LUB gets short-
+    // circuited against the raw, unresolved type argument. A class-
+    // level type parameter that is already bound in its own context
+    // (CLASSY_GENERIC_ARGUMENT, e.g. a generic class's own `T`) must
+    // NOT be excluded by the same guard, and neither must a method-level
+    // one belonging to the scope the push is happening in - inside its
+    // own function's body it names a fixed type like any other.
+    class LAMBDA_RETURN_CONSTRAINT_TESTS is
+        init() is si
+
+        loc() -> LOCATION => LOCATION("test.ghul", 1, 1, 1, 1)
+        empty_names() -> LIST[string] => LIST[string]()
+
+        names_for_T() -> LIST[string] is
+            let result = LIST[string]()
+            result.add("T")
+            return result
+        si
+
+        types(values: Collections.Iterable[Type]) -> LIST[Type] is
+            let result = LIST[Type]()
+            for v in values do result.add(v); od
+            return result
+        si
+
+        int_type() -> Type => CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "int", empty_names(), Semantic.BLOCK_SCOPE()).type!
+
+        // A method-level `U`, of the shape `map[U](f: T -> U)` carries
+        // on its own signature - still unbound while that call's
+        // overload resolution is in flight.
+        method_u() -> Type => FUNCTION_GENERIC_ARGUMENT(loc(), Semantic.BLOCK_SCOPE(), "U", 0).type!
+
+        // A class-level `T`, well-bound in its own context (e.g.
+        // referenced from inside a method of a generic class).
+        class_t() -> Type =>
+            CLASSY_GENERIC_ARGUMENT(
+                loc(),
+                CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Owner", names_for_T(), Semantic.BLOCK_SCOPE()),
+                "T",
+                0
+            ).type!
+
+        // A method-level `U` declared by `owner` itself.
+        owned_u(owner: Semantic.Scope) -> Type =>
+            FUNCTION_GENERIC_ARGUMENT(loc(), owner, "U", 0).type!
+
+        box_of(argument: Type) -> Type =>
+            cast Type(GENERIC(loc(), CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Box", names_for_T(), Semantic.BLOCK_SCOPE()), types([argument])))
+
+        @test()
+        Calling__should_push__with_null_candidate__returns_false() is
+            is_false(LAMBDA_RETURN_CONSTRAINT.should_push(null, null))
+        si
+
+        @test()
+        Calling__should_push__with_concrete_type__returns_true() is
+            is_true(LAMBDA_RETURN_CONSTRAINT.should_push(int_type(), null))
+        si
+
+        @test()
+        Calling__should_push__with_error_type__returns_false() is
+            is_false(LAMBDA_RETURN_CONSTRAINT.should_push(cast Type(ERROR()), null))
+        si
+
+        @test()
+        Calling__should_push__with_inferred_return_type_sentinel__returns_false() is
+            is_false(LAMBDA_RETURN_CONSTRAINT.should_push(cast Type(INFERRED_RETURN_TYPE()), null))
+        si
+
+        // A bare unbound method-level type argument must not be
+        // pushed down.
+        @test()
+        Calling__should_push__with_bare_unbound_method_type_argument__returns_false() is
+            is_false(LAMBDA_RETURN_CONSTRAINT.should_push(method_u(), null))
+        si
+
+        // A composite return slot (e.g. `Tasks.TASK[U]`) mentioning the
+        // callee's own unbound method-level type argument must also be
+        // excluded - the exclusion has to recurse, not just check the
+        // top-level type.
+        @test()
+        Calling__should_push__with_composite_containing_unbound_method_type_argument__returns_false() is
+            is_false(LAMBDA_RETURN_CONSTRAINT.should_push(box_of(method_u()), null))
+        si
+
+        // A class-level type parameter that is already bound in its
+        // own context must NOT be excluded - only the callee's own
+        // not-yet-bound method type argument is.
+        @test()
+        Calling__should_push__with_bare_class_level_type_parameter__returns_true() is
+            is_true(LAMBDA_RETURN_CONSTRAINT.should_push(class_t(), null))
+        si
+
+        @test()
+        Calling__should_push__with_composite_containing_class_level_type_parameter__returns_true() is
+            is_true(LAMBDA_RETURN_CONSTRAINT.should_push(box_of(class_t()), null))
+        si
+
+        // A method-level type argument belonging to the scope being
+        // compiled is that function's own `T`, not a callee's unbound
+        // one, so it pushes down like any other type.
+        @test()
+        Calling__should_push__with_method_type_argument_of_the_pushing_scope__returns_true() is
+            let scope = Semantic.BLOCK_SCOPE()
+
+            is_true(LAMBDA_RETURN_CONSTRAINT.should_push(owned_u(scope), scope))
+        si
+
+        @test()
+        Calling__should_push__with_composite_containing_the_pushing_scope_type_argument__returns_true() is
+            let scope = Semantic.BLOCK_SCOPE()
+
+            is_true(LAMBDA_RETURN_CONSTRAINT.should_push(box_of(owned_u(scope)), scope))
+        si
+
+        // The same shape belonging to some other scope stays excluded.
+        @test()
+        Calling__should_push__with_method_type_argument_of_another_scope__returns_false() is
+            is_false(LAMBDA_RETURN_CONSTRAINT.should_push(owned_u(Semantic.BLOCK_SCOPE()), Semantic.BLOCK_SCOPE()))
+        si
+
+        // A placeholder for a local variable, joining what is assigned
+        // to it or not.
+        placeholder(joins: bool) -> Type is
+            if !IoC.CONTAINER.instance.local_id_generator? then
+                IoC.CONTAINER.instance.set_local_id_generator_for_testing(IR.LOCAL_ID_GENERATOR())
+            fi
+
+            IoC.CONTAINER.instance.local_id_generator.enter_function()
+
+            let origin =
+                Semantic.Symbols.LOCAL_VARIABLE(
+                    loc(), Semantic.Symbols.NAMESPACE(loc(), "Test", null, ".Test", false), "v")
+
+            origin.joins_assignments = joins
+
+            return Semantic.Types.INFERRED_VARIABLE_TYPE(origin)
+        si
+
+        // holds_joining_placeholder: a slot holding a type argument that
+        // another argument gave and the literal's return can still widen
+        // is pushed as it stands, so the body is not held to what the
+        // placeholder has joined so far.
+        @test()
+        Calling__holds_joining_placeholder__with_a_joining_placeholder__returns_true() is
+            is_true(LAMBDA_RETURN_CONSTRAINT.holds_joining_placeholder(placeholder(true)))
+        si
+
+        @test()
+        Calling__holds_joining_placeholder__with_a_composite_holding_a_joining_placeholder__returns_true() is
+            is_true(LAMBDA_RETURN_CONSTRAINT.holds_joining_placeholder(box_of(box_of(placeholder(true)))))
+        si
+
+        @test()
+        Calling__holds_joining_placeholder__with_a_placeholder_that_does_not_join__returns_false() is
+            is_false(LAMBDA_RETURN_CONSTRAINT.holds_joining_placeholder(placeholder(false)))
+            is_false(LAMBDA_RETURN_CONSTRAINT.holds_joining_placeholder(box_of(placeholder(false))))
+        si
+
+        @test()
+        Calling__holds_joining_placeholder__with_a_settled_type__returns_false() is
+            is_false(LAMBDA_RETURN_CONSTRAINT.holds_joining_placeholder(box_of(int_type())))
+        si
+    si
+si

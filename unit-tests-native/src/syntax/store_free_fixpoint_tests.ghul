@@ -1,0 +1,692 @@
+namespace Syntax.UnitTests is
+    use Collections.LIST
+    use Collections.MAP
+
+    use Source.LOCATION
+
+    use Syntax.Process.STORE_FREE_FACTS
+    use Syntax.Process.STORE_FREE_FIXPOINT
+    use Syntax.Process.STORE_FREE_INNATES
+
+    use Semantic.Symbols.STORE_FREE_IMPORTS
+
+    use Semantic.Symbols.CLASS
+    use Semantic.Symbols.GLOBAL_FUNCTION
+    use Semantic.Symbols.INSTANCE_METHOD
+    use Semantic.Symbols.NAMESPACE
+
+    use Function = Semantic.Symbols.Function
+
+    use Ghul.Pipes
+    use Assertions
+
+    // Pins the store-free fixpoint's graph behaviour: seeding from
+    // disqualified bodies and open dispatch, propagation through
+    // callee and overrider edges, and the mutual-recursion case that
+    // must come out store-free.
+    class STORE_FREE_FIXPOINT_TESTS is
+        init() is si
+
+        loc() -> LOCATION => LOCATION("test.ghul", 1, 1, 1, 1)
+
+        global_function(name: string) -> GLOBAL_FUNCTION =>
+            GLOBAL_FUNCTION(loc(), loc(), Semantic.BLOCK_SCOPE(), name, Semantic.BLOCK_SCOPE())
+
+        method(name: string, owner: CLASS) -> INSTANCE_METHOD =>
+            INSTANCE_METHOD(loc(), loc(), owner, name, Semantic.BLOCK_SCOPE())
+
+        closed_class(name: string) -> CLASS is
+            let result = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), name, LIST[string](), Semantic.BLOCK_SCOPE())
+            result.mark_closed()
+            return result
+        si
+
+        open_class(name: string) -> CLASS is
+            let result = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), name, LIST[string](), Semantic.BLOCK_SCOPE())
+            result.mark_open()
+            return result
+        si
+
+        facts_for(functions: Collections.Iterable[Function]) -> MAP[Function, STORE_FREE_FACTS] is
+            let result = MAP[Function, STORE_FREE_FACTS]()
+            for f in functions do
+                result[f] = STORE_FREE_FACTS()
+            od
+            return result
+        si
+
+        // Solve and answer for the strict relation: is `f` proven to
+        // store nothing at all?
+        safe(facts: MAP[Function, STORE_FREE_FACTS], f: Function) -> bool =>
+            !STORE_FREE_FIXPOINT().solve(facts).unsafe.contains(f)
+
+        // The construction relation: does `f` write nothing beyond
+        // the object it is called to build?
+        construction_safe(facts: MAP[Function, STORE_FREE_FACTS], f: Function) -> bool =>
+            !STORE_FREE_FIXPOINT().solve(facts).construction_unsafe.contains(f)
+
+        // A reflected function whose owner renders the given ghūl
+        // qualified name — the shape STORE_FREE_IMPORTS matches on.
+        trusted_import(namespace_name: string, class_name: string, member_name: string) -> INSTANCE_METHOD is
+            let ns = NAMESPACE(loc(), namespace_name, null, ".{namespace_name}", false)
+            let owner = CLASS(LOCATION.reflected, LOCATION.reflected, ns, class_name, LIST[string](), Semantic.BLOCK_SCOPE())
+            return INSTANCE_METHOD(LOCATION.reflected, LOCATION.reflected, owner, member_name, Semantic.BLOCK_SCOPE())
+        si
+
+        @test()
+        Trusted_virtual_import_with_storing_overrider__poisons_the_caller() is
+            let to_string_import = trusted_import("Ghul.Intrinsics", "object", "to_string")
+            let overrider = method("to_string", closed_class("SHOUTY"))
+            to_string_import.add_overrider(overrider)
+
+            let caller = global_function("caller")
+            let facts = facts_for([cast Function(caller), cast Function(overrider)])
+            facts[caller].add_callee(to_string_import)
+            facts[overrider].is_disqualified = true
+
+            is_false(safe(facts, caller))
+            is_false(to_string_import.is_store_free)
+        si
+
+        @test()
+        Trusted_virtual_import_with_store_free_overrider__keeps_the_caller_safe() is
+            let to_string_import = trusted_import("Ghul.Intrinsics", "object", "to_string")
+            let overrider = method("to_string", closed_class("QUIET"))
+            to_string_import.add_overrider(overrider)
+
+            let caller = global_function("caller")
+            let facts = facts_for([cast Function(caller), cast Function(overrider)])
+            facts[caller].add_callee(to_string_import)
+
+            is_true(safe(facts, caller))
+        si
+
+        @test()
+        Untrusted_import__poisons_the_caller() is
+            let mystery = trusted_import("Ghul.Intrinsics", "object", "mystery_method")
+            let caller = global_function("caller")
+            let facts = facts_for([cast Function(caller)])
+            facts[caller].add_callee(mystery)
+
+            is_false(safe(facts, caller))
+        si
+
+        @test()
+        Trusted_import_reached_without_a_fixpoint_edge__reads_store_free() is
+            // A call in a function-literal body never becomes a fixpoint
+            // callee edge, so the import's trust has to hold when
+            // is_store_free is queried directly, with no solve run.
+            let import_fn = trusted_import("Ghul.Intrinsics", "string", "to_upper")
+
+            is_true(import_fn.is_store_free)
+        si
+
+        @test()
+        Curated_bcl_reads__are_trusted_store_free() is
+            // Pins the curated entries: a Type.to_string read, the
+            // reflected-metadata read on both MemberInfo and
+            // ParameterInfo, and the KeyValuePair struct's read-only
+            // getters.
+            is_true(trusted_import("Ghul", "Type", "to_string").is_store_free)
+            is_true(
+                trusted_import("System.Reflection", "MemberInfo", "get_custom_attributes_data").is_store_free)
+            is_true(
+                trusted_import("System.Reflection", "ParameterInfo", "get_custom_attributes_data").is_store_free)
+            is_true(trusted_import("Collections", "KEY_VALUE_PAIR", "key").is_store_free)
+            is_true(trusted_import("Collections", "KEY_VALUE_PAIR", "value").is_store_free)
+        si
+
+        @test()
+        Uncurated_sibling_member__stays_untrusted() is
+            // A member sharing the owner with a curated entry but not
+            // itself curated must not be swept in by a too-broad match.
+            is_false(trusted_import("Ghul", "Type", "get_methods").is_store_free)
+        si
+
+        @test()
+        Trusted_import_with_an_overrider__is_not_store_free() is
+            // The query-time gate withdraws trust from a virtual import
+            // that carries an overrider, deferring to the fixpoint's
+            // dispatch-shadow check.
+            let import_fn = trusted_import("Ghul.Intrinsics", "object", "to_string")
+            import_fn.add_overrider(method("to_string", closed_class("SHOUTY")))
+
+            is_false(import_fn.is_store_free)
+        si
+
+        // A body marked @trusted_store_free() is trusted as a curated
+        // import is, though the solve walked it and found it storing.
+        @test()
+        Trusted_store_free_body_that_stores__keeps_the_caller_safe() is
+            let marked = method("describe", closed_class("MARKED"))
+            marked.mark_trusted_store_free()
+
+            let caller = global_function("caller")
+            let facts = facts_for([cast Function(caller), cast Function(marked)])
+            facts[caller].add_callee(marked)
+            facts[marked].is_disqualified = true
+
+            is_true(safe(facts, caller))
+        si
+
+        // The trust covers the marked body only: an overrider in the
+        // program being compiled is judged, so one that stores poisons a
+        // caller that could dispatch to it.
+        @test()
+        Trusted_store_free_body_with_storing_overrider__poisons_the_caller() is
+            let marked = method("describe", open_class("BASE"))
+            marked.mark_trusted_store_free()
+
+            let overrider = method("describe", closed_class("DERIVED"))
+            marked.add_overrider(overrider)
+
+            let caller = global_function("caller")
+            let facts = facts_for([cast Function(caller), cast Function(marked), cast Function(overrider)])
+            facts[caller].add_callee(marked)
+            facts[overrider].is_disqualified = true
+
+            is_false(safe(facts, caller))
+        si
+
+        // An overrider in a library source stands where a .NET library's
+        // own override would, which the solve never judges.
+        @test()
+        Trusted_store_free_body_with_storing_library_overrider__keeps_the_caller_safe() is
+            let build_flags = IoC.CONTAINER.instance.build_flags
+            let previous = build_flags.library_sources
+
+            let libraries = Source.SOURCE_LIBRARIES()
+            let _ = libraries.add("core", "1.0.0", "/library-root")
+            libraries.list_file("/library-root/derived.ghul")
+            build_flags.library_sources = libraries
+
+            try
+                let marked = method("describe", open_class("BASE"))
+                marked.mark_trusted_store_free()
+
+                let library_class = CLASS(
+                    LOCATION("/library-root/derived.ghul", 1, 1, 1, 1), loc(), Semantic.BLOCK_SCOPE(), "DERIVED",
+                    LIST[string](), Semantic.BLOCK_SCOPE())
+                library_class.mark_closed()
+
+                let overrider = INSTANCE_METHOD(
+                    LOCATION("/library-root/derived.ghul", 2, 1, 2, 1), loc(), library_class, "describe", Semantic.BLOCK_SCOPE())
+                marked.add_overrider(overrider)
+
+                let caller = global_function("caller")
+                let facts = facts_for([cast Function(caller), cast Function(marked), cast Function(overrider)])
+                facts[caller].add_callee(marked)
+                facts[overrider].is_disqualified = true
+
+                is_true(safe(facts, caller))
+            finally
+                build_flags.library_sources = previous
+            yrt
+        si
+
+        @test()
+        Clean_leaf_function__is_safe() is
+            let f = global_function("leaf")
+            let facts = facts_for([f])
+
+            is_true(safe(facts, f))
+        si
+
+        @test()
+        Disqualified_function__is_not_safe() is
+            let f = global_function("storer")
+            let facts = facts_for([f])
+            facts[f].is_disqualified = true
+
+            is_false(safe(facts, f))
+        si
+
+        constructor(name: string) -> INSTANCE_METHOD is
+            let result = method(name, closed_class(name))
+            result.il_name_override = ".ctor"
+            return result
+        si
+
+        @test()
+        Constructor_writing_only_its_own_fields__constructs_store_free() is
+            // its own-field writes disqualify the strict bit but leave
+            // is_construction_disqualified clear, so a construction
+            // crossing on it discharges
+            let ctor = constructor("BOX")
+            let facts = facts_for([cast Function(ctor)])
+            facts[ctor].is_disqualified = true
+
+            is_false(safe(facts, ctor))
+            is_true(construction_safe(facts, ctor))
+        si
+
+        @test()
+        Constructor_writing_a_foreign_slot__does_not_construct_store_free() is
+            // a write to something other than the fresh object sets
+            // is_construction_disqualified, so construction is not trusted
+            let ctor = constructor("LEAK")
+            let facts = facts_for([cast Function(ctor)])
+            facts[ctor].is_disqualified = true
+            facts[ctor].is_construction_disqualified = true
+
+            is_false(construction_safe(facts, ctor))
+        si
+
+        // An imported constructor is never walked, so the fixpoint has no
+        // construction bit for it; its structural answer stands in, and
+        // a parameterless one leaves the caller store-free.
+        @test()
+        Construction_edge_to_unreaching_imported_constructor__keeps_the_caller_safe() is
+            let ctor = trusted_import("System", "Decimal", "init")
+            let caller = global_function("make_decimal")
+            let facts = facts_for([cast Function(caller)])
+            facts[caller].add_construction_callee(ctor)
+
+            is_true(safe(facts, caller))
+        si
+
+        // The same edge as an ordinary call is held to the strict bar,
+        // which an unlisted import does not clear.
+        @test()
+        Call_edge_to_imported_constructor__still_demotes_the_caller() is
+            let ctor = trusted_import("System", "Decimal", "init")
+            let caller = global_function("reinit_decimal")
+            let facts = facts_for([cast Function(caller)])
+            facts[caller].add_callee(ctor)
+
+            is_false(safe(facts, caller))
+        si
+
+        // A construction edge is read against the callee's construction
+        // bit, so a constructor that writes nothing but the object it is
+        // building leaves its caller store-free even though the
+        // constructor itself is not.
+        @test()
+        Construction_callee_writing_only_its_own_fields__keeps_the_caller_safe() is
+            let ctor = constructor("BOX")
+            let caller = global_function("make_box")
+            let facts = facts_for([cast Function(caller), cast Function(ctor)])
+            facts[ctor].is_disqualified = true
+            facts[caller].add_construction_callee(ctor)
+
+            is_false(safe(facts, ctor))
+            is_true(construction_safe(facts, ctor))
+            is_true(safe(facts, caller))
+        si
+
+        // The same edge against a constructor that writes something
+        // other than the object it is building demotes the caller.
+        @test()
+        Construction_callee_writing_a_foreign_slot__demotes_the_caller() is
+            let ctor = constructor("LEAK")
+            let caller = global_function("make_leak")
+            let facts = facts_for([cast Function(caller), cast Function(ctor)])
+            facts[ctor].is_disqualified = true
+            facts[ctor].is_construction_disqualified = true
+            facts[caller].add_construction_callee(ctor)
+
+            is_false(construction_safe(facts, ctor))
+            is_false(safe(facts, caller))
+        si
+
+        // The construction bit carries its own dispatch shadow, read
+        // against the bit under solution rather than the strict one. An
+        // override writing nothing but its own state is not store-free,
+        // yet reaching it in place of what it overrides still writes
+        // only the object under construction — so the construction edge
+        // survives it.
+        @test()
+        Overrider_writing_only_its_own_fields__keeps_the_construction_edge() is
+            let assign = method("$set_x", closed_class("HOLDER"))
+            let overrider = method("$set_x", closed_class("SUBHOLDER"))
+            assign.add_overrider(overrider)
+
+            let facts = facts_for([cast Function(assign), cast Function(overrider)])
+            facts[assign].is_disqualified = true
+            facts[overrider].is_disqualified = true
+
+            let ctor = constructor("HOLDER_CTOR")
+            facts[ctor] = STORE_FREE_FACTS()
+            facts[ctor].is_disqualified = true
+            facts[ctor].add_construction_callee(assign)
+
+            is_false(safe(facts, assign))
+            is_true(construction_safe(facts, ctor))
+        si
+
+        // The soundness half of the same shadow: an override that
+        // writes a foreign slot demotes what it overrides, so the
+        // construction edge through it goes too.
+        @test()
+        Overrider_writing_a_foreign_slot__demotes_the_construction_edge() is
+            let assign = method("$set_x", closed_class("HOLDER"))
+            let overrider = method("$set_x", closed_class("SUBHOLDER"))
+            assign.add_overrider(overrider)
+
+            let facts = facts_for([cast Function(assign), cast Function(overrider)])
+            facts[assign].is_disqualified = true
+            facts[overrider].is_disqualified = true
+            facts[overrider].is_construction_disqualified = true
+
+            let ctor = constructor("LEAKY_HOLDER_CTOR")
+            facts[ctor] = STORE_FREE_FACTS()
+            facts[ctor].is_disqualified = true
+            facts[ctor].add_construction_callee(assign)
+
+            is_false(construction_safe(facts, ctor))
+        si
+
+        // The two relations feed each other, so a cycle across
+        // construction edges has to converge rather than spin: neither
+        // constructor writes anything but the object it is building, so
+        // both come out construction-store-free.
+        @test()
+        Mutually_constructing_constructors__converge_construction_store_free() is
+            let a = constructor("A")
+            let b = constructor("B")
+            let facts = facts_for([cast Function(a), cast Function(b)])
+            facts[a].is_disqualified = true
+            facts[b].is_disqualified = true
+            facts[a].add_construction_callee(b)
+            facts[b].add_construction_callee(a)
+
+            is_true(construction_safe(facts, a))
+            is_true(construction_safe(facts, b))
+        si
+
+        // The same cycle with one foreign store in it: the demotion has
+        // to reach all the way round rather than stopping at the writer.
+        @test()
+        Mutually_constructing_constructors_with_a_foreign_store__both_demote() is
+            let a = constructor("A_LEAK")
+            let b = constructor("B_LEAK")
+            let facts = facts_for([cast Function(a), cast Function(b)])
+            facts[a].is_disqualified = true
+            facts[b].is_disqualified = true
+            facts[b].is_construction_disqualified = true
+            facts[a].add_construction_callee(b)
+            facts[b].add_construction_callee(a)
+
+            is_false(construction_safe(facts, b))
+            is_false(construction_safe(facts, a))
+        si
+
+        @test()
+        Caller_of_clean_callee__is_safe() is
+            let callee = global_function("callee")
+            let caller = global_function("caller")
+            let facts = facts_for([callee, caller])
+            facts[caller].add_callee(callee)
+
+            is_true(safe(facts, caller))
+        si
+
+        @test()
+        Caller_of_disqualified_callee__is_not_safe() is
+            let callee = global_function("storer")
+            let caller = global_function("caller")
+            let facts = facts_for([callee, caller])
+            facts[callee].is_disqualified = true
+            facts[caller].add_callee(callee)
+
+            is_false(safe(facts, caller))
+        si
+
+        @test()
+        Unsafety_propagates_through_call_chains() is
+            let a = global_function("a")
+            let b = global_function("b")
+            let c = global_function("c")
+            let facts = facts_for([a, b, c])
+            facts[a].add_callee(b)
+            facts[b].add_callee(c)
+            facts[c].is_disqualified = true
+
+            is_false(safe(facts, a))
+            is_false(safe(facts, b))
+        si
+
+        @test()
+        Caller_of_unwalked_callee__is_not_safe() is
+            let external = global_function("imported")
+            let caller = global_function("caller")
+            let facts = facts_for([caller])
+            facts[caller].add_callee(external)
+
+            is_false(safe(facts, caller))
+        si
+
+        @test()
+        Mutually_recursive_clean_functions__are_safe() is
+            let ping = global_function("ping")
+            let pong = global_function("pong")
+            let facts = facts_for([ping, pong])
+            facts[ping].add_callee(pong)
+            facts[pong].add_callee(ping)
+
+            is_true(safe(facts, ping))
+            is_true(safe(facts, pong))
+        si
+
+        @test()
+        Clean_method_with_storing_override__is_not_safe() is
+            let base_owner = closed_class("QUIET")
+            let derived_owner = closed_class("NOISY")
+            let base_method = method("calm", base_owner)
+            let override_method = method("calm", derived_owner)
+            base_method.add_overrider(override_method)
+
+            let facts = facts_for([base_method, override_method])
+            facts[override_method].is_disqualified = true
+
+            is_false(safe(facts, base_method))
+            is_false(safe(facts, override_method))
+        si
+
+        @test()
+        Clean_method_with_clean_override__is_safe() is
+            let base_owner = closed_class("QUIET")
+            let derived_owner = closed_class("CALM")
+            let base_method = method("calm", base_owner)
+            let override_method = method("calm", derived_owner)
+            base_method.add_overrider(override_method)
+
+            let facts = facts_for([base_method, override_method])
+
+            is_true(safe(facts, base_method))
+            is_true(safe(facts, override_method))
+        si
+
+        @test()
+        Clean_method_on_open_class__is_not_safe() is
+            let owner = open_class("LOUD")
+            let m = method("shout", owner)
+
+            let facts = facts_for([m])
+
+            is_false(safe(facts, m))
+        si
+
+        @test()
+        Clean_method_on_closed_class__is_safe() is
+            let owner = closed_class("QUIET")
+            let m = method("calm", owner)
+
+            let facts = facts_for([m])
+
+            is_true(safe(facts, m))
+        si
+    si
+
+    // Pins the innate allowlist: value arithmetic, comparisons,
+    // boolean logic and reads are store-free; assignment through a
+    // reference or pointer, unqualified names and unknown families
+    // are not.
+    class STORE_FREE_INNATES_TESTS is
+        init() is si
+
+        loc() -> LOCATION => LOCATION("test.ghul", 1, 1, 1, 1)
+
+        qualified(family: string, leaf: string) -> Syntax.Trees.Identifiers.Identifier =>
+            Syntax.Trees.Identifiers.QUALIFIED(
+                loc(),
+                Syntax.Trees.Identifiers.Identifier(loc(), family),
+                leaf,
+                loc(),
+                loc()
+            )
+
+        @test()
+        Arithmetic_add__is_store_free() is
+            is_true(STORE_FREE_INNATES.is_store_free(qualified("arithmetic", "add")))
+        si
+
+        @test()
+        Compare_order__is_store_free() is
+            is_true(STORE_FREE_INNATES.is_store_free(qualified("compare", "order")))
+        si
+
+        @test()
+        Reference_read__is_store_free() is
+            is_true(STORE_FREE_INNATES.is_store_free(qualified("reference", "read")))
+        si
+
+        @test()
+        Reference_assign__is_not_store_free() is
+            is_false(STORE_FREE_INNATES.is_store_free(qualified("reference", "assign")))
+        si
+
+        @test()
+        Pointer_assign__is_not_store_free() is
+            is_false(STORE_FREE_INNATES.is_store_free(qualified("pointer", "assign")))
+        si
+
+        @test()
+        Unknown_family__is_not_store_free() is
+            is_false(STORE_FREE_INNATES.is_store_free(qualified("mystery", "op")))
+        si
+
+        @test()
+        Unqualified_name__is_not_store_free() is
+            is_false(STORE_FREE_INNATES.is_store_free(Syntax.Trees.Identifiers.Identifier(loc(), "add")))
+        si
+
+        @test()
+        Null_name__is_not_store_free() is
+            is_false(STORE_FREE_INNATES.is_store_free(null))
+        si
+    si
+
+    // Pins the trusted-import matcher: entries key on the owner's
+    // ghūl-side qualified name plus the member name, and only
+    // reflected functions can match.
+    class STORE_FREE_IMPORTS_TESTS is
+        init() is si
+
+        loc() -> LOCATION => LOCATION("test.ghul", 1, 1, 1, 1)
+
+        import_named(namespace_name: string, class_name: string, member_name: string, reflected: bool) -> INSTANCE_METHOD is
+            let ns = NAMESPACE(loc(), namespace_name, null, ".{namespace_name}", false)
+            let location = if reflected then LOCATION.reflected else loc() fi
+            let owner = CLASS(location, location, ns, class_name, LIST[string](), Semantic.BLOCK_SCOPE())
+            return INSTANCE_METHOD(location, location, owner, member_name, Semantic.BLOCK_SCOPE())
+        si
+
+        @test()
+        Listed_reflected_member__is_trusted() is
+            let f = import_named("Ghul.Intrinsics", "string", "index_of", true)
+            is_true(
+                STORE_FREE_IMPORTS.is_store_free(f),
+                "key='{f.owner!.qualified_name}.{f.name}' reflected={f.is_reflected}"
+            )
+        si
+
+        @test()
+        Listed_collection_read__is_trusted() is
+            is_true(STORE_FREE_IMPORTS.is_store_free(import_named("Collections", "STACK", "peek", true)))
+        si
+
+        @test()
+        Listed_char_classifier__is_trusted() is
+            is_true(STORE_FREE_IMPORTS.is_store_free(import_named("Ghul.Intrinsics", "char", "is_digit", true)))
+        si
+
+        @test()
+        Listed_string_transform__is_trusted() is
+            is_true(STORE_FREE_IMPORTS.is_store_free(import_named("Ghul.Intrinsics", "string", "trim", true)))
+        si
+
+        @test()
+        Listed_path_op__is_trusted() is
+            is_true(STORE_FREE_IMPORTS.is_store_free(import_named("IO", "Path", "combine", true)))
+        si
+
+        @test()
+        Listed_object_get_type__is_trusted() is
+            is_true(STORE_FREE_IMPORTS.is_store_free(import_named("Ghul.Intrinsics", "object", "get_type", true)))
+        si
+
+        @test()
+        Listed_string_builder_read__is_trusted() is
+            is_true(STORE_FREE_IMPORTS.is_store_free(import_named("Text", "STRING_BUILDER", "to_string", true)))
+        si
+
+        @test()
+        Listed_reflected_type_name_getter__is_trusted() is
+            is_true(STORE_FREE_IMPORTS.is_store_free(import_named("Ghul", "Type", "$get_full_name", true)))
+        si
+
+        @test()
+        Listed_keyvaluepair_constructor__is_trusted() is
+            is_true(STORE_FREE_IMPORTS.is_store_free(import_named("Collections", "KEY_VALUE_PAIR", "init", true)))
+        si
+
+        @test()
+        Unlisted_member__is_not_trusted() is
+            is_false(STORE_FREE_IMPORTS.is_store_free(import_named("Ghul.Intrinsics", "string", "normalize", true)))
+        si
+
+        // Convert.to_int32 is JetBrains-Pure and looks like a value
+        // conversion, but its object overload dispatches through
+        // IConvertible on a user-typed argument, which can store. It
+        // stays off the list by name.
+        @test()
+        Convert_conversion__is_not_trusted() is
+            is_false(STORE_FREE_IMPORTS.is_store_free(import_named("System", "Convert", "to_int32", true)))
+        si
+
+        @test()
+        Listed_name_on_unreflected_function__is_not_trusted() is
+            is_false(STORE_FREE_IMPORTS.is_store_free(import_named("Ghul.Intrinsics", "string", "index_of", false)))
+        si
+
+        @test()
+        Pinned_reader_with_its_parameters__is_trusted() is
+            let f = import_named("Text", "MATCH", "$get_groups", true)
+            f.arguments = LIST[Semantic.Types.Type]()
+
+            is_true(STORE_FREE_IMPORTS.is_store_free(f))
+        si
+
+        // A pinned reader is trusted only in the overloads listed by
+        // their parameters: the same name taking other parameters, or
+        // one whose parameters are not yet declared, is not covered.
+        @test()
+        Pinned_name_with_other_parameters__is_not_trusted() is
+            let f = import_named("Text", "MATCH_COLLECTION", "get_Item", true)
+            f.arguments = LIST[Semantic.Types.Type]()
+
+            is_false(STORE_FREE_IMPORTS.is_store_free(f))
+        si
+
+        @test()
+        Pinned_reader_with_undeclared_parameters__is_not_trusted() is
+            is_false(STORE_FREE_IMPORTS.is_store_free(import_named("Text", "MATCH", "$get_groups", true)))
+        si
+
+        @test()
+        Null_function__is_not_trusted() is
+            is_false(STORE_FREE_IMPORTS.is_store_free(null))
+        si
+    si
+si

@@ -1,0 +1,116 @@
+namespace Semantic.Types.UnitTests is
+    use Collections.LIST
+
+    use Source.LOCATION
+
+    use Semantic.Symbols.CLASS
+    use Semantic.Symbols.FUNCTION_GENERIC_ARGUMENT
+    use Semantic.Types.GENERIC
+    use Semantic.Types.GENERIC_ARGUMENT_BIND_RESULTS
+    use Semantic.Types.GenericArgument
+    use Semantic.Types.Type
+    use Assertions
+
+    // A bind result whose actuals carry another function's method-level
+    // type parameter must not be committed as a call-site specialization:
+    // the !!N index has no meaning outside that function.
+    class GENERIC_ARGUMENT_BIND_RESULTS_FOREIGN_TESTS is
+        init() is si
+
+        loc() -> LOCATION => LOCATION("test.ghul", 1, 1, 1, 1)
+        empty_names() -> LIST[string] => LIST[string]()
+
+        make_owner(name: string) -> CLASS => CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), name, empty_names(), Semantic.BLOCK_SCOPE())
+
+        make_fga_type(owner: CLASS, name: string) -> Type is
+            let arg = FUNCTION_GENERIC_ARGUMENT(loc(), owner, name, 0)
+            return arg.type!
+        si
+
+        make_fga_slot(owner: CLASS, name: string) -> GenericArgument is
+            let arg = FUNCTION_GENERIC_ARGUMENT(loc(), owner, name, 0)
+            return cast GenericArgument(arg.type!)
+        si
+
+        @test()
+        foreign_actual_is_detected() is
+            let declaring = make_owner("declaring")
+            let compiling = make_owner("compiling")
+            let results = GENERIC_ARGUMENT_BIND_RESULTS()
+
+            is_true(results.bind(make_fga_slot(compiling, "A"), make_fga_type(declaring, "E")))
+            is_true(results.contains_function_generic_argument_foreign_to(compiling))
+        si
+
+        @test()
+        own_actual_is_not_foreign() is
+            let compiling = make_owner("compiling")
+            let results = GENERIC_ARGUMENT_BIND_RESULTS()
+
+            is_true(results.bind(make_fga_slot(compiling, "A"), make_fga_type(compiling, "U")))
+            is_false(results.contains_function_generic_argument_foreign_to(compiling))
+        si
+
+        @test()
+        nested_foreign_actual_is_detected() is
+            let declaring = make_owner("declaring")
+            let compiling = make_owner("compiling")
+            let results = GENERIC_ARGUMENT_BIND_RESULTS()
+
+            let foreign = make_fga_type(declaring, "E")
+            let iterable = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Iterable", ["T"], Semantic.BLOCK_SCOPE())
+            let nested = GENERIC(loc(), iterable, LIST[Type]([foreign]))
+
+            is_true(results.bind(make_fga_slot(compiling, "A"), nested))
+            is_true(results.contains_function_generic_argument_foreign_to(compiling))
+        si
+
+        // A slot bound first from a concrete actual and then paired with a
+        // placeholder pushes the bound type into the placeholder - unless
+        // that type names another function's type parameter, which is no
+        // type the placeholder could take.
+        placeholder_bound_after(existing: Type, site: CLASS) -> Semantic.Symbols.INFERRED_TYPE_ARG_ORIGIN is
+            let results = GENERIC_ARGUMENT_BIND_RESULTS()
+            results.site = site
+
+            let slot = make_fga_slot(site, "A")
+            let origin = Semantic.Symbols.INFERRED_TYPE_ARG_ORIGIN(loc(), Semantic.BLOCK_SCOPE(), "x")
+
+            is_true(results.bind(slot, existing))
+            is_true(results.bind(slot, cast Type(Semantic.Types.INFERRED_VARIABLE_TYPE(origin))))
+
+            results.offer_bindings_to_placeholders()
+
+            return origin
+        si
+
+        @test()
+        foreign_existing_actual_is_not_pushed_into_a_placeholder() is
+            let declaring = make_owner("declaring")
+            let compiling = make_owner("compiling")
+
+            let origin = placeholder_bound_after(make_fga_type(declaring, "T"), compiling)
+
+            is_null(origin.try_get_inferred_type())
+        si
+
+        @test()
+        own_existing_actual_is_pushed_into_a_placeholder() is
+            let compiling = make_owner("compiling")
+            let own = make_fga_type(compiling, "U")
+
+            let origin = placeholder_bound_after(own, compiling)
+
+            are_same(own, origin.try_get_inferred_type())
+        si
+
+        @test()
+        empty_bindings_are_never_foreign() is
+            let compiling = make_owner("compiling")
+            let results = GENERIC_ARGUMENT_BIND_RESULTS()
+
+            is_false(results.contains_function_generic_argument_foreign_to(compiling))
+            is_false(results.contains_function_generic_argument_foreign_to(null))
+        si
+    si
+si

@@ -1,0 +1,109 @@
+namespace Syntax.Process.Printer.UnitTests is
+
+    use Syntax.Process.Printer.FORMATTER
+    use Assertions
+
+    // A binary operator chain is one breaking unit: it stays on one line when
+    // it fits and otherwise breaks after each operator, never before one —
+    // a line-start operator opens something new, so a break before an
+    // operator would change what the next line re-parses as.
+    class FORMATTER_BINARY_CHAIN_TESTS is
+        init() is si
+
+        // LOCATION.internal and friends are statics the IoC container
+        // populates, and a unit test that does not bring the container up
+        // leaves them null.
+        location() -> Source.LOCATION => Source.LOCATION("test.ghul", 1, 1, 1, 1)
+
+        format(node: Trees.Node, width: int) -> string =>
+            FORMATTER(Collections.LIST[Lexical.TRIVIA](), width).format(node)
+
+        identifier(name: string) -> Trees.Expressions.Expression =>
+            Trees.Expressions.IDENTIFIER(
+                location(),
+                Trees.Identifiers.Identifier(location(), name)
+            )
+
+        operator_identifier(name: string) -> Trees.Identifiers.Identifier =>
+            Trees.Identifiers.Identifier(location(), name)
+
+        binary(
+            operation: string,
+            left: Trees.Expressions.Expression,
+            right: Trees.Expressions.Expression
+        ) -> Trees.Expressions.Expression =>
+            Trees.Expressions.BINARY(
+                location(),
+                operator_identifier(operation),
+                null,
+                left,
+                right
+            )
+
+        // A left-nested `a /\ b /\ c` chain.
+        chain() -> Trees.Expressions.Expression =>
+            binary(
+                "/\\",
+                binary("/\\", identifier("first_condition"), identifier("second_condition")),
+                identifier("third_condition")
+            )
+
+        @test()
+        Formatting__at_a_generous_width__should_not_break_a_chain_that_fits() is
+            let formatted = format(chain(), 100)
+
+            is_false(
+                formatted.trim().contains("\n"),
+                "expected one line at width 100, got: {formatted}"
+            )
+        si
+
+        @test()
+        Formatting__at_a_narrow_width__should_break_a_chain_only_after_operators() is
+            let formatted = format(chain(), 30)
+
+            is_true(
+                formatted.contains("\n"),
+                "expected a break at width 30, got: {formatted}"
+            )
+
+            for line in formatted.split(['\n']) do
+                let trimmed = line.trim()
+                is_false(
+                    trimmed.starts_with("/\\"),
+                    "expected no line to start with an operator, got: {formatted}"
+                )
+                is_true(
+                    trimmed.ends_with("/\\") \/ trimmed.length <= 30,
+                    "expected each line to end at an operator or fit, got: {formatted}"
+                )
+            od
+        si
+
+        @test()
+        Formatting__a_broken_chain__should_put_every_operand_at_the_first_operands_indent() is
+            let formatted = format(chain(), 30)
+
+            for line in formatted.split(['\n']) do
+                if line.trim().length > 0 then
+                    is_false(
+                        line.starts_with(" "),
+                        "expected every operand at the chain's own indent, got: {formatted}"
+                    )
+                fi
+            od
+        si
+
+        @test()
+        Formatting__a_broken_chain__should_put_one_operand_on_each_line() is
+            let formatted = format(chain(), 30)
+
+            let lines = formatted.trim().split(['\n'])
+
+            are_equal(3, lines.count, "expected three lines, got: {formatted}")
+            are_equal("first_condition /\\", lines[0].trim(), "line 0, got: {formatted}")
+            are_equal("second_condition /\\", lines[1].trim(), "line 1, got: {formatted}")
+            are_equal("third_condition", lines[2].trim(), "line 2, got: {formatted}")
+        si
+    si
+si

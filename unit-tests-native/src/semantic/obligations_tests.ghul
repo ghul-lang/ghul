@@ -1,0 +1,510 @@
+namespace Semantic.UnitTests is
+    use Collections.LIST
+
+    use Source.LOCATION
+
+    use Logging.DIAGNOSTICS_STORE
+
+    use Ghul.Pipes
+
+    use Semantic.Symbols.INFERRED_TYPE_ARG_ORIGIN
+    use Semantic.Symbols.LOCAL_VARIABLE
+    use Semantic.Types.INFERRED_VARIABLE_TYPE
+    use Assertions
+
+    // OBLIGATIONS is the queue of rules that could not fire on a walk of
+    // a function body because an input was still an inference
+    // placeholder. These tests pin what recording one does, what a new
+    // walk keeps, and what the fixing step reports once the body's loop
+    // has stopped.
+    class OBLIGATIONS_TESTS is
+        init() is
+            if !IoC.CONTAINER.instance.local_id_generator? then
+                IoC.CONTAINER.instance.set_local_id_generator_for_testing(IR.LOCAL_ID_GENERATOR())
+            fi
+
+            IoC.CONTAINER.instance.local_id_generator.enter_function()
+        si
+
+        loc() -> LOCATION => LOCATION("test.ghul", 1, 1, 1, 1)
+
+        local(name: string) -> LOCAL_VARIABLE => LOCAL_VARIABLE(loc(), Semantic.BLOCK_SCOPE(), name)
+
+        object_type() -> Semantic.Types.Type is
+            let c = Semantic.Symbols.CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "object", LIST[string](), Semantic.BLOCK_SCOPE())
+            c.mark_is_object()
+            return c.type!
+        si
+
+        @test()
+        Calling__defer__should_mark_the_logger_as_having_consumed_an_unresolved_type() is
+            let logger = DIAGNOSTICS_STORE()
+            IoC.CONTAINER.instance.set_logger_for_testing(logger)
+
+            OBLIGATIONS.begin_body()
+            OBLIGATIONS.defer("join", INFERRED_VARIABLE_TYPE(local("a")), null)
+
+            is_true(logger.has_consumed_any)
+
+            OBLIGATIONS.end_body()
+        si
+
+        @test()
+        Calling__begin_walk__should_drop_the_previous_walks_obligations() is
+            IoC.CONTAINER.instance.set_logger_for_testing(DIAGNOSTICS_STORE())
+
+            OBLIGATIONS.begin_body()
+            OBLIGATIONS.defer("join", INFERRED_VARIABLE_TYPE(local("a")), null)
+            OBLIGATIONS.begin_walk()
+
+            are_equal(0, OBLIGATIONS.standing.count)
+
+            OBLIGATIONS.end_body()
+        si
+
+        // A walk that leaves exactly the origins waiting that the walk
+        // before it did can only repeat; one that leaves a new origin, or
+        // none, has moved.
+        @test()
+        Reading__is_stuck__after_two_walks_leaving_the_same_origin__should_be_true() is
+            IoC.CONTAINER.instance.set_logger_for_testing(DIAGNOSTICS_STORE())
+            let a = local("a")
+
+            OBLIGATIONS.begin_body()
+            OBLIGATIONS.begin_walk()
+            OBLIGATIONS.defer("join", INFERRED_VARIABLE_TYPE(a), null)
+            OBLIGATIONS.begin_walk()
+            OBLIGATIONS.defer("parameter", INFERRED_VARIABLE_TYPE(a), null)
+
+            is_true(OBLIGATIONS.is_stuck)
+
+            OBLIGATIONS.end_body()
+        si
+
+        // A body compiled during another's walk keeps its own record: the
+        // enclosing body compares against its own previous walk.
+        @test()
+        Reading__is_stuck__after_a_nested_body__should_compare_against_the_enclosing_walk() is
+            IoC.CONTAINER.instance.set_logger_for_testing(DIAGNOSTICS_STORE())
+            let a = local("a")
+
+            OBLIGATIONS.begin_body()
+            OBLIGATIONS.begin_walk()
+            OBLIGATIONS.defer("join", INFERRED_VARIABLE_TYPE(a), null)
+            OBLIGATIONS.begin_walk()
+
+            OBLIGATIONS.begin_body()
+            OBLIGATIONS.begin_walk()
+            OBLIGATIONS.defer("join", INFERRED_VARIABLE_TYPE(local("b")), null)
+            OBLIGATIONS.begin_walk()
+            OBLIGATIONS.end_body()
+
+            OBLIGATIONS.defer("join", INFERRED_VARIABLE_TYPE(a), null)
+
+            is_true(OBLIGATIONS.is_stuck)
+
+            OBLIGATIONS.end_body()
+        si
+
+        // The origin that stopped waiting was settled by what the walk
+        // before learned; the walk that left the other one waiting learned
+        // nothing, so the next can only repeat it.
+        @test()
+        Reading__is_stuck__after_a_walk_leaving_fewer_of_the_same_origins__should_be_true() is
+            IoC.CONTAINER.instance.set_logger_for_testing(DIAGNOSTICS_STORE())
+            let a = local("a")
+            let b = local("b")
+
+            OBLIGATIONS.begin_body()
+            OBLIGATIONS.begin_walk()
+            OBLIGATIONS.defer("join", INFERRED_VARIABLE_TYPE(a), null)
+            OBLIGATIONS.defer("join", INFERRED_VARIABLE_TYPE(b), null)
+            OBLIGATIONS.begin_walk()
+            OBLIGATIONS.defer("join", INFERRED_VARIABLE_TYPE(a), null)
+
+            is_true(OBLIGATIONS.is_stuck)
+
+            OBLIGATIONS.end_body()
+        si
+
+        @test()
+        Reading__is_stuck__after_a_walk_leaving_a_different_origin__should_be_false() is
+            IoC.CONTAINER.instance.set_logger_for_testing(DIAGNOSTICS_STORE())
+
+            OBLIGATIONS.begin_body()
+            OBLIGATIONS.begin_walk()
+            OBLIGATIONS.defer("join", INFERRED_VARIABLE_TYPE(local("a")), null)
+            OBLIGATIONS.begin_walk()
+            OBLIGATIONS.defer("join", INFERRED_VARIABLE_TYPE(local("b")), null)
+
+            is_false(OBLIGATIONS.is_stuck)
+
+            OBLIGATIONS.end_body()
+        si
+
+        // A walk that leaves the same origin waiting has still moved when
+        // it learned a bound while doing so: the next walk is what settles
+        // the origin from it.
+        @test()
+        Reading__is_stuck__after_a_walk_that_learned_a_bound__should_be_false() is
+            IoC.CONTAINER.instance.set_logger_for_testing(DIAGNOSTICS_STORE())
+            let a = local("a")
+
+            OBLIGATIONS.begin_body()
+            OBLIGATIONS.begin_walk()
+            OBLIGATIONS.defer("join", INFERRED_VARIABLE_TYPE(a), null)
+            OBLIGATIONS.begin_walk()
+            OBLIGATIONS.defer("join", INFERRED_VARIABLE_TYPE(a), null)
+
+            is_true(INFERENCE_TRACE.add_lower_bound("test", local("b"), object_type()))
+            is_false(OBLIGATIONS.is_stuck)
+
+            OBLIGATIONS.end_body()
+        si
+
+        // What the walk before it learned does not keep it walking.
+        @test()
+        Reading__is_stuck__after_a_walk_that_learned_nothing_itself__should_be_true() is
+            IoC.CONTAINER.instance.set_logger_for_testing(DIAGNOSTICS_STORE())
+            let a = local("a")
+
+            OBLIGATIONS.begin_body()
+            OBLIGATIONS.begin_walk()
+            OBLIGATIONS.defer("join", INFERRED_VARIABLE_TYPE(a), null)
+            is_true(INFERENCE_TRACE.add_lower_bound("test", local("b"), object_type()))
+
+            OBLIGATIONS.begin_walk()
+            OBLIGATIONS.defer("join", INFERRED_VARIABLE_TYPE(a), null)
+
+            is_true(OBLIGATIONS.is_stuck)
+
+            OBLIGATIONS.end_body()
+        si
+
+        @test()
+        Reading__is_stuck__after_a_walk_leaving_nothing__should_be_false() is
+            IoC.CONTAINER.instance.set_logger_for_testing(DIAGNOSTICS_STORE())
+
+            OBLIGATIONS.begin_body()
+            OBLIGATIONS.begin_walk()
+            OBLIGATIONS.defer("join", INFERRED_VARIABLE_TYPE(local("a")), null)
+            OBLIGATIONS.begin_walk()
+
+            is_false(OBLIGATIONS.is_stuck)
+
+            OBLIGATIONS.end_body()
+        si
+
+        @test()
+        Reading__learned_nothing__after_a_walk_recording_nothing_new__should_be_true() is
+            IoC.CONTAINER.instance.set_logger_for_testing(DIAGNOSTICS_STORE())
+
+            OBLIGATIONS.begin_body()
+            OBLIGATIONS.begin_walk()
+            is_true(INFERENCE_TRACE.add_lower_bound("test", local("b"), object_type()))
+            OBLIGATIONS.begin_walk()
+
+            is_true(OBLIGATIONS.learned_nothing)
+
+            OBLIGATIONS.end_body()
+        si
+
+        @test()
+        Reading__learned_nothing__after_a_walk_recording_a_bound__should_be_false() is
+            IoC.CONTAINER.instance.set_logger_for_testing(DIAGNOSTICS_STORE())
+
+            OBLIGATIONS.begin_body()
+            OBLIGATIONS.begin_walk()
+            OBLIGATIONS.begin_walk()
+            is_true(INFERENCE_TRACE.add_lower_bound("test", local("b"), object_type()))
+
+            is_false(OBLIGATIONS.learned_nothing)
+
+            OBLIGATIONS.end_body()
+        si
+
+        @test()
+        Reading__learned_nothing__outside_any_body__should_be_false() is
+            is_false(OBLIGATIONS.learned_nothing)
+        si
+
+        // The default for a rule that has one is taken once, when the
+        // body's loop has stopped, and is seen by the walk that follows
+        // it - `begin_walk` drops the queue but keeps what was defaulted.
+        @test()
+        Calling__take_defaults__with_an_empty_literal_obligation_standing__should_take_it() is
+            IoC.CONTAINER.instance.set_logger_for_testing(DIAGNOSTICS_STORE())
+            let a = local("a")
+
+            OBLIGATIONS.begin_body()
+            OBLIGATIONS.begin_walk()
+            OBLIGATIONS.defer(OBLIGATIONS.EMPTY_LITERAL, INFERRED_VARIABLE_TYPE(a), null)
+
+            is_true(OBLIGATIONS.take_defaults())
+            is_true(OBLIGATIONS.has_default_for(a))
+
+            OBLIGATIONS.begin_walk()
+
+            is_true(OBLIGATIONS.has_default_for(a))
+
+            OBLIGATIONS.end_body()
+        si
+
+        // Reading a parameter's bounds joins them, and a join over one still
+        // being inferred records an obligation while the defaults are being
+        // taken. The parameter has no settled bound, so it waits.
+        @test()
+        Calling__take_defaults__when_reading_a_bound_records_an_obligation__should_not_throw() is
+            IoC.CONTAINER.instance.set_logger_for_testing(DIAGNOSTICS_STORE())
+            let parameter = local("action")
+
+            parameter.add_lower_bound(object_type())
+            let box = Semantic.Symbols.CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Box", LIST[string](["T"]), Semantic.BLOCK_SCOPE())
+
+            parameter.add_lower_bound(Semantic.Types.GENERIC(loc(), box, LIST[Semantic.Types.Type]([INFERRED_VARIABLE_TYPE(local("pending"))])))
+
+            OBLIGATIONS.begin_body()
+            OBLIGATIONS.begin_walk()
+            OBLIGATIONS.defer("parameter", INFERRED_VARIABLE_TYPE(parameter), null)
+
+            is_false(OBLIGATIONS.take_defaults())
+            is_true(OBLIGATIONS.standing.count > 1, "reading the bound did not record its join")
+
+            OBLIGATIONS.end_body()
+        si
+
+        // A parameter no argument has reached, whose only bound is what it
+        // is passed to, takes that as its default once the walks stop.
+        @test()
+        Calling__take_defaults__for_a_parameter_bounded_only_from_above__should_take_it() is
+            IoC.CONTAINER.instance.set_logger_for_testing(DIAGNOSTICS_STORE())
+            let parameter = local("item")
+
+            parameter.add_upper_bound(object_type())
+
+            OBLIGATIONS.begin_body()
+            OBLIGATIONS.begin_walk()
+            OBLIGATIONS.defer("parameter", INFERRED_VARIABLE_TYPE(parameter), null)
+
+            is_true(OBLIGATIONS.take_defaults())
+            is_true(OBLIGATIONS.has_default_for(parameter))
+
+            OBLIGATIONS.end_body()
+        si
+
+        // One with nothing bounding it at all has no default to take.
+        @test()
+        Calling__take_defaults__for_an_unbounded_parameter__should_take_nothing() is
+            IoC.CONTAINER.instance.set_logger_for_testing(DIAGNOSTICS_STORE())
+            let parameter = local("item")
+
+            OBLIGATIONS.begin_body()
+            OBLIGATIONS.begin_walk()
+            OBLIGATIONS.defer("parameter", INFERRED_VARIABLE_TYPE(parameter), null)
+
+            is_false(OBLIGATIONS.take_defaults())
+
+            OBLIGATIONS.end_body()
+        si
+
+        // Taking it twice would default an origin the walk after the
+        // first default has already answered.
+        @test()
+        Calling__take_defaults__for_an_origin_already_defaulted__should_take_nothing() is
+            IoC.CONTAINER.instance.set_logger_for_testing(DIAGNOSTICS_STORE())
+            let a = local("a")
+
+            OBLIGATIONS.begin_body()
+            OBLIGATIONS.begin_walk()
+            OBLIGATIONS.defer(OBLIGATIONS.EMPTY_LITERAL, INFERRED_VARIABLE_TYPE(a), null)
+            OBLIGATIONS.take_defaults()
+
+            is_false(OBLIGATIONS.take_defaults())
+
+            OBLIGATIONS.end_body()
+        si
+
+        // A rule with no default is reported by the fixing step instead.
+        @test()
+        Calling__take_defaults__with_no_defaultable_obligation__should_take_nothing() is
+            IoC.CONTAINER.instance.set_logger_for_testing(DIAGNOSTICS_STORE())
+            let a = local("a")
+
+            OBLIGATIONS.begin_body()
+            OBLIGATIONS.begin_walk()
+            OBLIGATIONS.defer("later_use", INFERRED_VARIABLE_TYPE(a), null)
+
+            is_false(OBLIGATIONS.take_defaults())
+            is_false(OBLIGATIONS.has_default_for(a))
+
+            OBLIGATIONS.end_body()
+        si
+
+        // An origin the body settled needs no default.
+        @test()
+        Calling__take_defaults__for_an_origin_whose_type_has_settled__should_take_nothing() is
+            IoC.CONTAINER.instance.set_logger_for_testing(DIAGNOSTICS_STORE())
+            let a = local("a")
+
+            OBLIGATIONS.begin_body()
+            OBLIGATIONS.begin_walk()
+            OBLIGATIONS.defer(OBLIGATIONS.EMPTY_LITERAL, INFERRED_VARIABLE_TYPE(a), null)
+
+            a.set_type(object_type())
+
+            is_false(OBLIGATIONS.take_defaults())
+
+            OBLIGATIONS.end_body()
+        si
+
+        // A defaulted origin is answered, so the fixing step has nothing
+        // to report about it.
+        @test()
+        Calling__fix__for_a_defaulted_origin__should_report_nothing() is
+            IoC.CONTAINER.instance.set_logger_for_testing(DIAGNOSTICS_STORE())
+            let logger = DIAGNOSTICS_STORE()
+            let a = local("a")
+
+            OBLIGATIONS.begin_body()
+            OBLIGATIONS.begin_walk()
+            OBLIGATIONS.defer(OBLIGATIONS.EMPTY_LITERAL, INFERRED_VARIABLE_TYPE(a), loc())
+            OBLIGATIONS.take_defaults()
+            OBLIGATIONS.fix(logger)
+            OBLIGATIONS.end_body()
+
+            is_false(logger.any_errors)
+        si
+
+        // A parameter whose missing type was reported where it is declared
+        // has nothing more to say about it.
+        @test()
+        Calling__fix__for_an_origin_reported_at_its_declaration__should_report_nothing() is
+            IoC.CONTAINER.instance.set_logger_for_testing(DIAGNOSTICS_STORE())
+            let logger = DIAGNOSTICS_STORE()
+            let a = local("a")
+
+            a.is_reported_at_declaration = true
+
+            OBLIGATIONS.begin_body()
+            OBLIGATIONS.defer("call", INFERRED_VARIABLE_TYPE(a), loc())
+            OBLIGATIONS.fix(logger)
+            OBLIGATIONS.end_body()
+
+            is_false(logger.any_errors)
+        si
+
+        @test()
+        Calling__fix__should_report_an_unsettled_origin_once() is
+            IoC.CONTAINER.instance.set_logger_for_testing(DIAGNOSTICS_STORE())
+            let logger = DIAGNOSTICS_STORE()
+            let a = local("a")
+
+            OBLIGATIONS.begin_body()
+            OBLIGATIONS.defer("join", INFERRED_VARIABLE_TYPE(a), null)
+            OBLIGATIONS.defer("join", INFERRED_VARIABLE_TYPE(a), loc())
+            OBLIGATIONS.fix(logger)
+            OBLIGATIONS.end_body()
+
+            are_equal(1, logger.error_count)
+        si
+
+        // The report names the variable and points at the site that
+        // waited on it.
+        @test()
+        Calling__fix__should_name_the_variable_and_relate_the_site() is
+            IoC.CONTAINER.instance.set_logger_for_testing(DIAGNOSTICS_STORE())
+            let logger = DIAGNOSTICS_STORE()
+            let a = local("a")
+            let site = LOCATION("test.ghul", 9, 16, 9, 20)
+
+            OBLIGATIONS.begin_body()
+            OBLIGATIONS.defer("pack_value", INFERRED_VARIABLE_TYPE(a), site)
+            OBLIGATIONS.fix(logger)
+            OBLIGATIONS.end_body()
+
+            if let message = logger.diagnostics_for("test.ghul") |> first() then
+                are_equal("cannot infer the type of 'a'", message.text)
+
+                if let related = message.related then
+                    are_equal(1, related.count)
+                    is_true(related[0].location =~ site)
+                else
+                    is_true(false)
+                fi
+            else
+                is_true(false)
+            fi
+        si
+
+        // An origin standing for an expression's result is reported by what
+        // it stands for, since it has no name of its own.
+        @test()
+        Calling__fix__for_a_result_origin__should_report_its_description() is
+            IoC.CONTAINER.instance.set_logger_for_testing(DIAGNOSTICS_STORE())
+            let logger = DIAGNOSTICS_STORE()
+            let origin = Semantic.Symbols.INFERRED_RESULT_ORIGIN(loc(), Semantic.BLOCK_SCOPE(), "$return")
+            origin.description = "the return type of this function literal"
+
+            OBLIGATIONS.begin_body()
+            OBLIGATIONS.defer(OBLIGATIONS.LITERAL_RETURN, INFERRED_VARIABLE_TYPE(origin), loc())
+            OBLIGATIONS.fix(logger)
+            OBLIGATIONS.end_body()
+
+            if let message = logger.diagnostics_for("test.ghul") |> first() then
+                are_equal("cannot infer the return type of this function literal", message.text)
+            else
+                is_true(false)
+            fi
+        si
+
+        // A return left waiting because the literal's tail failed is
+        // reported by the tail's own error.
+        @test()
+        Calling__fix__for_a_return_waiting_after_an_error__should_report_nothing() is
+            IoC.CONTAINER.instance.set_logger_for_testing(DIAGNOSTICS_STORE())
+            let logger = DIAGNOSTICS_STORE()
+            let origin = Semantic.Symbols.INFERRED_RESULT_ORIGIN(loc(), Semantic.BLOCK_SCOPE(), "$return")
+            origin.description = "the return type of this function literal"
+
+            OBLIGATIONS.begin_body()
+            OBLIGATIONS.defer(OBLIGATIONS.LITERAL_RETURN_AFTER_ERROR, INFERRED_VARIABLE_TYPE(origin), loc())
+            OBLIGATIONS.fix(logger)
+            OBLIGATIONS.end_body()
+
+            is_false(logger.any_errors)
+        si
+
+        @test()
+        Calling__fix__should_skip_an_origin_whose_type_has_settled() is
+            IoC.CONTAINER.instance.set_logger_for_testing(DIAGNOSTICS_STORE())
+            let logger = DIAGNOSTICS_STORE()
+            let a = local("a")
+            let placeholder = INFERRED_VARIABLE_TYPE(a)
+
+            OBLIGATIONS.begin_body()
+            OBLIGATIONS.defer("join", placeholder, null)
+
+            a.set_type(object_type())
+
+            OBLIGATIONS.fix(logger)
+            OBLIGATIONS.end_body()
+
+            is_false(logger.any_errors)
+        si
+
+        @test()
+        Calling__fix__should_leave_a_type_argument_phantom_to_the_registry() is
+            IoC.CONTAINER.instance.set_logger_for_testing(DIAGNOSTICS_STORE())
+            let logger = DIAGNOSTICS_STORE()
+            let phantom = INFERRED_TYPE_ARG_ORIGIN(loc(), Semantic.BLOCK_SCOPE(), "T")
+
+            OBLIGATIONS.begin_body()
+            OBLIGATIONS.defer("join", INFERRED_VARIABLE_TYPE(phantom), null)
+            OBLIGATIONS.fix(logger)
+            OBLIGATIONS.end_body()
+
+            is_false(logger.any_errors)
+        si
+    si
+
+si

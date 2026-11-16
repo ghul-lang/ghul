@@ -1,0 +1,181 @@
+namespace Semantic.UnitTests is
+    use Collections.Iterable
+    use Collections.LIST
+    use Collections.MAP
+
+    use Source.LOCATION
+
+    use Semantic.CONSTRUCTOR_CONSTRAINT_RETRY
+    use Semantic.OWNER_CONSTRAINT_SPECIALIZER
+
+    use Semantic.Symbols.CLASS
+    use Semantic.Symbols.CLASSY_GENERIC_ARGUMENT
+    use Semantic.Symbols.Function
+    use Semantic.Symbols.INSTANCE_METHOD
+
+    use Semantic.Types.Type
+    use Assertions
+
+    // OWNER_CONSTRAINT_SPECIALIZER stub: the retry's orchestration
+    // (which candidates to call, how to aggregate, when to return
+    // null) is what's under test, not OCS itself — OCS has its own
+    // unit tests. A keyed map drives the result for each candidate so
+    // each test case can describe "this candidate gets replaced,
+    // that one doesn't" without setting up symbol tables and type
+    // maps that would faithfully drive the real OCS through its
+    // direct / variant / ancestor branches.
+    class STUB_SPECIALIZER: OWNER_CONSTRAINT_SPECIALIZER is
+        _replacements: MAP[Function, Function]
+
+        init(replacements: MAP[Function, Function]) is
+            super.init()
+            _replacements = replacements
+        si
+
+        specialize_from_constraint(location: LOCATION, candidate: Function, constraint: Type?) -> Function is
+            if _replacements.contains_key(candidate) then
+                return _replacements[candidate]
+            fi
+
+            return candidate
+        si
+    si
+
+    // Tests for CONSTRUCTOR_CONSTRAINT_RETRY — the pre-specialisation
+    // pass run on a null first overload-resolution of a constructor
+    // call. It iterates the candidate list, asks OWNER_CONSTRAINT_
+    // SPECIALIZER to bind each candidate's owner-generic args from
+    // the call-site constraint, and returns a substituted list iff
+    // at least one candidate was specialised. Returns null when
+    // nothing changed so the caller keeps the original null result
+    // and its diagnostic intact.
+    class CONSTRUCTOR_CONSTRAINT_RETRY_TESTS is
+        init() is si
+
+        loc() -> LOCATION => LOCATION("test.ghul", 1, 1, 1, 1)
+
+        empty_names() -> LIST[string] => LIST[string]()
+        names_for(values: Iterable[string]) -> LIST[string] is
+            let result = LIST[string]()
+            for v in values do result.add(v); od
+            return result
+        si
+
+        int_type() -> Type is
+            let int_class = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "int", empty_names(), Semantic.BLOCK_SCOPE())
+            return int_class.type!
+        si
+
+        functions_of(values: Iterable[Function]) -> LIST[Function] is
+            let result = LIST[Function]()
+            for v in values do result.add(v); od
+            return result
+        si
+
+        // Build a stub-specialised CONSTRUCTOR_CONSTRAINT_RETRY whose
+        // OCS rewrites each entry in `replacements`. Stand-alone
+        // helper so tests read as a sequence of `let retry = ...;
+        // retry.try_specialise_candidates(...)` lines.
+        retry_with(replacements: MAP[Function, Function]) -> CONSTRUCTOR_CONSTRAINT_RETRY =>
+            CONSTRUCTOR_CONSTRAINT_RETRY(STUB_SPECIALIZER(replacements))
+
+        retry_with_no_change() -> CONSTRUCTOR_CONSTRAINT_RETRY =>
+            retry_with(MAP[Function, Function]())
+
+        any_class() -> CLASS => CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Some", empty_names(), Semantic.BLOCK_SCOPE())
+
+        instance_method() -> Function => INSTANCE_METHOD(loc(), loc(), any_class(), "init", Semantic.BLOCK_SCOPE())
+
+        // Null constraint → bail. The caller usually pre-checks but
+        // the retry guards against it so the helper is safe to call
+        // unconditionally on a null first resolve.
+        @test()
+        Calling__try_specialise_candidates__with_null_constraint__returns_null() is
+            let result = retry_with_no_change()
+                .try_specialise_candidates(loc(), functions_of([instance_method()]), null)
+
+            is_null(result)
+        si
+
+        // Inferred-placeholder constraint → bail. Pinning from a
+        // still-unresolved placeholder would burn a wild owner slot
+        // onto the candidate and the resolver couldn't recover the
+        // unconstrained shape; the body-retry loop's later iteration
+        // will see a resolved constraint and try again.
+        @test()
+        Calling__try_specialise_candidates__with_inferred_constraint__returns_null() is
+            let box = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Box", names_for(["T"]), Semantic.BLOCK_SCOPE())
+            let box_t = CLASSY_GENERIC_ARGUMENT(loc(), box, "T", 0)
+
+            // box_t.type is a GenericArgument, which `.is_inferred`
+            // recognises as a wild type-variable slot.
+            let result = retry_with_no_change()
+                .try_specialise_candidates(loc(), functions_of([instance_method()]), box_t.type!)
+
+            is_null(result)
+        si
+
+        // No candidates → null. Empty input means no specialisation
+        // happened; caller preserves the original null result.
+        @test()
+        Calling__try_specialise_candidates__with_no_candidates__returns_null() is
+            let result = retry_with_no_change()
+                .try_specialise_candidates(loc(), LIST[Function](), int_type())
+
+            is_null(result)
+        si
+
+        // OCS returns each candidate unchanged → any_specialised stays
+        // false → helper returns null. The caller's "no progress"
+        // branch fires and the original null result + diagnostic stand.
+        @test()
+        Calling__try_specialise_candidates__when_no_candidate_changes__returns_null() is
+            let result = retry_with_no_change()
+                .try_specialise_candidates(loc(), functions_of([instance_method(), instance_method()]), int_type())
+
+            is_null(result)
+        si
+
+        // OCS rewrites the single candidate → helper returns a one-
+        // element list containing the specialised function. Caller
+        // re-resolves against the rewritten list.
+        @test()
+        Calling__try_specialise_candidates__when_OCS_rewrites_the_one_candidate__returns_substituted_list() is
+            let original = instance_method()
+            let specialised = instance_method()
+
+            let replacements = MAP[Function, Function]()
+            replacements[original] = specialised
+
+            let result = retry_with(replacements)
+                .try_specialise_candidates(loc(), functions_of([original]), int_type())
+
+            assert result?
+            are_equal(1, result.count)
+            are_same(specialised, result[0])
+        si
+
+        // Mixed input: OCS rewrites some candidates and leaves others
+        // unchanged. Helper returns the full list, preserving input
+        // order, with each entry replaced where applicable. The
+        // resolver needs every candidate (rewritten or not) to score
+        // the call honestly.
+        @test()
+        Calling__try_specialise_candidates__with_mixed_change_and_no_change__returns_full_substituted_list() is
+            let changed_in = instance_method()
+            let changed_out = instance_method()
+            let unchanged = instance_method()
+
+            let replacements = MAP[Function, Function]()
+            replacements[changed_in] = changed_out
+
+            let result = retry_with(replacements)
+                .try_specialise_candidates(loc(), functions_of([changed_in, unchanged]), int_type())
+
+            assert result?
+            are_equal(2, result.count)
+            are_same(changed_out, result[0])
+            are_same(unchanged, result[1])
+        si
+    si
+si

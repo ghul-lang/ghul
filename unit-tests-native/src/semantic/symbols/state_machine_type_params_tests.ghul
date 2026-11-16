@@ -1,0 +1,190 @@
+namespace Semantic.Symbols.UnitTests is
+    use System.Text.StringBuilder
+
+    use Collections.LIST
+
+    use Source.LOCATION
+
+    use Semantic.Types.Type
+    use Semantic.Symbols.STATE_MACHINE_TYPE_PARAMS
+    use Assertions
+
+    // The STATE_MACHINE_TYPE_PARAMS helper is the shared bookkeeping
+    // for both generator and async state machines — it captures the
+    // canonical ordering of type parameters visible inside the
+    // owning function (enclosing-class first, function-own next)
+    // and uses that ordering both to move each parameter to a
+    // class-level position on the frame (so type references inside
+    // the body reach `!N` there) and to build the `newobj`
+    // type-argument list.
+    //
+    // These tests pin the ordering invariant — generator and async
+    // frames both rely on it to keep `!N` indices aligned with the
+    // frame class's declared generic arguments.
+    class STATE_MACHINE_TYPE_PARAMS_TESTS is
+        init() is si
+
+        loc() -> LOCATION => LOCATION("test.ghul", 1, 1, 1, 1)
+
+        namespace_owner() -> NAMESPACE => NAMESPACE(loc(), "Test", null, ".Test", false)
+
+        listener() -> SymbolDefinitionListener =>
+            IoC.CONTAINER.instance.symbol_definition_locations
+        @test()
+        Calling__construction_type_arguments__on_a_non_generic_function__should_return_null() is
+            let function = STATIC_METHOD(loc(), loc(), Semantic.BLOCK_SCOPE(), "do_thing", Semantic.BLOCK_SCOPE())
+
+            let result = STATE_MACHINE_TYPE_PARAMS.construction_type_arguments(function)
+
+            is_null(result)
+        si
+
+        @test()
+        Calling__construction_type_arguments__on_a_generic_function__should_list_function_type_args_in_order() is
+            let function = STATIC_METHOD(loc(), loc(), Semantic.BLOCK_SCOPE(), "do_thing", Semantic.BLOCK_SCOPE())
+            function.is_generic = true
+
+            let t = FUNCTION_GENERIC_ARGUMENT(loc(), function, "T", 0)
+            let u = FUNCTION_GENERIC_ARGUMENT(loc(), function, "U", 1)
+
+            function.declare(loc(), t, null)
+            function.declare(loc(), u, null)
+
+            let names = LIST[string]()
+            names.add("T")
+            names.add("U")
+            function.generic_argument_names = names
+
+            let args = LIST[Type]()
+            args.add(t.type!)
+            args.add(u.type!)
+            function.generic_arguments = args
+
+            let result = STATE_MACHINE_TYPE_PARAMS.construction_type_arguments(function)
+
+            is_not_null(result)
+            are_equal(2, result!.count)
+            are_same(t.type, result[0])
+            are_same(u.type, result[1])
+        si
+
+        @test()
+        Asking_a_closure_for_its_parameters__should_answer_its_captures_in_index_order() is
+            let owner = namespace_owner()
+            let subject = STATIC_CLOSURE(loc(), owner, "$anon", owner, false)
+
+            let a = FUNCTION_GENERIC_ARGUMENT(loc(), owner, "A", 0)
+            let b = FUNCTION_GENERIC_ARGUMENT(loc(), owner, "B", 1)
+
+            subject.add_type_argument_reference(a)
+            subject.add_type_argument_reference(b)
+
+            let parameters = STATE_MACHINE_TYPE_PARAMS.captured_parameters(subject)
+
+            are_equal(2, parameters.count)
+            are_same(a, parameters[0])
+            are_same(b, parameters[1])
+        si
+
+        @test()
+        Asking_a_closure_that_captured_nothing__should_answer_an_empty_set() is
+            let owner = namespace_owner()
+            let subject = STATIC_CLOSURE(loc(), owner, "$anon", owner, false)
+
+            are_equal(0, STATE_MACHINE_TYPE_PARAMS.captured_parameters(subject).count)
+        si
+
+        // A closure that has captured nothing yet is not a closure that
+        // captures nothing: the captures arrive while its body is
+        // walked. Answering with its enclosing class's parameters in
+        // the meantime freezes a parameter it will never carry at an
+        // index, and the one it does carry then has nowhere to go.
+        @test()
+        Asking_a_closure_in_a_generic_class_before_it_has_captured__should_answer_an_empty_set() is
+            let owner =
+                CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Owner", Collections.LIST[string](["T"]), Semantic.BLOCK_SCOPE())
+
+            owner.declare(loc(), CLASSY_GENERIC_ARGUMENT(loc(), owner, "T", 0), null)
+
+            let subject = INSTANCE_CLOSURE(loc(), owner, "$anon", owner, false)
+
+            is_true(owner.is_generic)
+            are_equal(0, STATE_MACHINE_TYPE_PARAMS.captured_parameters(subject).count)
+        si
+
+        @test()
+        Declaring_from_a_set_that_grew__should_keep_the_first_index_and_append() is
+            let owner = namespace_owner()
+            let closure = STATIC_CLOSURE(loc(), owner, "$anon", owner, false)
+
+            let a = FUNCTION_GENERIC_ARGUMENT(loc(), owner, "A", 0)
+
+            closure.add_type_argument_reference(a)
+
+            let frame = ASYNC_STATE_MACHINE_FRAME(owner, closure, null, false)
+
+            frame.declare_captured_type_params(listener())
+
+            are_equal(1, frame.argument_names.count)
+            are_equal("A", frame.argument_names[0])
+
+            let first = frame.mirror_of(a)
+
+            // A capture reached later in the body.
+            let b = FUNCTION_GENERIC_ARGUMENT(loc(), owner, "B", 1)
+
+            closure.add_type_argument_reference(b)
+
+            frame.declare_captured_type_params(listener())
+
+            are_equal(2, frame.argument_names.count)
+            are_equal("A", frame.argument_names[0])
+            are_equal("B", frame.argument_names[1])
+
+            // The parameter declared first still stands for the same
+            // frame parameter, so anything already rendered against it
+            // still names the slot it was given.
+            are_same(first, frame.mirror_of(a))
+            is_true(frame.mirrors(b))
+        si
+
+        @test()
+        Declaring_twice_from_an_unchanged_set__should_declare_nothing_further() is
+            let owner = namespace_owner()
+            let closure = STATIC_CLOSURE(loc(), owner, "$anon", owner, false)
+
+            closure.add_type_argument_reference(FUNCTION_GENERIC_ARGUMENT(loc(), owner, "A", 0))
+
+            let frame = ASYNC_STATE_MACHINE_FRAME(owner, closure, null, false)
+
+            frame.declare_captured_type_params(listener())
+            frame.declare_captured_type_params(listener())
+
+            are_equal(1, frame.argument_names.count)
+        si
+
+        // A parameter arrives as its own symbol in one place and as a
+        // frozen copy of itself in another, so the mirror is found by
+        // what the parameter is rather than by which symbol asked.
+        @test()
+        Asking_for_a_mirror_with_a_frozen_copy__should_find_the_one_declared_for_the_parameter() is
+            let owner = namespace_owner()
+            let closure = STATIC_CLOSURE(loc(), owner, "$anon", owner, false)
+
+            let a = FUNCTION_GENERIC_ARGUMENT(loc(), owner, "A", 0)
+
+            closure.add_type_argument_reference(a)
+
+            let frame = ASYNC_STATE_MACHINE_FRAME(owner, closure, null, false)
+
+            frame.declare_captured_type_params(listener())
+
+            let frozen = cast GenericArgument(a.freeze())
+
+            are_not_same(a, frozen)
+
+            is_true(frame.mirrors(frozen))
+            are_same(frame.mirror_of(a), frame.mirror_of(frozen))
+        si
+    si
+si

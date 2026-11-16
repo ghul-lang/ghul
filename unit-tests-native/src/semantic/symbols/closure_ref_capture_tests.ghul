@@ -1,0 +1,94 @@
+namespace Semantic.UnitTests is
+    use Collections.LIST
+
+    use Source.LOCATION
+
+    use Semantic.Symbols.CLASS
+    use Semantic.Symbols.Closure
+    use Semantic.Symbols.LOCAL_ARGUMENT
+    use Semantic.Symbols.LOCAL_VARIABLE
+
+    use Semantic.Types.REFERENCE
+    use Semantic.Types.Type
+
+    use Assertions
+
+    // Pins the gate that rejects a function literal capturing a
+    // `T ref` parameter: the parameter's stack slot dies when the
+    // enclosing method returns, so a closure frame field would hold
+    // a dangling pointer. Only a resolved reference type triggers
+    // the rejection.
+    class CLOSURE_REF_CAPTURE_TESTS is
+        init() is
+            // LOCAL_VARIABLE's init reads IoC.CONTAINER.instance.local_id_generator;
+            // ensure it's wired up with a function-id-stack frame so the
+            // id allocator works.
+            if !IoC.CONTAINER.instance.local_id_generator? then
+                IoC.CONTAINER.instance.set_local_id_generator_for_testing(IR.LOCAL_ID_GENERATOR())
+            fi
+            IoC.CONTAINER.instance.local_id_generator.enter_function()
+        si
+
+        loc() -> LOCATION => LOCATION("test.ghul", 1, 1, 1, 1)
+
+        owner_class() -> CLASS =>
+            CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Owner", Collections.LIST[string]().to_array(), Semantic.BLOCK_SCOPE())
+
+        // The REFERENCE carrier must take one type parameter — the
+        // generic symbol's constructor asserts it.
+        ref_carrier() -> CLASS =>
+            CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "REFERENCE", LIST[string](["T"]), Semantic.BLOCK_SCOPE())
+
+        concrete_named() -> Type =>
+            owner_class().type!
+
+        ref_to(pointee: Type) -> Type =>
+            REFERENCE(loc(), ref_carrier(), LIST[Type]([pointee]))
+
+        make_argument(name: string, argument_type: Type?) -> LOCAL_ARGUMENT is
+            let argument = LOCAL_ARGUMENT(loc(), owner_class(), name)
+
+            if argument_type? then
+                argument.set_type(argument_type)
+            fi
+
+            return argument
+        si
+
+        @test()
+        Calling__captures_reference__with_ref_parameter__returns_true() is
+            let argument = make_argument("x", ref_to(concrete_named()))
+
+            is_true(Closure.captures_reference(argument))
+        si
+
+        @test()
+        Calling__captures_reference__with_plain_parameter__returns_false() is
+            let argument = make_argument("x", concrete_named())
+
+            is_false(Closure.captures_reference(argument))
+        si
+
+        @test()
+        Calling__captures_reference__with_unresolved_type__returns_false() is
+            // The gate reads the resolved type only; a not-yet-typed
+            // symbol rejects nothing, matching the capture-field
+            // machinery's tolerance of unresolved sources.
+            let argument = make_argument("x", null)
+
+            is_false(Closure.captures_reference(argument))
+        si
+
+        @test()
+        Calling__captures_reference__with_ref_typed_local__returns_true() is
+            // Reference-typed locals are rejected by the explicit-type
+            // resolver before a capture can form; if that ever changes,
+            // the same dangling-pointer hazard applies, so the gate
+            // keys on the type alone.
+            let local = LOCAL_VARIABLE(loc(), owner_class(), "v")
+            local.set_type(ref_to(concrete_named()))
+
+            is_true(Closure.captures_reference(local))
+        si
+    si
+si

@@ -1,0 +1,113 @@
+namespace Syntax.Process.UnitTests is
+    use Collections.LIST
+
+    use Source.LOCATION
+
+    use Semantic.Symbols.CLASS
+    use Semantic.Types.Type
+    use Semantic.Types.INFERRED_RETURN_TYPE
+    use Semantic.Types.GenericArgument
+
+    use Syntax.Process.DIVERGING_VALUE_POSITION
+    use Assertions
+
+    // Pins the two decisions DIVERGING_VALUE_POSITION factors out of the
+    // compile-expressions visitor for a value-requiring position whose
+    // statement diverges (`throw`, or an `if`/`case` whose arms all
+    // diverge): whether the absent value is worth reporting, and whether a
+    // diverging `=>` body adopts void as its return type. The visitor
+    // orchestration that supplies the flow / return-type state is covered
+    // by the integration tests.
+    class DIVERGING_VALUE_POSITION_TESTS is
+        init() is si
+
+        loc() -> LOCATION => LOCATION("test.ghul", 1, 1, 1, 1)
+
+        empty_names() -> LIST[string] => LIST[string]()
+
+        settled_type() -> Type =>
+            CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Settled", empty_names(), Semantic.BLOCK_SCOPE()).type!
+
+        box_class() -> CLASS =>
+            CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Box", ["T"], Semantic.BLOCK_SCOPE())
+
+        // --- is_missing_value_reportable ---------------------------------
+
+        @test()
+        is_missing_value_reportable__when_value_wanted_absent_and_reachable__is_true() is
+            is_true(DIVERGING_VALUE_POSITION.is_missing_value_reportable(true, false, false))
+        si
+
+        @test()
+        is_missing_value_reportable__when_unreachable__is_false() is
+            // The diverging-statement case: the continuation never runs, so
+            // the missing value is legitimate and nothing is reported.
+            is_false(DIVERGING_VALUE_POSITION.is_missing_value_reportable(true, false, true))
+        si
+
+        @test()
+        is_missing_value_reportable__when_a_value_is_present__is_false() is
+            is_false(DIVERGING_VALUE_POSITION.is_missing_value_reportable(true, true, false))
+        si
+
+        @test()
+        is_missing_value_reportable__when_no_value_wanted__is_false() is
+            is_false(DIVERGING_VALUE_POSITION.is_missing_value_reportable(false, false, false))
+        si
+
+        // --- settles_inferred_return_to_void -----------------------------
+
+        @test()
+        settles_inferred_return_to_void__for_absent_return_type__is_true() is
+            is_true(DIVERGING_VALUE_POSITION.settles_inferred_return_to_void(null))
+        si
+
+        @test()
+        settles_inferred_return_to_void__for_inferred_return_type__is_true() is
+            is_true(DIVERGING_VALUE_POSITION.settles_inferred_return_to_void(INFERRED_RETURN_TYPE()))
+        si
+
+        @test()
+        settles_inferred_return_to_void__for_type_parameter_return_type__is_false() is
+            // A declared type-parameter return type (`make[T](n: int) -> T
+            // => throw ...`) is a settled type the body's divergence
+            // satisfies, not an unset slot to default. It reads `is_wild`
+            // for its overload-resolution soft-match meaning; that must not
+            // be taken as "unsettled" here.
+            let type_parameter: Type = Semantic.Types.CLASSY_GENERIC_ARGUMENT(CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "T", empty_names(), Semantic.BLOCK_SCOPE()))
+
+            is_false(DIVERGING_VALUE_POSITION.settles_inferred_return_to_void(type_parameter))
+        si
+
+        @test()
+        settles_inferred_return_to_void__for_generic_of_type_parameter_return_type__is_false() is
+            // `make[T](n: int) -> BOX[T] => throw ...` — a constructed
+            // generic over the function's own type parameter is as
+            // settled as a bare one; GENERIC.is_wild recurses to it.
+            let type_parameter: Type = Semantic.Types.CLASSY_GENERIC_ARGUMENT(CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "T", empty_names(), Semantic.BLOCK_SCOPE()))
+            let box: Type = Semantic.Types.GENERIC(loc(), box_class(), LIST[Type]([type_parameter]))
+
+            is_false(DIVERGING_VALUE_POSITION.settles_inferred_return_to_void(box))
+        si
+
+        @test()
+        settles_inferred_return_to_void__for_composite_with_nested_placeholder__is_true() is
+            // A provisional composite — a constructed generic over a
+            // still-unfilled inference slot — is not settled, so a
+            // diverging body defaults it to void. GENERIC overrides
+            // contains_inferred but not is_inferred, so only the
+            // recursive predicate sees the nested placeholder.
+            let box: Type = Semantic.Types.GENERIC(loc(), box_class(), LIST[Type]([cast Type(INFERRED_RETURN_TYPE())]))
+
+            is_true(DIVERGING_VALUE_POSITION.settles_inferred_return_to_void(box))
+        si
+
+        @test()
+        settles_inferred_return_to_void__for_settled_return_type__is_false() is
+            // A declared return type — `not_done() -> int => throw ...` —
+            // is kept, so the stub satisfies the declared signature rather
+            // than collapsing to void.
+            is_false(DIVERGING_VALUE_POSITION.settles_inferred_return_to_void(settled_type()))
+        si
+    si
+si

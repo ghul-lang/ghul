@@ -1,0 +1,189 @@
+namespace Semantic.UnitTests is
+    use Collections.Iterable
+    use Collections.LIST
+
+    use Source.LOCATION
+
+    use Semantic.UNDER_DETERMINATION_DETECTOR
+
+    use Semantic.Symbols.CLASS
+    use Semantic.Symbols.CLASSY_GENERIC_ARGUMENT
+    use Semantic.Symbols.INFERRED_TYPE_ARG_ORIGIN
+
+    use Semantic.Types.Type
+    use Assertions
+
+    // Tests for UNDER_DETERMINATION_DETECTOR — predicate gate on the
+    // expensive constraint-push retry. Pinning each return-true and
+    // return-false branch so a future refactor of the call-site path
+    // can't silently make the retry fire on (or skip) shapes it
+    // shouldn't.
+    //
+    // Function-typed-with-placeholders is the most subtle branch —
+    // covered by the integration tests under
+    // `integration-tests/execution/iterative-*-lambda-*/` but
+    // pinned here too against the underlying predicate.
+    class UNDER_DETERMINATION_DETECTOR_TESTS is
+        init() is si
+
+        loc() -> LOCATION => LOCATION("test.ghul", 1, 1, 1, 1)
+
+        empty_names() -> LIST[string] => LIST[string]()
+        names_for(values: Iterable[string]) -> LIST[string] is
+            let result = LIST[string]()
+            for v in values do result.add(v); od
+            return result
+        si
+
+        types(values: Iterable[Type]) -> LIST[Type] is
+            let result = LIST[Type]()
+            for v in values do result.add(v); od
+            return result
+        si
+
+        // === arg_under_determined_for_formal: positive case ===
+
+        // formal = Box[int] (a Symbols.GENERIC-typed type),
+        // actual = Box (a plain NAMED of the unspecialised classy).
+        // The constraint-push retry should kick in.
+        @test()
+        Calling__arg_under_determined__for_unspecialised_actual_matching_formal_classy__returns_true() is
+            let box = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Box", names_for(["T"]), Semantic.BLOCK_SCOPE())
+            let box_t = CLASSY_GENERIC_ARGUMENT(loc(), box, "T", 0)
+            let int_class = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "int", empty_names(), Semantic.BLOCK_SCOPE())
+
+            // formal: Box[int] as a Types.GENERIC — the 3-arg ctor
+            // wraps `box` in a Symbols.GENERIC internally, which is
+            // what the predicate's last cast looks for.
+            let formal = Semantic.Types.GENERIC(loc(), box, types([int_class.type!]))
+
+            // actual: bare Box (unspecialised) as Types.NAMED.
+            let actual = box.type!
+
+            let detector = UNDER_DETERMINATION_DETECTOR()
+
+            is_true(detector.arg_under_determined_for_formal(formal, actual))
+        si
+
+        // === arg_under_determined_for_formal: negative cases ===
+
+        @test()
+        Calling__arg_under_determined__with_null_formal__returns_false() is
+            let int_class = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "int", empty_names(), Semantic.BLOCK_SCOPE())
+            let detector = UNDER_DETERMINATION_DETECTOR()
+
+            is_false(detector.arg_under_determined_for_formal(null, int_class.type!))
+        si
+
+        @test()
+        Calling__arg_under_determined__with_null_actual__returns_false() is
+            let box = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Box", names_for(["T"]), Semantic.BLOCK_SCOPE())
+            let int_class = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "int", empty_names(), Semantic.BLOCK_SCOPE())
+            let formal = Semantic.Types.GENERIC(loc(), box, types([int_class.type!]))
+
+            let detector = UNDER_DETERMINATION_DETECTOR()
+
+            is_false(detector.arg_under_determined_for_formal(formal, null))
+        si
+
+        // formal is plain NAMED, not a Types.GENERIC — predicate
+        // bails on the first cast.
+        @test()
+        Calling__arg_under_determined__with_non_generic_formal__returns_false() is
+            let int_class = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "int", empty_names(), Semantic.BLOCK_SCOPE())
+            let detector = UNDER_DETERMINATION_DETECTOR()
+
+            is_false(detector.arg_under_determined_for_formal(int_class.type!, int_class.type!))
+        si
+
+        // Both formal and actual are Types.GENERIC — already
+        // specialised on both sides, no benefit from constraint-push.
+        @test()
+        Calling__arg_under_determined__with_both_generic__returns_false() is
+            let box = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Box", names_for(["T"]), Semantic.BLOCK_SCOPE())
+            let int_class = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "int", empty_names(), Semantic.BLOCK_SCOPE())
+
+            let formal = Semantic.Types.GENERIC(loc(), box, types([int_class.type!]))
+            let actual = Semantic.Types.GENERIC(loc(), box, types([int_class.type!]))
+
+            let detector = UNDER_DETERMINATION_DETECTOR()
+
+            is_false(detector.arg_under_determined_for_formal(formal, actual))
+        si
+
+        // formal is Box[int], actual is unspecialised Other —
+        // different head classes, no benefit from constraint-push.
+        @test()
+        Calling__arg_under_determined__with_different_head_classes__returns_false() is
+            let box = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Box", names_for(["T"]), Semantic.BLOCK_SCOPE())
+            let other = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Other", names_for(["U"]), Semantic.BLOCK_SCOPE())
+            let int_class = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "int", empty_names(), Semantic.BLOCK_SCOPE())
+
+            let formal = Semantic.Types.GENERIC(loc(), box, types([int_class.type!]))
+
+            let actual = other.type!
+
+            let detector = UNDER_DETERMINATION_DETECTOR()
+
+            is_false(detector.arg_under_determined_for_formal(formal, actual))
+        si
+
+        // Actual is non-generic — its classy.is_generic check fails.
+        @test()
+        Calling__arg_under_determined__with_non_generic_actual_classy__returns_false() is
+            let box = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Box", names_for(["T"]), Semantic.BLOCK_SCOPE())
+            let plain = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Plain", empty_names(), Semantic.BLOCK_SCOPE())
+            let int_class = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "int", empty_names(), Semantic.BLOCK_SCOPE())
+
+            let formal = Semantic.Types.GENERIC(loc(), box, types([int_class.type!]))
+
+            let detector = UNDER_DETERMINATION_DETECTOR()
+
+            is_false(detector.arg_under_determined_for_formal(formal, plain.type!))
+        si
+
+        // === any_arg_under_determined ===
+
+        // No actuals under-determined → false. Pinned because the
+        // caller skips the speculate / re-walk loop on false; making
+        // the loop fire unnecessarily is a noticeable perf hit on
+        // every overload-resolution failure.
+        @test()
+        Calling__any_arg_under_determined__with_all_specialised_actuals__returns_false() is
+            let box = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Box", names_for(["T"]), Semantic.BLOCK_SCOPE())
+            let int_class = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "int", empty_names(), Semantic.BLOCK_SCOPE())
+
+            let formal = Semantic.Types.GENERIC(loc(), box, types([int_class.type!]))
+
+            let candidate_owner = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Owner", empty_names(), Semantic.BLOCK_SCOPE())
+            let candidate = Symbols.INSTANCE_METHOD(loc(), loc(), candidate_owner, "init", Semantic.BLOCK_SCOPE())
+            candidate.arguments = types([formal])
+
+            // actual matches formal exactly — fully specialised.
+            let actual = Semantic.Types.GENERIC(loc(), box, types([int_class.type!]))
+
+            let detector = UNDER_DETERMINATION_DETECTOR()
+
+            is_false(detector.any_arg_under_determined(candidate, types([actual])))
+        si
+
+        @test()
+        Calling__any_arg_under_determined__with_one_underdetermined_arg__returns_true() is
+            let box = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Box", names_for(["T"]), Semantic.BLOCK_SCOPE())
+            let int_class = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "int", empty_names(), Semantic.BLOCK_SCOPE())
+
+            let formal = Semantic.Types.GENERIC(loc(), box, types([int_class.type!]))
+
+            let candidate_owner = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Owner", empty_names(), Semantic.BLOCK_SCOPE())
+            let candidate = Symbols.INSTANCE_METHOD(loc(), loc(), candidate_owner, "init", Semantic.BLOCK_SCOPE())
+            candidate.arguments = types([formal])
+
+            // actual = bare Box — under-determined wrt Box[int].
+            let actual = box.type!
+
+            let detector = UNDER_DETERMINATION_DETECTOR()
+
+            is_true(detector.any_arg_under_determined(candidate, types([actual])))
+        si
+    si
+si

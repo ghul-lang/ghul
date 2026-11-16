@@ -1,0 +1,364 @@
+namespace Syntax.Process.UnitTests is
+    use Collections.LIST
+
+    use Source.LOCATION
+
+    use Syntax.Process.COMPILE_CALLS
+
+    use Semantic.BLOCK_SCOPE
+    use Semantic.Scope
+    use Semantic.Symbols.CLASS
+    use Semantic.Symbols.CLASSY_GENERIC_ARGUMENT
+    use Semantic.Symbols.FUNCTION_GENERIC_ARGUMENT
+    use Semantic.Types.GENERIC
+    use Semantic.Types.Type
+
+    use Trees.Expressions.CALL
+    use Trees.Expressions.Expression
+    use Trees.Expressions.FUNCTION
+    use Trees.Expressions.IDENTIFIER
+    use Trees.Expressions.PARTIAL_APPLICATION
+    use Trees.Expressions.PLACEHOLDER
+    use Trees.Expressions.SEQUENCE
+    use Trees.Identifiers.Identifier
+    use Assertions
+
+    // Tests for COMPILE_CALLS.has_function_literal_argument and
+    // has_empty_array_literal_argument — the static gates that decide
+    // whether the constraint-push retry should fire when an overload
+    // resolution returns null or PARTIAL. Pure structural checks over the
+    // actual argument expressions; no symbol table or type system involved.
+    class COMPILE_CALLS_TESTS is
+        init() is si
+
+        loc() -> LOCATION => LOCATION("test.ghul", 1, 1, 1, 1)
+
+        make_identifier(name: string) -> IDENTIFIER =>
+            IDENTIFIER(loc(), Identifier(loc(), name))
+
+        // For this gate the structural `isa FUNCTION` is all that
+        // matters, so the arguments list is empty and the body does
+        // nothing - but both are present, as the parser builds them.
+        make_function_literal() -> FUNCTION =>
+            FUNCTION(
+                loc(),
+                Trees.Expressions.LIST(loc(), LIST[Expression]()),
+                Trees.TypeExpressions.INFER(loc()),
+                Trees.Bodies.NULL(loc()),
+                false)
+
+        make_empty_array() -> SEQUENCE =>
+            SEQUENCE(loc(), Trees.Expressions.LIST(loc(), LIST[Expression]()), Trees.TypeExpressions.INFER(loc()))
+
+        make_non_empty_array() -> SEQUENCE is
+            let elements = LIST[Expression]()
+            elements.add(make_identifier("x"))
+
+            return SEQUENCE(loc(), Trees.Expressions.LIST(loc(), elements), Trees.TypeExpressions.INFER(loc()))
+        si
+
+        @test()
+        Calling__has_function_literal_argument__with_null__returns_false() is
+            is_false(COMPILE_CALLS.has_function_literal_argument(null))
+        si
+
+        @test()
+        Calling__has_function_literal_argument__with_empty_list__returns_false() is
+            is_false(COMPILE_CALLS.has_function_literal_argument(LIST[Expression]()))
+        si
+
+        @test()
+        Calling__has_function_literal_argument__with_only_identifiers__returns_false() is
+            let args = LIST[Expression?]()
+            args.add(make_identifier("a"))
+            args.add(make_identifier("b"))
+
+            is_false(COMPILE_CALLS.has_function_literal_argument(args))
+        si
+
+        @test()
+        Calling__has_function_literal_argument__with_a_function_literal__returns_true() is
+            let args = LIST[Expression?]()
+            args.add(make_function_literal())
+
+            is_true(COMPILE_CALLS.has_function_literal_argument(args))
+        si
+
+        // The mixed case is the operator-path gate: a concrete sibling
+        // arg (e.g. the LHS of `$$`) plus a lambda RHS still triggers
+        // the retry so the lambda can be re-walked under the
+        // operator's formal.
+        @test()
+        Calling__has_function_literal_argument__with_mixed_args__returns_true() is
+            let args = LIST[Expression?]()
+            args.add(make_identifier("concrete"))
+            args.add(make_function_literal())
+
+            is_true(COMPILE_CALLS.has_function_literal_argument(args))
+        si
+
+        // Null entries in the list are tolerated — callers may pass
+        // partially-built argument lists.
+        @test()
+        Calling__has_function_literal_argument__with_null_entries__skips_them() is
+            let args = LIST[Expression?]()
+            args.add(null)
+            args.add(make_function_literal())
+            args.add(null)
+
+            is_true(COMPILE_CALLS.has_function_literal_argument(args))
+        si
+
+        @test()
+        Calling__has_function_literal_argument__with_only_null_entries__returns_false() is
+            let args = LIST[Expression?]()
+            args.add(null)
+            args.add(null)
+
+            is_false(COMPILE_CALLS.has_function_literal_argument(args))
+        si
+
+        @test()
+        Calling__has_empty_array_literal_argument__with_null__returns_false() is
+            is_false(COMPILE_CALLS.has_empty_array_literal_argument(null))
+        si
+
+        @test()
+        Calling__has_empty_array_literal_argument__with_empty_list__returns_false() is
+            is_false(COMPILE_CALLS.has_empty_array_literal_argument(LIST[Expression]()))
+        si
+
+        @test()
+        Calling__has_empty_array_literal_argument__with_only_identifiers__returns_false() is
+            let args = LIST[Expression?]()
+            args.add(make_identifier("a"))
+            args.add(make_identifier("b"))
+
+            is_false(COMPILE_CALLS.has_empty_array_literal_argument(args))
+        si
+
+        @test()
+        Calling__has_empty_array_literal_argument__with_an_empty_array__returns_true() is
+            let args = LIST[Expression?]()
+            args.add(make_empty_array())
+
+            is_true(COMPILE_CALLS.has_empty_array_literal_argument(args))
+        si
+
+        // The count == 0 boundary: a populated array literal already
+        // carries an element type, so it must not trigger the retry.
+        @test()
+        Calling__has_empty_array_literal_argument__with_a_non_empty_array__returns_false() is
+            let args = LIST[Expression?]()
+            args.add(make_non_empty_array())
+
+            is_false(COMPILE_CALLS.has_empty_array_literal_argument(args))
+        si
+
+        @test()
+        Calling__has_empty_array_literal_argument__with_mixed_args__returns_true() is
+            let args = LIST[Expression?]()
+            args.add(make_identifier("concrete"))
+            args.add(make_empty_array())
+
+            is_true(COMPILE_CALLS.has_empty_array_literal_argument(args))
+        si
+
+        @test()
+        Calling__has_empty_array_literal_argument__with_null_entries__skips_them() is
+            let args = LIST[Expression?]()
+            args.add(null)
+            args.add(make_empty_array())
+            args.add(null)
+
+            is_true(COMPILE_CALLS.has_empty_array_literal_argument(args))
+        si
+
+        @test()
+        Calling__has_empty_array_literal_argument__with_only_null_entries__returns_false() is
+            let args = LIST[Expression?]()
+            args.add(null)
+            args.add(null)
+
+            is_false(COMPILE_CALLS.has_empty_array_literal_argument(args))
+        si
+
+        // has_unbound_type_argument is the gate for an actual whose
+        // type still names a type parameter of the function that
+        // produced it - a call to a generic function nothing in its own
+        // arguments could bind. A parameter of the caller, or of a
+        // function the caller is nested in, is in scope where the call
+        // is written and is not that shape.
+
+        empty_names() -> LIST[string] => LIST[string]()
+
+        names_for_T() -> LIST[string] is
+            let result = LIST[string]()
+            result.add("T")
+            return result
+        si
+
+        type_list(values: Collections.Iterable[Type?]) -> LIST[Type?] is
+            let result = LIST[Type?]()
+            for v in values do result.add(v); od
+            return result
+        si
+
+        int_type() -> Type =>
+            CLASS(loc(), loc(), BLOCK_SCOPE(), "int", empty_names(), BLOCK_SCOPE()).type!
+
+        // A method-level `U` belonging to some other function - the
+        // callee whose overload resolution left it unbound.
+        foreign_u() -> Type =>
+            FUNCTION_GENERIC_ARGUMENT(loc(), BLOCK_SCOPE(), "U", 0).type!
+
+        // A method-level `U` declared by `owner` itself.
+        owned_u(owner: Scope) -> Type =>
+            FUNCTION_GENERIC_ARGUMENT(loc(), owner, "U", 0).type!
+
+        // A class-level `T`, which names a fixed type in its own
+        // context however the call resolves.
+        class_t() -> Type =>
+            CLASSY_GENERIC_ARGUMENT(
+                loc(),
+                CLASS(loc(), loc(), BLOCK_SCOPE(), "Owner", names_for_T(), BLOCK_SCOPE()),
+                "T",
+                0
+            ).type!
+
+        box_of(argument: Type) -> Type is
+            let arguments = LIST[Type]()
+            arguments.add(argument)
+
+            return cast Type(
+                GENERIC(
+                    loc(),
+                    CLASS(loc(), loc(), BLOCK_SCOPE(), "Box", names_for_T(), BLOCK_SCOPE()),
+                    arguments))
+        si
+
+        @test()
+        Calling__has_unbound_type_argument__with_null__returns_false() is
+            is_false(COMPILE_CALLS.has_unbound_type_argument(null, null))
+        si
+
+        @test()
+        Calling__has_unbound_type_argument__with_empty_list__returns_false() is
+            is_false(COMPILE_CALLS.has_unbound_type_argument(LIST[Type?](), null))
+        si
+
+        @test()
+        Calling__has_unbound_type_argument__with_concrete_type__returns_false() is
+            is_false(COMPILE_CALLS.has_unbound_type_argument(type_list([int_type()]), null))
+        si
+
+        @test()
+        Calling__has_unbound_type_argument__with_foreign_method_type_argument__returns_true() is
+            is_true(COMPILE_CALLS.has_unbound_type_argument(type_list([foreign_u()]), BLOCK_SCOPE()))
+        si
+
+        @test()
+        Calling__has_unbound_type_argument__with_callers_own_type_argument__returns_false() is
+            let caller = BLOCK_SCOPE()
+
+            is_false(COMPILE_CALLS.has_unbound_type_argument(type_list([owned_u(caller)]), caller))
+        si
+
+        // A closure compiling its body may name the enclosing
+        // function's type parameters; those resolve where the call is
+        // written and must not count.
+        @test()
+        Calling__has_unbound_type_argument__with_lexically_visible_type_argument__returns_false() is
+            let enclosing = BLOCK_SCOPE()
+            let u = FUNCTION_GENERIC_ARGUMENT(loc(), enclosing, "U", 0)
+
+            enclosing.declare(loc(), u, null)
+
+            let caller = BLOCK_SCOPE(enclosing)
+
+            is_false(COMPILE_CALLS.has_unbound_type_argument(type_list([u.type!]), caller))
+        si
+
+        @test()
+        Calling__has_unbound_type_argument__with_class_type_argument__returns_false() is
+            is_false(COMPILE_CALLS.has_unbound_type_argument(type_list([class_t()]), BLOCK_SCOPE()))
+        si
+
+        // The check recurses: a composite actual mentioning the
+        // callee's own unbound type argument is the same shape.
+        @test()
+        Calling__has_unbound_type_argument__with_composite_type__returns_true() is
+            is_true(COMPILE_CALLS.has_unbound_type_argument(type_list([box_of(foreign_u())]), BLOCK_SCOPE()))
+        si
+
+        @test()
+        Calling__has_unbound_type_argument__with_null_entries__skips_them() is
+            is_true(
+                COMPILE_CALLS.has_unbound_type_argument(
+                    type_list([null, foreign_u(), null]),
+                    BLOCK_SCOPE()))
+        si
+
+        @test()
+        Calling__has_unbound_type_argument__with_only_null_entries__returns_false() is
+            let arguments = LIST[Type?]()
+            arguments.add(null)
+            arguments.add(null)
+
+            is_false(COMPILE_CALLS.has_unbound_type_argument(arguments, BLOCK_SCOPE()))
+        si
+
+        // is_unresolved_group_argument: the gate that re-walks an argument
+        // under the resolved formal. A bare operator spelling is resolved
+        // by the function type expected of it, so one standing as an
+        // error or as a named unknown is re-walked once the formal is
+        // known; a partial application carries its `*` types as named
+        // unknowns the resolution bounds directly, and is never re-walked
+        // by this gate.
+
+        any_type() -> Type => Semantic.Types.ERROR()
+
+        placeholder_type() -> Type =>
+            Semantic.Types.INFERRED_VARIABLE_TYPE(Semantic.Symbols.INFERRED_RESULT_ORIGIN(loc(), BLOCK_SCOPE(), "$`+"))
+
+        make_partial_application() -> PARTIAL_APPLICATION is
+            let arguments = LIST[Expression]()
+            arguments.add(PLACEHOLDER(loc()))
+            arguments.add(make_identifier("x"))
+
+            return PARTIAL_APPLICATION(loc(), CALL(loc(), make_identifier("f"), Trees.Expressions.LIST(loc(), arguments)))
+        si
+
+        @test()
+        Calling__is_unresolved_group_argument__with_a_bare_operator_and_no_expected_type__returns_true() is
+            is_true(COMPILE_CALLS.is_unresolved_group_argument(make_identifier("+")))
+        si
+
+        @test()
+        Calling__is_unresolved_group_argument__with_a_bare_operator_given_an_expected_type_and_no_value__returns_true() is
+            let operator = make_identifier("+")
+            operator.set_expected_type(any_type(), null)
+
+            is_true(COMPILE_CALLS.is_unresolved_group_argument(operator))
+        si
+
+        @test()
+        Calling__is_unresolved_group_argument__with_a_plain_identifier_and_no_expected_type__returns_false() is
+            is_false(COMPILE_CALLS.is_unresolved_group_argument(make_identifier("f")))
+        si
+
+        @test()
+        Calling__is_unresolved_group_argument__with_a_bare_operator_standing_as_a_named_unknown__returns_true() is
+            let operator = make_identifier("+")
+            operator.compile_expressions_state.value = IR.Values.DUMMY(placeholder_type(), loc())
+
+            is_true(COMPILE_CALLS.is_unresolved_group_argument(operator))
+        si
+
+        @test()
+        Calling__is_unresolved_group_argument__with_a_partial_application__returns_false() is
+            is_false(COMPILE_CALLS.is_unresolved_group_argument(make_partial_application()))
+        si
+
+    si
+si

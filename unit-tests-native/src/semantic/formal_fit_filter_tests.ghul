@@ -1,0 +1,289 @@
+namespace Semantic.UnitTests is
+    use Collections.LIST
+    use Collections.List
+
+    use Source.LOCATION
+
+    use Semantic.FORMAL_FIT_FILTER
+    use Semantic.Symbols.CLASS
+    use Semantic.Symbols.CLASSY_GENERIC_ARGUMENT
+    use Semantic.Symbols.Function
+    use Semantic.Symbols.GLOBAL_FUNCTION
+    use Semantic.Types.Type
+    use Semantic.Types.INFERRED_VARIABLE_TYPE
+    use Semantic.Symbols.INFERRED_TYPE_ARG_ORIGIN
+    use Assertions
+
+    // Which of two candidates the resolver keeps once their type
+    // arguments are bound. The filter answers only where one candidate
+    // fits every actual at least as closely as the other; where it
+    // cannot separate them it returns null and the caller keeps the
+    // ambiguity it had.
+    class FORMAL_FIT_FILTER_TESTS is
+        init() is si
+
+        loc() -> LOCATION => LOCATION("test.ghul", 1, 1, 1, 1)
+
+        empty_names() -> LIST[string] => LIST[string]()
+
+        a_type(name: string) -> Type =>
+            CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), name, empty_names(), Semantic.BLOCK_SCOPE()).type!
+
+        a_child(name: string, parent: Type) -> Type is
+            let result =
+                CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), name, empty_names(), Semantic.BLOCK_SCOPE())
+
+            result.push_ancestor(parent)
+
+            return result.type!
+        si
+
+        a_wild_type() -> Type is
+            let owner =
+                CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "OWNER", LIST[string](["T"]), Semantic.BLOCK_SCOPE())
+
+            return CLASSY_GENERIC_ARGUMENT(loc(), owner, "T", 0).type!
+        si
+
+        a_function(name: string, formals: ARRAY[Type]) -> Function is
+            let result = GLOBAL_FUNCTION(loc(), loc(), Semantic.BLOCK_SCOPE(), name, Semantic.BLOCK_SCOPE())
+
+            let arguments = LIST[Type]()
+
+            for formal in formals do
+                arguments.add(formal)
+            od
+
+            result.arguments = arguments
+
+            return result
+        si
+
+        candidates(functions: ARRAY[Function]) -> Function[] is
+            let result = LIST[Function]()
+
+            for f in functions do
+                result.add(f)
+            od
+
+            return result
+        si
+
+        actuals(types: ARRAY[Type]) -> Type[] is
+            let result = LIST[Type]()
+
+            for t in types do
+                result.add(t)
+            od
+
+            return result
+        si
+
+        @test()
+        given_a_non_optional_actual__prefers_the_non_optional_formal() is
+            let cat = a_type("CAT")
+
+            let bare = a_function("f", [cat])
+            let optional = a_function("f", [cat.as_optional()])
+
+            let picked = FORMAL_FIT_FILTER.pick(candidates([bare, optional]), actuals([cat]))
+
+            assert picked? else "the two formals fit the actual differently"
+            are_equal(1, picked.count)
+            are_same(bare, picked[0])
+        si
+
+        @test()
+        given_a_subtype_actual__prefers_the_exact_formal() is
+            let parent = a_type("PARENT")
+            let child = a_child("CHILD", parent)
+
+            let exact = a_function("f", [child])
+            let widening = a_function("f", [parent])
+
+            let picked = FORMAL_FIT_FILTER.pick(candidates([exact, widening]), actuals([child]))
+
+            assert picked? else "the two formals fit the actual differently"
+            are_equal(1, picked.count)
+            are_same(exact, picked[0])
+        si
+
+        // A candidate the actual cannot reach at all is not one the
+        // filter picks against: the resolver would have dropped it
+        // before the tie, so seeing one here means the fit question
+        // was asked of something it does not describe.
+        @test()
+        given_a_formal_the_actual_cannot_reach__declines() is
+            let cat = a_type("CAT")
+
+            let optional = a_function("f", [cat.as_optional()])
+            let bare = a_function("f", [cat])
+
+            is_null(FORMAL_FIT_FILTER.pick(candidates([optional, bare]), actuals([cat.as_optional()])))
+        si
+
+        @test()
+        given_formals_that_fit_alike__declines() is
+            let cat = a_type("CAT")
+
+            let first = a_function("f", [cat])
+            let second = a_function("f", [cat])
+
+            is_null(FORMAL_FIT_FILTER.pick(candidates([first, second]), actuals([cat])))
+        si
+
+        @test()
+        given_a_formal_still_carrying_a_type_variable__declines() is
+            let cat = a_type("CAT")
+
+            let bare = a_function("f", [cat])
+            let wild = a_function("f", [a_wild_type()])
+
+            is_null(FORMAL_FIT_FILTER.pick(candidates([bare, wild]), actuals([cat])))
+        si
+
+        @test()
+        given_a_single_candidate__declines() is
+            let cat = a_type("CAT")
+
+            is_null(FORMAL_FIT_FILTER.pick(candidates([a_function("f", [cat])]), actuals([cat])))
+        si
+
+        lookup() -> Lookups.InnateSymbolLookup => TEST_INNATE_SYMBOL_LOOKUP()
+
+        // A built-in scalar type, as the innate lookup marks one.
+        a_scalar(name: string, kind: Semantic.Symbols.BuiltInType) -> Type is
+            let result = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), name, empty_names(), Semantic.BLOCK_SCOPE())
+
+            result.built_in_type = kind
+
+            return result.type!
+        si
+
+        int_type: Type => a_scalar("int", Semantic.Symbols.BuiltInType.INT)
+
+        double_type: Type => a_scalar("double", Semantic.Symbols.BuiltInType.DOUBLE)
+
+        // A function type taking `parameter` and returning `result`.
+        a_function_type(parameter: Type, result: Type) -> Type =>
+            lookup().get_function_type(LIST[Type]([parameter, result]))
+
+        // A type inference has not settled yet.
+        unsettled() -> Type =>
+            INFERRED_VARIABLE_TYPE(INFERRED_TYPE_ARG_ORIGIN(loc(), Semantic.BLOCK_SCOPE(), "p"))
+
+        rejects(formal: Type, actual: Type) -> bool =>
+            FORMAL_FIT_FILTER.rejects(a_function("f", [formal]), actuals([actual]))
+
+        @test()
+        given_a_function_returning_a_different_scalar__rejects() is
+            let whole = int_type
+            let real = double_type
+
+            is_true(rejects(a_function_type(whole, real), a_function_type(whole, whole)))
+        si
+
+        @test()
+        given_a_function_returning_the_same_scalar__does_not_reject() is
+            let whole = int_type
+
+            is_false(rejects(a_function_type(whole, whole), a_function_type(whole, whole)))
+        si
+
+        // A function literal whose parameter is still being inferred has
+        // already settled what it returns, and is held to that.
+        @test()
+        given_an_unsettled_parameter_and_a_settled_different_result__rejects() is
+            let whole = int_type
+            let real = double_type
+
+            is_true(rejects(a_function_type(whole, real), a_function_type(unsettled(), whole)))
+        si
+
+        @test()
+        given_an_unsettled_result__does_not_reject() is
+            let whole = int_type
+            let real = double_type
+
+            is_false(rejects(a_function_type(whole, real), a_function_type(whole, unsettled())))
+        si
+
+        // A type variable inside the formal function type says nothing
+        // about fit yet.
+        @test()
+        given_a_type_variable_inside_the_formal__does_not_reject() is
+            let whole = int_type
+
+            is_false(rejects(a_function_type(whole, a_wild_type()), a_function_type(whole, whole)))
+        si
+
+        @test()
+        given_a_nested_function_returning_a_different_scalar__rejects() is
+            let whole = int_type
+            let real = double_type
+
+            is_true(
+                rejects(
+                    a_function_type(whole, a_function_type(whole, real)),
+                    a_function_type(whole, a_function_type(whole, whole))))
+        si
+
+        // A literal's result can settle as the optional a slot asks for,
+        // so an optional result is left to the scoring.
+        @test()
+        given_an_optional_formal_result__does_not_reject() is
+            let whole = int_type
+
+            is_false(rejects(a_function_type(whole, whole.as_optional()), a_function_type(whole, whole)))
+        si
+
+        @test()
+        given_a_function_returning_an_unrelated_class__rejects() is
+            let whole = int_type
+
+            is_true(rejects(a_function_type(whole, a_type("DOG")), a_function_type(whole, a_type("CAT"))))
+        si
+
+        @test()
+        given_a_function_returning_a_subclass__does_not_reject() is
+            let whole = int_type
+            let animal = a_type("ANIMAL")
+
+            is_false(rejects(a_function_type(whole, animal), a_function_type(whole, a_child("CAT", animal))))
+        si
+
+        // Parameters go the other way: the actual must take what the formal
+        // passes it.
+        @test()
+        given_a_function_taking_a_wider_parameter__does_not_reject() is
+            let whole = int_type
+            let animal = a_type("ANIMAL")
+
+            is_false(rejects(a_function_type(a_child("CAT", animal), whole), a_function_type(animal, whole)))
+        si
+
+        @test()
+        given_a_function_taking_a_narrower_parameter__rejects() is
+            let whole = int_type
+            let animal = a_type("ANIMAL")
+
+            is_true(rejects(a_function_type(animal, whole), a_function_type(a_child("CAT", animal), whole)))
+        si
+
+        // Only function types decide: a formal and actual that are not
+        // function types are left to the scoring, however different they
+        // are.
+        @test()
+        given_formals_that_are_not_function_types__does_not_reject() is
+            is_false(rejects(a_type("DOG"), a_type("CAT")))
+        si
+
+        @test()
+        given_a_different_number_of_actuals__does_not_reject() is
+            let cat = a_type("CAT")
+            let dog = a_type("DOG")
+
+            is_false(FORMAL_FIT_FILTER.rejects(a_function("f", [dog]), actuals([cat, cat])))
+        si
+    si
+si

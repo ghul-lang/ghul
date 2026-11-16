@@ -1,0 +1,190 @@
+namespace IR.Program.UnitTests is
+    use Collections.LIST
+    use Collections.MAP
+
+    use Source.LOCATION
+
+    use Semantic.Symbols.CLASS
+    use Semantic.Symbols.TRAIT
+    use Semantic.Symbols.Classy
+    use Semantic.Symbols.Function
+    use Semantic.Symbols.INSTANCE_METHOD
+    use Semantic.Symbols.Symbol
+
+    use Semantic.Types.Type
+
+    use Assertions
+
+    class PROGRAM_PLAN_TESTS is
+        _object: CLASS
+        _animal: CLASS
+        _cat: CLASS
+        _named: TRAIT
+
+        _animal_speak: INSTANCE_METHOD
+        _cat_speak: INSTANCE_METHOD
+        _cat_sleep: INSTANCE_METHOD
+        _named_label: INSTANCE_METHOD
+
+        init() is
+            _object = declare("object")
+            _object.mark_is_object()
+
+            _animal = declare("animal")
+            _animal.add_ancestor(_object.type!)
+
+            _cat = declare("cat")
+            _cat.add_ancestor(_animal.type!)
+
+            _named = TRAIT(loc(), loc(), Semantic.BLOCK_SCOPE(), "Named", LIST[string](), Semantic.BLOCK_SCOPE())
+
+            _animal_speak = method(_animal, "speak")
+            _cat_speak = method(_cat, "speak")
+            _cat_sleep = method(_cat, "sleep")
+            _named_label = method(_named, "label")
+
+            _cat_speak.add_overridee(_animal_speak)
+            _animal_speak.add_overrider(_cat_speak)
+        si
+
+        loc() -> LOCATION => LOCATION("test.ghul", 1, 1, 1, 1)
+
+        declare(name: string) -> CLASS =>
+            CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), name, LIST[string](), Semantic.BLOCK_SCOPE())
+
+        method(owner: Classy, name: string) -> INSTANCE_METHOD =>
+            INSTANCE_METHOD(loc(), loc(), owner, name, Semantic.BLOCK_SCOPE())
+
+        plan(bodies: Collections.Iterable[Function]) -> (plan: PROGRAM_PLAN, target: STUB_DISCOVERY_TARGET) is
+            let classes = CLASS_SET(_object, element => true, NO_CORE_CLASSES())
+            let functions = FUNCTION_WORKLIST(f => true)
+            let dispatched = DISPATCHED_METHODS()
+            let display = DISPLAY_PLAN(NO_DISPLAY_TARGET(), NO_CORE_CLASSES())
+
+            let plan = PROGRAM_PLAN(classes, functions, dispatched, display, bodies)
+
+            return (plan, STUB_DISCOVERY_TARGET(plan))
+        si
+
+        @test()
+        discover__reaches_each_instance_once_and_what_it_calls() is
+            let (plan, target) = plan([_animal_speak, _cat_sleep]: Function)
+
+            // speak calls sleep when reached.
+            target.calls[_animal_speak] = _cat_sleep
+
+            plan.functions.add(_animal_speak)
+            plan.discover(target)
+
+            are_equal(2, target.reached.count)
+            is_true(target.reached[0].definition == _animal_speak)
+            is_true(target.reached[1].definition == _cat_sleep)
+            are_equal(2, plan.functions.count)
+        si
+
+        @test()
+        discover__an_instantiated_class__adds_its_override_of_a_dispatched_method() is
+            let (plan, target) = plan([_animal_speak, _cat_speak, _cat_sleep]: Function)
+
+            // Reaching speak dispatches on it and creates a cat.
+            target.dispatches[_animal_speak] = _animal_speak
+            target.creates[_animal_speak] = _cat
+
+            plan.functions.add(_animal_speak)
+            plan.discover(target)
+
+            is_true(plan.functions.ordinal_of(FUNCTION_INSTANCE.of(_cat_speak))?)
+            is_false(plan.functions.ordinal_of(FUNCTION_INSTANCE.of(_cat_sleep))?)
+        si
+
+        @test()
+        discover__notes_each_instantiated_class_once() is
+            let (plan, target) = plan([_animal_speak, _cat_speak]: Function)
+
+            target.creates[_animal_speak] = _cat
+            target.creates[_cat_speak] = _cat
+            target.dispatches[_animal_speak] = _animal_speak
+
+            plan.functions.add(_animal_speak)
+            plan.discover(target)
+
+            // cat, animal added with it as its superclass, and the root.
+            are_equal(3, target.noted.count)
+        si
+
+        @test()
+        discover__a_dispatched_trait_default__is_reached() is
+            let (plan, target) = plan([_named_label, _cat_sleep]: Function)
+
+            target.dispatches[_cat_sleep] = _named_label
+
+            plan.functions.add(_cat_sleep)
+            plan.discover(target)
+
+            is_true(plan.functions.ordinal_of(FUNCTION_INSTANCE.of(_named_label))?)
+        si
+    si
+
+    // Stands in for a backend's lowering: reaching a function calls, creates
+    // and dispatches on whatever the test said it does.
+    class STUB_DISCOVERY_TARGET(plan: PROGRAM_PLAN private): DiscoveryTarget is
+        reached: LIST[FUNCTION_INSTANCE]
+        noted: LIST[CLASS_INSTANCE]
+        calls: MAP[Function, Function]
+        creates: MAP[Function, Classy]
+        dispatches: MAP[Function, Function]
+
+        init(..) is
+            reached = LIST[FUNCTION_INSTANCE]()
+            noted = LIST[CLASS_INSTANCE]()
+            calls = MAP[Function, Function]()
+            creates = MAP[Function, Classy]()
+            dispatches = MAP[Function, Function]()
+        si
+
+        reach(instance: FUNCTION_INSTANCE) is
+            reached.add(instance)
+
+            let callee: Function mut
+            let created: Classy mut
+            let dispatched: Function mut
+
+            if calls.try_get_value(instance.definition, callee ref) then
+                _plan.functions.add(callee)
+            fi
+
+            if creates.try_get_value(instance.definition, created ref) then
+                _plan.classes.class_of(created, MAP[Symbol, Type]())
+            fi
+
+            if dispatches.try_get_value(instance.definition, dispatched ref) then
+                _plan.dispatched.note(dispatched)
+            fi
+        si
+
+        is_instantiated(type: CLASS_INSTANCE) -> bool => true
+
+        note_instantiated(type: CLASS_INSTANCE) is
+            noted.add(type)
+        si
+
+        report(location: LOCATION, construct: string) is
+        si
+    si
+
+    class NO_DISPLAY_TARGET: DisplayTarget is
+        init() is si
+
+        class_of(type: Type?) -> CLASS_INSTANCE? => null
+        trait_of(type: Type) -> CLASS_INSTANCE? => null
+        superclass_of(type: CLASS_INSTANCE) -> CLASS_INSTANCE? => null
+        array_element(type: CLASS_INSTANCE) -> Type => type.arguments[0]
+        display_state: CLASS_INSTANCE? => null
+        is_object_type(type: CLASS_INSTANCE) -> bool => true
+        is_box(type: CLASS_INSTANCE) -> bool => false
+        is_array(type: CLASS_INSTANCE) -> bool => false
+        is_string(type: CLASS_INSTANCE) -> bool => false
+        is_struct(type: CLASS_INSTANCE) -> bool => false
+        is_bigint(type: CLASS_INSTANCE) -> bool => false
+    si
+si

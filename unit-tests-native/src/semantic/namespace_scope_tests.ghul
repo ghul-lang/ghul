@@ -1,0 +1,107 @@
+namespace Semantic.UnitTests is
+    use Source.LOCATION
+
+    use Semantic.NAMESPACE_SCOPE
+    use Semantic.Symbols.NAMESPACE
+    use Semantic.Symbols.TOP_LEVEL_VARIABLE
+
+    use Assertions
+
+    // `get_used_symbol` answers what a `use` imported under a name, whatever the
+    // namespace itself declares under it: it is how a submission's
+    // `let x = x + 1` reaches the earlier step's `x` past its own.
+    class NAMESPACE_SCOPE_TESTS is
+        init() is si
+
+        loc() -> LOCATION => LOCATION("test.ghul", 1, 1, 1, 1)
+
+        namespace_named(name: string) -> NAMESPACE =>
+            NAMESPACE(loc(), name, null, ".{name}", false)
+
+        @test()
+        Calling__get_used_symbol__with_an_imported_name_should_return_the_imported_symbol() is
+            let earlier = namespace_named("earlier")
+            let imported = TOP_LEVEL_VARIABLE(loc(), earlier, "count")
+
+            let scope = NAMESPACE_SCOPE(namespace_named("later"))
+
+            scope.add("count", imported)
+
+            are_same(imported, scope.get_used_symbol("count"))
+        si
+
+        @test()
+        Calling__get_used_symbol__should_not_return_what_the_namespace_declares_itself() is
+            let later = namespace_named("later")
+            let scope = NAMESPACE_SCOPE(later)
+
+            let _ = later.declare_top_level_variable(loc(), "count", null)
+
+            is_null(scope.get_used_symbol("count"))
+        si
+
+        @test()
+        Calling__get_used_symbol__should_prefer_nothing_to_the_namespaces_own_declaration() is
+            let earlier = namespace_named("earlier")
+            let later = namespace_named("later")
+
+            let imported = TOP_LEVEL_VARIABLE(loc(), earlier, "count")
+            let own = later.declare_top_level_variable(loc(), "count", null)
+
+            let scope = NAMESPACE_SCOPE(later)
+
+            scope.add("count", imported)
+
+            are_same(imported, scope.get_used_symbol("count"))
+            are_same(own, scope.find_direct("count"))
+        si
+
+        @test()
+        Adding_a_symbol_between__begin_default_uses__and__end_default_uses__should_not_make_it_an_explicit_used_symbol() is
+            let earlier = namespace_named("earlier")
+            let imported = TOP_LEVEL_VARIABLE(loc(), earlier, "count")
+
+            let scope = NAMESPACE_SCOPE(namespace_named("later"))
+
+            scope.begin_default_uses()
+            scope.add("count", imported)
+            scope.end_default_uses()
+
+            is_false(scope.contains_used_symbol("count"))
+            is_null(scope.get_used_symbol("count"))
+            are_same(imported, scope.find_enclosing("count"))
+        si
+
+        @test()
+        Calling__find_enclosing__should_prefer_an_explicit_used_symbol_to_a_default_one() is
+            let earlier = namespace_named("earlier")
+            let explicit = TOP_LEVEL_VARIABLE(loc(), earlier, "count")
+            let fallback = TOP_LEVEL_VARIABLE(loc(), earlier, "count")
+
+            let scope = NAMESPACE_SCOPE(namespace_named("later"))
+
+            scope.begin_default_uses()
+            scope.add("count", fallback)
+            scope.end_default_uses()
+
+            scope.add("count", explicit)
+
+            are_same(explicit, scope.find_enclosing("count"))
+        si
+
+        @test()
+        Calling__get_used_symbol__while_adding_defaults_should_answer_the_default_tier() is
+            let earlier = namespace_named("earlier")
+            let fallback = TOP_LEVEL_VARIABLE(loc(), earlier, "count")
+
+            let scope = NAMESPACE_SCOPE(namespace_named("later"))
+
+            scope.begin_default_uses()
+            scope.add("count", fallback)
+
+            are_same(fallback, scope.get_used_symbol("count"))
+
+            scope.end_default_uses()
+        si
+    si
+si

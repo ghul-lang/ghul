@@ -1,0 +1,140 @@
+namespace Driver.UnitTests is
+    use Collections.LIST
+    use IO.File
+    use IO.Path
+    use Assertions
+
+    class RESPONSE_FILE_TESTS is
+        init() is si
+
+        _written: LIST[string]
+
+        write_response_file(contents: string) -> string is
+            let path = Path.combine(Path.get_temp_path(), "ghul-response-file-tests-{System.Guid.new_guid()}.rsp")
+
+            File.write_all_text(path, contents)
+
+            _written.add(path)
+
+            return path
+        si
+
+        expand(arguments: ARRAY[string]) -> LIST[string] is
+            let result = LIST[string]()
+
+            Driver.MAIN.add_arguments(result, arguments)
+
+            return result
+        si
+
+        @test()
+        given_a_response_file__add_arguments__should_expand_its_contents() is
+            _written = LIST[string]()
+
+            try
+                let path = write_response_file("--library --version \"1.2.3\"")
+
+                let result = expand(["@{path}"])
+
+                are_equal(3, result.count)
+                are_equal("--library", result[0])
+                are_equal("--version", result[1])
+                are_equal("1.2.3", result[2])
+            finally
+                delete_written()
+            yrt
+        si
+
+        @test()
+        given_a_response_file_naming_another__add_arguments__should_expand_both() is
+            _written = LIST[string]()
+
+            try
+                let inner = write_response_file("--library")
+                let outer = write_response_file("--debug\n@{inner}")
+
+                let result = expand(["@{outer}"])
+
+                are_equal(2, result.count)
+                are_equal("--debug", result[0])
+                are_equal("--library", result[1])
+            finally
+                delete_written()
+            yrt
+        si
+
+        // The same file reached twice is expanded once. This is the observable
+        // face of the guard that stops a response file naming itself, directly
+        // or through another, from being followed forever.
+        @test()
+        given_the_same_response_file_twice__add_arguments__should_expand_it_once() is
+            _written = LIST[string]()
+
+            try
+                let path = write_response_file("--library")
+
+                let result = expand(["@{path}", "@{path}"])
+
+                are_equal(1, result.count)
+                are_equal("--library", result[0])
+            finally
+                delete_written()
+            yrt
+        si
+
+        @test()
+        given_a_response_file_named_two_ways__add_arguments__should_expand_it_once() is
+            _written = LIST[string]()
+
+            try
+                let path = write_response_file("--library")
+
+                let directory = Path.get_directory_name(path)!
+                let same_file_written_differently = Path.combine(directory, ".", Path.get_file_name(path)!)
+
+                let result = expand(["@{path}", "@{same_file_written_differently}"])
+
+                are_equal(1, result.count)
+                are_equal("--library", result[0])
+            finally
+                delete_written()
+            yrt
+        si
+
+        @test()
+        given_every_assembly_is_present__missing_assemblies_message__should_be_null() is
+            _written = LIST[string]()
+
+            try
+                let present = write_response_file("")
+
+                is_null(Driver.MAIN.missing_assemblies_message([present]))
+            finally
+                delete_written()
+            yrt
+        si
+
+        @test()
+        given_one_absent_assembly__missing_assemblies_message__should_name_it_in_the_singular() is
+            are_equal(
+                "reference assembly not found: /no/such/one.dll",
+                Driver.MAIN.missing_assemblies_message(["/no/such/one.dll"]))
+        si
+
+        @test()
+        given_several_absent_assemblies__missing_assemblies_message__should_name_them_in_the_plural() is
+            are_equal(
+                "reference assemblies not found: /no/such/one.dll, /no/such/two.dll",
+                Driver.MAIN.missing_assemblies_message(["/no/such/one.dll", "/no/such/two.dll"]))
+        si
+
+        delete_written() is
+            for path in _written do
+                try
+                    File.delete(path)
+                catch ex: System.Exception
+                yrt
+            od
+        si
+    si
+si

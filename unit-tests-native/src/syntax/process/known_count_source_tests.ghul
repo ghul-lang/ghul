@@ -1,0 +1,306 @@
+namespace Syntax.Process.UnitTests is
+    use Collections.LIST
+
+    use Source.LOCATION
+
+    use Logging.DIAGNOSTICS_STORE
+
+    use Semantic.Symbols.CLASS
+    use Semantic.Symbols.INSTANCE_METHOD
+    use Semantic.Types.Type
+    use Semantic.UnitTests.TEST_INNATE_SYMBOL_LOOKUP
+    use Syntax.Process.KNOWN_COUNT_SOURCE
+    use Assertions
+
+    // Adds the two answers KNOWN_COUNT_SOURCE itself asks for that
+    // TEST_INNATE_SYMBOL_LOOKUP has no stand-in for - the unspecialized
+    // list/mutable-list types (so a source that is neither is
+    // distinguishable from one that is), and a settable range-types
+    // answer, since the real one is only present once the runtime is
+    // compiled and KNOWN_COUNT_SOURCE has to decline sizing without it.
+    class RANGE_LOOKUP: TEST_INNATE_SYMBOL_LOOKUP is
+        _list_type: Type
+        _mutable_list_type: Type
+        _ranges: (exclusive: Type, inclusive: Type)?
+
+        init(ranges: (exclusive: Type, inclusive: Type)?) is
+            super.init()
+
+            let loc = LOCATION("test.ghul", 1, 1, 1, 1)
+
+            _list_type = CLASS(loc, loc, Semantic.BLOCK_SCOPE(), "List", LIST[string](["T"]), Semantic.BLOCK_SCOPE()).type!
+            _mutable_list_type = CLASS(loc, loc, Semantic.BLOCK_SCOPE(), "MutableList", LIST[string](["T"]), Semantic.BLOCK_SCOPE()).type!
+            _ranges = ranges
+        si
+
+        get_unspecialized_list_type() -> Type => _list_type
+        get_unspecialized_mutable_list_type() -> Type => _mutable_list_type
+        get_int_range_types() -> (exclusive: Type, inclusive: Type)? => _ranges
+    si
+
+    // KNOWN_COUNT_SOURCE decides how many elements a comprehension's
+    // source will produce before any of them is read, so a fixed-size
+    // array can be allocated up front instead of grown. Sizing is an
+    // optimisation, so every path that cannot prove a count declines
+    // with null rather than throwing.
+    //
+    // These tests pin the shape of the returned value - which accessor
+    // was reached, and, for a range, whether the inclusive +1 is there -
+    // without executing any of it. The IL those values actually emit is
+    // covered end to end by integration-tests/execution/pipe-fusion-presize
+    // and integration-tests/il/list-comprehension-fill.
+    class KNOWN_COUNT_SOURCE_TESTS is
+        init() is si
+
+        loc() -> LOCATION => LOCATION("test.ghul", 1, 1, 1, 1)
+
+        a_class(name: string) -> CLASS =>
+            CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), name, LIST[string](), Semantic.BLOCK_SCOPE())
+
+        function_caller() -> Semantic.FUNCTION_CALLER is
+            let logger = DIAGNOSTICS_STORE()
+            let symbol_table = Semantic.SYMBOL_TABLE(logger)
+
+            return Semantic.FUNCTION_CALLER(symbol_table, IR.VALUE_BOXER(logger))
+        si
+
+        subject_with(
+            lookup: Semantic.Lookups.InnateSymbolLookup,
+            zero_argument_function: (Type, string) -> Semantic.Symbols.Function?
+        ) -> KNOWN_COUNT_SOURCE =>
+            KNOWN_COUNT_SOURCE(lookup, function_caller(), zero_argument_function, () => null)
+
+        // A non-array, non-list, non-range expression to stand in for
+        // "the source is nothing count_of recognises" - its own type is
+        // irrelevant to count_of, only its shape (not a CALL) matters.
+        an_unrecognised_source() -> Trees.Expressions.Expression =>
+            Trees.Expressions.NULL(loc())
+
+        // === count_of ===
+
+        // The range types resolve only once the runtime that declares
+        // them is compiled; while compiling the runtime itself they are
+        // absent, and count_of has to decline rather than crash.
+        @test()
+        Calling__count_of__with_no_range_types_and_a_source_that_is_neither_array_nor_list__declines() is
+            let lookup = RANGE_LOOKUP(null)
+            let subject = subject_with(lookup, (t, n) => null)
+            let source_type = lookup.get_string_type()
+            let source_load = IR.Values.Literal.NUMBER(0, lookup.get_int_type())
+
+            let result = subject.count_of(an_unrecognised_source(), source_load, source_type, loc())
+
+            is_null(result)
+        si
+
+        // Range types present, but the source is unrelated to either
+        // of them and isn't a `repeat(...)` call either - nothing
+        // recognises it, so count_of falls through to declining.
+        @test()
+        Calling__count_of__with_range_types_but_an_unrelated_non_call_source__declines() is
+            let exclusive_class = a_class("IntRange")
+            let inclusive_class = a_class("IntRangeInclusive")
+            let ranges = (exclusive = exclusive_class.type!, inclusive = inclusive_class.type!)
+
+            let lookup = RANGE_LOOKUP(ranges)
+            let subject = subject_with(lookup, (t, n) => null)
+            let source_type = lookup.get_string_type()
+            let source_load = IR.Values.Literal.NUMBER(0, lookup.get_int_type())
+
+            let result = subject.count_of(an_unrecognised_source(), source_load, source_type, loc())
+
+            is_null(result)
+        si
+
+        // An array source's count comes from calling its `$get_count`
+        // accessor over the already-evaluated source.
+        @test()
+        Calling__count_of__with_an_array_source__calls_get_count_and_returns_a_value() is
+            let lookup = RANGE_LOOKUP(null)
+            let element_type = a_class("Element").type!
+            let array_symbol = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Array", LIST[string](["T"]), Semantic.BLOCK_SCOPE())
+            let array_type = Semantic.Types.ARRAY(loc(), array_symbol, [element_type])
+
+            let count_method = INSTANCE_METHOD(loc(), loc(), array_symbol, "get_count", Semantic.BLOCK_SCOPE())
+            count_method.arguments = LIST[Type]()
+            count_method.return_type = lookup.get_int_type()
+
+            let subject = subject_with(lookup, (t, name) => if name =~ "$get_count" then count_method else null fi)
+            let source_load = IR.Values.Literal.NUMBER(0, lookup.get_int_type())
+
+            let result = subject.count_of(an_unrecognised_source(), source_load, array_type, loc())
+
+            is_not_null(result)
+        si
+
+        // A source typed as the list trait has no known count, even with a
+        // `$get_count` to call: the value can be a lazy list, whose count
+        // reads its whole source before the first element is used.
+        @test()
+        Calling__count_of__with_a_source_typed_as_the_list_trait__declines() is
+            let lookup = RANGE_LOOKUP(null)
+
+            let count_method = INSTANCE_METHOD(loc(), loc(), Semantic.BLOCK_SCOPE(), "get_count", Semantic.BLOCK_SCOPE())
+            count_method.arguments = LIST[Type]()
+            count_method.return_type = lookup.get_int_type()
+
+            let subject = subject_with(lookup, (t, name) => if name =~ "$get_count" then count_method else null fi)
+            let source_load = IR.Values.Literal.NUMBER(0, lookup.get_int_type())
+
+            let result = subject.count_of(an_unrecognised_source(), source_load, lookup.get_unspecialized_list_type(), loc())
+
+            is_null(result)
+        si
+
+        // If the array/list branch finds no `$get_count` accessor to
+        // call - declined by the same zero-argument-function lookup
+        // that finds it in the case above - it declines too, rather
+        // than falling through into the range/repeat checks below it.
+        @test()
+        Calling__count_of__with_an_array_source_and_no_get_count_accessor__declines() is
+            let lookup = RANGE_LOOKUP(null)
+            let element_type = a_class("Element").type!
+            let array_symbol = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Array", LIST[string](["T"]), Semantic.BLOCK_SCOPE())
+            let array_type = Semantic.Types.ARRAY(loc(), array_symbol, [element_type])
+
+            let subject = subject_with(lookup, (t, n) => null)
+            let source_load = IR.Values.Literal.NUMBER(0, lookup.get_int_type())
+
+            let result = subject.count_of(an_unrecognised_source(), source_load, array_type, loc())
+
+            is_null(result)
+        si
+
+        // Two distinct range classes and the tuple `count_of` asks the
+        // lookup for - never the same class for both, so a source typed
+        // as one is never mistaken for the other.
+        range_classes() -> (exclusive: CLASS, inclusive: CLASS) =>
+            (exclusive = a_class("IntRange"), inclusive = a_class("IntRangeInclusive"))
+
+        zero_argument_range_accessors(
+            to_method: Semantic.Symbols.Function?,
+            from_method: Semantic.Symbols.Function?
+        ) -> (Type, string) -> Semantic.Symbols.Function? =>
+            (t, name) =>
+                if name =~ "$get_to" then
+                    to_method
+                elif name =~ "$get_from" then
+                    from_method
+                else
+                    null
+                fi
+
+        no_argument_int_method(owner: CLASS, name: string, int_type: Type) -> Semantic.Symbols.Function is
+            let f = INSTANCE_METHOD(loc(), loc(), owner, name, Semantic.BLOCK_SCOPE())
+            f.arguments = LIST[Type]()
+            f.return_type = int_type
+            return f
+        si
+
+        // An exclusive range's count is `to - from`, wrapped so a
+        // backwards range (start after end) sizes to zero rather than a
+        // negative length. Checking the rendered value for the
+        // INT_MAX_ZERO wrapper, rather than executing it, is enough to
+        // pin which accessor was reached and how the result is shaped.
+        @test()
+        Calling__count_of__with_an_exclusive_range_source__wraps_to_minus_from_in_int_max_zero() is
+            let classes = range_classes()
+            let ranges = (exclusive = classes.exclusive.type!, inclusive = classes.inclusive.type!)
+            let lookup = RANGE_LOOKUP(ranges)
+            let int_type = lookup.get_int_type()
+
+            let to_method = no_argument_int_method(classes.exclusive, "get_to", int_type)
+            let from_method = no_argument_int_method(classes.exclusive, "get_from", int_type)
+
+            let subject = subject_with(lookup, zero_argument_range_accessors(to_method, from_method))
+            let source_load = IR.Values.Literal.NUMBER(0, int_type)
+
+            let result = subject.count_of(an_unrecognised_source(), source_load, classes.exclusive.type!, loc())
+
+            assert result? else "expected a value"
+
+            let text = result.to_string()
+
+            is_true(text.contains("int-max-zero"), "expected an INT_MAX_ZERO wrapper")
+            is_false(text.contains("value = 1"), "an exclusive range must not add the +1 an inclusive one does")
+        si
+
+        // An inclusive range's count is the same subtraction, plus one -
+        // the difference from the exclusive case above is the literal
+        // `1` the addition wraps in, which shows up in the rendered
+        // value even though nothing here executes it.
+        @test()
+        Calling__count_of__with_an_inclusive_range_source__adds_one_to_the_exclusive_span() is
+            let classes = range_classes()
+            let ranges = (exclusive = classes.exclusive.type!, inclusive = classes.inclusive.type!)
+            let lookup = RANGE_LOOKUP(ranges)
+            let int_type = lookup.get_int_type()
+
+            let to_method = no_argument_int_method(classes.inclusive, "get_to", int_type)
+            let from_method = no_argument_int_method(classes.inclusive, "get_from", int_type)
+
+            let subject = subject_with(lookup, zero_argument_range_accessors(to_method, from_method))
+            let source_load = IR.Values.Literal.NUMBER(0, int_type)
+
+            let result = subject.count_of(an_unrecognised_source(), source_load, classes.inclusive.type!, loc())
+
+            assert result? else "expected a value"
+
+            let text = result.to_string()
+
+            is_true(text.contains("int-max-zero"), "expected an INT_MAX_ZERO wrapper")
+            is_true(text.contains("value = 1"), "an inclusive range must add the +1 an exclusive one lacks")
+        si
+
+        // Sizing is an optimisation, so a range whose `$get_to` accessor
+        // cannot be found declines rather than building a call to
+        // nothing.
+        @test()
+        Calling__count_of__with_a_range_source_missing_get_to__declines() is
+            let classes = range_classes()
+            let ranges = (exclusive = classes.exclusive.type!, inclusive = classes.inclusive.type!)
+            let lookup = RANGE_LOOKUP(ranges)
+            let int_type = lookup.get_int_type()
+
+            let from_method = no_argument_int_method(classes.exclusive, "get_from", int_type)
+
+            let subject = subject_with(lookup, zero_argument_range_accessors(null, from_method))
+            let source_load = IR.Values.Literal.NUMBER(0, int_type)
+
+            let result = subject.count_of(an_unrecognised_source(), source_load, classes.exclusive.type!, loc())
+
+            is_null(result)
+        si
+
+        // === is_same_generic ===
+
+        @test()
+        Calling__is_same_generic__with_no_generic_to_compare_against__is_false() is
+            let subject = subject_with(RANGE_LOOKUP(null), (t, n) => null)
+            let type = a_class("Whatever").type!
+
+            is_false(subject.is_same_generic(type, null))
+        si
+
+        @test()
+        Calling__is_same_generic__with_two_named_types_over_the_same_classy__is_true() is
+            let subject = subject_with(RANGE_LOOKUP(null), (t, n) => null)
+            let classy = a_class("List")
+
+            let a = Semantic.Types.NAMED(classy)
+            let b = Semantic.Types.NAMED(classy)
+
+            is_true(subject.is_same_generic(a, b))
+        si
+
+        @test()
+        Calling__is_same_generic__with_different_classy__is_false() is
+            let subject = subject_with(RANGE_LOOKUP(null), (t, n) => null)
+
+            let a = a_class("List").type!
+            let b = a_class("MutableList").type!
+
+            is_false(subject.is_same_generic(a, b))
+        si
+    si
+si

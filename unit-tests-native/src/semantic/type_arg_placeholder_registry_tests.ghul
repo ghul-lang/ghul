@@ -1,0 +1,507 @@
+namespace Semantic.UnitTests is
+    use Collections.Iterable
+    use Collections.LIST
+
+    use Source.LOCATION
+
+    use Logging.DIAGNOSTICS_STORE
+
+    use Semantic.SYMBOL_TABLE
+    use Semantic.TYPE_ARG_PLACEHOLDER_REGISTRY
+
+    use Semantic.Symbols.CLASS
+    use Semantic.Symbols.INSTANCE_METHOD
+    use Semantic.Symbols.Variable
+
+    use Semantic.Types.Type
+
+    use Syntax.Trees.Node
+    use Assertions
+
+    // Tests for TYPE_ARG_PLACEHOLDER_REGISTRY — the stateful cache
+    // that backs iterative-inference at constructor expressions.
+    //
+    // The cache's correctness rests on two properties:
+    //
+    //   - Stability: re-asking for the same cache_key returns the
+    //     SAME LIST instance with the SAME phantom Variables. Body-
+    //     retry depends on this — constraints pushed into a phantom's
+    //     _lub_map on iteration N must be visible to the LUB lookup
+    //     on iteration N+1.
+    //
+    //   - Width: get_or_create produces exactly one phantom per
+    //     argument_name on the type symbol. Phantom_origins lists
+    //     consumed by OWNER_TYPE_ARG_SPECIALIZER align positionally
+    //     with argument_names; a too-short list would silently leave
+    //     slots unbound.
+    //
+    // specialize_with_placeholders is the entry consumed by
+    // resolve_constructor — bail-out branches are tested directly;
+    // the positive path (which calls GENERIC.try_create_from +
+    // find_specialized_function) is integration-test territory.
+    class TYPE_ARG_PLACEHOLDER_REGISTRY_TESTS is
+        init() is si
+
+        loc() -> LOCATION => LOCATION("test.ghul", 1, 1, 1, 1)
+
+        empty_names() -> LIST[string] => LIST[string]()
+        names_for(values: Iterable[string]) -> LIST[string] is
+            let result = LIST[string]()
+            for v in values do result.add(v); od
+            return result
+        si
+
+        build_registry() -> TYPE_ARG_PLACEHOLDER_REGISTRY is
+            let logger = DIAGNOSTICS_STORE()
+            let symbol_table = SYMBOL_TABLE(logger)
+
+            // A phantom is owned by the function whose call site is
+            // being resolved, so the table needs one on its stack.
+            let scope = Semantic.BLOCK_SCOPE()
+            let owner = CLASS(loc(), loc(), scope, "Owner", empty_names(), Semantic.BLOCK_SCOPE())
+
+            symbol_table.enter_scope(INSTANCE_METHOD(loc(), loc(), owner, "resolving", Semantic.BLOCK_SCOPE()))
+
+            return TYPE_ARG_PLACEHOLDER_REGISTRY(symbol_table)
+        si
+
+        // === get_or_create ===
+
+        @test()
+        Calling__get_or_create__on_one_arg_classy__produces_one_phantom() is
+            let registry = build_registry()
+            let box = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Box", names_for(["T"]), Semantic.BLOCK_SCOPE())
+            let key = Syntax.Trees.Identifiers.Identifier(loc(), "key")
+
+            let origins = registry.get_or_create(key, loc(), box)
+
+            is_not_null(origins)
+            are_equal(1, origins.count)
+            is_not_null(origins[0])
+        si
+
+        @test()
+        Calling__get_or_create__on_two_arg_classy__produces_two_phantoms() is
+            let registry = build_registry()
+            let pair = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Pair", names_for(["T", "U"]), Semantic.BLOCK_SCOPE())
+            let key = Syntax.Trees.Identifiers.Identifier(loc(), "key")
+
+            let origins = registry.get_or_create(key, loc(), pair)
+
+            are_equal(2, origins.count)
+            is_not_null(origins[0])
+            is_not_null(origins[1])
+        si
+
+        // Stability: re-asking the same cache_key returns the SAME
+        // list instance (not just one equal in content). Body-retry's
+        // constraint accumulation depends on this — iter N+1 reads
+        // the same phantom-_lub_map iter N wrote to.
+        @test()
+        Calling__get_or_create__with_same_cache_key__returns_same_list() is
+            let registry = build_registry()
+            let box = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Box", names_for(["T"]), Semantic.BLOCK_SCOPE())
+            let key = Syntax.Trees.Identifiers.Identifier(loc(), "key")
+
+            let first = registry.get_or_create(key, loc(), box)
+            let second = registry.get_or_create(key, loc(), box)
+
+            are_same(first, second)
+            are_same(first[0], second[0])
+        si
+
+        // Two containers sharing a name are still two containers. One
+        // AST node drives two retries - the free-function group and
+        // the member group - and each must get its own phantoms, at
+        // its own arity, however the two spell themselves.
+        @test()
+        Calling__get_or_create__with_same_named_containers__keeps_their_phantoms_apart() is
+            let registry = build_registry()
+            let one = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Box", names_for(["T"]), Semantic.BLOCK_SCOPE())
+            let other = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Box", names_for(["T", "U"]), Semantic.BLOCK_SCOPE())
+            let key = Syntax.Trees.Identifiers.Identifier(loc(), "key")
+
+            let first = registry.get_or_create(key, loc(), one)
+            let second = registry.get_or_create(key, loc(), other)
+
+            are_equal(1, first.count)
+            are_equal(2, second.count)
+            is_false(first[0] == second[0])
+        si
+
+        // Distinct cache_keys produce distinct phantom lists. Each
+        // call expression in the source gets its own phantoms so
+        // match propagation at one call site doesn't bleed into another.
+        @test()
+        Calling__get_or_create__with_distinct_cache_keys__returns_distinct_lists() is
+            let registry = build_registry()
+            let box = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Box", names_for(["T"]), Semantic.BLOCK_SCOPE())
+            let key_a = Syntax.Trees.Identifiers.Identifier(loc(), "key")
+            let key_b = Syntax.Trees.Identifiers.Identifier(loc(), "key")
+
+            let a = registry.get_or_create(key_a, loc(), box)
+            let b = registry.get_or_create(key_b, loc(), box)
+
+            are_not_same(a, b)
+            are_not_same(a[0], b[0])
+        si
+
+        // Same cache_key but distinct container symbols must produce
+        // distinct phantom lists. This is the operator-path shape:
+        // visit_binary issues two retries from the same BINARY node,
+        // one against the free-function `$$` group and one against
+        // any member operator of the LHS type — the two retries' phantoms
+        // stand in for the type-args of different functions and must
+        // not share storage.
+        @test()
+        Calling__get_or_create__with_same_key_distinct_classy__returns_distinct_lists() is
+            let registry = build_registry()
+            let box = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Box", names_for(["T"]), Semantic.BLOCK_SCOPE())
+            let pair = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Pair", names_for(["T", "U"]), Semantic.BLOCK_SCOPE())
+            let key = Syntax.Trees.Identifiers.Identifier(loc(), "key")
+
+            let box_origins = registry.get_or_create(key, loc(), box)
+            let pair_origins = registry.get_or_create(key, loc(), pair)
+
+            are_not_same(box_origins, pair_origins)
+            are_equal(1, box_origins.count)
+            are_equal(2, pair_origins.count)
+            are_not_same(box_origins[0], pair_origins[0])
+        si
+
+        // Same cache_key, same container — repeated calls still return
+        // the same instance (regression guard for the two-level cache).
+        @test()
+        Calling__get_or_create__with_same_key_same_classy__keeps_stability() is
+            let registry = build_registry()
+            let box = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Box", names_for(["T"]), Semantic.BLOCK_SCOPE())
+            let key = Syntax.Trees.Identifiers.Identifier(loc(), "key")
+
+            let first = registry.get_or_create(key, loc(), box)
+            let second = registry.get_or_create(key, loc(), box)
+
+            are_same(first, second)
+            are_same(first[0], second[0])
+        si
+
+        // Same cache_key but distinct Function symbols must produce
+        // distinct phantom lists — the function-own-arg variant of
+        // the previous test.
+        @test()
+        Calling__get_or_create_for_function__with_same_key_distinct_functions__returns_distinct_lists() is
+            let registry = build_registry()
+            let owner = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Owner", empty_names(), Semantic.BLOCK_SCOPE())
+
+            let foo = Semantic.Symbols.STATIC_METHOD(loc(), loc(), owner, "foo", Semantic.BLOCK_SCOPE())
+            foo.generic_argument_names = names_for(["T"])
+
+            let bar = Semantic.Symbols.STATIC_METHOD(loc(), loc(), owner, "bar", Semantic.BLOCK_SCOPE())
+            bar.generic_argument_names = names_for(["U", "V"])
+
+            let key = Syntax.Trees.Identifiers.Identifier(loc(), "key")
+
+            let foo_origins = registry.get_or_create_for_function(key, loc(), foo)
+            let bar_origins = registry.get_or_create_for_function(key, loc(), bar)
+
+            are_not_same(foo_origins, bar_origins)
+            are_equal(1, foo_origins.count)
+            are_equal(2, bar_origins.count)
+        si
+
+        // The origin minted for a `[T..]` slot carries the pack flag, and
+        // the one for a plain slot does not: a call through a value whose
+        // formal is the first phantom binds the pack to its arguments.
+        @test()
+        Calling__get_or_create_for_function__marks_the_origin_of_a_pack_slot() is
+            let registry = build_registry()
+            let owner = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Owner", empty_names(), Semantic.BLOCK_SCOPE())
+
+            let combinator = Semantic.Symbols.STATIC_METHOD(loc(), loc(), owner, "combinator", Semantic.BLOCK_SCOPE())
+            combinator.generic_argument_names = names_for(["T", "U"])
+
+            let t = Semantic.Symbols.FUNCTION_GENERIC_ARGUMENT(loc(), combinator, "T", 0)
+            t.set_is_argument_pack(true)
+
+            let u = Semantic.Symbols.FUNCTION_GENERIC_ARGUMENT(loc(), combinator, "U", 1)
+
+            let parameters = LIST[Type]()
+            parameters.add(Semantic.Types.FUNCTION_GENERIC_ARGUMENT(t))
+            parameters.add(Semantic.Types.FUNCTION_GENERIC_ARGUMENT(u))
+            combinator.generic_arguments = parameters
+
+            let origins = registry.get_or_create_for_function(Syntax.Trees.Identifiers.Identifier(loc(), "key"), loc(), combinator)
+
+            are_equal(2, origins.count)
+            is_true((cast Semantic.Symbols.INFERRED_TYPE_ARG_ORIGIN(origins[0])).is_argument_pack)
+            is_false((cast Semantic.Symbols.INFERRED_TYPE_ARG_ORIGIN(origins[1])).is_argument_pack)
+        si
+
+        // === clear ===
+
+        // After clear(), a previously-cached key triggers a fresh
+        // create — i.e. the cache is genuinely empty. Pinned because
+        // apply()-boundary clear() is the only thing keeping a
+        // recompile of the same file from reusing phantoms that
+        // reference Type instances from the now-wiped symbol table.
+        @test()
+        Calling__clear__discards_cached_entries() is
+            let registry = build_registry()
+            let box = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Box", names_for(["T"]), Semantic.BLOCK_SCOPE())
+            let key = Syntax.Trees.Identifiers.Identifier(loc(), "key")
+
+            let before = registry.get_or_create(key, loc(), box)
+            registry.clear()
+            let after = registry.get_or_create(key, loc(), box)
+
+            are_not_same(before, after)
+        si
+
+        // === specialize_with_placeholders: bail-out branches ===
+
+        @test()
+        Calling__specialize_with_placeholders__with_null_cache_key__returns_candidate() is
+            let registry = build_registry()
+            let box = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Box", names_for(["T"]), Semantic.BLOCK_SCOPE())
+            let init = INSTANCE_METHOD(loc(), loc(), box, "init", Semantic.BLOCK_SCOPE())
+
+            let result = registry.specialize_with_placeholders(loc(), init, null)
+
+            are_same(init, result)
+        si
+
+        @test()
+        Calling__specialize_with_placeholders__on_non_generic_owner__returns_candidate() is
+            let registry = build_registry()
+            let plain = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Plain", empty_names(), Semantic.BLOCK_SCOPE())
+            let init = INSTANCE_METHOD(loc(), loc(), plain, "init", Semantic.BLOCK_SCOPE())
+            let key = Syntax.Trees.Identifiers.Identifier(loc(), "key")
+
+            let result = registry.specialize_with_placeholders(loc(), init, key)
+
+            are_same(init, result)
+        si
+
+        // === report_unresolved ===
+
+        // Empty registry: nothing to report.
+        @test()
+        Calling__report_unresolved__on_empty_registry__reports_nothing() is
+            let logger = DIAGNOSTICS_STORE()
+            let registry = build_registry()
+
+            registry.report_unresolved(logger, 0)
+
+            is_false(logger.any_errors)
+        si
+
+        // An unresolved phantom is a construction whose type-args
+        // nothing ever pinned - one error per construction site,
+        // however many slots are open.
+        @test()
+        Calling__report_unresolved__with_unresolved_phantoms__reports_one_error() is
+            let logger = DIAGNOSTICS_STORE()
+            let registry = build_registry()
+            let pair = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Pair", names_for(["T", "U"]), Semantic.BLOCK_SCOPE())
+            let key = Syntax.Trees.Identifiers.Identifier(loc(), "key")
+
+            registry.get_or_create(key, loc(), pair)
+
+            registry.report_unresolved(logger, 0)
+
+            are_equal(1, logger.error_count)
+        si
+
+        // A construction reported once stays reported: the visitor
+        // sweeps the registry after every function body, and a
+        // phantom unresolved at the end of its own function's walk
+        // stays unresolved.
+        @test()
+        Calling__report_unresolved__twice__reports_once() is
+            let logger = DIAGNOSTICS_STORE()
+            let registry = build_registry()
+            let box = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Box", names_for(["T"]), Semantic.BLOCK_SCOPE())
+            let key = Syntax.Trees.Identifiers.Identifier(loc(), "key")
+
+            registry.get_or_create(key, loc(), box)
+
+            registry.report_unresolved(logger, 0)
+            registry.report_unresolved(logger, 0)
+
+            are_equal(1, logger.error_count)
+        si
+
+        // A phantom whose origin settled is not an error - the
+        // construction's type-arg was pinned by usage.
+        @test()
+        Calling__report_unresolved__with_settled_phantoms__reports_nothing() is
+            let logger = DIAGNOSTICS_STORE()
+            let registry = build_registry()
+            let box = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Box", names_for(["T"]), Semantic.BLOCK_SCOPE())
+            let int_class = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "int", empty_names(), Semantic.BLOCK_SCOPE())
+            let key = Syntax.Trees.Identifiers.Identifier(loc(), "key")
+
+            let origins = registry.get_or_create(key, loc(), box)
+            origins[0].add_lower_bound(int_class.type!)
+
+            registry.report_unresolved(logger, 0)
+
+            is_false(logger.any_errors)
+        si
+
+        // === walk scoping ===
+
+        // A construction the final walk of its body did not ask for again
+        // resolved without its phantoms there: they belong to an earlier,
+        // superseded resolution, and a failure elsewhere in the body is
+        // no reason to report them.
+        @test()
+        Calling__report_unresolved__skips_a_construction_the_final_walk_did_not_use() is
+            let logger = DIAGNOSTICS_STORE()
+            let registry = build_registry()
+            let box = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Box", names_for(["T"]), Semantic.BLOCK_SCOPE())
+
+            registry.begin_body()
+            registry.begin_walk()
+            registry.get_or_create(Syntax.Trees.Identifiers.Identifier(loc(), "earlier"), loc(), box)
+
+            let final_walk = registry.begin_walk()
+            registry.report_unresolved(logger, final_walk)
+
+            is_false(logger.any_errors)
+        si
+
+        // A construction that ended in an error is reported whichever walk
+        // last asked for its phantoms: they are what it could not settle.
+        @test()
+        Calling__report_unresolved__reports_a_failed_construction_the_final_walk_did_not_use() is
+            let logger = DIAGNOSTICS_STORE()
+            let registry = build_registry()
+            let box = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Box", names_for(["T"]), Semantic.BLOCK_SCOPE())
+            let failed = Syntax.Trees.Expressions.IDENTIFIER(loc(), Syntax.Trees.Identifiers.Identifier(loc(), "failed"))
+
+            failed.compile_expressions_state.value = IR.Values.DUMMY(Semantic.Types.ERROR(), loc())
+
+            registry.begin_body()
+            registry.begin_walk()
+            registry.get_or_create(failed, loc(), box)
+
+            let final_walk = registry.begin_walk()
+            registry.report_unresolved(logger, final_walk)
+
+            are_equal(1, logger.error_count)
+        si
+
+        @test()
+        Calling__report_unresolved__reports_a_construction_the_final_walk_used() is
+            let logger = DIAGNOSTICS_STORE()
+            let registry = build_registry()
+            let box = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Box", names_for(["T"]), Semantic.BLOCK_SCOPE())
+            let key = Syntax.Trees.Identifiers.Identifier(loc(), "both")
+
+            registry.begin_body()
+            registry.begin_walk()
+            registry.get_or_create(key, loc(), box)
+
+            let final_walk = registry.begin_walk()
+            registry.get_or_create(key, loc(), box)
+            registry.report_unresolved(logger, final_walk)
+
+            are_equal(1, logger.error_count)
+        si
+
+        // === body scoping ===
+
+        // A sweep at the end of one body reports only constructions its
+        // own walk created: one left unresolved by an earlier body was
+        // settled, or reported, when that body finished.
+        @test()
+        Calling__report_unresolved__after_begin_body__skips_a_construction_from_an_earlier_body() is
+            let logger = DIAGNOSTICS_STORE()
+            let registry = build_registry()
+            let box = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Box", names_for(["T"]), Semantic.BLOCK_SCOPE())
+
+            registry.begin_body()
+            registry.get_or_create(Syntax.Trees.Identifiers.Identifier(loc(), "earlier"), loc(), box)
+
+            registry.begin_body()
+            registry.report_unresolved(logger, 0)
+
+            is_false(logger.any_errors)
+        si
+
+        @test()
+        Calling__report_unresolved__after_begin_body__reports_a_construction_from_the_current_body() is
+            let logger = DIAGNOSTICS_STORE()
+            let registry = build_registry()
+            let box = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Box", names_for(["T"]), Semantic.BLOCK_SCOPE())
+
+            registry.begin_body()
+            registry.get_or_create(Syntax.Trees.Identifiers.Identifier(loc(), "earlier"), loc(), box)
+
+            registry.begin_body()
+            registry.get_or_create(Syntax.Trees.Identifiers.Identifier(loc(), "current"), loc(), box)
+            registry.report_unresolved(logger, 0)
+
+            are_equal(1, logger.error_count)
+        si
+
+        // A construction keeps the body it was first created in: asking for
+        // it again, as a re-walk does, does not move it into a later body.
+        @test()
+        Calling__get_or_create__again_in_a_later_body__keeps_the_original_body() is
+            let logger = DIAGNOSTICS_STORE()
+            let registry = build_registry()
+            let box = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Box", names_for(["T"]), Semantic.BLOCK_SCOPE())
+            let key = Syntax.Trees.Identifiers.Identifier(loc(), "key")
+
+            registry.begin_body()
+            registry.get_or_create(key, loc(), box)
+
+            registry.begin_body()
+            registry.get_or_create(key, loc(), box)
+            registry.report_unresolved(logger, 0)
+
+            is_false(logger.any_errors)
+        si
+
+        // The same holds for a second container added under the same key:
+        // the key's body is fixed by its first construction.
+        @test()
+        Calling__get_or_create__with_a_new_container_in_a_later_body__keeps_the_original_body() is
+            let logger = DIAGNOSTICS_STORE()
+            let registry = build_registry()
+            let box = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Box", names_for(["T"]), Semantic.BLOCK_SCOPE())
+            let pair = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Pair", names_for(["T", "U"]), Semantic.BLOCK_SCOPE())
+            let key = Syntax.Trees.Identifiers.Identifier(loc(), "key")
+
+            registry.begin_body()
+            registry.get_or_create(key, loc(), box)
+
+            registry.begin_body()
+            registry.get_or_create(key, loc(), pair)
+            registry.report_unresolved(logger, 0)
+
+            is_false(logger.any_errors)
+        si
+
+        // clear() forgets which body created each construction along with
+        // the constructions themselves.
+        @test()
+        Calling__clear__resets_the_body_of_each_construction() is
+            let logger = DIAGNOSTICS_STORE()
+            let registry = build_registry()
+            let box = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Box", names_for(["T"]), Semantic.BLOCK_SCOPE())
+            let key = Syntax.Trees.Identifiers.Identifier(loc(), "key")
+
+            registry.begin_body()
+            registry.get_or_create(key, loc(), box)
+
+            registry.begin_body()
+            registry.clear()
+            registry.get_or_create(key, loc(), box)
+            registry.report_unresolved(logger, 0)
+
+            are_equal(1, logger.error_count)
+        si
+    si
+si

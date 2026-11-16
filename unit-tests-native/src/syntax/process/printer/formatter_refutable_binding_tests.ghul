@@ -1,0 +1,251 @@
+namespace Syntax.Process.Printer.UnitTests is
+
+    use Syntax.Process.Printer.FORMATTER
+    use Assertions
+
+    // FORMATTER renders the REFUTABLE_BINDING that drives an `if let` arm
+    // as `pattern[: T] = scrutinee[ /\ guard]`. Without an explicit visit
+    // method the StrictVisitor base throws and FORMAT_HANDLER swallows
+    // the exception — echoing the input back unchanged, which a canonical
+    // round-trip cannot distinguish from a working format. Hitting the
+    // FORMATTER directly here surfaces a regression as a thrown exception
+    // or a mismatched string.
+    class FORMATTER_REFUTABLE_BINDING_TESTS is
+        init() is si
+
+        format(node: Trees.Node) -> string =>
+            FORMATTER(Collections.LIST[Lexical.TRIVIA](), 100).format(node)
+
+        identifier(name: string) -> Trees.Expressions.Expression =>
+            Trees.Expressions.IDENTIFIER(
+                Source.LOCATION("test.ghul", 1, 1, 1, 1),
+                Trees.Identifiers.Identifier(Source.LOCATION("test.ghul", 1, 1, 1, 1), name)
+            )
+
+        simple_pattern(name: string) -> Trees.Variables.VariableLeft =>
+            Trees.Variables.SIMPLE_VARIABLE_LEFT(
+                Source.LOCATION("test.ghul", 1, 1, 1, 1),
+                Trees.Identifiers.Identifier(Source.LOCATION("test.ghul", 1, 1, 1, 1), name)
+            )
+
+        named_type(name: string) -> Trees.TypeExpressions.TypeExpression =>
+            Trees.TypeExpressions.NAMED(
+                Source.LOCATION("test.ghul", 1, 1, 1, 1),
+                Trees.Identifiers.Identifier(Source.LOCATION("test.ghul", 1, 1, 1, 1), name)
+            )
+
+        and_guard(
+            left: Trees.Expressions.Expression,
+            right: Trees.Expressions.Expression
+        ) -> Trees.Expressions.Expression =>
+            Trees.Expressions.BINARY(
+                Source.LOCATION("test.ghul", 1, 1, 1, 1),
+                Trees.Identifiers.Identifier(Source.LOCATION("test.ghul", 1, 1, 1, 1), "/\\"),
+                "/\\",
+                left,
+                right
+            )
+
+        binding(
+            pattern: Trees.Variables.VariableLeft,
+            narrow_type_expression: Trees.TypeExpressions.TypeExpression?,
+            scrutinee: Trees.Expressions.Expression,
+            guard: Trees.Expressions.Expression?
+        ) -> Trees.Statements.REFUTABLE_BINDING is
+            let clauses = Collections.LIST[Trees.Statements.REFUTABLE_BINDING_CLAUSE]()
+
+            clauses.add(
+                Trees.Statements.REFUTABLE_BINDING_CLAUSE(
+                    Source.LOCATION("test.ghul", 1, 1, 1, 1),
+                    scrutinee,
+                    narrow_type_expression,
+                    pattern,
+                    guard
+                )
+            )
+
+            return Trees.Statements.REFUTABLE_BINDING(
+                Source.LOCATION("test.ghul", 1, 1, 1, 1),
+                clauses
+            )
+        si
+
+        @test()
+        a_bare_pattern_renders_as_pattern_eq_scrutinee() is
+            are_equal(
+                "x = e\n",
+                format(binding(simple_pattern("x"), null, identifier("e"), null))
+            )
+        si
+
+        @test()
+        a_narrow_type_renders_between_pattern_and_scrutinee() is
+            are_equal(
+                "x: T = e\n",
+                format(binding(simple_pattern("x"), named_type("T"), identifier("e"), null))
+            )
+        si
+
+        @test()
+        a_guard_renders_after_scrutinee_with_an_and_separator() is
+            are_equal(
+                "x = e /\\ g\n",
+                format(binding(simple_pattern("x"), null, identifier("e"), identifier("g")))
+            )
+        si
+
+        @test()
+        a_chained_guard_renders_as_a_left_associative_and_chain() is
+            are_equal(
+                "x = e /\\ g1 /\\ g2\n",
+                format(
+                    binding(
+                        simple_pattern("x"),
+                        null,
+                        identifier("e"),
+                        and_guard(identifier("g1"), identifier("g2"))
+                    )
+                )
+            )
+        si
+
+        @test()
+        a_narrow_type_and_guard_compose() is
+            are_equal(
+                "x: T = e /\\ g\n",
+                format(
+                    binding(simple_pattern("x"), named_type("T"), identifier("e"), identifier("g"))
+                )
+            )
+        si
+
+        // Multi-clause renderings: clauses join with a comma. Each
+        // clause renders the same way the single-clause case does;
+        // the per-clause guard is local to its clause.
+        clause(
+            pattern: Trees.Variables.VariableLeft,
+            narrow_type_expression: Trees.TypeExpressions.TypeExpression?,
+            scrutinee: Trees.Expressions.Expression,
+            guard: Trees.Expressions.Expression?
+        ) -> Trees.Statements.REFUTABLE_BINDING_CLAUSE =>
+            Trees.Statements.REFUTABLE_BINDING_CLAUSE(
+                Source.LOCATION("test.ghul", 1, 1, 1, 1),
+                scrutinee,
+                narrow_type_expression,
+                pattern,
+                guard
+            )
+
+        multi_binding(clauses: Collections.Iterable[Trees.Statements.REFUTABLE_BINDING_CLAUSE]) -> Trees.Statements.REFUTABLE_BINDING =>
+            Trees.Statements.REFUTABLE_BINDING(
+                Source.LOCATION("test.ghul", 1, 1, 1, 1),
+                clauses
+            )
+
+        @test()
+        two_clauses_render_with_a_comma_separator() is
+            let cs = Collections.LIST[Trees.Statements.REFUTABLE_BINDING_CLAUSE]()
+            cs.add(clause(simple_pattern("x"), null, identifier("e"), null))
+            cs.add(clause(simple_pattern("y"), null, identifier("f"), null))
+
+            are_equal(
+                "x = e, y = f\n",
+                format(multi_binding(cs))
+            )
+        si
+
+        @test()
+        per_clause_guards_render_inside_each_clause() is
+            let cs = Collections.LIST[Trees.Statements.REFUTABLE_BINDING_CLAUSE]()
+            cs.add(clause(simple_pattern("x"), null, identifier("e"), identifier("g1")))
+            cs.add(clause(simple_pattern("y"), null, identifier("f"), identifier("g2")))
+
+            are_equal(
+                "x = e /\\ g1, y = f /\\ g2\n",
+                format(multi_binding(cs))
+            )
+        si
+
+        @test()
+        per_clause_narrow_types_render_per_clause() is
+            let cs = Collections.LIST[Trees.Statements.REFUTABLE_BINDING_CLAUSE]()
+            cs.add(clause(simple_pattern("x"), named_type("T"), identifier("e"), null))
+            cs.add(clause(simple_pattern("y"), named_type("U"), identifier("f"), null))
+
+            are_equal(
+                "x: T = e, y: U = f\n",
+                format(multi_binding(cs))
+            )
+        si
+
+        // Leaf-name shorthand renderings: a clause whose variable name
+        // was inferred from the path renders back as the shorthand the
+        // user wrote — `path?` / `path: T` — never expanded to the
+        // full `name = path` form.
+        member(left: Trees.Expressions.Expression, name: string) -> Trees.Expressions.Expression =>
+            Trees.Expressions.MEMBER(
+                Source.LOCATION("test.ghul", 1, 1, 1, 1),
+                left,
+                Trees.Identifiers.Identifier(Source.LOCATION("test.ghul", 1, 1, 1, 1), name),
+                Source.LOCATION("test.ghul", 1, 1, 1, 1)
+            )
+
+        shorthand_clause(
+            scrutinee: Trees.Expressions.Expression,
+            leaf: string,
+            narrow_type_expression: Trees.TypeExpressions.TypeExpression?,
+            guard: Trees.Expressions.Expression?
+        ) -> Trees.Statements.REFUTABLE_BINDING_CLAUSE is
+            let result = clause(simple_pattern(leaf), narrow_type_expression, scrutinee, guard)
+
+            result.is_inferred_name = true
+
+            return result
+        si
+
+        @test()
+        a_shorthand_clause_renders_as_path_query() is
+            let cs = Collections.LIST[Trees.Statements.REFUTABLE_BINDING_CLAUSE]()
+            cs.add(shorthand_clause(member(identifier("x"), "y"), "y", null, null))
+
+            are_equal(
+                "x.y?\n",
+                format(multi_binding(cs))
+            )
+        si
+
+        @test()
+        a_shorthand_narrow_clause_renders_as_path_colon_type() is
+            let cs = Collections.LIST[Trees.Statements.REFUTABLE_BINDING_CLAUSE]()
+            cs.add(shorthand_clause(member(identifier("x"), "y"), "y", named_type("T"), null))
+
+            are_equal(
+                "x.y: T\n",
+                format(multi_binding(cs))
+            )
+        si
+
+        @test()
+        a_shorthand_guard_renders_after_the_query() is
+            let cs = Collections.LIST[Trees.Statements.REFUTABLE_BINDING_CLAUSE]()
+            cs.add(shorthand_clause(member(identifier("x"), "y"), "y", null, identifier("g")))
+
+            are_equal(
+                "x.y? /\\ g\n",
+                format(multi_binding(cs))
+            )
+        si
+
+        @test()
+        shorthand_and_full_clauses_mix_in_one_chain() is
+            let cs = Collections.LIST[Trees.Statements.REFUTABLE_BINDING_CLAUSE]()
+            cs.add(shorthand_clause(member(identifier("x"), "y"), "y", null, null))
+            cs.add(clause(simple_pattern("z"), null, identifier("f"), null))
+
+            are_equal(
+                "x.y?, z = f\n",
+                format(multi_binding(cs))
+            )
+        si
+    si
+si
