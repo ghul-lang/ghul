@@ -84,6 +84,7 @@ jobs:
       compiler: ${{ steps.compiler_version.outputs.compiler }}
       build: ${{ steps.compiler_version.outputs.build }}
       runtime: ${{ steps.libraries.outputs.runtime }}
+      testing: ${{ steps.libraries.outputs.testing }}
       ghul_llvm: ${{ steps.libraries.outputs.ghul_llvm }}
 
     permissions:
@@ -118,10 +119,13 @@ jobs:
           runtime=$(build/library-tag.sh ghul-runtime)
         fi
         ghul_llvm=$(gh release view --repo ghul-lang/ghul-llvm --json tagName --jq .tagName)
-        [ -n "$runtime" ] && [ -n "$ghul_llvm" ]
+        # The unit tests run on ghul-testing's latest release.
+        testing=$(build/library-tag.sh ghul-testing)
+        [ -n "$runtime" ] && [ -n "$ghul_llvm" ] && [ -n "$testing" ]
         echo "runtime=$runtime" >> "$GITHUB_OUTPUT"
         echo "ghul_llvm=$ghul_llvm" >> "$GITHUB_OUTPUT"
-        echo "runtime $runtime, ghul-llvm $ghul_llvm" >> "$GITHUB_STEP_SUMMARY"
+        echo "testing=$testing" >> "$GITHUB_OUTPUT"
+        echo "runtime $runtime, ghul-llvm $ghul_llvm, ghul-testing $testing" >> "$GITHUB_STEP_SUMMARY"
 
     # Compute the next version: the patch bump of the latest vX.Y.Z tag, unless
     # the checked-in VERSION file declares a higher minor/major floor (a marker
@@ -426,6 +430,18 @@ jobs:
 
     - name: Run unit tests
       run: dotnet test unit-tests
+
+    # The unit tests moved to the ghul-testing runner, on .NET. They run on
+    # llvm too, in the llvm bootstrap job, with the compiler it builds.
+    - name: Checkout ghul-testing
+      uses: actions/checkout@v7
+      with:
+        repository: ghul-lang/ghul-testing
+        path: libraries/ghul-testing
+        ref: ${{ needs.version.outputs.testing }}
+
+    - name: Run the unit tests on the ghul-testing runner
+      run: dotnet run --project unit-tests-native -- --format text
 
     - name: Run WebAssembly library unit tests
       run: dotnet test wasm/tests/wasm-tests.ghulproj
@@ -825,6 +841,18 @@ jobs:
         LLVM_BOOTSTRAP_DIR: ${{ runner.temp }}/llvm-bootstrap
         GHUL_NATIVE_VERSION: ${{ needs.version.outputs.package }}
       run: build/llvm-bootstrap.sh
+
+    # The unit tests on the ghul-testing runner, built for llvm from the
+    # compiler's own sources by the native compiler that pass 2 produced.
+    - name: Checkout ghul-testing
+      uses: actions/checkout@v7
+      with:
+        repository: ghul-lang/ghul-testing
+        path: libraries/ghul-testing
+        ref: ${{ needs.version.outputs.testing }}
+
+    - name: Run the unit tests on llvm
+      run: build/llvm-unit-tests.sh "${{ runner.temp }}/llvm-bootstrap" libraries/ghul-testing "${{ runner.temp }}/llvm-bootstrap/pass-2/ghul"
 
     # Pass 2's module and executable, hashed for llvm_chain_compare.
     - name: Hash pass 2
