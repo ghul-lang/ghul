@@ -18,7 +18,7 @@ Use it for any change meant to leave output unchanged, such as a refactor of the
 ## `coverage.sh`
 Measures how much of the compiler's own ghūl source each test suite executes: unit, integration, cross-assembly, and analysis.
 
-The compiler is built with debug information so that a Portable PDB maps the emitted IL back to `.ghul` source. Unit tests call into the compiler in the same process, so coverage comes from `coverlet.collector` (referenced from `unit-tests.ghulproj`) through the standard VSTest data-collector protocol. The other three suites spawn the compiler as a separate process, so coverlet instruments the built assembly itself and every spawned process — including MSBuild's, for cross-assembly — runs the instrumented copy. This script only captures — each suite's Cobertura report lands in `coverage/` and the script stops there.
+The compiler is built with debug information so that a Portable PDB maps the emitted IL back to `.ghul` source. Coverlet instruments the built compiler assembly itself for every suite. The unit tests call into the copy beside their own program, which is instrumented and then run. The other three suites spawn the compiler as a separate process, and every spawned process — including MSBuild's, for cross-assembly — runs the instrumented copy. This script only captures — each suite's Cobertura report lands in `coverage/` and the script stops there.
 
 ```sh
 build/coverage.sh                                   # integration tests only

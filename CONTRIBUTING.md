@@ -127,8 +127,7 @@ no need to run the whole suite yourself, because CI will.
 
 | Suite | Command | Time | Notes |
 |---|---|---|---|
-| Unit | `dotnet test unit-tests` | seconds | Deliberately selective - see [Changing the type system](#changing-the-type-system) for the exception |
-| Unit, on the ghul-testing runner | `dotnet run --project unit-tests-native` | seconds | The unit tests moving off MSTest, a batch at a time; each test file is in one of the two projects. Needs [ghul-testing](https://github.com/ghul-lang/ghul-testing) checked out under `libraries/ghul-testing` or beside this checkout. `build/llvm-unit-tests.sh` runs the same tests on llvm; see [unit-tests-native/README.md](unit-tests-native/README.md) |
+| Unit | `dotnet run --project unit-tests` | seconds | Deliberately selective - see [Changing the type system](#changing-the-type-system) for the exception. Run by [ghul-testing](https://github.com/ghul-lang/ghul-testing), which must be checked out under `libraries/ghul-testing` or beside this checkout; `build/llvm-unit-tests.sh` runs the same tests on llvm. See [unit-tests/README.md](unit-tests/README.md) |
 | Integration | `dotnet publish --output publish/ && dotnet ghul-test integration-tests` | ~3 min | Snapshot-based; see [integration-tests/README.md](integration-tests/README.md) |
 | Cross-assembly | `dotnet publish --output publish/ && dotnet ghul-test --config cross-assembly cross-assembly-tests` | ~1 min | Real MSBuild projects; see [cross-assembly-tests/README.md](cross-assembly-tests/README.md) |
 | Analysis | `dotnet test analysis-tests` | seconds | Drives the language-service mode the editor extension uses |

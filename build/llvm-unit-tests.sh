@@ -7,7 +7,7 @@
 #
 # <work> holds the libraries.rsp and sources.rsp that llvm-self-sources.sh
 # writes, the runtime and the compiler's own sources; the tests are compiled
-# with those, the sources under unit-tests-native/src and ghul-testing's,
+# with those, the sources under unit-tests/src and ghul-testing's,
 # into <work>/unit-tests/unit-tests, which runs every test and exits with the
 # runner's status. The compiler links with the ghul-llvm on the PATH or in
 # GHUL_LLVM. Arguments for the runner go in UNIT_TEST_ARGUMENTS.
@@ -35,7 +35,7 @@ mkdir -p "$directory"
 
 {
     cat "$work/sources.rsp"
-    find "$root/unit-tests-native/src" -name '*.ghul' | sort
+    find "$root/unit-tests/src" -name '*.ghul' | sort
 } > "$directory/sources.rsp"
 
 start=$(date +%s)
