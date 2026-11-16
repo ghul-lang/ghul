@@ -44,8 +44,10 @@ collect() {
         fi
 
         # A program linked dynamically needs the system's C library, which an
-        # empty image does not have.
-        if grep -qs -e '--llvm-link-mode dynamic' "$dir/ghulflags" "$dir/../../ghulflags"; then
+        # empty image does not have. A run of a test under one of its targets
+        # sits somewhere under the test's .targets/, and the flags are the
+        # test's own.
+        if grep -qs -e '--llvm-link-mode dynamic' "$dir/ghulflags" "${dir%%/.targets/*}/ghulflags"; then
             continue
         fi
 

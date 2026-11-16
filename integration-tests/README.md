@@ -109,21 +109,32 @@ opportunistic upkeep, not a project.
 
 The suite is organised by what a test asserts - `execution/`, `semantic/`,
 `parse/`, `il/` - and a target is a second axis across it, not a fifth kind.
-A test belongs in one of two places:
+A test belongs in one of three places:
 
 - **A program that should mean the same thing on every target** lives under
   its kind and carries a `targets` file naming the targets it runs under,
   `dotnet wasm llvm` or any subset. The runner builds and runs it once per
   target, adding `--target <name>` to its `ghulflags` - which must not name a
   target itself - and reports each run as `<test>[<target>]`. Each run
-  happens in its own `.targets/<target>/` directory under the test, holding
-  copies of the sources, inputs and expectations, so the runs neither collide
-  nor leave artifacts in the test directory. One `run.expected` serves every
+  happens in its own `.targets/<target>/<test>/` directory under the test,
+  holding copies of the sources, inputs and expectations, so the runs neither
+  collide nor leave artifacts in the test directory. The last part is the
+  test's own directory name, so a namespace the compiler takes from it is the
+  same in every run. One `run.expected` serves every
   target; where a target's result legitimately differs, a
   `run.wasm.expected`, `err.llvm.expected` or `fail.wasm.expected` stands in
   for the plain file in that target's run alone. A test that does not yet
   pass on a target records the difference that way rather than leaving the
   target out, so the gap stays visible.
+- **A test whose subject is .NET itself** - an IL snapshot, a .NET API the
+  core library doesn't declare, an `IL.*` pragma, `decimal`, DllImport - has
+  no meaning on wasm or llvm. It lives under its kind with a `targets` file
+  naming only `dotnet`. That file is what keeps it out of a run that builds
+  every test for another target, such as the `host-llvm-all` configuration,
+  which builds the whole suite for llvm with the native compiler in
+  `hosts/llvm/`, as a contributor without .NET runs it. A test that should
+  mean the same thing everywhere but doesn't yet is not one of these: it
+  records the difference as above.
 - **A test about a target's own behaviour** - what it cannot compile yet,
   the shape of the module or IR it writes, a host operation only it has -
   lives under that target's directory, `wasm/` or `llvm/`, with `--target
