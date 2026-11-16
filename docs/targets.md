@@ -131,14 +131,14 @@ Only values that the machine lays out in the same way on both sides can cross:
 
 - The scalars `bool`, `char`, `byte`, `ubyte`, `short`, `ushort`, `int`, `uint`, `long`, `ulong`, `word`, `uword`, `single` and `double` cross as the C types of the same width. A C pointer that ghūl only holds and passes back, such as a handle, is a `word`.
 - A `string` argument crosses as a NUL-terminated UTF-8 copy, made for the call and released after it.
-- On .NET and llvm, a reference to a scalar, such as `int ref` or `word ref`, crosses as the address of the slot, so a C out-parameter such as `int *` or `sqlite3 **` writes into a local, a field or an array element. The address is valid for the call only.
+- On .NET and llvm, a reference, such as `int ref` or `word ref`, crosses as the address of the slot, so a C out-parameter such as `int *` or `sqlite3 **` writes into a local, a field or an array element. The address is valid for the call only.
 - On .NET and llvm, an `ARRAY[ubyte]` crosses as the address of its first byte, so the foreign function reads or writes the array's own bytes. The length is a separate argument that the declaration has and the caller passes, as in C. A length greater than the array's count is the caller's bug, and nothing checks it. The address is valid for the call only, and the callee must not keep it.
-- On .NET and llvm, a reference to a struct marked `@layout("c")`, such as `TM ref`, crosses as the address of the struct, so a C function that takes a `struct tm *` reads and writes its fields. The address is valid for the call only.
+- On .NET and llvm, a reference to a struct marked `@layout("c")`, such as `TM ref`, crosses as the address of the struct, so a C function that takes a `struct tm *` reads and writes its fields. The address is valid for the call only. On .NET, a struct that the platform's marshalling cannot pass in place, such as one with a `bool`, `char` or reference field, fails at the call with .NET's marshalling exception.
 - Pointers cross on .NET only.
 
 Any other type, such as a class, a tuple, another kind of array or a function, is an error at the parameter. A foreign function that keeps the pointer it was given after it returns has undefined behaviour, as with any marshalled call.
 
-`@layout("c")` before a struct promises that its fields are laid out as C lays out a struct with the same fields: in the order they are declared, each aligned to its own size, with the padding that C puts between them. `size_of` gives the struct's C `sizeof`. Each field must be a scalar other than `bool` and `char`, a `word`, or another struct marked `@layout("c")`. A C `_Bool` is a `ubyte`. A `signed char` is a `byte` and an `unsigned char` is a `ubyte`. A plain C `char` is whichever of those two the platform uses: it is signed on x86-64 and unsigned on 64-bit Arm Linux. A C pointer field is a `word`. A generic struct, a struct with any other field type, a layout other than `"c"`, and `@layout` on anything but a struct are errors. Bit-fields and C unions have no equivalent, and structs do not cross by value.
+`@layout("c")` before a struct promises that its fields are laid out as C lays out a struct with the same fields: in the order they are declared, each aligned to its own size, with the padding that C puts between them. `size_of` gives the struct's C `sizeof`. The promise is about layout only, and nothing about the fields is checked: calling foreign code is unsafe, and the declaration has to match what the foreign code expects. A reference, such as a `string` or a class, is laid out as a pointer. A `bool` takes the size the target gives it, which is one byte on llvm, as a C `_Bool` is. A `signed char` is a `byte` and an `unsigned char` is a `ubyte`. A plain C `char` is whichever of those two the platform uses: it is signed on x86-64 and unsigned on 64-bit Arm Linux. A C pointer field that ghūl only holds is a `word`. `@layout` on anything but a struct, and a layout other than `"c"`, are errors. Bit-fields and C unions have no equivalent, and structs do not cross by value.
 
 ```ghul
 @layout("c")
@@ -162,7 +162,7 @@ si
 gmtime(time: long ref, result: TIME_PARTS ref) -> word
 ```
 
-On llvm, `Ghul.Interop.read` and `write` read and write a whole `@layout("c")` struct at an address, as they do a scalar, and an `ARRAY[T]` of such a struct holds its elements in place, one after another, as a C array does.
+On llvm, `Ghul.Interop.read` and `write` read and write a value of any type at an address, and `elements` gives the address of an array's first element. An `ARRAY[T]` of a struct holds its elements in place, one after another, as a C array of the struct does, and an array of references holds one pointer after another.
 
 A function that returns a string must say who owns the text, on llvm, with a named argument. A string return is an error on .NET. On wasm, a string return needs no named argument. The two values are:
 

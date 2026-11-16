@@ -5,7 +5,7 @@ namespace Semantic is
     //
     // A native call carries its arguments as the machine lays them out,
     // so the types it can carry are the ones whose layout is fixed: the
-    // scalars, a pointer, a reference to a scalar, and a string, which
+    // scalars, a pointer, a reference, and a string, which
     // the runtime marshals to a null-terminated buffer for the duration
     // of the call. Anything else - a class, a tuple, an array, a
     // function - has a representation the runtime would have to be told
@@ -22,8 +22,8 @@ namespace Semantic is
 
         // Whether an `@extern` parameter may be declared at this type when
         // building for `target`. Every target takes the scalars and strings.
-        // .NET and llvm also take a reference to a scalar or to a
-        // `@layout("c")` struct, which crosses as the slot's address, and an ARRAY[ubyte], which crosses as the
+        // .NET and llvm also take a reference, which crosses as the slot's
+        // address, and an ARRAY[ubyte], which crosses as the
         // address of its first element, each valid for the call. Only .NET
         // takes a pointer.
         can_take_on(type: Type?, target: Compiler.Target) -> bool =>
@@ -41,10 +41,6 @@ namespace Semantic is
             fi
 
             if type.is_ref then
-                if !is_scalar(type.get_element_type()) /\ !is_c_layout_struct(type.get_element_type()) then
-                    return ExternRefusal.REFERENCE_TO_NON_SCALAR
-                fi
-
                 return if target == Compiler.Target.WASM then ExternRefusal.REFERENCE_ON_WASM else null fi
             fi
 
@@ -127,30 +123,6 @@ namespace Semantic is
             return is_scalar(type) \/ type.is_pointer
         si
 
-        // Whether this is a struct marked `@layout("c")`, laid out as C lays
-        // out a struct of the same fields.
-        is_c_layout_struct(type: Type?) -> bool =>
-            if let named: Types.NAMED = type, s: Symbols.STRUCT = named.symbol then
-                s.is_c_layout
-            else
-                false
-            fi
-
-        // Whether a `@layout("c")` struct may hold a field of this type: a
-        // scalar C has an equivalent of, a `word`, or another such struct.
-        // A `bool` and a `char` are left out, because C's `_Bool` and `char`
-        // are a byte where .NET marshals a `bool` as four bytes and a `char`
-        // as one, so neither has the same size on every target; a binding
-        // uses `ubyte` or `byte` and `ushort` instead.
-        can_hold_in_c_layout(type: Type?) -> bool =>
-            is_c_layout_struct(type) \/
-            (
-                type? /\
-                is_scalar(type) /\
-                !type.matches(_innate_symbol_lookup.get_bool_type()) /\
-                !type.matches(_innate_symbol_lookup.get_char_type())
-            )
-
         // The scalars, by the symbols the compiler knows them as rather
         // than by what they render as.
         is_scalar(type: Type?) -> bool is
@@ -190,7 +162,6 @@ si
 namespace Semantic is
     // Why a type cannot be an `@extern` parameter on the target being built.
     enum ExternRefusal is
-        REFERENCE_TO_NON_SCALAR,
         REFERENCE_ON_WASM,
         ARRAY_ON_WASM,
         ARRAY_OF_NON_BYTE,
