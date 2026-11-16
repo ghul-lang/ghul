@@ -187,9 +187,12 @@ widening, retry-loop convergence, or IL emission. So the bar here is higher than
   the reasoning visible in the diff, or notices it broke something.
 
 Unit tests go in `unit-tests/src/`, one file per class under test, named
-`<class>_tests.ghul`. Test classes carry `@TestClass()` and test methods
-`@Test()` — aliases of the MSTest attribute types imported with `use` — and
-assertions are global functions declared in `assertions.ghul`. See the files
+`<class>_tests.ghul`. A test is a method marked `@test()` on a class with a
+public `init()` that takes no arguments, and asserts with `assert` or the
+functions declared in `assertions.ghul`. Fakes and fixtures more than one file
+uses go in `src/shared/`. A test only .NET can run is marked `@IF.dotnet()`,
+and a file only .NET can run starts with `@@IF.dotnet()`; everything else runs
+on llvm too. See [unit-tests/README.md](unit-tests/README.md) and the files
 already there for the conventions.
 
 ## Documentation
