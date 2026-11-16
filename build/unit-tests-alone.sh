@@ -36,32 +36,29 @@ done
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 
-# Each test class, fully qualified: the file's namespace, then the name of
-# the class declared after each @TestClass().
-for file in $(grep -rl '@TestClass()' unit-tests/src --include='*.ghul'); do
-    namespace=$(sed -n 's/^namespace \([A-Za-z0-9_.]*\) is.*/\1/p' "$file" | head -n 1)
-    grep -A2 '@TestClass()' "$file" |
-        sed -n 's/^ *class \([A-Za-z0-9_]*\).*/\1/p' |
-        while read -r class; do
-            echo "$namespace.$class"
-        done
-done | sort -u | grep -F -- "$pattern" > "$work/classes" || true
-
-count=$(wc -l < "$work/classes")
 echo "building the unit tests"
 dotnet build unit-tests -nologo -v q > "$work/build.log" 2>&1 || { cat "$work/build.log"; exit 1; }
+
+runner="unit-tests/bin/Debug/net10.0/unit-tests.dll"
+
+# Each test class, fully qualified: every test's name without its last part,
+# the method.
+dotnet "$runner" --list 2>/dev/null | sed 's/\.[^.]*$//' | sort -u | grep -F -- "$pattern" > "$work/classes" || true
+
+count=$(wc -l < "$work/classes")
 
 echo "running $count classes, $jobs at a time"
 
 run_one() {
-    local class="$1" work="$2"
+    local class="$1" work="$2" runner="$3"
     local log="$work/$class.log"
+    local status=0
 
-    if dotnet test unit-tests --no-build --nologo \
-        --filter "ClassName=$class" \
-        --results-directory "$work/results/$class" > "$log" 2>&1; then
+    dotnet "$runner" --filter "$class.*" --format text > "$log" 2>&1 || status=$?
+
+    if [ "$status" -eq 0 ]; then
         rm -f "$log"
-    elif grep -q 'No test matches the given testcase filter' "$log"; then
+    elif [ "$status" -eq 2 ]; then
         echo "unmatched: $class"
     else
         echo "fails alone: $class"
@@ -70,7 +67,7 @@ run_one() {
 export -f run_one
 
 start=$(date +%s)
-xargs -P "$jobs" -I{} bash -c 'run_one "$@"' _ {} "$work" < "$work/classes" | sort > "$work/report" || true
+xargs -P "$jobs" -I{} bash -c 'run_one "$@"' _ {} "$work" "$runner" < "$work/classes" | sort > "$work/report" || true
 elapsed=$(( $(date +%s) - start ))
 
 cat "$work/report"

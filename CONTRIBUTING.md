@@ -127,8 +127,7 @@ no need to run the whole suite yourself, because CI will.
 
 | Suite | Command | Time | Notes |
 |---|---|---|---|
-| Unit | `dotnet test unit-tests` | seconds | Deliberately selective - see [Changing the type system](#changing-the-type-system) for the exception |
-| Unit, on the ghul-testing runner | `dotnet run --project unit-tests-native` | seconds | The unit tests moving off MSTest, a batch at a time; each test file is in one of the two projects. Needs [ghul-testing](https://github.com/ghul-lang/ghul-testing) checked out under `libraries/ghul-testing` or beside this checkout. `build/llvm-unit-tests.sh` runs the same tests on llvm; see [unit-tests-native/README.md](unit-tests-native/README.md) |
+| Unit | `dotnet run --project unit-tests` | seconds | Deliberately selective - see [Changing the type system](#changing-the-type-system) for the exception. Run by [ghul-testing](https://github.com/ghul-lang/ghul-testing), which must be checked out under `libraries/ghul-testing` or beside this checkout; `build/llvm-unit-tests.sh` runs the same tests on llvm. See [unit-tests/README.md](unit-tests/README.md) |
 | Integration | `dotnet publish --output publish/ && dotnet ghul-test integration-tests` | ~3 min | Snapshot-based; see [integration-tests/README.md](integration-tests/README.md) |
 | Cross-assembly | `dotnet publish --output publish/ && dotnet ghul-test --config cross-assembly cross-assembly-tests` | ~1 min | Real MSBuild projects; see [cross-assembly-tests/README.md](cross-assembly-tests/README.md) |
 | Analysis | `dotnet test analysis-tests` | seconds | Drives the language-service mode the editor extension uses |
@@ -188,9 +187,12 @@ widening, retry-loop convergence, or IL emission. So the bar here is higher than
   the reasoning visible in the diff, or notices it broke something.
 
 Unit tests go in `unit-tests/src/`, one file per class under test, named
-`<class>_tests.ghul`. Test classes carry `@TestClass()` and test methods
-`@Test()` — aliases of the MSTest attribute types imported with `use` — and
-assertions are global functions declared in `assertions.ghul`. See the files
+`<class>_tests.ghul`. A test is a method marked `@test()` on a class with a
+public `init()` that takes no arguments, and asserts with `assert` or the
+functions declared in `assertions.ghul`. Fakes and fixtures more than one file
+uses go in `src/shared/`. A test only .NET can run is marked `@IF.dotnet()`,
+and a file only .NET can run starts with `@@IF.dotnet()`; everything else runs
+on llvm too. See [unit-tests/README.md](unit-tests/README.md) and the files
 already there for the conventions.
 
 ## Documentation

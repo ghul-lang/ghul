@@ -4,11 +4,11 @@
 # suites execute.
 #
 # The compiler is built with debug information so a Portable PDB is emitted
-# mapping IL back to .ghul source. For the integration and cross-assembly
-# suites, coverlet rewrites the built assembly to record which sequence
-# points are hit; unit tests use coverlet's in-process VSTest collector
-# instead, since they call into the compiler directly rather than spawning
-# it. This script only captures — it writes each suite's Cobertura report
+# mapping IL back to .ghul source. For every suite, coverlet rewrites the
+# built compiler assembly to record which sequence points are hit, and runs
+# the suite against it: the integration and cross-assembly suites spawn the
+# compiler, and the unit tests call into the copy beside their own program.
+# This script only captures — it writes each suite's Cobertura report
 # to coverage/ and stops there. Turning that into the HTML report is
 # ghul-lang/ghul-coverage-report's job: its own scheduled workflow checks out
 # this repo, runs this script, and builds+deploys the report.
@@ -163,22 +163,37 @@ run_out_of_process_suite() {
     [[ "$status" -eq 0 ]] || echo "coverage: warning: $suite reported failures; coverage below still reflects what ran"
 }
 
-# Unit tests call into the compiler in the same process, so coverlet.collector
-# (referenced from unit-tests.ghulproj) attaches through the standard VSTest
-# data-collector protocol instead — no separate instrumentation step.
+# Unit tests call into the compiler in the same process: the copy of
+# ghul.dll the build puts beside their program, which this instruments, and
+# then runs the program against. They are run by ghul-testing, which the
+# build takes from libraries/ghul-testing; where no checkout is there or
+# beside this one, its latest release is fetched there first.
 run_unit_suite() {
+    if [[ ! -d libraries/ghul-testing/src && ! -d ../ghul-testing/src ]]; then
+        local tag
+        tag="$(build/library-tag.sh ghul-testing)" || die "cannot find ghul-testing's latest release"
+        git clone --quiet --depth 1 --branch "$tag" https://github.com/ghul-lang/ghul-testing libraries/ghul-testing \
+            || die "cannot fetch ghul-testing $tag"
+    fi
+
+    echo "coverage: building unit-tests"
+    local config="Debug"
+    dotnet build unit-tests -c "$config" >/dev/null || die "unit-tests build failed"
+    local directory="unit-tests/bin/$config/net10.0"
+    local dll="$directory/ghul.dll"
+    [[ -f "$dll" ]] || die "$dll not found after build"
+    [[ -f "${dll%.dll}.pdb" ]] || die "${dll%.dll}.pdb not found; unit-tests was built without debug information"
+
     echo "coverage: running unit"
     local start=$SECONDS
-    local raw="$output/.raw-unit"
-    rm -rf "$raw"
     local status=0
-    dotnet test unit-tests --collect:"XPlat Code Coverage" --results-directory "$raw" \
+    "$tools/coverlet" "$dll" \
+        --target dotnet \
+        --targetargs "$directory/unit-tests.dll --format text" \
+        --format cobertura \
+        --output "$output/unit.cobertura.xml" \
+        --include-test-assembly \
         || status=$?
-    local produced
-    produced="$(find "$raw" -name 'coverage.cobertura.xml' -print -quit)"
-    [[ -n "$produced" ]] || die "unit test coverage file was not produced"
-    cp "$produced" "$output/unit.cobertura.xml"
-    rm -rf "$raw"
     echo "coverage: unit finished in $((SECONDS - start))s (exit $status)"
     [[ "$status" -eq 0 ]] || echo "coverage: warning: unit reported failures; coverage below still reflects what ran"
 }
