@@ -116,9 +116,11 @@ A test belongs in one of two places:
   `dotnet wasm llvm` or any subset. The runner builds and runs it once per
   target, adding `--target <name>` to its `ghulflags` - which must not name a
   target itself - and reports each run as `<test>[<target>]`. Each run
-  happens in its own `.targets/<target>/` directory under the test, holding
-  copies of the sources, inputs and expectations, so the runs neither collide
-  nor leave artifacts in the test directory. One `run.expected` serves every
+  happens in its own `.targets/<target>/<test>/` directory under the test,
+  holding copies of the sources, inputs and expectations, so the runs neither
+  collide nor leave artifacts in the test directory. The last part is the
+  test's own directory name, so a namespace the compiler takes from it is the
+  same in every run. One `run.expected` serves every
   target; where a target's result legitimately differs, a
   `run.wasm.expected`, `err.llvm.expected` or `fail.wasm.expected` stands in
   for the plain file in that target's run alone. A test that does not yet
