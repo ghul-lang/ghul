@@ -167,6 +167,73 @@ namespace Semantic.UnitTests is
         an_array(element: Type) -> Type =>
             Semantic.Types.ARRAY(LOCATION("test.ghul", 1, 1, 1, 1), a_wrapper("Array", element), [element])
 
+        a_struct(name: string, is_c_layout: bool) -> Type is
+            let loc = LOCATION("test.ghul", 1, 1, 1, 1)
+            let s = Semantic.Symbols.STRUCT(loc, loc, Semantic.BLOCK_SCOPE(), name, LIST[string](), Semantic.BLOCK_SCOPE())
+            s.is_c_layout = is_c_layout
+
+            return s.type!
+        si
+
+        @Test()
+        is_c_layout_struct__answers_for_a_struct_marked_layout_c_only() is
+            let l = lookup()
+            let signature = PINVOKE_SIGNATURE(l)
+
+            is_true(signature.is_c_layout_struct(a_struct("TM", true)))
+            is_false(signature.is_c_layout_struct(a_struct("PLAIN", false)))
+            is_false(signature.is_c_layout_struct(a_class("BOX")))
+            is_false(signature.is_c_layout_struct(l.get_int_type()))
+            is_false(signature.is_c_layout_struct(null))
+        si
+
+        @Test()
+        can_hold_in_c_layout__takes_c_sized_scalars_and_layout_c_structs() is
+            let l = lookup()
+            let signature = PINVOKE_SIGNATURE(l)
+
+            is_true(signature.can_hold_in_c_layout(l.get_int_type()))
+            is_true(signature.can_hold_in_c_layout(l.get_ubyte_type()))
+            is_true(signature.can_hold_in_c_layout(l.get_word_type()))
+            is_true(signature.can_hold_in_c_layout(l.get_double_type()))
+            is_true(signature.can_hold_in_c_layout(a_struct("INNER", true)))
+        si
+
+        // A bool and a char differ in size between .NET's marshalling and C,
+        // so neither has one layout on every target.
+        @Test()
+        can_hold_in_c_layout__refuses_bool_char_and_types_without_c_layout() is
+            let l = lookup()
+            let signature = PINVOKE_SIGNATURE(l)
+
+            is_false(signature.can_hold_in_c_layout(l.get_bool_type()))
+            is_false(signature.can_hold_in_c_layout(l.get_char_type()))
+            is_false(signature.can_hold_in_c_layout(l.get_string_type()))
+            is_false(signature.can_hold_in_c_layout(a_struct("PLAIN", false)))
+            is_false(signature.can_hold_in_c_layout(a_class("BOX")))
+            is_false(signature.can_hold_in_c_layout(null))
+        si
+
+        @Test()
+        refusal_on__a_reference_to_a_layout_c_struct__crosses_on_dotnet_and_llvm_but_not_wasm() is
+            let signature = signature()
+            let reference = a_ref(a_struct("TM", true))
+
+            is_true(!signature.refusal_on(reference, Compiler.Target.DOTNET)?)
+            is_true(!signature.refusal_on(reference, Compiler.Target.LLVM)?)
+            is_true(signature.refusal_on(reference, Compiler.Target.WASM) =~ Semantic.ExternRefusal.REFERENCE_ON_WASM)
+        si
+
+        @Test()
+        refusal_on__a_reference_to_a_struct_without_layout_c__is_refused() is
+            let signature = signature()
+            let reference = a_ref(a_struct("PLAIN", false))
+
+            for target in [Compiler.Target.DOTNET, Compiler.Target.LLVM] do
+                is_true(signature.refusal_on(reference, target) =~ Semantic.ExternRefusal.REFERENCE_TO_NON_SCALAR, "on {target}")
+            od
+        si
+
         @Test()
         refusal_on__a_reference_to_a_scalar__crosses_on_dotnet_and_llvm_but_not_wasm() is
             let l = lookup()
