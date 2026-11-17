@@ -1172,7 +1172,7 @@ namespace Logging is
         si
 
         error(location: LOCATION, code: string, message: string, related: LIST[RELATED_LOCATION]) is
-            if let usable = _usable_related(related) then
+            if let usable = _usable_related(location, related) then
                 top.add_diagnostic_message(
                     location.file_name,
                     DIAGNOSTIC_MESSAGE(is_analysis, is_compile_expressions, DiagnosticSeverity.ERROR, location, code, message, usable, true)
@@ -1185,13 +1185,20 @@ namespace Logging is
         // A related location sitting on a sentinel ("internal", "unknown",
         // "reflected")
         // is not a jump target - there is no file behind it - so it is
-        // dropped rather than rendered as noise. Returns null when nothing
-        // usable is left, so the caller falls back to the related-free form.
-        _usable_related(related: LIST[RELATED_LOCATION]) -> LIST[RELATED_LOCATION]? is
+        // dropped rather than rendered as noise. Outside the IDE, so is one
+        // in a source library the diagnostic at `at` is not part of: a
+        // library is another assembly to the code that uses it, and a
+        // build against the library's compiled form has no file to point
+        // at either. Returns null when nothing usable is left, so the
+        // caller falls back to the related-free form.
+        _usable_related(at: LOCATION, related: LIST[RELATED_LOCATION]) -> LIST[RELATED_LOCATION]? is
             let usable = LIST[RELATED_LOCATION](related.count)
 
             for r in related do
-                if !r.location.is_reflected /\ !r.location.is_unknown /\ !r.location.is_internal then
+                if
+                    !r.location.is_reflected /\ !r.location.is_unknown /\ !r.location.is_internal /\
+                    (is_analysis \/ !_is_in_another_library(at, r.location))
+                then
                     usable.add(r)
                 fi
             od
@@ -1201,6 +1208,13 @@ namespace Logging is
             fi
 
             return usable
+        si
+
+        _is_in_another_library(at: LOCATION, related: LOCATION) -> bool is
+            let flags = IoC.CONTAINER.instance.build_flags
+            let unit = flags.unit_of(related)
+
+            return unit.is_library /\ !(unit =~ flags.unit_of(at))
         si
 
         // A lexical error comes from the tokenizer, which reads each source
@@ -1297,13 +1311,13 @@ namespace Logging is
                 // still needs the advice and the slug to suppress by.
                 top.add_diagnostic_message(
                     location.file_name,
-                    DIAGNOSTIC_MESSAGE(is_analysis, is_compile_expressions, DiagnosticSeverity.INFO, location, code, message, _usable_related(related))
+                    DIAGNOSTIC_MESSAGE(is_analysis, is_compile_expressions, DiagnosticSeverity.INFO, location, code, message, _usable_related(location, related))
                 )
 
                 return
             fi
 
-            let usable = _usable_related(related)
+            let usable = _usable_related(location, related)
 
             if !usable? then
                 warn(location, code, message)
@@ -1361,7 +1375,7 @@ namespace Logging is
 
             related.add(RELATED_LOCATION(related_location, related_message))
 
-            let usable = _usable_related(related)
+            let usable = _usable_related(location, related)
 
             if !usable? then
                 hint(location, code, message)
