@@ -1015,7 +1015,10 @@ namespace IR.WasmGC is
         // Where an instance field lives, or null, reported, where the
         // object model does not hold it.
         _instance_field(from: Value?, symbol: Semantic.Symbols.Symbol) -> WASMGC_FIELD? is
-            if !from? \/ (from.is_value_type /\ !_struct_of(from.type)?) then
+            // A value read at a type parameter may be a value type in
+            // general, but one specialized at a class holds a reference, and
+            // its field is read through it.
+            if !from? \/ (from.is_value_type /\ !_struct_of(from.type)? /\ (_specialize(from.type)?.is_value_type ?? true)) then
                 _report("a field of a value type")
                 return null
             fi
@@ -3451,11 +3454,19 @@ namespace IR.WasmGC is
                 return
             fi
 
-            if let array = _registry.array_of(_specialize(test.isa_type)) then
+            // A boxed value is an instance of the optional of its type as of
+            // the type itself, as .NET's isinst reads Nullable<T> as T.
+            let tested mut = _specialize(test.isa_type)
+
+            if let t = tested /\ t.is_optional /\ t.is_value_type /\ !t.is_maybe then
+                tested = t.optional_inner_type
+            fi
+
+            if let array = _registry.array_of(tested) then
                 gen(value)
 
                 _test_class_ids(_registry.array_class_ids(array))
-            elif let target = _registry.type_index(_specialize(test.isa_type)) then
+            elif let target = _registry.type_index(tested) then
                 gen(value)
 
                 _emit(HEAP_TYPE_INSTRUCTION(Opcode.REF_TEST, HEAP_TYPE.of_type_index(target)))

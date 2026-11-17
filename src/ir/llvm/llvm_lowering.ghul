@@ -4364,12 +4364,10 @@ namespace IR.LLVMTarget is
             fi
 
             // A struct's field is within the struct, wherever that is held.
-            if from.is_value_type then
-                if !objects.is_struct(owner) then
-                    _report("a field of {symbol.owner}")
-                    return null
-                fi
-
+            // Whether the owner is a struct decides it, not the type the value
+            // is read at: a type parameter may be a value type, but one
+            // specialized at a class holds a reference.
+            if from.is_value_type /\ objects.is_struct(owner) then
                 if let address = _address_of(from) then
                     let within: LLVM.Value? = null
 
@@ -5266,7 +5264,10 @@ namespace IR.LLVMTarget is
                 return
             fi
 
-            let ranges = _class_ranges(_specialize(test.isa_type))
+            // A boxed value is an instance of the optional of its type as of
+            // the type itself, as .NET's isinst reads Nullable<T> as T.
+            let tested = _value_optional_inner(test.isa_type) ?? _specialize(test.isa_type)
+            let ranges = _class_ranges(tested)
 
             if !ranges? then
                 _report("a type test against {test.isa_type}{_in_cells()}")
@@ -5492,7 +5493,15 @@ namespace IR.LLVMTarget is
 
         visit(load: Values.Load.STATIC_ANONYMOUS_FUNCTION) is _anonymous_function(load.symbol, load.func_type) si
         visit(load: Values.Load.GLOBAL_ANONYMOUS_FUNCTION) is _anonymous_function(load.symbol, load.func_type) si
-        visit(load: Values.Load.INSTANCE_ANONYMOUS_FUNCTION) is _report("a function value") si
+        // A literal that captures only the receiver of the body it is written
+        // in is a function value over that receiver.
+        visit(load: Values.Load.INSTANCE_ANONYMOUS_FUNCTION) is
+            if let function: Semantic.Symbols.Function = load.symbol, owner: Semantic.Symbols.Classy = function.owner then
+                gen(Values.MAKE_CLOSURE(load.func_type, function, Values.Load.REFERENCE_SELF(owner)))
+            else
+                _report("a function value")
+            fi
+        si
 
         // A literal that captures nothing but its enclosing body's type
         // parameters is a function value with no receiver.
