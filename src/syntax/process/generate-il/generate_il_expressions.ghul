@@ -277,9 +277,10 @@ namespace Syntax.Process is
         // code units is made; each piece is written into it in order; and
         // the draft becomes the string. Nothing is shared with any other
         // interpolation, an inner one included, and a hole that throws
-        // leaves no draft behind. A hole whose text isn't known until it is
-        // written, such as a double, a formatted or aligned hole, or a value
-        // displayed, is read into a string of its own first. Adds the value
+        // leaves no draft behind. A string, char, bool, integer, double or
+        // single hole is measured and written in place; any other hole, such
+        // as a formatted or aligned one or a value displayed, is read into a
+        // string of its own first. Adds the value
         // and answers true, or adds nothing and answers false where the core
         // library doesn't declare the writers.
         _try_interpolate_into_draft(interpolation: Expressions.STRING_INTERPOLATION, string_type: Semantic.Types.Type) -> bool is
@@ -300,6 +301,15 @@ namespace Syntax.Process is
             let write_unsigned = IR.Program.CORE_LIBRARY.global_function("_write_decimal", [draft_type, int_type, int_type, ulong_type])
             let from_draft = IR.Program.CORE_LIBRARY.global_function("_string_from_draft", [draft_type])
             let copy_to = IR.Program.CORE_LIBRARY.global_function("_string_copy_to", [string_type, int_type, draft_type, int_type, int_type])
+
+            // A core library from before the floating-point writers reads a
+            // double or a single hole into text of its own instead.
+            let double_type = lookup.get_double_type()
+            let single_type = lookup.get_single_type()
+            let double_length = IR.Program.CORE_LIBRARY.global_function("_double_length", [double_type])
+            let write_double = IR.Program.CORE_LIBRARY.global_function("_write_double", [draft_type, int_type, double_type])
+            let single_length = IR.Program.CORE_LIBRARY.global_function("_single_length", [single_type])
+            let write_single = IR.Program.CORE_LIBRARY.global_function("_write_single", [draft_type, int_type, single_type])
 
             if
                 !text_length? \/ !signed_length? \/ !unsigned_length? \/ !write_text? \/
@@ -341,6 +351,10 @@ namespace Syntax.Process is
                     pieces.add(DraftPiece.DECIMAL(TEMP(current_block, "hole", _type_caster.cast_value(location, value, long_type, true, false)), false))
                 elif _is(type, ulong_type) then
                     pieces.add(DraftPiece.DECIMAL(TEMP(current_block, "hole", value), true))
+                elif _is(type, double_type) /\ double_length? /\ write_double? then
+                    pieces.add(DraftPiece.FLOATING(TEMP(current_block, "hole", value), double_length!, write_double!))
+                elif _is(type, single_type) /\ single_length? /\ write_single? then
+                    pieces.add(DraftPiece.FLOATING(TEMP(current_block, "hole", value), single_length!, write_single!))
                 else
                     pieces.add(DraftPiece.TEXT(_hole_text(location, value, null)))
                 fi
@@ -377,6 +391,8 @@ namespace Syntax.Process is
                         let measure = if number.is_unsigned then unsigned_length! else signed_length! fi
 
                         TEMP(current_block, "length", measure.call(location, null, [number.value.load()]:Value, null, _function_caller))
+                    when floating: DraftPiece.FLOATING then
+                        TEMP(current_block, "length", floating.measure.call(location, null, [floating.value.load()]:Value, null, _function_caller))
                     esac
 
                 if let length = measured then
@@ -422,6 +438,8 @@ namespace Syntax.Process is
                         let write = if number.is_unsigned then write_unsigned! else write_signed! fi
 
                         write.call(location, null, [draft.load(), at.load(), lengths[i]!.load(), number.value.load()]:Value, null, _function_caller)
+                    when floating: DraftPiece.FLOATING then
+                        floating.write.call(location, null, [draft.load(), at.load(), floating.value.load()]:Value, null, _function_caller)
                     esac
 
                 at.store(written)
@@ -869,5 +887,6 @@ namespace Syntax.Process is
         ALIGNED(text: TEMP, width: int)
         CHAR(unit: TEMP)
         DECIMAL(value: TEMP, is_unsigned: bool)
+        FLOATING(value: TEMP, measure: Semantic.Symbols.Function, write: Semantic.Symbols.Function)
     si
 si
