@@ -43,6 +43,12 @@ collect() {
             continue
         fi
 
+        # A program that reads a file the compiler wrote while building it,
+        # such as an inference trace, has nothing to read in an empty image.
+        if grep -qs -e '--trace-inference-file' "$dir/ghulflags" "${dir%%/.targets/*}/ghulflags"; then
+            continue
+        fi
+
         # A program linked dynamically needs the system's C library, which an
         # empty image does not have. A run of a test under one of its targets
         # sits somewhere under the test's .targets/, and the flags are the
