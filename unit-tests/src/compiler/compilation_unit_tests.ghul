@@ -1,0 +1,109 @@
+namespace Compiler.UnitTests is
+    use Collections.LIST
+
+    use Source.LOCATION
+    use Source.UNIT
+    use Source.UnitKind
+
+    use Assertions
+
+    // Pins which unit a declaration belongs to by where it is: the
+    // compiler's, an imported assembly's, nowhere, a source library's, a
+    // session cell's, or the program's.
+    class COMPILATION_UNIT_TESTS is
+        init() is si
+
+        // Runs `body` with the build's flags declaring one library rooted
+        // at /library-root and, where `cells` holds any, a session of those
+        // cells, putting the flags back after.
+        with_flags(cells: string[], body: () -> void) is
+            let flags = IoC.CONTAINER.instance.build_flags
+            let was_libraries = flags.library_sources
+            let was_cells = LIST[string](flags.session_cell_names)
+
+            let libraries = Source.SOURCE_LIBRARIES()
+            let _ = libraries.add("core", "1.0.0", "/library-root")
+            flags.library_sources = libraries
+
+            for name in cells do
+                flags.session_cell_names.add(name)
+            od
+
+            try
+                body()
+            finally
+                flags.library_sources = was_libraries
+                flags.session_cell_names.clear()
+
+                for name in was_cells do
+                    flags.session_cell_names.add(name)
+                od
+            yrt
+        si
+
+        unit_of(location: LOCATION) -> UNIT => IoC.CONTAINER.instance.build_flags.unit_of(location)
+
+        at(file_name: string) -> LOCATION => LOCATION(file_name, 1, 1, 1, 1)
+
+        @test()
+        the_compilers_own_declarations__are_the_compilers_unit() is
+            with_flags([], () -> void is
+                assert unit_of(LOCATION.internal).kind == UnitKind.COMPILER
+            si)
+        si
+
+        @test()
+        a_reflected_declaration__is_imported_and_an_unknown_one_is_nowhere() is
+            with_flags([], () -> void is
+                assert unit_of(LOCATION.reflected).kind == UnitKind.IMPORTED
+                assert unit_of(LOCATION.unknown).kind == UnitKind.UNKNOWN
+            si)
+        si
+
+        @test()
+        a_file_under_a_library_root__is_that_librarys_unit() is
+            with_flags([], () -> void is
+                let unit = unit_of(at("/library-root/src/list.ghul"))
+
+                assert unit.is_library
+                assert unit.library?.name =~ "core"
+                assert !unit.is_users
+            si)
+        si
+
+        @test()
+        a_file_beside_a_library_root__is_the_programs() is
+            with_flags([], () -> void is
+                let unit = unit_of(at("/library-rooted/main.ghul"))
+
+                assert unit.is_program
+                assert unit.is_users
+                assert unit =~ UNIT.program
+            si)
+        si
+
+        @test()
+        a_sessions_cell__is_its_own_unit_by_its_place() is
+            with_flags(["cell1", "cell2"], () -> void is
+                let second = unit_of(at("cell2.ghul"))
+
+                assert second.is_cell /\ second.cell =~ 1
+                assert second.is_users
+                assert !(second =~ unit_of(at("cell1.ghul")))
+                assert second =~ unit_of(at("cell2.ghul"))
+            si)
+        si
+
+        @test()
+        two_files_of_one_library__are_one_unit() is
+            with_flags([], () -> void is
+                let first = unit_of(at("/library-root/a.ghul"))
+                let second = unit_of(at("/library-root/nested/b.ghul"))
+
+                assert first =~ second
+                assert first.get_hash_code() == second.get_hash_code()
+                assert !(first =~ UNIT.program)
+            si)
+        si
+    si
+si
