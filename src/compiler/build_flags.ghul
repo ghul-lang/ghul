@@ -343,6 +343,49 @@ namespace Compiler is
             return Source.UNIT.program
         si
 
+        /// Whether a declaration at `declared`, seen from code at `from`,
+        /// lies across an assembly boundary, as an imported assembly's
+        /// declaration does from the program: it is imported, or it is a
+        /// source library's and `from` is not in that library, or it is
+        /// one the compiler makes for a source core library and `from` is
+        /// the user's own code. The program and the cells of a session are
+        /// one assembly to each other here, as they are when compiled.
+        ///
+        /// - declared: where the declaration is
+        /// - from: where the code naming, extending or overriding it is
+        is_across_assembly_boundary(declared: Source.LOCATION, from: Source.LOCATION) -> bool is
+            let declared_unit = unit_of(declared)
+
+            case declared_unit.kind
+            when Source.UnitKind.IMPORTED then
+                return true
+            when Source.UnitKind.LIBRARY then
+                return !(unit_of(from) =~ declared_unit)
+            when Source.UnitKind.COMPILER then
+                return library_sources? /\ unit_of(from).is_users
+            else
+                return false
+            esac
+        si
+
+        /// Whether `symbol`, seen from code at `from`, is a source library's
+        /// underscore name and `from` is outside that library. A library's
+        /// underscore names are private to it, as an assembly's are on
+        /// .NET, where they are not imported at all.
+        ///
+        /// - symbol: the declaration being named
+        /// - from: where the code naming it is
+        is_private_to_another_unit(symbol: Semantic.Symbols.Symbol, from: Source.LOCATION) -> bool is
+            // A group is reported at the call, against the function chosen.
+            if !symbol.name.starts_with("_") \/ from.is_internal \/ isa Semantic.Symbols.FUNCTION_GROUP(symbol) then
+                return false
+            fi
+
+            let declared = unit_of(symbol.location)
+
+            return declared.is_library /\ !(unit_of(from) =~ declared)
+        si
+
         // The imports `use default` stands for, when the project names
         // its own set with `--default-use`. Empty leaves the curated set
         // in `DEFAULT_USES` in force.
