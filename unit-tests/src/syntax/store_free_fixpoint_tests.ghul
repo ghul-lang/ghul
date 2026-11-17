@@ -252,6 +252,58 @@ namespace Syntax.UnitTests is
             yrt
         si
 
+        // A trusted body whose only overrides are in a library source is
+        // trusted before the solve runs, as an imported one is: those
+        // overrides stand where a .NET library's own would.
+        @test()
+        Trusted_store_free_body_overridden_only_in_a_library__is_store_free() is
+            let build_flags = IoC.CONTAINER.instance.build_flags
+            let previous = build_flags.library_sources
+
+            let libraries = Source.SOURCE_LIBRARIES()
+            let _ = libraries.add("core", "1.0.0", "/library-root")
+            build_flags.library_sources = libraries
+
+            try
+                let marked = method("describe", open_class("BASE"))
+                marked.mark_trusted_store_free()
+
+                let library_class = CLASS(
+                    LOCATION("/library-root/derived.ghul", 1, 1, 1, 1), loc(), Semantic.BLOCK_SCOPE(), "DERIVED",
+                    LIST[string](), Semantic.BLOCK_SCOPE())
+
+                marked.add_overrider(INSTANCE_METHOD(
+                    LOCATION("/library-root/derived.ghul", 2, 1, 2, 1), loc(), library_class, "describe", Semantic.BLOCK_SCOPE()))
+
+                is_true(marked.is_store_free)
+            finally
+                build_flags.library_sources = previous
+            yrt
+        si
+
+        // An override in the program being compiled is judged, so before
+        // the solve the trusted body is not trusted for a call that could
+        // reach it.
+        @test()
+        Trusted_store_free_body_overridden_in_the_program__is_not_store_free_before_the_solve() is
+            let build_flags = IoC.CONTAINER.instance.build_flags
+            let previous = build_flags.library_sources
+
+            let libraries = Source.SOURCE_LIBRARIES()
+            let _ = libraries.add("core", "1.0.0", "/library-root")
+            build_flags.library_sources = libraries
+
+            try
+                let marked = method("describe", open_class("BASE"))
+                marked.mark_trusted_store_free()
+                marked.add_overrider(method("describe", closed_class("PROGRAM_DERIVED")))
+
+                is_false(marked.is_store_free)
+            finally
+                build_flags.library_sources = previous
+            yrt
+        si
+
         @test()
         Clean_leaf_function__is_safe() is
             let f = global_function("leaf")

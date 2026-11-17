@@ -831,9 +831,43 @@ namespace Semantic.Lookups is
         get_pipes_unbounded_sources() -> Collections.SET[Semantic.Symbols.Symbol] => _source.unbounded_sources
 
         is_pipes_function(function: Semantic.Symbols.Function) -> bool => _source.is_pipes_function(function)
-        stops_early(function: Semantic.Symbols.Function) -> bool => false
-        reads_whole_source(function: Semantic.Symbols.Function) -> bool => false
-        holds_resource(function: Semantic.Symbols.Function) -> bool => false
+        stops_early(function: Semantic.Symbols.Function) -> bool =>
+            _source_read(function) =~ true
+
+        reads_whole_source(function: Semantic.Symbols.Function) -> bool =>
+            _source_read(function) =~ false
+
+        _source_read(function: Semantic.Symbols.Function) -> bool? is
+            let stops_early: bool mut
+
+            if _source.source_reads.try_get_value(function.root_specialized_from, stops_early ref) then
+                return stops_early
+            fi
+
+            return null
+        si
+
+        // The core's counterparts of the .NET calls whose sequence holds a
+        // resource until it is disposed: every overload of the file and
+        // directory enumerations, as on .NET, so a program is told the same
+        // thing on every target.
+        holds_resource(function: Semantic.Symbols.Function) -> bool =>
+            _is_member_of(function, "IO.File", ["read_lines"]) \/
+            _is_member_of(function, "IO.Directory", ["enumerate_files", "enumerate_directories", "enumerate_file_system_entries"])
+
+        _is_member_of(function: Semantic.Symbols.Function, type_name: string, names: ARRAY[string]) -> bool is
+            let root = function.root_specialized_from
+
+            if names |> Ghul.Pipes.all(name => name !~ root.name) then
+                return false
+            fi
+
+            if let type = _find_declared_class(type_name, 0), group: Semantic.Symbols.FUNCTION_GROUP = type.find_member(root.name) then
+                return group.functions |> Ghul.Pipes.any(f => f.root_specialized_from == root)
+            fi
+
+            return false
+        si
 
         get_task_type(type: Type) -> Type? =>
             if let classy = _find_declared_class("Tasks.TASK", 1) then Types.GENERIC(LOCATION.internal, classy, LIST[Type]([type])) else null fi
