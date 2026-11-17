@@ -812,6 +812,8 @@ namespace IR.LLVMTarget is
             else
                 _report("an argument of another function")
             fi
+
+            _narrow_guard(load.snapshot_type)
         si
 
         visit_address(load: Values.Load.LOCAL_ARGUMENT) is
@@ -836,6 +838,8 @@ namespace IR.LLVMTarget is
             else
                 _report("a load of {load.symbol.name}")
             fi
+
+            _narrow_guard(load.snapshot_type)
         si
 
         visit_address(load: Values.Load.LOCAL_VARIABLE) is
@@ -1404,8 +1408,54 @@ namespace IR.LLVMTarget is
             if isa Semantic.Types.REFERENCE(_specialize(from.type)) then _value_of(from) else _address_of(from) fi
         // A narrowed value is the value it narrows, read as its narrower
         // type: the IR already holds what that reading is.
-        visit(projection: Values.NARROW_PROJECT) is gen(projection.projected) si
-        visit(view: Values.NARROW_VIEW) is gen(view.underlying) si
+        visit(projection: Values.NARROW_PROJECT) is
+            gen(projection.projected)
+            _narrow_guard(projection.type)
+        si
+
+        visit(view: Values.NARROW_VIEW) is
+            gen(view.underlying)
+            _narrow_guard(view.type)
+        si
+
+        // A value narrowed to `narrowed` by eliminating every other
+        // alternative of a hierarchy is checked where it is loaded, in a
+        // session, where a later cell can add an alternative the
+        // elimination never saw: a value of another class throws
+        // InvalidCastException rather than being used as the narrowed type.
+        // See NARROW_GUARD.
+        _narrow_guard(narrowed: Type?) is
+            if !Values.NARROW_GUARD.is_needed(narrowed) then
+                return
+            fi
+
+            let target = narrowed!
+
+            if !LLVM_TYPES.is_object_reference(target) \/ target.is_object then
+                return
+            fi
+
+            let value = _pop()
+
+            if !value? then
+                return
+            fi
+
+            let trait_type = _cell_trait(target)
+            let ranges = if trait_type? then LIST[(first: int, last: int)]() else _class_ranges(target) fi
+
+            if !ranges? then
+                _push(value)
+                _report("a narrowing to {target} checked{_in_cells()}")
+                return
+            fi
+
+            let in_class = if let t = trait_type then _has_trait(value, t) else _fits(value, ranges) fi
+            let fits = _current.binary(BinaryOperator.OR, IntegerFlags.NONE, in_class, _current.compare(IntegerPredicate.EQ, value, LLVM.Values.null_pointer))
+
+            _throw_if(_current.compare(IntegerPredicate.EQ, fits, LLVM.Values.boolean(false)), Semantic.Lookups.RuntimeException.INVALID_CAST)
+            _push(value)
+        si
         // A view held as its underlying value is where that value is; one
         // held otherwise, such as an optional value type viewed as the value
         // it holds, is copied into a place of its own.
@@ -2432,6 +2482,28 @@ namespace IR.LLVMTarget is
             let right = _value_of(compare.right)
 
             if left? /\ right? then
+                // A reference against a value of a type parameter specialized
+                // at a value type, which the generic body could not box,
+                // compares as references do; see _reference_equal.
+                if
+                    (compare.comparison == Comparison.EQUAL \/ compare.comparison == Comparison.NOT_EQUAL) /\
+                    (
+                        isa LLVM.Type.STRUCT(left.type) \/ isa LLVM.Type.STRUCT(right.type) \/
+                        (isa LLVM.Type.POINTER(left.type)) != (isa LLVM.Type.POINTER(right.type))
+                    )
+                then
+                    let equal = _reference_equal(left, compare.left.type, right, compare.right.type)
+
+                    _push(
+                        if compare.comparison == Comparison.EQUAL then
+                            equal
+                        else
+                            _current.binary(BinaryOperator.XOR, IntegerFlags.NONE, equal, LLVM.Values.boolean(true))
+                        fi)
+
+                    return
+                fi
+
                 _push(_compare(compare.comparison, left, right, compare.is_unsigned))
             fi
         si
@@ -2788,6 +2860,21 @@ namespace IR.LLVMTarget is
                         fi
                 fi
 
+                // A value of a value type tested against null reaches here
+                // only through a generic specialized at that type, and is
+                // tested as its box would be: an absent optional's box is
+                // null, and any other value's box is not.
+                if isa LLVM.Type.STRUCT(first.type) then
+                    let is_null = _boxed_as_null(first, operands[0].type) ?? LLVM.Values.boolean(false)
+
+                    return
+                        if condition == IR.BRANCH.Z then
+                            is_null
+                        else
+                            _current.binary(BinaryOperator.XOR, IntegerFlags.NONE, is_null, LLVM.Values.boolean(true))
+                        fi
+                fi
+
                 return _current.compare(
                     if condition == IR.BRANCH.Z then IntegerPredicate.EQ else IntegerPredicate.NE fi,
                     first,
@@ -2803,6 +2890,26 @@ namespace IR.LLVMTarget is
 
             if !second? then
                 return null
+            fi
+
+            // A reference compared with a value of a value type, or two such
+            // values held as structs, compare as references do; see
+            // _reference_equal.
+            if
+                (condition == IR.BRANCH.EQ \/ condition == IR.BRANCH.NE) /\
+                (
+                    isa LLVM.Type.STRUCT(first.type) \/ isa LLVM.Type.STRUCT(second.type) \/
+                    (isa LLVM.Type.POINTER(first.type)) != (isa LLVM.Type.POINTER(second.type))
+                )
+            then
+                let equal = _reference_equal(first, operands[0].type, second, operands[1].type)
+
+                return
+                    if condition == IR.BRANCH.EQ then
+                        equal
+                    else
+                        _current.binary(BinaryOperator.XOR, IntegerFlags.NONE, equal, LLVM.Values.boolean(true))
+                    fi
             fi
 
             let comparison: (Comparison, bool)? =
@@ -5293,9 +5400,48 @@ namespace IR.LLVMTarget is
 
         visit(equality: Values.REFERENCE_EQUALITY) is
             if let left = _value_of(equality.left), right = _value_of(equality.right) then
-                _push(_current.compare(IntegerPredicate.EQ, left, right))
+                _push(_reference_equal(left, equality.left.type, right, equality.right.type))
             fi
         si
+
+        // `==` compares references. A value of a value type reaches it only
+        // through a generic specialized at that type, and compares as .NET
+        // compares it once boxed: a box is a new object, so it is equal to
+        // nothing, and the box of an absent optional is null.
+        _reference_equal(left: LLVM.Value, left_type: Type?, right: LLVM.Value, right_type: Type?) -> LLVM.Value is
+            let left_is_reference = isa LLVM.Type.POINTER(left.type)
+            let right_is_reference = isa LLVM.Type.POINTER(right.type)
+
+            if left_is_reference /\ right_is_reference then
+                return _current.compare(IntegerPredicate.EQ, left, right)
+            fi
+
+            let left_absent = _boxed_as_null(left, left_type)
+            let right_absent = _boxed_as_null(right, right_type)
+
+            if left_is_reference then
+                if let absent = right_absent then
+                    return _current.binary(BinaryOperator.AND, IntegerFlags.NONE, _current.compare(IntegerPredicate.EQ, left, LLVM.Values.null_pointer), absent)
+                fi
+            elif right_is_reference then
+                if let absent = left_absent then
+                    return _current.binary(BinaryOperator.AND, IntegerFlags.NONE, absent, _current.compare(IntegerPredicate.EQ, right, LLVM.Values.null_pointer))
+                fi
+            elif left_absent? /\ right_absent? then
+                return _current.binary(BinaryOperator.AND, IntegerFlags.NONE, left_absent!, right_absent!)
+            fi
+
+            return LLVM.Values.boolean(false)
+        si
+
+        // Whether `value` of `type`, a value type, would box to null: true
+        // where it is an absent optional. Null where its box is never null.
+        _boxed_as_null(value: LLVM.Value, type: Type?) -> LLVM.Value? =>
+            if _value_optional_inner(type)? then
+                _current.compare(IntegerPredicate.EQ, _is_present(value), LLVM.Values.boolean(false))
+            else
+                null
+            fi
 
         visit(check: Values.REFERENCE_NULL_CHECK) is
             if let value = _value_of(check.inner) then
