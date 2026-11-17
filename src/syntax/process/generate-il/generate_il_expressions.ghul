@@ -242,6 +242,11 @@ namespace Syntax.Process is
                 return
             fi
 
+            if _build_flags.target != Compiler.Target.DOTNET /\ _try_interpolate_into_draft(interpolation, string_type) then
+                leave_block()
+                return
+            fi
+
             let literal_length = Literal.NUMBER(interpolation.literal_length, int_type)
             let expression_count = Literal.NUMBER(interpolation.expression_count, int_type)
             let capacity = Literal.NUMBER(_estimated_capacity(interpolation), int_type)
@@ -258,85 +263,379 @@ namespace Syntax.Process is
                 )
 
             for eaf in interpolation.values do
-                let expression = eaf.expression
-                let alignment = eaf.alignment
-                let format = eaf.format
-                let expr_value = expression.value!
-
-                if !eaf.is_expression \/ _is_plain_string_literal_hole(eaf) then
-                    let literal = cast Expressions.Literals.STRING?(expression)!
-
-                    if literal.value_string.length == 0 then
-                        continue
-                    fi
-
-                    add(Values.RUNTIME(IR.RuntimeOperation.APPEND_TEXT, interpolator.load(), Literal.STRING(literal.value_string, string_type), null))
-                elif !format? /\ !alignment? then
-                    _append_interpolated_value(interpolation.location, interpolator, expr_value, null)
-                elif _reads_differently_from_formatted(expr_value.type!) then
-                    // A value .NET would not print as ghūl does reads as it
-                    // would in a plain hole, and an alignment then pads that
-                    // text; a format applies where the rendering reaches a
-                    // value .NET formats, as the payload of an optional.
-                    if let aligned_by = alignment then
-                        let rendered =
-                            TEMP(
-                                current_block,
-                                "rendered",
-                                Values.RUNTIME(
-                                    IR.RuntimeOperation.NEW_STRING_BUILDER,
-                                    Literal.NUMBER(0, _innate_symbol_lookup.get_int_type()),
-                                    Literal.NUMBER(1, _innate_symbol_lookup.get_int_type()),
-                                    _innate_symbol_lookup.get_interpolated_string_handler_type()
-                                )
-                            )
-
-                        _append_interpolated_value(interpolation.location, rendered, expr_value, format)
-
-                        let text = TEMP(current_block, "text", Values.RUNTIME(IR.RuntimeOperation.BUILD_STRING, rendered.load(), string_type))
-
-                        add(
-                            Values.RUNTIME(
-                                IR.RuntimeOperation.APPEND_ALIGNED_VALUE,
-                                [interpolator.load(), text.load(), aligned_by.value!]:Value,
-                                null,
-                                string_type
-                            )
-                        )
-                    else
-                        _append_interpolated_value(interpolation.location, interpolator, expr_value, format)
-                    fi
-                else
-                    let operands = Collections.LIST[Value](4)
-
-                    operands.add(interpolator.load())
-                    operands.add(expr_value)
-
-                    let operation: IR.RuntimeOperation mut
-
-                    if format? /\ alignment? then
-                        operands.add(alignment.value!)
-                        operands.add(Literal.STRING(format, string_type))
-
-                        operation = IR.RuntimeOperation.APPEND_ALIGNED_FORMATTED_VALUE
-                    elif format? then
-                        operands.add(Literal.STRING(format, string_type))
-
-                        operation = IR.RuntimeOperation.APPEND_FORMATTED_VALUE
-                    else
-                        operands.add(alignment!.value!)
-
-                        operation = IR.RuntimeOperation.APPEND_ALIGNED_VALUE
-                    fi
-
-                    add(Values.RUNTIME(operation, operands, null, expr_value.type!))
-                fi
+                _append_fragment(interpolation.location, interpolator, eaf)
             od
 
             add(Values.RUNTIME(IR.RuntimeOperation.BUILD_STRING, interpolator.load(), string_type))
 
             leave_block()
         si
+
+        // Builds an interpolation without a builder, as wasm and llvm do:
+        // each hole is evaluated once, left to right, into a temporary; the
+        // lengths of the pieces are added up; one draft of exactly that many
+        // code units is made; each piece is written into it in order; and
+        // the draft becomes the string. Nothing is shared with any other
+        // interpolation, an inner one included, and a hole that throws
+        // leaves no draft behind. A hole whose text isn't known until it is
+        // written, such as a double, a formatted or aligned hole, or a value
+        // displayed, is read into a string of its own first. Adds the value
+        // and answers true, or adds nothing and answers false where the core
+        // library doesn't declare the writers.
+        _try_interpolate_into_draft(interpolation: Expressions.STRING_INTERPOLATION, string_type: Semantic.Types.Type) -> bool is
+            let lookup = _innate_symbol_lookup
+            let int_type = lookup.get_int_type()
+            let long_type = lookup.get_long_type()
+            let ulong_type = lookup.get_ulong_type()
+            let char_type = lookup.get_char_type()
+            let draft_type = lookup.get_array_type(char_type)
+            let optional_string = string_type.as_optional()
+
+            let text_length = IR.Program.CORE_LIBRARY.global_function("_text_length", [optional_string])
+            let signed_length = IR.Program.CORE_LIBRARY.global_function("_decimal_length", [long_type])
+            let unsigned_length = IR.Program.CORE_LIBRARY.global_function("_decimal_length", [ulong_type])
+            let write_text = IR.Program.CORE_LIBRARY.global_function("_write_text", [draft_type, int_type, optional_string])
+            let write_char = IR.Program.CORE_LIBRARY.global_function("_write_char", [draft_type, int_type, char_type])
+            let write_signed = IR.Program.CORE_LIBRARY.global_function("_write_decimal", [draft_type, int_type, int_type, long_type])
+            let write_unsigned = IR.Program.CORE_LIBRARY.global_function("_write_decimal", [draft_type, int_type, int_type, ulong_type])
+            let from_draft = IR.Program.CORE_LIBRARY.global_function("_string_from_draft", [draft_type])
+            let copy_to = IR.Program.CORE_LIBRARY.global_function("_string_copy_to", [string_type, int_type, draft_type, int_type, int_type])
+
+            if
+                !text_length? \/ !signed_length? \/ !unsigned_length? \/ !write_text? \/
+                !write_char? \/ !write_signed? \/ !write_unsigned? \/ !from_draft? \/ !copy_to?
+            then
+                return false
+            fi
+
+            let location = interpolation.location
+            let pieces = Collections.LIST[DraftPiece]()
+
+            for eaf in interpolation.values do
+                if !eaf.is_expression \/ _is_plain_string_literal_hole(eaf) then
+                    let literal = cast Expressions.Literals.STRING?(eaf.expression)!
+
+                    if literal.value_string.length > 0 then
+                        pieces.add(DraftPiece.LITERAL(literal.value_string))
+                    fi
+
+                    continue
+                fi
+
+                let value = eaf.expression.value!
+                let type = value.type!
+
+                if let alignment = eaf.alignment then
+                    if let literal: Values.Literal.NUMBER = alignment.value, width: Values.Literal.CONSTANT.I4 = literal.constant then
+                        pieces.add(DraftPiece.ALIGNED(_hole_text(location, value, eaf.format), width.value))
+                    else
+                        pieces.add(DraftPiece.TEXT(_render_hole(location, eaf)))
+                    fi
+                elif let format = eaf.format then
+                    pieces.add(DraftPiece.TEXT(_hole_text(location, value, format)))
+                elif !type.is_optional /\ _is(type, string_type) then
+                    pieces.add(DraftPiece.TEXT(TEMP(current_block, "hole", _type_caster.cast_value(location, value, optional_string, true, false))))
+                elif _is(type, char_type) then
+                    pieces.add(DraftPiece.CHAR(TEMP(current_block, "hole", value)))
+                elif _is_signed_decimal(type) then
+                    pieces.add(DraftPiece.DECIMAL(TEMP(current_block, "hole", _type_caster.cast_value(location, value, long_type, true, false)), false))
+                elif _is(type, ulong_type) then
+                    pieces.add(DraftPiece.DECIMAL(TEMP(current_block, "hole", value), true))
+                else
+                    pieces.add(DraftPiece.TEXT(_hole_text(location, value, null)))
+                fi
+            od
+
+            // Every hole has been evaluated: only now is anything measured.
+            let known mut = 0
+            let lengths = Collections.LIST[TEMP?]()
+            let total: Value mut = Literal.NUMBER(0, int_type)
+
+            for piece in pieces do
+                let measured: TEMP? =
+                    case piece
+                    when literal: DraftPiece.LITERAL then
+                        known = known + literal.text.length
+                        null
+                    when text: DraftPiece.TEXT then
+                        TEMP(current_block, "length", text_length!.call(location, null, [text.text.load()]:Value, null, _function_caller))
+                    when aligned: DraftPiece.ALIGNED then
+                        // the text's length and the padding the width
+                        // leaves past it
+                        let width = if aligned.width < 0 then -aligned.width else aligned.width fi
+                        let length = TEMP(current_block, "length", text_length!.call(location, null, [aligned.text.load()]:Value, null, _function_caller))
+                        let short_by = ARITHMETIC(IR.ArithmeticOperation.SUBTRACT, Literal.NUMBER(width, int_type), length.load(), int_type)
+                        let padding = TEMP(current_block, "padding", INT_MAX_ZERO(short_by, int_type))
+
+                        total = ARITHMETIC(IR.ArithmeticOperation.ADD, total, length.load(), int_type)
+
+                        padding
+                    when unit: DraftPiece.CHAR then
+                        known = known + 1
+                        null
+                    when number: DraftPiece.DECIMAL then
+                        let measure = if number.is_unsigned then unsigned_length! else signed_length! fi
+
+                        TEMP(current_block, "length", measure.call(location, null, [number.value.load()]:Value, null, _function_caller))
+                    esac
+
+                if let length = measured then
+                    total = ARITHMETIC(IR.ArithmeticOperation.ADD, total, length.load(), int_type)
+                fi
+
+                lengths.add(measured)
+            od
+
+            total = ARITHMETIC(IR.ArithmeticOperation.ADD, total, Literal.NUMBER(known, int_type), int_type)
+
+            let draft = TEMP(current_block, "draft", NEW_ARRAY(draft_type, char_type, total))
+            let at = TEMP(current_block, "at", Literal.NUMBER(0, int_type))
+
+            for i in 0..pieces.count do
+                let written: Value =
+                    case pieces[i]
+                    when literal: DraftPiece.LITERAL then
+                        let text = _type_caster.cast_value(location, Literal.STRING(literal.text, string_type), optional_string, true, false)
+
+                        write_text!.call(location, null, [draft.load(), at.load(), text]:Value, null, _function_caller)
+                    when text: DraftPiece.TEXT then
+                        write_text!.call(location, null, [draft.load(), at.load(), text.text.load()]:Value, null, _function_caller)
+                    when aligned: DraftPiece.ALIGNED then
+                        let width = if aligned.width < 0 then -aligned.width else aligned.width fi
+                        let spaces = Literal.STRING("".pad_left(width), string_type)
+                        let padding = lengths[i]!
+
+                        if aligned.width < 0 then
+                            at.store(write_text!.call(location, null, [draft.load(), at.load(), aligned.text.load()]:Value, null, _function_caller))
+                            add(copy_to!.call(location, null, [spaces, Literal.NUMBER(0, int_type), draft.load(), at.load(), padding.load()]:Value, null, _function_caller))
+
+                            ARITHMETIC(IR.ArithmeticOperation.ADD, at.load(), padding.load(), int_type)
+                        else
+                            add(copy_to!.call(location, null, [spaces, Literal.NUMBER(0, int_type), draft.load(), at.load(), padding.load()]:Value, null, _function_caller))
+                            at.store(ARITHMETIC(IR.ArithmeticOperation.ADD, at.load(), padding.load(), int_type))
+
+                            write_text!.call(location, null, [draft.load(), at.load(), aligned.text.load()]:Value, null, _function_caller)
+                        fi
+                    when unit: DraftPiece.CHAR then
+                        write_char!.call(location, null, [draft.load(), at.load(), unit.unit.load()]:Value, null, _function_caller)
+                    when number: DraftPiece.DECIMAL then
+                        let write = if number.is_unsigned then write_unsigned! else write_signed! fi
+
+                        write.call(location, null, [draft.load(), at.load(), lengths[i]!.load(), number.value.load()]:Value, null, _function_caller)
+                    esac
+
+                at.store(written)
+            od
+
+            add(from_draft!.call(location, null, [draft.load()]:Value, null, _function_caller))
+
+            return true
+        si
+
+        // Whether a value of `type` is written through the signed decimal
+        // writer: a signed integer, or an unsigned one narrower than a long,
+        // which a long holds exactly.
+        _is_signed_decimal(type: Semantic.Types.Type) -> bool is
+            let lookup = _innate_symbol_lookup
+
+            return
+                _is(type, lookup.get_int_type()) \/ _is(type, lookup.get_long_type()) \/
+                _is(type, lookup.get_short_type()) \/ _is(type, lookup.get_byte_type()) \/
+                _is(type, lookup.get_uint_type()) \/ _is(type, lookup.get_ushort_type()) \/
+                _is(type, lookup.get_ubyte_type())
+        si
+
+        // The text of a hole's `value` under `format`, if any, as the builder
+        // would append it, for a draft to copy: a string as itself, a bool as
+        // a literal, a displayed value through `$`, an optional through a
+        // builder of its own, and anything else through its type's
+        // `to_string`, chosen once the type is known.
+        _hole_text(location: Source.LOCATION, value: Value, format: string?) -> TEMP is
+            let string_type = _innate_symbol_lookup.get_string_type()
+            let optional_string = string_type.as_optional()
+            let type = value.type!
+
+            if !format? /\ !type.is_optional /\ _is(type, string_type) then
+                return TEMP(current_block, "hole", _type_caster.cast_value(location, value, optional_string, true, false))
+            fi
+
+            let text: Value =
+                case _interpolated_value_classifier.classify(type, false)
+                when Semantic.InterpolatedValueRendering.BOOL then
+                    return _bool_text(location, value, optional_string)
+
+                when Semantic.InterpolatedValueRendering.OPTIONAL then
+                    _rendered_text(location, value, format)
+
+                when Semantic.InterpolatedValueRendering.DISPLAYED then
+                    if let display = _display_function then
+                        display.call(location, null, [value]:Value, null, _function_caller)
+                    else
+                        Values.RUNTIME(IR.RuntimeOperation.VALUE_TEXT, [value]:Value, string_type, type)
+                    fi
+
+                else
+                    if let format_text = format then
+                        Values.RUNTIME(IR.RuntimeOperation.FORMATTED_VALUE_TEXT, [value, Literal.STRING(format_text, string_type)]:Value, string_type, type)
+                    else
+                        Values.RUNTIME(IR.RuntimeOperation.VALUE_TEXT, [value]:Value, string_type, type)
+                    fi
+                esac
+
+            return TEMP(current_block, "hole", _type_caster.cast_value(location, text, optional_string, true, false))
+        si
+
+        // `value` under `format` appended to a builder of its own, as an
+        // optional is: the builder's rendering decides what an absent value
+        // reads as.
+        _rendered_text(location: Source.LOCATION, value: Value, format: string?) -> Value is
+            let int_type = _innate_symbol_lookup.get_int_type()
+
+            let rendered =
+                TEMP(
+                    current_block,
+                    "rendered",
+                    Values.RUNTIME(
+                        IR.RuntimeOperation.NEW_STRING_BUILDER,
+                        Literal.NUMBER(0, int_type),
+                        Literal.NUMBER(1, int_type),
+                        _innate_symbol_lookup.get_interpolated_string_handler_type()
+                    )
+                )
+
+            _append_interpolated_value(location, rendered, value, format)
+
+            return Values.RUNTIME(IR.RuntimeOperation.BUILD_STRING, rendered.load(), _innate_symbol_lookup.get_string_type())
+        si
+
+        // A hole read into a string of its own, as the builder would append
+        // it, for a draft to copy.
+        _render_hole(location: Source.LOCATION, eaf: Expressions.INTERPOLATION_FRAGMENT) -> TEMP is
+            let int_type = _innate_symbol_lookup.get_int_type()
+            let string_type = _innate_symbol_lookup.get_string_type()
+
+            let rendered =
+                TEMP(
+                    current_block,
+                    "rendered",
+                    Values.RUNTIME(
+                        IR.RuntimeOperation.NEW_STRING_BUILDER,
+                        Literal.NUMBER(0, int_type),
+                        Literal.NUMBER(1, int_type),
+                        _innate_symbol_lookup.get_interpolated_string_handler_type()
+                    )
+                )
+
+            _append_fragment(location, rendered, eaf)
+
+            let text = Values.RUNTIME(IR.RuntimeOperation.BUILD_STRING, rendered.load(), string_type)
+
+            return TEMP(current_block, "hole", _type_caster.cast_value(location, text, string_type.as_optional(), true, false))
+        si
+
+        // The literal `true` or `false` as the bool `value` reads, which
+        // allocates nothing.
+        _bool_text(location: Source.LOCATION, value: Value, optional_string: Semantic.Types.Type) -> TEMP is
+            let string_type = _innate_symbol_lookup.get_string_type()
+            let result = TEMP(current_block, "hole", optional_string)
+
+            let done = _open_region(LABEL())
+            let true_arm = _open_region(LABEL())
+
+            add(Values.BREAK(true_arm, IR.BRANCH.Z, value))
+            add(_type_caster.cast_value(location, Literal.STRING("true", string_type), optional_string, true, false))
+            add(Values.STORE_TEMP(result.local))
+            add(Values.BREAK(done))
+
+            _close_structured(true_arm)
+            add(_type_caster.cast_value(location, Literal.STRING("false", string_type), optional_string, true, false))
+            add(Values.STORE_TEMP(result.local))
+
+            _close_structured(done)
+
+            return result
+        si
+
+        // Appends one piece of an interpolation to `interpolator`: literal
+        // text, or a hole's value read as its alignment and format say.
+        _append_fragment(location: Source.LOCATION, interpolator: TEMP, eaf: Expressions.INTERPOLATION_FRAGMENT) is
+            let string_type = _innate_symbol_lookup.get_string_type()
+
+            let expression = eaf.expression
+            let alignment = eaf.alignment
+            let format = eaf.format
+            let expr_value = expression.value!
+
+            if !eaf.is_expression \/ _is_plain_string_literal_hole(eaf) then
+                let literal = cast Expressions.Literals.STRING?(expression)!
+
+                if literal.value_string.length == 0 then
+                    return
+                fi
+
+                add(Values.RUNTIME(IR.RuntimeOperation.APPEND_TEXT, interpolator.load(), Literal.STRING(literal.value_string, string_type), null))
+            elif !format? /\ !alignment? then
+                _append_interpolated_value(location, interpolator, expr_value, null)
+            elif _reads_differently_from_formatted(expr_value.type!) then
+                // A value .NET would not print as ghūl does reads as it
+                // would in a plain hole, and an alignment then pads that
+                // text; a format applies where the rendering reaches a
+                // value .NET formats, as the payload of an optional.
+                if let aligned_by = alignment then
+                    let rendered =
+                        TEMP(
+                            current_block,
+                            "rendered",
+                            Values.RUNTIME(
+                                IR.RuntimeOperation.NEW_STRING_BUILDER,
+                                Literal.NUMBER(0, _innate_symbol_lookup.get_int_type()),
+                                Literal.NUMBER(1, _innate_symbol_lookup.get_int_type()),
+                                _innate_symbol_lookup.get_interpolated_string_handler_type()
+                            )
+                        )
+
+                    _append_interpolated_value(location, rendered, expr_value, format)
+
+                    let text = TEMP(current_block, "text", Values.RUNTIME(IR.RuntimeOperation.BUILD_STRING, rendered.load(), string_type))
+
+                    add(
+                        Values.RUNTIME(
+                            IR.RuntimeOperation.APPEND_ALIGNED_VALUE,
+                            [interpolator.load(), text.load(), aligned_by.value!]:Value,
+                            null,
+                            string_type
+                        )
+                    )
+                else
+                    _append_interpolated_value(location, interpolator, expr_value, format)
+                fi
+            else
+                let operands = Collections.LIST[Value](4)
+
+                operands.add(interpolator.load())
+                operands.add(expr_value)
+
+                let operation: IR.RuntimeOperation mut
+
+                if format? /\ alignment? then
+                    operands.add(alignment.value!)
+                    operands.add(Literal.STRING(format, string_type))
+
+                    operation = IR.RuntimeOperation.APPEND_ALIGNED_FORMATTED_VALUE
+                elif format? then
+                    operands.add(Literal.STRING(format, string_type))
+
+                    operation = IR.RuntimeOperation.APPEND_FORMATTED_VALUE
+                else
+                    operands.add(alignment!.value!)
+
+                    operation = IR.RuntimeOperation.APPEND_ALIGNED_VALUE
+                fi
+
+                add(Values.RUNTIME(operation, operands, null, expr_value.type!))
+            fi
+        si
+
         // An interpolation whose text needs no builder: a single plain hole
         // holding a non-optional string is that string, or the empty string
         // where it is null, as appending it would give. An interpolation of
@@ -560,5 +859,15 @@ namespace Syntax.Process is
 
             _close_structured(done)
         si
+    si
+
+    // One piece of an interpolation built into a draft, held in the order
+    // it is written.
+    union DraftPiece is
+        LITERAL(text: string)
+        TEXT(text: TEMP)
+        ALIGNED(text: TEMP, width: int)
+        CHAR(unit: TEMP)
+        DECIMAL(value: TEMP, is_unsigned: bool)
     si
 si

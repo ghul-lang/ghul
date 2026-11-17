@@ -1830,7 +1830,7 @@ namespace IR.WasmGC is
 
         _is_representation_operation(name: string) -> bool =>
             name =~ "string.length" \/ name =~ "string.char_at" \/ name =~ "string.concat" \/
-            name =~ "string.from_char" \/ name =~ "string.substring" \/ name =~ "string.from_chars" \/ name =~ "string.copy_to" \/
+            name =~ "string.from_char" \/ name =~ "string.substring" \/ name =~ "string.from_chars" \/ name =~ "string.from_draft" \/ name =~ "string.copy_to" \/
             name =~ "object.type_name"
 
         // An interpolation's builder operations, as INTERPOLATION_CALLS
@@ -1860,6 +1860,12 @@ namespace IR.WasmGC is
 
             when IR.RuntimeOperation.APPEND_ALIGNED_FORMATTED_VALUE then
                 _gen_call_dropping(calls.append_aligned(operands[0], calls.formatted_text_of(operands[1], operands[3], _specialize(operands[1].type)), operands[2]))
+
+            when IR.RuntimeOperation.VALUE_TEXT then
+                _gen_call(_text_of(calls, operands[0]))
+
+            when IR.RuntimeOperation.FORMATTED_VALUE_TEXT then
+                _gen_call(calls.formatted_text_of(operands[0], operands[1], _specialize(operands[0].type)))
 
             else
                 return false
@@ -2036,6 +2042,21 @@ namespace IR.WasmGC is
                 gen(arguments[1])
                 gen(arguments[2])
                 _emit(INDEX_INSTRUCTION(Opcode.CALL, strings.from_chars_function(storage.data_index)))
+            elif name =~ "string.from_draft" then
+                let array = _array_of(arguments[0].type)
+
+                if !array? then
+                    _report("string.from_draft over a value that is not an array")
+                    return true
+                fi
+
+                let storage = _registry.array_storage(array)
+
+                gen(arguments[0])
+                _coerce_top(VALUE_TYPE.of_type_index(storage.struct_index, true))
+                _check_not_null(VALUE_TYPE.of_type_index(storage.struct_index, true))
+                _emit(TYPE_FIELD_INSTRUCTION(Opcode.STRUCT_GET, storage.struct_index, 1))
+                _emit(INDEX_INSTRUCTION(Opcode.CALL, strings.from_draft_function(storage.data_index)))
             elif name =~ "string.copy_to" then
                 let array = _array_of(arguments[2].type)
 

@@ -46,6 +46,7 @@ namespace IR.WasmGC is
         _concat: int?
         _substring: int?
         _from_chars: int?
+        _from_draft: int?
         _copy_to: int?
         _to_host: int?
         _from_host: int?
@@ -217,6 +218,20 @@ namespace IR.WasmGC is
             return index
         si
 
+        /// The function making a string of every code unit in the element
+        /// array of a finished `char[]` draft, of type `data_index`.
+        from_draft_function(data_index: int) -> int is
+            if let index = _from_draft then
+                return index
+            fi
+
+            let index = _helper(() => _build_from_draft(data_index))
+
+            _from_draft = index
+
+            return index
+        si
+
         /// The function copying `count` code units of a string from `start`
         /// into the element array of a `char[]`, of type `data_index`, from
         /// `at` on. A range outside either traps.
@@ -357,6 +372,28 @@ namespace IR.WasmGC is
             return FUNCTION(
                 _module.add_type(FUNC_TYPE([string_reference, i32, VALUE_TYPE.of_type_index(data_index, true), i32, i32], [])),
                 [],
+                body)
+        si
+
+        _build_from_draft(data_index: int) -> FUNCTION is
+            let chars = _registry.chars_type_index
+
+            // parameter 0 the code units; local 1 the result's code units
+            let body = LIST[INSTRUCTION]([
+                _get(0), _op(Opcode.ARRAY_LEN), TYPE_INSTRUCTION(Opcode.ARRAY_NEW_DEFAULT, chars), _set(1),
+                _get(1), I32_CONSTANT(0),
+                _get(0), I32_CONSTANT(0),
+                _get(0), _op(Opcode.ARRAY_LEN),
+                TWO_TYPE_INSTRUCTION(Opcode.ARRAY_COPY, chars, data_index),
+                INDEX_INSTRUCTION(Opcode.GLOBAL_GET, _registry.string_descriptor_global!),
+                I32_CONSTANT(0),
+                _get(1), _op(Opcode.REF_AS_NON_NULL),
+                TYPE_INSTRUCTION(Opcode.STRUCT_NEW, string_type_index)
+            ]:INSTRUCTION)
+
+            return FUNCTION(
+                _module.add_type(FUNC_TYPE([VALUE_TYPE.of_type_index(data_index, true)], [string_reference])),
+                [_chars_reference],
                 body)
         si
 
