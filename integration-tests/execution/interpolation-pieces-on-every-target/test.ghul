@@ -1,0 +1,106 @@
+// Interpolations of every kind of piece, nested, re-entered and with holes
+// that have side effects or throw: each hole is evaluated once, left to
+// right, and the text is the same on every target.
+use IO.Std.write_line
+
+class Recorder is
+    log: Collections.LIST[string] public
+
+    init() is
+        log = Collections.LIST[string]()
+    si
+
+    note(name: string, value: int) -> int is
+        log.add(name)
+        return value
+    si
+si
+
+inner(text: string) -> string => "<{text}:{text.length}>"
+
+countdown(n: int) -> string => if n == 0 then "done" else "{n} {countdown(n - 1)} {n}" fi
+
+fails(message: string) -> int => throw Ghul.Exception(message)
+
+twice_async(n: int) -> Tasks.TASK[int] is
+    await Tasks.TASK.yield()
+    return n * 2
+si
+
+across_await(name: string, count: int) -> Tasks.TASK[string] is
+    let text = "{name}-{await twice_async(count)}-{count}-{await twice_async(1)}"
+    return text
+si
+
+framed[T](value: T) -> string => "({value})"
+
+lines(limit: int) -> string{} is
+    for i in 1::limit do
+        yield "line {i} of {limit}"
+    od
+si
+
+let name = "ada"
+let empty = ""
+let missing: string? = null
+let letter = 'z'
+let count = 42
+let negative = -7
+let big = long.min_value
+let huge = ulong.max_value
+let small = byte.min_value
+let narrow: ushort = 65535us
+let flag = true
+let off = false
+let ratio = 2.5
+let maybe: int? = null
+let some: int? = 3
+
+write_line("{name}: {count}")
+write_line("[{letter}{name}{letter}] {empty}|{missing}|")
+write_line("{negative} {big} {huge} {small} {narrow} {0} {-0}")
+write_line("{flag} {off} {ratio} {maybe} {some}")
+write_line("|{name,6}|{name,-6}|{count,5}|{count:X}|{ratio:F3}|{count,-4:D3}|")
+write_line("{count} and {ratio,8:F1} then {name} {flag,6} {letter}")
+
+// a hole of a type parameter, a displayed value, and alignment or a format
+// over holes that are read into text of their own
+write_line("{framed(count)} {framed(name)} {framed(ratio)} {framed(letter)}")
+write_line("{[1, 2, 3]} {(count, name)} |{[4, 5],8}|{maybe,6}|{some,-4}|{flag,-6}|{off,6}|{letter,3}|")
+for line in lines(2) do
+    write_line(line)
+od
+
+// a hole that awaits: the holes before it are kept across the suspension
+write_line(across_await(name, count).result)
+
+// nested: an inner interpolation is a string hole of the outer one
+write_line("a{inner("b{inner("c{count}")}d")}e")
+write_line("x{(() => "y{count}z")()}w")
+
+// re-entered: each level has its own pieces
+write_line(countdown(3))
+
+// order: each hole once, left to right
+let r = Recorder()
+write_line("{r.note("first", 1)}-{r.note("second", 22)}-{r.note("third", 333)}")
+write_line(r.log |> Ghul.Pipes.join(","))
+
+// a hole that throws: the holes before it ran, nothing after it did, and
+// no text was made
+let t = Recorder()
+let result: string mut = "unset"
+
+try
+    result = "{t.note("before", 1)} {fails("stop")} {t.note("after", 2)}"
+catch e: Ghul.Exception
+    write_line("caught {e.message}")
+yrt
+
+write_line(result)
+write_line(t.log |> Ghul.Pipes.join(","))
+
+// in a loop, each evaluation is its own
+for i in 0..3 do
+    write_line("{i}:{name}:{i * count}")
+od
