@@ -232,7 +232,7 @@ A program run by Node reads and writes the real file system through `File`, `Dir
 
 Reflection on the `wasm` and `llvm` targets is a subset of .NET reflection, with the same names and meanings:
 
-- a `Type`'s fields, properties, constructors, base type, generic arguments and attributes
+- a `Type`'s fields, properties, constructors, base type and generic arguments, and among its attributes the one that the compiler puts on a union. A program's own attributes are not reported: `get_custom_attributes` answers none of them
 - `FieldInfo`, `PropertyInfo`, `ConstructorInfo` and `ParameterInfo`
 - `Activator.create_instance`
 - `Assembly.get_entry_assembly().get_types()`, which lists only the classes holding the program's tests, and a type for each namespace whose global functions include tests, named `<namespace>.$globals` as on .NET
