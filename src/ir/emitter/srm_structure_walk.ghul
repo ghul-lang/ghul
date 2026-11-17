@@ -108,6 +108,11 @@ namespace IR.Emitter is
         // attribute on the same member.
         _doc_attribute_assembly: string?
 
+        // The assembly that declares INFERRED_STORE_FREE_ATTRIBUTE, when a
+        // referenced runtime does: an older runtime doesn't, and a member carrying a reference to a type its
+        // runtime lacks can't have its attributes read.
+        _inferred_store_free_attribute_assembly: string?
+
         // The assembly declaring the marker for a field declared `field
         // public`, or null when the referenced runtime is too old to have
         // one, for the same reason.
@@ -128,6 +133,10 @@ namespace IR.Emitter is
 
             if let assignable_type = IoC.CONTAINER.instance.assemblies.find_type(ASSIGNABLE_ATTRIBUTE_NAME) then
                 _assignable_attribute_assembly = assignable_type.assembly.get_name().name
+            fi
+
+            if let inferred_type = IoC.CONTAINER.instance.assemblies.find_type(INFERRED_STORE_FREE_ATTRIBUTE_NAME) then
+                _inferred_store_free_attribute_assembly = inferred_type.assembly.get_name().name
             fi
         si
 
@@ -1117,6 +1126,28 @@ namespace IR.Emitter is
 
             if method.is_trusted_store_free_declared then
                 _mark(cast EntityHandle(handle), TRUSTED_STORE_FREE_ATTRIBUTE_NAME)
+            elif
+                let assembly_name = _inferred_store_free_attribute_assembly /\
+                IoC.CONTAINER.instance.build_flags.want_library /\
+                !IoC.CONTAINER.instance.build_flags.submission_name? /\
+                !method.is_declared_pure /\ !is_sealed_backing_read /\ method.is_proven_store_free /\
+                !_overridable_outside(method)
+            then
+                // What the effect solve proved about the member's own body,
+                // so an importer trusts it as the solve here did. Only an
+                // assembly that references this one reads it, so only a
+                // library carries it. A session's cells don't: the compile
+                // server and a batch compile of the same cell have to emit
+                // the same assembly, and the server doesn't see what an
+                // earlier cell's marker says. It isn't
+                // a contract: an override elsewhere is judged by its own
+                // assembly's solve.
+                _attach(
+                    cast EntityHandle(handle),
+                    assembly_name,
+                    INFERRED_STORE_FREE_ATTRIBUTE_NAME,
+                    Collections.LIST[Semantic.Types.Type](),
+                    SRM_ASSEMBLY_EMITTER.NO_ARGUMENT_ATTRIBUTE_VALUE)
             fi
 
             if method.is_declared_stable \/ is_sealed_backing_read then
@@ -1205,8 +1236,30 @@ namespace IR.Emitter is
                 "injected.method"
             fi
 
+        // Whether a call bound to `method` could reach a body other than
+        // its own: an abstract member, a member of a trait, a member of a
+        // class open to extension, or one already overridden here. The
+        // marker speaks for the member's own body only, and an importer
+        // that trusted it would also trust a body it can't see.
+        _overridable_outside(method: Semantic.Symbols.Function) -> bool static is
+            if isa Semantic.Symbols.STRUCT_METHOD(method) \/ !isa Semantic.Symbols.INSTANCE_METHOD(method) then
+                return false
+            fi
+
+            if method.is_abstract \/ !method.has_no_overriders then
+                return true
+            fi
+
+            if let owner: Semantic.Symbols.Classy = method.owner then
+                return owner.is_open \/ owner.is_trait
+            fi
+
+            return true
+        si
+
         PURE_ATTRIBUTE_NAME: string static => "Ghul.Internal.PURE_ATTRIBUTE"
         TRUSTED_STORE_FREE_ATTRIBUTE_NAME: string static => "Ghul.Internal.TRUSTED_STORE_FREE_ATTRIBUTE"
+        INFERRED_STORE_FREE_ATTRIBUTE_NAME: string static => "Ghul.Internal.INFERRED_STORE_FREE_ATTRIBUTE"
 
         DOC_ATTRIBUTE_NAME: string static => "Ghul.Internal.DOC_ATTRIBUTE"
 
