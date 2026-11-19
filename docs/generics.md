@@ -4,7 +4,7 @@ Read this file when you are writing generic library code. It continues sections 
 
 ## generics
 
-Code can reach a bound's *static* members through the type parameter, written `T.member(...)`. .NET's generic-math interfaces (`Ghul.Parsable[T]`, which is .NET's `IParsable<T>`, `INumber[T]`, `IBinaryInteger[T]`, ...) are built on this mechanism:
+Code can reach a bound's *static* members through the type parameter, written `T.member(...)`. .NET's generic-math interfaces are built on this mechanism. They are named in `Ghul.Math`, with the leading `I` dropped: `Ghul.Math.Number[T]` is .NET's `INumber<T>`, `Ghul.Math.BinaryInteger[T]` is `IBinaryInteger<T>`, and so on. The `System.Numerics` names still compile, as .NET interop, and name the same types. `Ghul.Parsable[T]`, which is .NET's `IParsable<T>`, works the same way:
 
 ```ghul
 use Ghul.Parsable;
@@ -14,33 +14,33 @@ parse_or_throw[T: Parsable[T]](s: string) -> T => T.parse(s, null);
 
 A type cannot *implement* a static member of a .NET interface. Nothing connects a type's static member to the interface's static slot, and the runtime refuses to load a type that leaves such a slot empty. So declaring a concrete type that implements an interface with a static member is an error at the declaration. This applies to the generic-math interfaces above. So the built-in numeric types satisfy a bound on one of these interfaces, and a type of your own cannot.
 
-Some of these interfaces declare an **operator** as a static member. `IAdditionOperators[TSelf, TOther, TResult]` declares addition, and `INumber[T]` extends it. Code uses such an operator as an operator, not through the type parameter, but only after importing the operator by name:
+Some of these interfaces declare an **operator** as a static member. `Ghul.Math.AdditionOperators[TSelf, TOther, TResult]` declares addition, and `Ghul.Math.Number[T]` extends it. Code uses such an operator as an operator, not through the type parameter, but only after importing the operator by name:
 
 ```ghul
-use System.Numerics.INumber;
-use System.Numerics.IAdditionOperators.`+;
+use Ghul.Math.Number;
+use Ghul.Math.AdditionOperators.`+;
 
-total[T: INumber[T]](a: T, b: T) -> T => a + b;
+total[T: Number[T]](a: T, b: T) -> T => a + b;
 ```
 
 Without the `use`, the operator is not in scope and `a + b` does not resolve. So code that does not import the operator is unaffected. Importing an operator does not replace the built-in operators: `3 + 4` still adds two `int` values with the built-in operator.
 
 A concrete type needs no import for its own operators. A public static operator that a .NET type declares for itself is a candidate wherever either operand has that type (see [.NET interop](../GHUL.md#net-interop)). So `Int128.one + Int128.one` resolves with no import. The import is for a bounded type parameter, whose operators come from the interface, not from one type.
 
-A static member imported by name works on a concrete type as well as on a bounded one. So `use System.Numerics.INumber.max;` makes `max(a, b)` available on a bounded `T` and on `Int128`.
+A static member imported by name works on a concrete type as well as on a bounded one. So `use Ghul.Math.Number.max;` makes `max(a, b)` available on a bounded `T` and on `Int128`.
 
 These operators can be imported in this way:
 
 - the arithmetic operators `+`, `-`, `*`, `/` and `%`
 - the bitwise and shift operators `&`, `|`, `^`, `\`, `<<`, `>>` and `>>>`
 
-The comparison and equality operators cannot be imported. A type defines its order and equality with `<>` and `=~`, and the comparison and equality operators are defined in terms of those. Import each operator from the interface that *declares* it. For the shift operators this is `IShiftOperators`, whatever the bound is:
+The comparison and equality operators cannot be imported. A type defines its order and equality with `<>` and `=~`, and the comparison and equality operators are defined in terms of those. Import each operator from the interface that *declares* it. For the shift operators this is `ShiftOperators`, whatever the bound is:
 
 ```ghul
-use System.Numerics.IBinaryInteger;
-use System.Numerics.IShiftOperators.`>>>;
+use Ghul.Math.BinaryInteger;
+use Ghul.Math.ShiftOperators.`>>>;
 
-halve[T: IBinaryInteger[T]](a: T) -> T => a >>> 1;
+halve[T: BinaryInteger[T]](a: T) -> T => a >>> 1;
 ```
 
 A trait's type parameter can declare its **variance**, after any other constraints. `out` makes the parameter covariant, and `in` makes it contravariant. A covariant trait of a subtype can be assigned to the same trait of its supertype: a `Source[CAT]` is a `Source[Animal]`. A contravariant trait works in the other direction: a `Sink[Animal]` is a `Sink[CAT]`.
