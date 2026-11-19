@@ -789,11 +789,11 @@ namespace Syntax.Process is
                         left_type? /\
                         !VALUE_EQUALITY_OPERANDS.can_compare(left_type)
                     then
-                        // A `bigint` is a built-in, and `==` on two of
-                        // them compares their values, as it does on two
-                        // `decimal`s: through the equality `=~` would
-                        // choose for them.
-                        if let by_value = _bigint_value_equality(binary, left_value, right_value) then
+                        // A `bigint` or a `complex` is a built-in, and `==`
+                        // on two of them compares their values, as it does
+                        // on two `decimal`s: through the equality `=~`
+                        // would choose for them.
+                        if let by_value = _built_in_value_equality(binary, left_value, right_value) then
                             binary.compile_expressions_state.value = by_value
 
                             return
@@ -1062,23 +1062,28 @@ namespace Syntax.Process is
             return _build_lowered_equality(binary, lowering, left_value, right_value)
         si
 
-        // `a == b` or `a != b` on two `bigint`s, as the value equality
-        // `=~` and `!~` would give them; null where either operand is not
-        // a `bigint`.
-        _bigint_value_equality(
+        // `a == b` or `a != b` on two `bigint`s or two `complex`es, as the
+        // value equality `=~` and `!~` would give them; null where the
+        // operands are not both one of those types.
+        _built_in_value_equality(
             binary: Trees.Expressions.BINARY,
             left_value: Value,
             right_value: Value
         ) -> Value? is
-            let bigint_type = _innate_symbol_lookup.get_bigint_type()
             let left_type = left_value.type
             let right_type = right_value.type
 
-            if
-                !left_type? \/ !right_type? \/
-                left_type.compare(bigint_type) != Semantic.Types.MATCH.SAME \/
-                right_type.compare(bigint_type) != Semantic.Types.MATCH.SAME
-            then
+            if !left_type? \/ !right_type? then
+                return null
+            fi
+
+            let compared_by_value =
+                [_innate_symbol_lookup.get_bigint_type(), _innate_symbol_lookup.get_complex_type()]
+                |> any(t =>
+                    left_type.compare(t) == Semantic.Types.MATCH.SAME /\
+                    right_type.compare(t) == Semantic.Types.MATCH.SAME)
+
+            if !compared_by_value then
                 return null
             fi
 

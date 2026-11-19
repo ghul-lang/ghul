@@ -275,6 +275,7 @@ ghūl gives the .NET primitive types lowercase names:
 - integers: `byte`, `ubyte`, `short`, `ushort`, `int`, `uint`, `long`, `ulong`, `word`, `uword`
 - floating point: `single`, `double` and `decimal`
 - `bigint`, an integer with no fixed width
+- `complex`, a complex number with `double` parts
 - `bool`, `char`, `void`
 
 `string` and `object` are reference types from the .NET base class library.
@@ -290,6 +291,7 @@ let ratio = 123.456;           // double
 let coarse = 123.456s;         // single
 let price = 19.99m;            // decimal
 let huge = 900719925474099n;   // bigint
+let z = 3r + 4j;               // complex
 let letter = 'c';              // char
 let greeting = "hello";        // string
 ```
@@ -321,6 +323,16 @@ write_line("{factorial}");     // 265252859812191058636308480000000
 Mixed operands are an error, exactly as `1.0 + 1` is. If `total` is a `bigint`, `total * 2` is an error; write `total * 2n`. `==` and `!=` on two `bigint`s compare their values, as they do on two `decimal`s, so `factorial(25) == factorial(24) * 25n` is true. `=~` gives the same answer.
 
 A fractional literal is a `double` unless it has a suffix: `s` for single, `d` for double, `m` for decimal, in either case. The `m` suffix also works on a literal with only digits, to write an integral decimal (`100m`). Exponent notation is valid: `1.5e3`, `1.5E-3`.
+
+`complex` is a built-in name for `System.Numerics.Complex`, as `bigint` is for `BigInteger`, and `complex` is the only name for it. The suffixes `r` and `j`, in either case, make a `complex` literal from decimal digits: `2.5r` is the complex number with real part 2.5 and imaginary part zero, and `2.5j` the one with real part zero and imaginary part 2.5. Both suffixes also work on a literal with only digits (`2r`, `3j`) and with an exponent (`1.5e3j`). A complex number with both parts is the sum of the two, `3r + 4j`, or `complex(3.0, 4.0)`.
+
+A `complex`'s arithmetic operators take two `complex` operands. There is no `+`, `-`, `*` or `/` between a `complex` and a `double`, although .NET declares them, so `z * 2.0` is an error, as `1.0 + 1` is. Write `z * 2r` for a constant, and `z * cast complex(x)` or `z * complex(x, 0.0)` for a `double` held in a variable. Keeping one operator per operation means that an operand whose type is still being inferred, such as the `*` in `zs |> map(* / 2r)`, has one operator to match. `==` and `!=` on two `complex` numbers compare their values, as `=~` does. The functions of a complex number, such as `complex.sqrt`, `complex.exp`, `complex.log` and `complex.from_polar_coordinates`, are its static members.
+
+```ghul
+let z = 3r + 4j;
+
+write_line("{z * z} {z.magnitude} {complex.sqrt(-4r)}");   // <-7; 24> 5 <0; 2>
+```
 
 ghūl does not convert between scalar types implicitly. An arithmetic expression with operands of different types is a compile-time error, and needs a `cast`. Upcasting is implicit: a value can be assigned to a variable of any ancestor type. So a `string` can be assigned to an `object` with no cast.
 

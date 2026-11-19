@@ -23,10 +23,19 @@ namespace Semantic.DotNet is
     //   runtime adds to the same type under the replacement name is
     //   present, so the two never share a name. Where the replacement is
     //   absent the member is imported as usual.
+    //
+    // A fourth table, keyed on the type alone, names the types whose
+    // binary arithmetic operators are imported only where both operands
+    // are the type itself, as the language's own arithmetic is. .NET gives
+    // Complex `+`, `-`, `*` and `/` overloads that take a double on either
+    // side; with them in the candidate set an operand whose type is still
+    // being inferred has several operators to match instead of one.
     class REFLECTED_MEMBER_TABLES is
         _renames: MAP[(string, string), REFLECTED_MEMBER_RENAME] static
         _deprecations: MAP[(string, string), string] static
         _hides: MAP[(string, string), string] static
+        _same_type_arithmetic: Collections.SET[string] static
+        _arithmetic_operators: Collections.SET[string] static
 
         init() static is
             _renames = MAP[(string, string), REFLECTED_MEMBER_RENAME]()
@@ -134,6 +143,28 @@ namespace Semantic.DotNet is
             ] do
                 _hides[("System.Char", member)] = replacement
             od
+
+            _same_type_arithmetic = Collections.SET[string](["System.Numerics.Complex"])
+            _arithmetic_operators = Collections.SET[string](["op_Addition", "op_Subtraction", "op_Multiply", "op_Division"])
+        si
+
+        // Whether `method` is a binary arithmetic operator of a type whose
+        // arithmetic takes only that type, with an operand of some other
+        // type, so is not imported.
+        //
+        // - method: the reflected method
+        is_mixed_operand_arithmetic(method: System.Reflection.MethodInfo) -> bool static is
+            if !method.is_static \/ !_arithmetic_operators.contains(method.name) then
+                return false
+            fi
+
+            let declaring_type = method.declaring_type
+
+            if !declaring_type? \/ !declaring_type.full_name? \/ !_same_type_arithmetic.contains(declaring_type.full_name) then
+                return false
+            fi
+
+            return method.get_parameters() |> any(p => p.parameter_type != declaring_type)
         si
 
         // The rename for a member, or null where it keeps its de-camelled

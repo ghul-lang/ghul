@@ -71,6 +71,11 @@ namespace Syntax.Process is
                 return
             fi
 
+            if kind == FloatLiteralKind.REAL \/ kind == FloatLiteralKind.IMAGINARY then
+                float.compile_expressions_state.value = _complex_literal(float, stripped, kind == FloatLiteralKind.IMAGINARY)
+                return
+            fi
+
             let is_single = kind == FloatLiteralKind.SINGLE
 
             let type =
@@ -96,6 +101,41 @@ namespace Syntax.Process is
                     fi,
                     type
                 )
+        si
+
+        // A complex literal: `2.5r` is the complex number with real part
+        // 2.5 and imaginary part zero, `2.5j` the one with real part zero
+        // and imaginary part 2.5. It has no constant to load, and is
+        // built by the type's two-part constructor.
+        _complex_literal(float: Trees.Expressions.Literals.FLOAT, stripped: string, is_imaginary: bool) -> Value is
+            let parsed: double mut = _
+
+            if !double.try_parse(stripped, parsed ref) then
+                _logger.error(float.location, "invalid-floating-point-literal", "invalid complex literal '{stripped}'")
+                return DUMMY(Semantic.Types.ERROR(), float.location)
+            fi
+
+            let complex_type = _innate_symbol_lookup.get_complex_type()
+            let double_type = _innate_symbol_lookup.get_double_type()
+
+            let constructor = Semantic.KNOWN_MEMBERS.find(complex_type, "init", [double_type, double_type])
+
+            if !constructor? then
+                _logger.error(float.location, "invalid-floating-point-literal", "complex literals are not supported on this target")
+                return DUMMY(Semantic.Types.ERROR(), float.location)
+            fi
+
+            let zero = Literal.NUMBER(Literal.CONSTANT.R8(0.0), double_type)
+            let part = Literal.NUMBER(Literal.CONSTANT.R8(parsed), double_type)
+
+            let arguments: Value[] =
+                if is_imaginary then
+                    [cast Value(zero), cast Value(part)]
+                else
+                    [cast Value(part), cast Value(zero)]
+                fi
+
+            return NEW(complex_type, constructor, arguments)
         si
 
         visit_interpolation(interpolation: Trees.Expressions.STRING_INTERPOLATION) is
