@@ -12,6 +12,11 @@ namespace Syntax.Process is
 
         _duplicate_method_checker: Semantic.DUPLICATE_METHOD_CHECKER
 
+        // The `impl` blocks for built-in types, checked once the built-in
+        // operators a source core library declares are registered, since
+        // a scalar fills an operator slot with one of those.
+        _impl_checks: Collections.LIST[(target: Semantic.Symbols.Classy, ancestor: Semantic.Types.Type, location: Source.LOCATION)]
+
         init(
             logger: Logger,
             symbol_table: Semantic.SYMBOL_TABLE,
@@ -24,6 +29,7 @@ namespace Syntax.Process is
             _symbol_table = symbol_table
 
             _duplicate_method_checker = Semantic.DUPLICATE_METHOD_CHECKER(logger)
+            _impl_checks = Collections.LIST[(target: Semantic.Symbols.Classy, ancestor: Semantic.Types.Type, location: Source.LOCATION)]()
         si
 
         apply(root: Trees.Node) is
@@ -121,6 +127,39 @@ namespace Syntax.Process is
 
                 Semantic.Symbols.STATIC_INTERFACE_IMPLEMENTATION_CHECKER(_logger).check(symbol)
             fi
+        si
+
+        // A built-in type has no definition of its own to visit, so each
+        // `impl` for one is recorded, to be checked for the static members
+        // it leaves unfilled. A type declared in source is checked at its
+        // definition.
+        visit(`impl: Trees.Definitions.IMPL) is
+            if let target = class_or_trait_for(`impl) /\ target.is_built_in_type /\ `impl.ancestors? then
+                for a in `impl.ancestors do
+                    if let ancestor = a.type /\ !ancestor.is_error then
+                        _impl_checks.add((target, ancestor, a.location))
+                    fi
+                od
+            fi
+
+            super.visit(`impl)
+        si
+
+        /// Forgets the `impl` blocks recorded by an earlier run of the pass.
+        forget_impl_checks() is
+            _impl_checks.clear()
+        si
+
+        /// Checks each `impl` for a built-in type recorded so far for the
+        /// static members it leaves unfilled, then forgets them.
+        check_impl_static_members() is
+            let checker = Semantic.Symbols.STATIC_INTERFACE_IMPLEMENTATION_CHECKER(_logger)
+
+            for check in _impl_checks do
+                checker.check_implemented(check.target, check.ancestor, check.location)
+            od
+
+            _impl_checks.clear()
         si
 
         pre(`trait: Trees.Definitions.TRAIT) -> bool => true

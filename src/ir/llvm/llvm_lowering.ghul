@@ -3030,6 +3030,11 @@ namespace IR.LLVMTarget is
             let function = _static_callee(call)
 
             if !function? then
+                if let built_in = _innate_static(call) then
+                    gen(built_in.lower())
+                    return
+                fi
+
                 _report("a constrained call")
                 return
             fi
@@ -3056,13 +3061,32 @@ namespace IR.LLVMTarget is
                 fi
 
                 if let concrete = _specialize(receiver) then
-                    return Semantic.Symbols.STATIC_SLOT_RESOLVER.resolve(call.function, concrete)
+                    if let implementation = Semantic.Symbols.STATIC_SLOT_RESOLVER.resolve(call.function, concrete) then
+                        return Semantic.Symbols.STATIC_SLOT_RESOLVER.instantiated_for(implementation, call.function)
+                    fi
                 fi
 
                 return null
             fi
 
             return call.function
+        si
+
+        // The built-in operation a scalar supplies for a trait's operator
+        // slot, as a call of the innate function, which the slot's
+        // specialised parameter types pick out of the scalar's own.
+        _innate_static(call: Values.Call.STATIC) -> Values.Call.INNATE? is
+            if let receiver = call.constrained_receiver /\ Semantic.Symbols.STATIC_SLOT_RESOLVER.is_source_slot(call.function) then
+                if let concrete = _specialize(receiver) then
+                    let parameters = Collections.LIST[Semantic.Types.Type?](call.arguments |> Ghul.Pipes.map(a => _specialize(a.type)))
+
+                    if let found = Semantic.Symbols.STATIC_SLOT_RESOLVER.resolve_innate(call.function, concrete, parameters.to_array()) then
+                        return Values.Call.INNATE(found, null, call.arguments, call.type)
+                    fi
+                fi
+            fi
+
+            return null
         si
 
         // A struct method is called with the address of its receiver, so it

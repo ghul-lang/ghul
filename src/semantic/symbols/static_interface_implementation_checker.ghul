@@ -29,63 +29,81 @@ namespace Semantic.Symbols is
                 return
             fi
 
-            _check_ancestors(type, type)
+            _check_ancestors(type, type, type.location)
+        si
+
+        /// Checks that `type` supplies the static members `ancestor`
+        /// requires, for an `impl` that gives `type` that ancestor, and
+        /// reports at the `impl` whatever it leaves unfilled.
+        ///
+        /// - type: the type the `impl` is for
+        /// - ancestor: the trait the `impl` implements
+        /// - at: where the `impl` is
+        check_implemented(type: Classy, ancestor: Types.Type, at: Source.LOCATION) is
+            if !type.is_reflected then
+                _check_ancestor(type, ancestor, at)
+            fi
         si
 
         // `Classy.ancestors` holds what a type declares, not what it
         // inherits, so reaching an interface a base class or a trait
         // brought in means walking it. A type hierarchy is acyclic, and
         // a diamond only costs a repeated visit that answers the same.
-        _check_ancestors(type: Classy, current: Classy) -> bool is
+        _check_ancestors(type: Classy, current: Classy, at: Source.LOCATION) -> bool is
             for ancestor in current.ancestors do
-                // Asked of the type rather than of its symbol: where the
-                // interface is constructed the symbol is a GENERIC, and
-                // a GENERIC is not a Classy.
-                if ancestor.is_trait then
-                    for member in _members(ancestor.symbol) do
-                        // Where the core library is built from source, a
-                        // trait's static slot is bound when a generic is
-                        // instantiated, so the type has only to supply it.
-                        if
-                            IoC.CONTAINER.instance.target_profile.has_source_core_library /\
-                            _is_source_slot_member(member)
-                        then
-                            if !_supplies(type, member) then
-                                _logger.error(
-                                    type.location,
-                                    "static-interface-member-not-implemented", "'{type.name}' must implement the static member '{member.name}' that '{ancestor}' requires",
-                                    member.location,
-                                    "member declared here")
-
-                                return true
-                            fi
-                        elif is_static_slot(member) then
-                            _logger.error(
-                                type.location,
-                                "implement-static-member-unsupported", "cannot implement static member '{member.name}' of '{ancestor}'",
-                                member.location,
-                                "member declared here")
-
-                            return true
-                        fi
-                    od
-                fi
-
-                // Not through a reflected base class: it already supplies
-                // whatever it implements and .NET lets a derived type
-                // inherit that, so descending would reject source that
-                // loads. A reflected trait supplies nothing, so its own
-                // ancestors are still walked.
-                if
-                    let above = _as_classy(ancestor.symbol) /\
-                        (above.is_trait \/ !above.is_reflected) /\
-                        _check_ancestors(type, above)
-                then
+                if _check_ancestor(type, ancestor, at) then
                     return true
                 fi
             od
 
             return false
+        si
+
+        _check_ancestor(type: Classy, ancestor: Types.Type, at: Source.LOCATION) -> bool is
+            // Asked of the type rather than of its symbol: where the
+            // interface is constructed the symbol is a GENERIC, and
+            // a GENERIC is not a Classy.
+            if ancestor.is_trait then
+                for member in _members(ancestor.symbol) do
+                    // Where the core library is built from source, a
+                    // trait's static slot is bound when a generic is
+                    // instantiated, so the type has only to supply it.
+                    if
+                        IoC.CONTAINER.instance.target_profile.has_source_core_library /\
+                        _is_source_slot_member(member)
+                    then
+                        if !_supplies(type, member) then
+                            _logger.error(
+                                at,
+                                "static-interface-member-not-implemented", "'{type.name}' must implement the static member '{member.name}' that '{ancestor}' requires",
+                                member.location,
+                                "member declared here")
+
+                            return true
+                        fi
+                    elif is_static_slot(member) then
+                        _logger.error(
+                            at,
+                            "implement-static-member-unsupported", "cannot implement static member '{member.name}' of '{ancestor}'",
+                            member.location,
+                            "member declared here")
+
+                        return true
+                    fi
+                od
+            fi
+
+            // Not through a reflected base class: it already supplies
+            // whatever it implements and .NET lets a derived type
+            // inherit that, so descending would reject source that
+            // loads. A reflected trait supplies nothing, so its own
+            // ancestors are still walked.
+            return
+                if let above = _as_classy(ancestor.symbol) /\ (above.is_trait \/ !above.is_reflected) then
+                    _check_ancestors(type, above, at)
+                else
+                    false
+                fi
         si
 
         _as_classy(symbol: Symbol) -> Classy? is
@@ -119,10 +137,15 @@ namespace Semantic.Symbols is
         si
 
         // Whether `type` declares a static for each source slot `member`
-        // carries.
+        // carries, with a built-in operator of the slot's parameter types counting
+        // as one, as a scalar's are.
         _supplies(type: Classy, member: Symbol) -> bool is
             for function in _functions(member) do
-                if STATIC_SLOT_RESOLVER.is_source_slot(function) /\ !STATIC_SLOT_RESOLVER.implementation_in(function, type)? then
+                if
+                    STATIC_SLOT_RESOLVER.is_source_slot(function) /\
+                    !STATIC_SLOT_RESOLVER.implementation_in(function, type)? /\
+                    !STATIC_SLOT_RESOLVER.resolve_innate(function, Types.NAMED(type), Collections.LIST[Types.Type?](function.arguments).to_array())?
+                then
                     return false
                 fi
             od

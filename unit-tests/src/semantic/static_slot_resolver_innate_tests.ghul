@@ -1,0 +1,85 @@
+namespace Semantic.UnitTests is
+    use Collections.LIST
+
+    use Source.LOCATION
+
+    use Semantic.Types.Type
+
+    use Semantic.Symbols.CLASS
+    use Semantic.Symbols.FUNCTION_GROUP
+    use Semantic.Symbols.INNATE_FUNCTION
+    use Semantic.Symbols.STATIC_METHOD
+    use Semantic.Symbols.STATIC_SLOT_RESOLVER
+
+    use Assertions
+
+    // A scalar fills a trait's operator slot with its built-in operator,
+    // which `resolve_innate` finds by the slot's exact parameter types in
+    // the scalar's group for the operator.
+    class STATIC_SLOT_RESOLVER_INNATE_TESTS is
+        _scalar: CLASS
+        _other: Type
+
+        init() is
+            _scalar = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Scalar", LIST[string](), Semantic.BLOCK_SCOPE())
+            _other = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "Other", LIST[string](), Semantic.BLOCK_SCOPE()).type!
+        si
+
+        loc() -> LOCATION => LOCATION("test.ghul", 1, 1, 1, 1)
+
+        scalar_type: Type => _scalar.type!
+
+        slot() -> STATIC_METHOD is
+            let result = STATIC_METHOD(loc(), loc(), _scalar, "+", Semantic.BLOCK_SCOPE())
+            result.is_static_interface_virtual = true
+            result.arguments = LIST[Type]([scalar_type, scalar_type])
+            return result
+        si
+
+        built_in(arguments: Type[]) -> INNATE_FUNCTION is
+            let result = INNATE_FUNCTION(loc(), _scalar, "+", _scalar, "arithmetic.add")
+            result.arguments = LIST[Type](arguments)
+            return result
+        si
+
+        // The group a scalar holds for an operator lists the slot it fills
+        // beside its own built-in function of the same parameter types.
+        declare_group(functions: Collections.Iterable[Semantic.Symbols.Function]) is
+            let group = FUNCTION_GROUP(loc(), _scalar, "+")
+
+            for f in functions do
+                group.add(f)
+            od
+
+            _scalar.declare(loc(), group, null)
+        si
+
+        @test()
+        The_built_in_operator_is_found_rather_than_the_slot_listed_before_it() is
+            let the_slot = slot()
+            let operator = built_in([scalar_type, scalar_type])
+
+            declare_group([the_slot, operator])
+
+            are_same(operator, STATIC_SLOT_RESOLVER.resolve_innate(the_slot, scalar_type, [scalar_type, scalar_type]))
+        si
+
+        @test()
+        A_built_in_operator_of_other_parameter_types_is_not_found() is
+            let the_slot = slot()
+
+            declare_group([the_slot, built_in([scalar_type, _other])])
+
+            is_null(STATIC_SLOT_RESOLVER.resolve_innate(the_slot, scalar_type, [scalar_type, scalar_type]))
+        si
+
+        @test()
+        A_type_with_no_built_in_operator_has_none_to_find() is
+            let the_slot = slot()
+
+            declare_group([the_slot])
+
+            is_null(STATIC_SLOT_RESOLVER.resolve_innate(the_slot, scalar_type, [scalar_type, scalar_type]))
+        si
+    si
+si
