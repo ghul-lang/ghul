@@ -46,7 +46,7 @@ ghūl keywords are lowercase. Identifiers follow a naming convention, and the co
 - `UPPER_SNAKE_CASE`: union variants, enum members
 - either: concrete classes and structs
 
-A concrete class or struct can be written either way. The standard library uses `UPPER_SNAKE_CASE` for its concrete types (`LIST`, `MAP`, `SET`), and so do the few .NET types that ghūl renames. Every other .NET type keeps its .NET name. Example code and most programs use `PascalCase` for their own types (`Order`, `Point`).
+A concrete class or struct can be written either way. The standard library uses `UPPER_SNAKE_CASE` for a concrete type that has an abstract alternative you may prefer (`LIST`, `MAP`, `SET`), and `PascalCase` for one that has none (`StringBuilder`, `Random`, `DateTime`); the .NET types that ghūl renames follow the same rule. Every other .NET type keeps its .NET name. Example code and most programs use `PascalCase` for their own types (`Order`, `Point`).
 
 A name of more than one letter is `PascalCase` only if it has a lower-case letter, so an all-caps word such as `TREE` is `UPPER_SNAKE_CASE` and not `PascalCase`. A single capital such as `T` is both.
 
@@ -2181,7 +2181,7 @@ ghūl compiles to .NET IL, and can use most types in any .NET assembly. The comp
 
 - Method, property and field names become `snake_case`.
 - Enum members become `UPPER_SNAKE_CASE`.
-- Type names keep their .NET names, without .NET's generic arity suffix, except a short list of core types that ghūl names in `UPPER_SNAKE_CASE` (`LIST`, `MAP`, `SET`, `TASK`, ...), listed below. So `SortedSet<T>` is `Collections.SortedSet[T]`.
+- Type names keep their .NET names, without .NET's generic arity suffix, except a short list of core types that ghūl renames, in `UPPER_SNAKE_CASE` where an abstract alternative exists (`LIST`, `MAP`, `SET`, `TASK`, ...) and in `PascalCase` where none does (`StringBuilder`, `DateTime`, ...), listed below. So `SortedSet<T>` is `Collections.SortedSet[T]`.
 - The namespace `System.Collections.Generic` is `Collections`, and `System.IO` is `IO`.
 
 Some common types have different names:
@@ -2245,7 +2245,7 @@ A backtick escapes an identifier that is a ghūl keyword: `` `class `` is the id
 
 A static property or field is `snake_case`, even when it looks like a constant, because only enum members become `UPPER_SNAKE_CASE`. So `CancellationToken.None` is `System.Threading.CancellationToken.none`.
 
-An **indexer** is the one member that code reaches only through its own syntax. .NET does not fix an indexer's name: the property has the name its declaring language chose, and the type names the real one. `System.String` and `Text.STRING_BUILDER` both call theirs `Chars`. Code never writes the name: `[` and `]` find the indexer whatever its name is.
+An **indexer** is the one member that code reaches only through its own syntax. .NET does not fix an indexer's name: the property has the name its declaring language chose, and the type names the real one. `System.String` and `Text.StringBuilder` both call theirs `Chars`. Code never writes the name: `[` and `]` find the indexer whatever its name is.
 
 ```ghul
 let initial = name[0];
