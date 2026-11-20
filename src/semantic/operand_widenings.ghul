@@ -1,0 +1,149 @@
+namespace Semantic is
+    use Types.Type
+
+    // The conversions a library declares as widenings: one-parameter static
+    // functions marked @widening(), held by `Ghul.Internal.WIDENINGS`. A
+    // widening is identified by its mark and by its parameter and return
+    // types, never by its own name; an unmarked function in the holder is
+    // not one. Read afresh each time: it is consulted only where an
+    // operator has already failed to resolve.
+    class OPERAND_WIDENINGS is
+        _holder_for_testing: Symbols.Symbol?
+        _has_holder_for_testing: bool
+
+        init() is si
+
+        // Tests only: reads its widenings from `holder` rather than from
+        // the compilation.
+        init(holder: Symbols.Symbol) is
+            _holder_for_testing = holder
+            _has_holder_for_testing = true
+        si
+
+        // The one candidate that reaches its operator with the fewest
+        // widenings and whose result is narrower than every other such
+        // candidate's, or null when there is none or no single one.
+        choose(candidates: Collections.LIST[WIDENED_OPERATOR]) -> WIDENED_OPERATOR? is
+            let fewest mut = -1
+
+            for c in candidates do
+                if fewest < 0 \/ c.widening_count < fewest then
+                    fewest = c.widening_count
+                fi
+            od
+
+            let least = Collections.LIST[WIDENED_OPERATOR]()
+
+            for c in candidates do
+                if c.widening_count == fewest then
+                    least.add(c)
+                fi
+            od
+
+            let chosen: WIDENED_OPERATOR? mut = null
+
+            for c in least do
+                let narrowest mut = true
+
+                for other in least do
+                    if other.function != c.function /\ !widens(c.function.return_type!, other.function.return_type!) then
+                        narrowest = false
+                    fi
+                od
+
+                if narrowest then
+                    if chosen? /\ chosen.function != c.function then
+                        return null
+                    fi
+
+                    if !chosen? then
+                        chosen = c
+                    fi
+                fi
+            od
+
+            return chosen
+        si
+
+        // The widenings whose parameter is exactly `from`.
+        from(from: Type) -> Collections.LIST[Symbols.Function] is
+            let result = Collections.LIST[Symbols.Function]()
+
+            for w in _all() do
+                if w.arguments[0].matches(from) then
+                    result.add(w)
+                fi
+            od
+
+            return result
+        si
+
+        // Whether a widening from `from` to `to` is declared, which is what
+        // makes `from` the narrower of the two.
+        widens(from: Type, to: Type) -> bool is
+            for w in _all() do
+                if w.arguments[0].matches(from) /\ w.return_type!.matches(to) then
+                    return true
+                fi
+            od
+
+            return false
+        si
+
+        _all() -> Collections.LIST[Symbols.Function] is
+            let result = Collections.LIST[Symbols.Function]()
+
+            if let holder = _holder() then
+                for symbol in holder.symbols do
+                    if let group: Symbols.FUNCTION_GROUP = symbol then
+                        for f in group.functions do
+                            _add_if_widening(f, result)
+                        od
+                    elif let f: Symbols.Function = symbol then
+                        _add_if_widening(f, result)
+                    fi
+                od
+            fi
+
+            return result
+        si
+
+        // The holder as source in this compilation, or reflected from a
+        // referenced runtime, where name lookup does not reach it.
+        _holder() -> Symbols.Symbol? is
+            if _has_holder_for_testing then
+                return _holder_for_testing
+            fi
+
+            if
+                let internal = IoC.CONTAINER.instance.namespaces.try_find_namespace(".Ghul.Internal"),
+                holder = internal.find_member("WIDENINGS")
+            then
+                return holder
+            fi
+
+            @IF.dotnet()
+            if let holder = IoC.CONTAINER.instance.dotnet_symbol_table.value.get_symbol("Ghul.Internal.WIDENINGS") then
+                return holder
+            fi
+
+            return null
+        si
+
+        _add_if_widening(f: Symbols.Function, into: Collections.LIST[Symbols.Function]) is
+            if f.is_widening /\ !f.is_instance /\ f.arguments.count == 1 /\ f.return_type? then
+                into.add(f)
+            fi
+        si
+    si
+    // An operator reached by widening the left operand, the right one, or
+    // both, with the widenings that reach it; a null widening leaves its
+    // operand as written.
+    class WIDENED_OPERATOR(
+        function: Symbols.Function public,
+        left: Symbols.Function? public,
+        right: Symbols.Function? public
+    ) is
+        widening_count: int => (if left? then 1 else 0 fi) + (if right? then 1 else 0 fi)
+    si
+si

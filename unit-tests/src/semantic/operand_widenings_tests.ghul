@@ -1,0 +1,140 @@
+namespace Semantic.UnitTests is
+    use Collections.LIST
+
+    use Source.LOCATION
+
+    use Semantic.Types.Type
+
+    use Semantic.Symbols.CLASS
+    use Semantic.Symbols.Function
+    use Semantic.Symbols.INSTANCE_METHOD
+    use Semantic.Symbols.STATIC_METHOD
+
+    use Assertions
+
+    class OPERAND_WIDENINGS_TESTS is
+        _int: Type
+        _long: Type
+        _double: Type
+        _other: Type
+
+        init() is
+            Fixtures.enter_function()
+
+            _int = new_class("int").type!
+            _long = new_class("long").type!
+            _double = new_class("double").type!
+            _other = new_class("other").type!
+        si
+
+        loc() -> LOCATION => LOCATION("test.ghul", 1, 1, 1, 1)
+
+        new_class(name: string) -> CLASS =>
+            CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), name, LIST[string](), Semantic.BLOCK_SCOPE())
+
+        add_static(holder: CLASS, name: string, from: Type, to: Type, marked: bool) -> STATIC_METHOD is
+            let f = STATIC_METHOD(loc(), loc(), holder, name, Semantic.BLOCK_SCOPE())
+            f.arguments = LIST[Type]([from])
+            f.return_type = to
+
+            if marked then
+                f.mark_widening()
+            fi
+
+            holder.add_member(f)
+            return f
+        si
+
+        // A holder with int -> long, int -> double and long -> double marked,
+        // beside an unmarked int -> other and a marked instance method.
+        holder() -> CLASS is
+            let result = new_class("WIDENINGS")
+
+            add_static(result, "int_to_long", _int, _long, true)
+            add_static(result, "int_to_double", _int, _double, true)
+            add_static(result, "long_to_double", _long, _double, true)
+            add_static(result, "int_to_other", _int, _other, false)
+
+            let instance = INSTANCE_METHOD(loc(), loc(), result, "instance_to_double", Semantic.BLOCK_SCOPE())
+            instance.arguments = LIST[Type]([_int])
+            instance.return_type = _double
+            instance.mark_widening()
+            result.add_member(instance)
+
+            return result
+        si
+
+        operator_returning(type: Type) -> Function is
+            let owner = new_class("OPERATORS")
+            let f = STATIC_METHOD(loc(), loc(), owner, "+", Semantic.BLOCK_SCOPE())
+            f.arguments = LIST[Type]([type, type])
+            f.return_type = type
+            return f
+        si
+
+        @test()
+        From_should_list_only_the_marked_static_widenings_from_the_type() is
+            let widenings = OPERAND_WIDENINGS(holder())
+
+            let names = LIST[string]()
+
+            for w in widenings.from(_int) do
+                names.add(w.name)
+            od
+
+            names.sort()
+
+            are_equal("int_to_double, int_to_long", names |> Ghul.Pipes.join(", "))
+        si
+
+        @test()
+        Widens_should_answer_for_a_declared_pair_only() is
+            let widenings = OPERAND_WIDENINGS(holder())
+
+            is_true(widenings.widens(_int, _long))
+            is_true(widenings.widens(_long, _double))
+            is_false(widenings.widens(_double, _long))
+            is_false(widenings.widens(_int, _other))
+        si
+
+        @test()
+        Choose_should_prefer_the_fewest_widenings() is
+            let widenings = OPERAND_WIDENINGS(holder())
+            let int_to_long = widenings.from(_int)[0]
+
+            let one = WIDENED_OPERATOR(operator_returning(_double), int_to_long, null)
+            let two = WIDENED_OPERATOR(operator_returning(_long), int_to_long, int_to_long)
+
+            are_equal(one, widenings.choose(LIST[WIDENED_OPERATOR]([two, one])))
+        si
+
+        @test()
+        Choose_should_prefer_the_narrower_result_at_the_same_count() is
+            let widenings = OPERAND_WIDENINGS(holder())
+            let w = widenings.from(_int)[0]
+
+            let to_long = WIDENED_OPERATOR(operator_returning(_long), w, null)
+            let to_double = WIDENED_OPERATOR(operator_returning(_double), null, w)
+
+            are_equal(to_long, widenings.choose(LIST[WIDENED_OPERATOR]([to_double, to_long])))
+            are_equal(to_long, widenings.choose(LIST[WIDENED_OPERATOR]([to_long, to_double])))
+        si
+
+        // long is narrower than double, but other is related to neither: no
+        // result is narrower than every other, in whatever order the
+        // candidates arrive.
+        @test()
+        Choose_should_reach_nothing_without_a_single_narrowest_result_in_any_order() is
+            let widenings = OPERAND_WIDENINGS(holder())
+            let w = widenings.from(_int)[0]
+
+            let to_long = WIDENED_OPERATOR(operator_returning(_long), w, null)
+            let to_double = WIDENED_OPERATOR(operator_returning(_double), w, null)
+            let to_other = WIDENED_OPERATOR(operator_returning(_other), null, w)
+
+            is_true(!widenings.choose(LIST[WIDENED_OPERATOR]([to_long, to_double, to_other]))?)
+            is_true(!widenings.choose(LIST[WIDENED_OPERATOR]([to_other, to_long, to_double]))?)
+            is_true(!widenings.choose(LIST[WIDENED_OPERATOR]([to_double, to_other, to_long]))?)
+        si
+    si
+si
