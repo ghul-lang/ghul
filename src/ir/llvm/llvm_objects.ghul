@@ -75,6 +75,7 @@ namespace IR.LLVMTarget is
         _unsupported: LIST[(location: Source.LOCATION, construct: string)]
         _string: CLASS_INSTANCE?
         _boxes_made: Collections.SET[CLASS_INSTANCE]
+        _constructed: Collections.SET[CLASS_INSTANCE]
         _display_state: CLASS_INSTANCE?
         _displayers: MAP[CLASS_INSTANCE, LLVM.FUNCTION]
         _describers: MAP[CLASS_INSTANCE, FUNCTION_INSTANCE]
@@ -169,6 +170,7 @@ namespace IR.LLVMTarget is
 
             _unsupported = LIST[(location: Source.LOCATION, construct: string)]()
             _boxes_made = Collections.SET[CLASS_INSTANCE]()
+            _constructed = Collections.SET[CLASS_INSTANCE]()
             _displayers = MAP[CLASS_INSTANCE, LLVM.FUNCTION]()
             _describers = MAP[CLASS_INSTANCE, FUNCTION_INSTANCE]()
         si
@@ -1923,8 +1925,34 @@ namespace IR.LLVMTarget is
         si
 
         /// Whether a value of `type` can exist: a box only where something
-        /// boxes a value in it.
-        is_instantiated(type: CLASS_INSTANCE) -> bool => !_classes.is_box(type) \/ _boxes_made.contains(type)
+        /// boxes a value in it, and a class only where something constructs
+        /// it or a class that extends it. A library or a cell keeps every
+        /// class, since what links against it can construct any of them.
+        is_instantiated(type: CLASS_INSTANCE) -> bool =>
+            if _classes.is_box(type) then
+                _boxes_made.contains(type)
+            elif _is_constructed_class(type) /\ !CELL_LINK.is_active /\ !IoC.CONTAINER.instance.build_flags.want_library then
+                _constructed.contains(type)
+            else
+                true
+            fi
+
+        /// Records that the program constructs a value of `type`, and so of
+        /// each class it extends.
+        note_constructed(type: CLASS_INSTANCE) is
+            let current: CLASS_INSTANCE? mut = type
+
+            while let at = current /\ _constructed.add(at) do
+                current = superclass_of(at)
+            od
+        si
+
+        // A reference class, whose values are only made by construction:
+        // not an array, a string, the root, a box or anything declared as a
+        // struct, whose values are also made in other ways: a bigint, for
+        // one, is a struct the runtime builds whichever way it is held.
+        _is_constructed_class(type: CLASS_INSTANCE) -> bool =>
+            is_object_type(type) /\ !isa Semantic.Symbols.STRUCT(type.definition) /\ !is_array(type) /\ !is_string(type) /\ !is_object(type)
 
         // Whether a value of `type` can exist in the program: discovery found it
         // instantiated. A vtable or trait table entry a call can reach must be
