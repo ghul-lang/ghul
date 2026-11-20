@@ -211,6 +211,38 @@ namespace Semantic is
                 (new_name = "Ghul.Coroutines.Semaphore", earlier_name = "Ghul.Coroutines.SEMAPHORE"),
                 (new_name = "Ghul.Coroutines.Coroutine", earlier_name = "Ghul.Coroutines.COROUTINE")
             ]
+
+            // A lookup that fails in a namespace asks these on every miss,
+            // so they are answered from tables rather than by scanning.
+            _renamed = Collections.MAP[string, string]()
+            _with_earlier_home = Collections.SET[string]()
+            _namespaces = Collections.SET[string]()
+
+            for alias in all do
+                if !_renamed.contains_key(alias.old_name) then
+                    _renamed[alias.old_name] = alias.new_name
+                fi
+
+                _add_enclosing_namespaces(alias.old_name)
+            od
+
+            for home in earlier_homes do
+                _with_earlier_home.add(home.new_name)
+                _add_enclosing_namespaces(home.new_name)
+            od
+        si
+
+        _renamed: Collections.MAP[string, string] static
+        _with_earlier_home: Collections.SET[string] static
+        _namespaces: Collections.SET[string] static
+
+        _add_enclosing_namespaces(name: string) static is
+            let dot mut = name.index_of('.')
+
+            while dot > 0 do
+                _namespaces.add(name.substring(0, dot))
+                dot = name.index_of('.', dot + 1)
+            od
         si
 
         /// Where to look for the type named `new_name` in source, in
@@ -237,51 +269,22 @@ namespace Semantic is
         /// null.
         ///
         /// - name: a qualified name, as source writes it
-        renamed_in_source(name: string) -> string? static is
-            for alias in all do
-                if alias.old_name =~ name then
-                    return alias.new_name
-                fi
-            od
-
-            return null
-        si
+        renamed_in_source(name: string) -> string? static =>
+            if _renamed.contains_key(name) then _renamed[name] else null fi
 
         /// Whether `name` is a namespace some old name lies in, such as
         /// `System` or `System.Text`, or one a type is moving to, such as
         /// `Time`, where the core library declares the types in source.
         ///
         /// - name: a qualified name, as source writes it
-        is_namespace_in_source(name: string) -> bool static is
-            let prefix = "{name}."
-
-            for alias in all do
-                if alias.old_name.starts_with(prefix) then
-                    return true
-                fi
-            od
-
-            for home in earlier_homes do
-                if home.new_name.starts_with(prefix) then
-                    return true
-                fi
-            od
-
-            return false
-        si
+        is_namespace_in_source(name: string) -> bool static =>
+            _namespaces.contains(name)
 
         /// Whether the core type named `new_name` has an earlier home, where
         /// a core library from before it moved declares it.
         ///
         /// - new_name: a core type's qualified ghūl name
-        has_earlier_home(new_name: string) -> bool static is
-            for home in earlier_homes do
-                if home.new_name =~ new_name then
-                    return true
-                fi
-            od
-
-            return false
-        si
+        has_earlier_home(new_name: string) -> bool static =>
+            _with_earlier_home.contains(new_name)
     si
 si
