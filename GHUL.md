@@ -275,6 +275,7 @@ ghūl gives the .NET primitive types lowercase names:
 - integers: `byte`, `ubyte`, `short`, `ushort`, `int`, `uint`, `long`, `ulong`, `word`, `uword`
 - floating point: `single`, `double` and `decimal`
 - `bigint`, an integer with no fixed width
+- `complex`, a complex number with `double` parts
 - `bool`, `char`, `void`
 
 `string` and `object` are reference types from the .NET base class library.
@@ -290,6 +291,7 @@ let ratio = 123.456;           // double
 let coarse = 123.456s;         // single
 let price = 19.99m;            // decimal
 let huge = 900719925474099n;   // bigint
+let z = 3r + 4j;               // complex
 let letter = 'c';              // char
 let greeting = "hello";        // string
 ```
@@ -321,6 +323,16 @@ write_line("{factorial}");     // 265252859812191058636308480000000
 Mixed operands are an error, exactly as `1.0 + 1` is. If `total` is a `bigint`, `total * 2` is an error; write `total * 2n`. `==` and `!=` on two `bigint`s compare their values, as they do on two `decimal`s, so `factorial(25) == factorial(24) * 25n` is true. `=~` gives the same answer.
 
 A fractional literal is a `double` unless it has a suffix: `s` for single, `d` for double, `m` for decimal, in either case. The `m` suffix also works on a literal with only digits, to write an integral decimal (`100m`). Exponent notation is valid: `1.5e3`, `1.5E-3`.
+
+`complex` is a built-in name for `System.Numerics.Complex`, as `bigint` is for `BigInteger`, and `complex` is the only name for it. The suffixes `r` and `j`, in either case, make a `complex` literal from decimal digits: `2.5r` is the complex number with real part 2.5 and imaginary part zero, and `2.5j` the one with real part zero and imaginary part 2.5. Both suffixes also work on a literal with only digits (`2r`, `3j`) and with an exponent (`1.5e3j`). A complex number with both parts is the sum of the two, `3r + 4j`, or `complex(3.0, 4.0)`.
+
+A `complex`'s arithmetic operators take two `complex` operands, and an `int`, `long`, `single` or `double` operand widens to `complex`, as an `int` widens to `double`: `z * 2` and `1.5 + z` are `complex`. .NET's own mixed `complex` and `double` operators are not imported. A `complex` is also constructed from one `double`, `single`, `int` or `long` as its real part, as in `complex(x)`. Equality doesn't widen: `z == 2.0` is an error.
+
+```ghul
+let z = 3r + 4j;
+
+write_line("{z * z} {z.magnitude} {complex.sqrt(-4r)}");   // <-7; 24> 5 <0; 2>
+```
 
 ghūl does not convert between scalar types implicitly. An arithmetic expression with operands of different types is a compile-time error, and needs a `cast`. Upcasting is implicit: a value can be assigned to a variable of any ancestor type. So a `string` can be assigned to an `object` with no cast.
 
@@ -2204,7 +2216,7 @@ The core types have ghūl names in ghūl namespaces:
 - The date and time types are in `Time`: `System.DateTime`, `System.DateTimeOffset` and `System.TimeSpan` are `Time.DateTime`, `Time.DateTimeOffset` and `Time.TimeSpan`, `System.DayOfWeek` and `System.DateTimeKind` are `Time.DayOfWeek` and `Time.DateTimeKind`, `System.Diagnostics.Stopwatch` is `Time.Stopwatch`, and `System.Globalization.ISOWeek` is `Time.IsoWeek`. The UPPER_SNAKE_CASE spellings (`Time.DATE_TIME` and the rest) still work.
 - The rest of the text family is in `Text`, beside `Text.StringBuilder` and `Text.Regex`: `System.Text.Encoding` is `Text.Encoding`, `System.Text.Rune` is `Text.Rune` (`Text.RUNE` still works), `System.Globalization.CultureInfo` is `Text.Locale`, `System.Globalization.NumberStyles` is `Text.NumberStyles`, `System.Text.UTF8Encoding`, `ASCIIEncoding`, `UTF32Encoding` and `UnicodeEncoding` are `Text.UTF8_ENCODING`, `Text.ASCII_ENCODING`, `Text.UTF32_ENCODING` and `Text.UTF16_ENCODING`, `System.Globalization.StringInfo` and `TextInfo` are `Text.StringInfo` and `Text.TextInfo`, and `Ghul.StringComparison` and `Ghul.StringSplitOptions` are `Text.StringComparison` and `Text.StringSplitOptions`. On wasm and llvm the only locale is the invariant one: the invariant and current locales are the same, and formatting, parsing and changing case work the same whichever locale is passed. The members of `Text.Locale` that said culture drop the word on .NET: `invariant`, `current` and `current_ui` are `InvariantCulture`, `CurrentCulture` and `CurrentUICulture`; `installed_ui`, `default_thread_current`, `default_thread_current_ui`, `create_specific`, `get`, `get_by_ietf_language_tag`, `get_locales`, `get_console_fallback_ui`, `is_neutral` and `locale_types` follow the same rule. The core library on wasm and llvm declares the same names from the release that follows. The other .NET names with culture in them change the same way: `System.Globalization.CultureTypes` is `Text.LocaleTypes` (members such as `NEUTRAL_LOCALES`), `CultureNotFoundException` is `Text.LocaleNotFoundException`, `System.Reflection.AssemblyCultureAttribute` is `Ghul.Reflection.AssemblyLocaleAttribute`, `StringComparison` has `CURRENT_LOCALE`, `CURRENT_LOCALE_IGNORE_CASE`, `INVARIANT_LOCALE` and `INVARIANT_LOCALE_IGNORE_CASE`, `RegexOptions` has `LOCALE_INVARIANT`, and `StringComparer` has `current`, `current_ignore_case`, `invariant` and `invariant_ignore_case`. The old spellings of the members (`invariant_culture`, `current_culture`, `get_culture_info` and the rest) still compile for one release and are removed after it. The renamed enum members (`CURRENT_CULTURE` and the others) and the `RegexOptions` member have no second name: the old ones are gone. `System.Text.Encoding.Unicode` is `Text.Encoding.utf16` on every target; `unicode` is not a name for it.
 - `Text` has functions for numbers in a base and bytes as text: `to_base(value, base)` writes an integer in base 2, 8, 10 or 16, and `from_base(text, base)` reads one back as a `long?`; `to_hex`, `to_hex_lower` and `from_hex` write and read bytes as hexadecimal; `to_base64` and `from_base64` do the same in Base64. Each `from_` function answers null for text it can't read. `System.Convert` is still there and still throws.
-- The numeric types are in `Ghul.Math`, beside the maths functions: `System.Numerics.Complex` is `Ghul.Math.Complex`, `System.Numerics.BitOperations` is `Ghul.Math.BitOperations` and `System.BitConverter` is `Ghul.Math.BitConverter`.
+- The bit-level numeric types are in `Ghul.Math`, beside the maths functions: `System.Numerics.BitOperations` is `Ghul.Math.BitOperations` and `System.BitConverter` is `Ghul.Math.BitConverter`. `System.Numerics.Complex` is the built-in `complex`.
 - The reflection types are in `Ghul.Reflection`, beside `Ghul.Type`: `System.Reflection.Assembly`, `FieldInfo`, `ParameterInfo`, `ConstructorInfo`, `MethodInfo`, `PropertyInfo` and `BindingFlags` are the same names in `Ghul.Reflection`, and `System.Activator` is `Ghul.Reflection.Activator`.
 - The language's own types are in `Ghul`: `System.GC`, `System.ObsoleteAttribute`, `System.Runtime.CompilerServices.MethodImplAttribute` and `MethodImplOptions` are `Ghul.GC`, `Ghul.ObsoleteAttribute`, `Ghul.MethodImplAttribute` and `Ghul.MethodImplOptions`, and `System.IFormattable` is `Ghul.Formattable`. `System.Threading.Thread` is `Tasks.Thread`.
 - `System.Uri` is `IO.Uri`.

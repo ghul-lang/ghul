@@ -513,15 +513,19 @@ namespace Semantic.DotNet is
         // and BigInteger do for the wider numeric types, that constructor
         // stays and none is added beside it.
         _add_scalar_conversions(owner: Symbols.Scoped, type: TYPE) is
-            if !_is_scalar(type) then
+            let sources: TYPE[] mut
+
+            if _is_scalar(type) then
+                sources = SCALAR_CONVERSION_SOURCES.needing_constructor(type, _scalar_types())
+            elif let complex_sources = _complex_conversion_sources(type) then
+                sources = complex_sources
+            else
                 return
             fi
 
-            let scalars = _scalar_types()
-
             let location = Source.LOCATION.reflected
 
-            for source in SCALAR_CONVERSION_SOURCES.needing_constructor(type, scalars) do
+            for source in sources do
                 let result = Symbols.STRUCT_METHOD(location, location, owner, "init", owner)
 
                 result.argument_names = LIST[string](["value"])
@@ -533,6 +537,28 @@ namespace Semantic.DotNet is
 
                 owner.add_member(result)
             od
+        si
+
+        // complex is constructed from the real scalars it converts from
+        // implicitly, as the core library's complex is on the other
+        // targets: `complex(x)` is `cast complex(x)`, with a zero
+        // imaginary part. .NET's Complex has no such constructor.
+        _complex_conversion_sources(type: TYPE) -> TYPE[]? is
+            let complex = _type_details_lookup.get_type_details_by_ghul_namespace_and_symbol_name("Ghul.Intrinsics", "complex")
+
+            if !complex? \/ complex.dotnet_type != type then
+                return null
+            fi
+
+            let result = LIST[TYPE]()
+
+            for name in ["double", "single", "int", "long"] do
+                if let detail = _type_details_lookup.get_type_details_by_ghul_namespace_and_symbol_name("Ghul.Intrinsics", name) then
+                    result.add(detail.dotnet_type)
+                fi
+            od
+
+            return result
         si
 
         // Copy any concrete (`is_default_trait_method`) method from
@@ -1134,6 +1160,10 @@ namespace Semantic.DotNet is
                 fi
             fi
 
+            if REFLECTED_MEMBER_TABLES.is_mixed_operand_arithmetic(method) then
+                return
+            fi
+
             let result: Symbols.Function mut
             let location = Source.LOCATION.reflected
 
@@ -1393,7 +1423,10 @@ namespace Semantic.DotNet is
                 result.mark_widening()
             fi
 
-            if _has_attribute(method.get_custom_attributes_data(), "Ghul.Internal.WIDEN_OPERANDS_ATTRIBUTE") then
+            if
+                _has_attribute(method.get_custom_attributes_data(), "Ghul.Internal.WIDEN_OPERANDS_ATTRIBUTE") \/
+                REFLECTED_MEMBER_TABLES.is_widened_operand_arithmetic(method)
+            then
                 result.mark_widens_operands()
             fi
 
