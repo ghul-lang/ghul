@@ -33,7 +33,7 @@ GHUL.md covers the language that ordinary programs use. Seven further files cove
 | [docs/generics.md](docs/generics.md) | argument packs, variance, generic-math operator imports, open generics in `typeof`, `size_of` | you are writing generic library code |
 | [docs/async.md](docs/async.md) | the awaiter pattern, task-like return types and their builders, asynchronous function literals | you are writing a coroutine library or a custom task type |
 | [docs/sessions.md](docs/sessions.md) | `--submission`, `--cells`, `--session` and `--cell-link`, and the checks each one adds | you are working on the REPL, a notebook kernel or the playground |
-| [docs/dotnet.md](docs/dotnet.md) | the core type names, attributes and pragmas (`@intrinsic`, `@trusted_store_free()`, `@finalizer()`), `DllImport`, `StructLayout`, `IL.name`, operators declared by .NET types | you are calling .NET libraries beyond the common cases |
+| [docs/dotnet.md](docs/dotnet.md) | the core type names, attributes and pragmas (`@intrinsic`, `@trusted_store_free()`, `@weak_overload()`, `@finalizer()`), `DllImport`, `StructLayout`, `IL.name`, operators declared by .NET types | you are calling .NET libraries beyond the common cases |
 | [docs/targets.md](docs/targets.md) | what each target supports, conditional compilation, what differs on wasm, `@extern` on each target, the llvm options | you are building for WebAssembly or native executables |
 | [docs/details.md](docs/details.md) | access policy flags, file-level pragmas, doc comment rules, `cast` target inference, synthesised equality and `@equality()`, `@Flags()` operators, `partial` and `impl` blocks, `@precedence`, `Displayable` | you need a specific rule |
 

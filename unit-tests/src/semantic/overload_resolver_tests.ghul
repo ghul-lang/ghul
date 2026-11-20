@@ -613,5 +613,55 @@ namespace Semantic.UnitTests is
             assert result? else "the single candidate should resolve"
             are_same(put, result.function)
         si
+
+        // `scale(a: A, b: A)` and a weak `scale(a: A, b: B)`, for building
+        // the cases below.
+        scale_group(weak_mixed: bool) -> (group: FUNCTION_GROUP, same: GLOBAL_FUNCTION, mixed: GLOBAL_FUNCTION, a: Type, b: Type) is
+            let a = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "A", LIST[string](), Semantic.BLOCK_SCOPE()).type!
+            let b = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "B", LIST[string](), Semantic.BLOCK_SCOPE()).type!
+
+            let same = GLOBAL_FUNCTION(loc(), loc(), Semantic.BLOCK_SCOPE(), "scale", Semantic.BLOCK_SCOPE())
+            same.arguments = LIST[Type]([a, a])
+
+            let mixed = GLOBAL_FUNCTION(loc(), loc(), Semantic.BLOCK_SCOPE(), "scale", Semantic.BLOCK_SCOPE())
+            mixed.arguments = LIST[Type]([a, b])
+
+            if weak_mixed then
+                mixed.mark_weak_overload()
+            fi
+
+            let group = FUNCTION_GROUP(loc(), Semantic.BLOCK_SCOPE(), "scale")
+            group.add(same)
+            group.add(mixed)
+
+            return (group, same, mixed, a, b)
+        si
+
+        // An unsettled actual ties both candidates; the weak one yields, so
+        // the one that is not weak is chosen and settles the actual.
+        @test()
+        A_tie_with_a_weak_overload__chooses_the_one_that_is_not_weak() is
+            let (group, same, mixed, a, b) = scale_group(true)
+
+            let origin = INFERRED_TYPE_ARG_ORIGIN(loc(), Semantic.BLOCK_SCOPE(), "y")
+            let arguments = LIST[Type]([a, cast Type(INFERRED_VARIABLE_TYPE(origin))])
+
+            let result = OVERLOAD_RESOLVER(DIAGNOSTICS_STORE()).resolve(loc(), group, arguments, true, false, false)
+
+            assert result? else "the tie should resolve"
+            are_same(same, result.function)
+        si
+
+        // A weak overload still matches on its own: where only it fits the
+        // settled actuals, it is chosen.
+        @test()
+        A_weak_overload_that_alone_fits__is_chosen() is
+            let (group, same, mixed, a, b) = scale_group(true)
+
+            let result = OVERLOAD_RESOLVER(DIAGNOSTICS_STORE()).resolve(loc(), group, LIST[Type]([a, b]), false, false, false)
+
+            assert result? else "the weak overload should resolve"
+            are_same(mixed, result.function)
+        si
     si
 si
