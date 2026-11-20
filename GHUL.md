@@ -46,7 +46,7 @@ ghūl keywords are lowercase. Identifiers follow a naming convention, and the co
 - `UPPER_SNAKE_CASE`: union variants, enum members
 - either: concrete classes and structs
 
-A concrete class or struct can be written either way. The standard library uses `UPPER_SNAKE_CASE` for its concrete types (`LIST`, `MAP`, `STRING_BUILDER`), and so do the few .NET types that ghūl renames. Every other .NET type keeps its .NET name. Example code and most programs use `PascalCase` for their own types (`Order`, `Point`).
+A concrete class or struct can be written either way. The standard library uses `UPPER_SNAKE_CASE` for its concrete types (`LIST`, `MAP`, `SET`), and so do the few .NET types that ghūl renames. Every other .NET type keeps its .NET name. Example code and most programs use `PascalCase` for their own types (`Order`, `Point`).
 
 A name of more than one letter is `PascalCase` only if it has a lower-case letter, so an all-caps word such as `TREE` is `UPPER_SNAKE_CASE` and not `PascalCase`. A single capital such as `T` is both.
 
@@ -2181,7 +2181,7 @@ ghūl compiles to .NET IL, and can use most types in any .NET assembly. The comp
 
 - Method, property and field names become `snake_case`.
 - Enum members become `UPPER_SNAKE_CASE`.
-- Type names keep their .NET names, without .NET's generic arity suffix, except a short list of core types that ghūl names in `UPPER_SNAKE_CASE` (`LIST`, `MAP`, `SET`, `STRING_BUILDER`, `RANDOM`, `TASK`, ...), listed below. So `SortedSet<T>` is `Collections.SortedSet[T]`.
+- Type names keep their .NET names, without .NET's generic arity suffix, except a short list of core types that ghūl names in `UPPER_SNAKE_CASE` (`LIST`, `MAP`, `SET`, `RANDOM`, `TASK`, ...), listed below. So `SortedSet<T>` is `Collections.SortedSet[T]`.
 - The namespace `System.Collections.Generic` is `Collections`, and `System.IO` is `IO`.
 
 Some common types have different names:
@@ -2198,11 +2198,11 @@ The dotnet-integration page has the full table of names.
 The core types have ghūl names in ghūl namespaces:
 
 - `System.Exception` is `Ghul.Exception`. The common exceptions in `System` are also in `Ghul`: `Ghul.InvalidOperationException`, `Ghul.NotImplementedException`, `Ghul.ArgumentException` and the others.
-- `System.Text.StringBuilder` is `Text.STRING_BUILDER`.
+- `System.Text.StringBuilder` is `Text.StringBuilder`. The old spelling `Text.STRING_BUILDER` still works.
 - `System.Globalization.UnicodeCategory` is `Text.UnicodeCategory`.
-- The regular expression types in `System.Text.RegularExpressions` are `Text.REGEX`, `Text.MATCH`, `Text.GROUP`, `Text.MATCH_COLLECTION`, `Text.GROUP_COLLECTION` and `Text.RegexOptions`.
+- The regular expression types in `System.Text.RegularExpressions` are `Text.Regex`, `Text.Match`, `Text.Group`, `Text.MatchCollection`, `Text.GroupCollection` and `Text.RegexOptions`; the UPPER spellings still work.
 - The date and time types are in `Time`: `System.DateTime`, `System.DateTimeOffset` and `System.TimeSpan` are `Time.DATE_TIME`, `Time.DATE_TIME_OFFSET` and `Time.TIME_SPAN`, `System.DayOfWeek` and `System.DateTimeKind` are `Time.DayOfWeek` and `Time.DateTimeKind`, `System.Diagnostics.Stopwatch` is `Time.STOPWATCH`, and `System.Globalization.ISOWeek` is `Time.ISO_WEEK`.
-- The rest of the text family is in `Text`, beside `Text.STRING_BUILDER` and `Text.REGEX`: `System.Text.Encoding` is `Text.Encoding`, `System.Text.Rune` is `Text.RUNE`, `System.Globalization.CultureInfo` is `Text.Locale`, `System.Globalization.NumberStyles` is `Text.NumberStyles`, `System.Text.UTF8Encoding`, `ASCIIEncoding`, `UTF32Encoding` and `UnicodeEncoding` are `Text.UTF8_ENCODING`, `Text.ASCII_ENCODING`, `Text.UTF32_ENCODING` and `Text.UTF16_ENCODING`, `System.Globalization.StringInfo` and `TextInfo` are `Text.StringInfo` and `Text.TextInfo`, and `Ghul.StringComparison` and `Ghul.StringSplitOptions` are `Text.StringComparison` and `Text.StringSplitOptions`. On wasm and llvm the only culture is the invariant one: `Text.Locale.invariant_culture` and `current_culture` are the same culture, and formatting, parsing and changing case work the same whichever culture is passed. `System.Text.Encoding.Unicode` is `Text.Encoding.utf16` on every target; `unicode` is not a name for it.
+- The rest of the text family is in `Text`, beside `Text.StringBuilder` and `Text.Regex`: `System.Text.Encoding` is `Text.Encoding`, `System.Text.Rune` is `Text.Rune` (`Text.RUNE` still works), `System.Globalization.CultureInfo` is `Text.Locale`, `System.Globalization.NumberStyles` is `Text.NumberStyles`, `System.Text.UTF8Encoding`, `ASCIIEncoding`, `UTF32Encoding` and `UnicodeEncoding` are `Text.UTF8_ENCODING`, `Text.ASCII_ENCODING`, `Text.UTF32_ENCODING` and `Text.UTF16_ENCODING`, `System.Globalization.StringInfo` and `TextInfo` are `Text.StringInfo` and `Text.TextInfo`, and `Ghul.StringComparison` and `Ghul.StringSplitOptions` are `Text.StringComparison` and `Text.StringSplitOptions`. On wasm and llvm the only culture is the invariant one: `Text.Locale.invariant_culture` and `current_culture` are the same culture, and formatting, parsing and changing case work the same whichever culture is passed. `System.Text.Encoding.Unicode` is `Text.Encoding.utf16` on every target; `unicode` is not a name for it.
 - `Text` has functions for numbers in a base and bytes as text: `to_base(value, base)` writes an integer in base 2, 8, 10 or 16, and `from_base(text, base)` reads one back as a `long?`; `to_hex`, `to_hex_lower` and `from_hex` write and read bytes as hexadecimal; `to_base64` and `from_base64` do the same in Base64. Each `from_` function answers null for text it can't read. `System.Convert` is still there and still throws.
 - The numeric types are in `Ghul.Math`, beside the maths functions: `System.Numerics.Complex` is `Ghul.Math.Complex`, `System.Numerics.BitOperations` is `Ghul.Math.BitOperations` and `System.BitConverter` is `Ghul.Math.BitConverter`.
 - `System.Uri` is `IO.Uri`.
