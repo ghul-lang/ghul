@@ -105,7 +105,7 @@ The compiler decides whether a call leaves a fact unchanged member by member, af
 
 An unannotated member of a ghūl library counts as store-free in a program using the library when the library's own compiler proved it store-free and wrote that into the library (see the inferred marker in [the .NET notes](dotnet.md)).
 
-A small fixed set of imported .NET members is trusted further than an unproven call and less than a store-free call. These are the collection mutators `LIST.add`, `LIST.insert`, `LIST.remove_at`, `LIST.clear`, `STACK.push`, `STACK.pop` and `STACK.clear`, and the `STRING_BUILDER` writers. They store only their own receiver's internal state, and call nothing while they do it. So they leave unchanged any fact that does not read through a getter of that state. So `if _name? then _items.add(x); _name.length` type-checks. The same `_items.add(x)` before a use that relies on a property whose getter reads `_items` is reported.
+A small fixed set of imported .NET members is trusted further than an unproven call and less than a store-free call. These are the collection mutators `LIST.add`, `LIST.insert`, `LIST.remove_at`, `LIST.clear`, `STACK.push`, `STACK.pop` and `STACK.clear`, and the `StringBuilder` writers. They store only their own receiver's internal state, and call nothing while they do it. So they leave unchanged any fact that does not read through a getter of that state. So `if _name? then _items.add(x); _name.length` type-checks. The same `_items.add(x)` before a use that relies on a property whose getter reads `_items` is reported.
 
 The compiler also trusts some members by their shape:
 
