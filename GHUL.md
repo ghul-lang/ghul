@@ -359,7 +359,7 @@ let combined = "{prefix}{suffix}";                  // concatenation
 
 An interpolated expression can have an alignment and a format specifier, as in .NET: `{expr, alignment : format}`.
 
-A format applies to a number, and to a value whose type implements `System.IFormattable`. The value is written with its `to_string(format, format_provider)`, with no provider. A format on any other value is ignored, as on .NET. To make a type of your own accept a format, implement `System.IFormattable`.
+A format applies to a number, and to a value whose type implements `Ghul.Formattable`. The value is written with its `to_string(format, format_provider)`, with no provider. A format on any other value is ignored, as on .NET. To make a type of your own accept a format, implement `Ghul.Formattable`.
 
 ```ghul
 let padded = "[{value,12:F3}]";     // [    1500.000]
@@ -372,7 +372,7 @@ The static type of an interpolated value decides how it is written:
 - An optional is written as the value it holds, by these same rules, or as `null` when it holds no value.
 - Every other value is written by the runtime's `$`. This covers an array, a list, a tuple, a struct or class that declares no `to_string`, a value held as `object`, a trait and a type parameter. `$` writes a sequence as its elements in brackets, a tuple as its elements in parentheses, and a record as its type and members. Without `$`, these values would be written as their .NET type name.
 
-An alignment pads the text these rules give, and a format applies wherever they reach a number or a `System.IFormattable` value, including the value an optional holds. So `{xs,-12}` pads `[1, 2, 3]`, `{flag,6}` pads `true`, and an absent `{opt:F2}` is `null`.
+An alignment pads the text these rules give, and a format applies wherever they reach a number or a `Ghul.Formattable` value, including the value an optional holds. So `{xs,-12}` pads `[1, 2, 3]`, `{flag,6}` pads `true`, and an absent `{opt:F2}` is `null`.
 
 ```ghul
 struct POINT(x: int public, y: int public);
@@ -2322,7 +2322,7 @@ The compiler resolves an overloaded name against the function or delegate type t
 A pragma whose name is not a compiler built-in names a .NET **attribute**. The compiler emits the attribute on the declaration that the pragma is written on. That declaration can be a class, trait, struct, union, variant or enum; a function or method; a field or property; or one parameter in the parameter list of a function, method or lambda literal. The short form `Foo` resolves to `FooAttribute` when there is no plain `Foo`. This applies in a `use` as well as in a pragma. So `use System.Obsolete` imports `System.ObsoleteAttribute`, and `use Marker = System.Obsolete` imports it as `Marker`. Attribute arguments can be positional, named (`name = value`), arrays, or `typeof`. An integer or enum argument can combine constants with `|`, `&` and `^`, as in `AttributeTargets.CLASS | AttributeTargets.METHOD`:
 
 ```ghul
-@System.Obsolete("use PRODUCT instead")
+@Ghul.Obsolete("use PRODUCT instead")
 class LEGACY_PRODUCT is
     init() is si
 si
