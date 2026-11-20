@@ -533,8 +533,8 @@ namespace Syntax.Process is
                 return
             fi
 
-            let left_value = binary.left.value
-            let right_value = binary.right.value
+            let left_value mut = binary.left.value
+            let right_value mut = binary.right.value
             let left_is_consumable = left_value.check_is_consumable(_logger, binary.left.location)
             let right_is_consumable = right_value.check_is_consumable(_logger, binary.right.location)
 
@@ -697,6 +697,24 @@ namespace Syntax.Process is
                 function = member_overload_result.function
             elif binary_overload_result? then
                 function = binary_overload_result.function
+            fi
+
+            // Where nothing resolves for the operand types written, an
+            // operand may be widened to reach an operator marked for it.
+
+            if !function? then
+                if let found = _widened_operator(binary, left_value, right_value) then
+                    function = found.function
+                    left_value = found.left
+                    right_value = found.right
+
+                    binary_argument_values.clear()
+                    binary_argument_values.add(left_value)
+                    binary_argument_values.add(right_value)
+
+                    member_argument_values.clear()
+                    member_argument_values.add(right_value)
+                fi
             fi
 
             if function? then
@@ -927,6 +945,8 @@ namespace Syntax.Process is
                 if member_errors? /\ member_errors.count > 0 then
                     _logger.merge(member_errors)
                 fi
+
+                _report_missing_widening(binary, binary.left.value?.type, binary.right.value?.type)
 
                 // A compound-statement left operand got here through a
                 // parenthesised group's expression reading; with no
@@ -2844,6 +2864,196 @@ namespace Syntax.Process is
         // enum's `=~`.
         _takes_receiver(function: Semantic.Symbols.Function) -> bool =>
             SCOPE_OPERATOR_CANDIDATES.takes_receiver(function)
+
+        // The operator reached by widening one operand or both through the
+        // library's marked widenings, where the operator chosen for the
+        // widened types is itself marked to accept them. The fewest
+        // widenings win, then the narrower result; anything still tied
+        // reaches nothing. Only settled operand types take part.
+        _widened_operator(
+            binary: Trees.Expressions.BINARY,
+            left_value: Value,
+            right_value: Value
+        ) -> (function: Semantic.Symbols.Function, left: Value, right: Value)? is
+            let left_type = left_value.type
+            let right_type = right_value.type
+
+            if
+                !left_type? \/ !right_type? \/
+                left_type.is_error \/ right_type.is_error \/
+                !left_type.is_settled \/ !right_type.is_settled
+            then
+                return null
+            fi
+
+            let widenings = IoC.CONTAINER.instance.operand_widenings
+
+            let left_options = Collections.LIST[Semantic.Symbols.Function?]()
+            let right_options = Collections.LIST[Semantic.Symbols.Function?]()
+
+            left_options.add(null)
+            right_options.add(null)
+
+            for w in widenings.from(left_type) do
+                left_options.add(w)
+            od
+
+            for w in widenings.from(right_type) do
+                right_options.add(w)
+            od
+
+            if left_options.count == 1 /\ right_options.count == 1 then
+                return null
+            fi
+
+            let best: Semantic.Symbols.Function? mut = null
+            let best_left: Semantic.Symbols.Function? mut = null
+            let best_right: Semantic.Symbols.Function? mut = null
+            let best_count mut = 0
+            let tied mut = false
+
+            for lw in left_options do
+                for rw in right_options do
+                    if !lw? /\ !rw? then
+                        continue
+                    fi
+
+                    let count = (if lw? then 1 else 0 fi) + (if rw? then 1 else 0 fi)
+
+                    let candidate =
+                        _marked_operator_for(
+                            binary,
+                            lw?.return_type ?? left_type,
+                            rw?.return_type ?? right_type
+                        )
+
+                    if !candidate? then
+                        continue
+                    fi
+
+                    let better mut = false
+
+                    if !best? \/ count < best_count then
+                        better = true
+                    elif count == best_count /\ candidate != best then
+                        let candidate_result = candidate.return_type!
+                        let best_result = best.return_type!
+
+                        if widenings.widens(candidate_result, best_result) then
+                            better = true
+                        elif !widenings.widens(best_result, candidate_result) then
+                            tied = true
+                        fi
+                    fi
+
+                    if better then
+                        best = candidate
+                        best_left = lw
+                        best_right = rw
+                        best_count = count
+                        tied = false
+                    fi
+                od
+            od
+
+            if !best? \/ tied then
+                return null
+            fi
+
+            return (
+                function = best,
+                left = _widen(binary.left.location, left_value, best_left),
+                right = _widen(binary.right.location, right_value, best_right)
+            )
+        si
+
+        // Where an operator over one operand's type is marked to take a
+        // widened operand, but the other operand has no widening to that
+        // type, says which widening is missing.
+        _report_missing_widening(binary: Trees.Expressions.BINARY, left_type: Type?, right_type: Type?) is
+            if
+                !left_type? \/ !right_type? \/
+                left_type.is_error \/ right_type.is_error \/
+                !left_type.is_settled \/ !right_type.is_settled \/
+                left_type.matches(right_type)
+            then
+                return
+            fi
+
+            let widenings = IoC.CONTAINER.instance.operand_widenings
+
+            for (from, to) in [(left_type, right_type), (right_type, left_type)] do
+                if !widenings.widens(from, to) /\ _marked_operator_for(binary, to, to)? then
+                    _logger.info(binary.operation.location, "no-widening", "no widening from '{from}' to '{to}'")
+                fi
+            od
+        si
+
+        _widen(location: Source.LOCATION, value: Value, widening: Semantic.Symbols.Function?) -> Value is
+            if !widening? then
+                return value
+            fi
+
+            _symbol_use_locations.add_symbol_use(location, widening)
+
+            return widening.call(location, null, [value], widening.return_type, _function_caller)
+        si
+
+        // The operator the written operator resolves to over operands of
+        // these types, when it is marked to take widened operands.
+        _marked_operator_for(
+            binary: Trees.Expressions.BINARY,
+            left_type: Type,
+            right_type: Type
+        ) -> Semantic.Symbols.Function? is
+            let use snapshot = _logger.speculate_then_backtrack()
+
+            let name = binary.operation.name
+            let location = binary.operation.location
+            let operand_types = Collections.LIST[Type]([left_type, right_type])
+            let right_types = Collections.LIST[Type]([right_type])
+
+            let static_result: Semantic.OVERLOAD_RESOLVE_RESULT? mut = null
+
+            if let group = _static_operator_candidates(location, name, operand_types) then
+                static_result = _overload_resolver.resolve(location, group, operand_types, false, _symbol_table.current_instance_context?, false)
+            fi
+
+            let member_result: Semantic.OVERLOAD_RESOLVE_RESULT? mut = null
+
+            if let group = _instance_operator_candidates(location, name, left_type.find_member(name)) then
+                if !HIDDEN_OPERATOR_MEMBERS.is_hidden(group) then
+                    member_result = _overload_resolver.resolve(location, group, right_types, false, true, false)
+                fi
+            fi
+
+            if member_result? /\ member_result.function.is_hidden_from_operator_resolution then
+                member_result = null
+            fi
+
+            let chosen: Semantic.Symbols.Function? mut = null
+
+            if member_result? /\ static_result? then
+                if cast int(member_result.score) <= cast int(static_result.score) then
+                    chosen = member_result.function
+                else
+                    chosen = static_result.function
+                fi
+            elif member_result? then
+                chosen = member_result.function
+            elif static_result? then
+                chosen = static_result.function
+            fi
+
+            snapshot.backtrack()
+
+
+            if chosen? /\ chosen.widens_operands then
+                return chosen
+            fi
+
+            return null
+        si
 
         // The instance operators in a type's group under the operator's
         // name, which take the left operand as their receiver. A static

@@ -1,0 +1,80 @@
+namespace Semantic is
+    use Types.Type
+
+    // The conversions a library declares as widenings: one-parameter static
+    // functions marked @widening(), held by `Ghul.Internal.WIDENINGS`. A
+    // widening is identified by its mark and by its parameter and return
+    // types, never by its own name; an unmarked function in the holder is
+    // not one. Read afresh each time: it is consulted only where an
+    // operator has already failed to resolve.
+    class OPERAND_WIDENINGS is
+        init() is si
+
+        // The widenings whose parameter is exactly `from`.
+        from(from: Type) -> Collections.LIST[Symbols.Function] is
+            let result = Collections.LIST[Symbols.Function]()
+
+            for w in _all() do
+                if w.arguments[0].matches(from) then
+                    result.add(w)
+                fi
+            od
+
+            return result
+        si
+
+        // Whether a widening from `from` to `to` is declared, which is what
+        // makes `from` the narrower of the two.
+        widens(from: Type, to: Type) -> bool is
+            for w in _all() do
+                if w.arguments[0].matches(from) /\ w.return_type!.matches(to) then
+                    return true
+                fi
+            od
+
+            return false
+        si
+
+        _all() -> Collections.LIST[Symbols.Function] is
+            let result = Collections.LIST[Symbols.Function]()
+
+            if let holder = _holder() then
+                for symbol in holder.symbols do
+                    if let group: Symbols.FUNCTION_GROUP = symbol then
+                        for f in group.functions do
+                            _add_if_widening(f, result)
+                        od
+                    elif let f: Symbols.Function = symbol then
+                        _add_if_widening(f, result)
+                    fi
+                od
+            fi
+
+            return result
+        si
+
+        // The holder as source in this compilation, or reflected from a
+        // referenced runtime, where name lookup does not reach it.
+        _holder() -> Symbols.Symbol? is
+            if
+                let internal = IoC.CONTAINER.instance.namespaces.try_find_namespace(".Ghul.Internal"),
+                holder = internal.find_member("WIDENINGS")
+            then
+                return holder
+            fi
+
+            @IF.dotnet()
+            if let holder = IoC.CONTAINER.instance.dotnet_symbol_table.value.get_symbol("Ghul.Internal.WIDENINGS") then
+                return holder
+            fi
+
+            return null
+        si
+
+        _add_if_widening(f: Symbols.Function, into: Collections.LIST[Symbols.Function]) is
+            if f.is_widening /\ !f.is_instance /\ f.arguments.count == 1 /\ f.return_type? then
+                into.add(f)
+            fi
+        si
+    si
+si

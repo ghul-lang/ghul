@@ -54,6 +54,8 @@ namespace Syntax.Process is
             name =~ "equality" \/
             name =~ "intrinsic" \/
             name =~ "trusted_store_free" \/
+            name =~ "widening" \/
+            name =~ "widen_operands" \/
             name =~ "finalizer" \/
             name =~ "reflected" \/
             name =~ "test" \/
@@ -163,6 +165,11 @@ namespace Syntax.Process is
 
             if name =~ "trusted_store_free" then
                 _resolve_trusted_store_free(pragma, target)
+                return
+            fi
+
+            if name =~ "widening" \/ name =~ "widen_operands" then
+                _resolve_widening_mark(pragma, target, name)
                 return
             fi
 
@@ -370,6 +377,32 @@ namespace Syntax.Process is
                 fi
             else
                 _logger.error(pragma.name.location, "pragma-wrong-target", "trusted_store_free applies only to a function, method or property")
+            fi
+        si
+
+        // `widening` and `widen_operands` are marked where members are
+        // declared, so they are there before any operator is resolved; here
+        // they are only checked. Like `trusted_store_free` they are the
+        // libraries' to write.
+        _resolve_widening_mark(pragma: Trees.Pragmas.PRAGMA, target: Semantic.Symbols.Symbol, name: string) is
+            let library_sources = IoC.CONTAINER.instance.build_flags.library_sources
+
+            if library_sources? /\ !library_sources.can_declare_core(pragma.location.file_name) then
+                _logger.error(pragma.name.location, "pragma-library-only", "{name} is only accepted in a library source")
+                return
+            fi
+
+            if !isa Semantic.Symbols.Function(target) then
+                _logger.error(pragma.name.location, "pragma-wrong-target", "{name} applies only to a function or operator")
+                return
+            fi
+
+            if name =~ "widening" then
+                let function = cast Semantic.Symbols.Function(target)
+
+                if function.is_instance \/ function.arguments.count != 1 \/ !function.return_type? then
+                    _logger.error(pragma.name.location, "widening-wrong-shape", "a widening takes one parameter and returns the type it widens to")
+                fi
             fi
         si
 
