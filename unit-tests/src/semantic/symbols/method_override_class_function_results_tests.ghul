@@ -100,5 +100,67 @@ namespace Semantic.UnitTests is
 
             is_null(override_class([l.get_int_type()]).function_results_differing_from(override_class([l.get_string_type()])))
         si
+
+        // Type parameters of a fresh method, `count` of them, named T0, T1, ...
+        parameters(count: int) -> LIST[Type] is
+            let function = Symbols.STATIC_METHOD(loc(), loc(), Semantic.BLOCK_SCOPE(), "f", Semantic.BLOCK_SCOPE())
+            let result = LIST[Type]()
+
+            for i in 0..count do
+                result.add(Symbols.FUNCTION_GENERIC_ARGUMENT(loc(), function, "T{i}", i).type!)
+            od
+
+            return result
+        si
+
+        // `f[T, N](source: T, selector: T -> N)` beside
+        // `f[T](source: T, selector: T -> bool)`: the extra parameter is
+        // only a result, so the two agree but for the selector's result.
+        @test()
+        An_extra_type_parameter_that_is_only_a_function_result_differs_only_in_that_result() is
+            let l = lookup()
+            let generic = parameters(2)
+            let concrete = parameters(1)
+            let first = METHOD_OVERRIDE_CLASS(LIST[Type]([generic[0], l.get_function_type(LIST[Type]([generic[0], generic[1]]))]), generic)
+            let second = METHOD_OVERRIDE_CLASS(LIST[Type]([concrete[0], l.get_function_type(LIST[Type]([concrete[0], l.get_bool_type()]))]), concrete)
+
+            let differing = first.function_results_differing_from(second)
+
+            is_true(differing?)
+            are_equal(1, differing!.count)
+            is_true(differing.contains(1))
+        si
+
+        // `f[T, U](source: T, selector: U -> int)` beside
+        // `f[T](source: T, selector: T -> int)`: the extra parameter is a
+        // selector parameter, which no parameter of the other pairs with.
+        @test()
+        An_extra_type_parameter_in_a_function_parameter_differs_in_more_than_a_result() is
+            let l = lookup()
+            let int_type = l.get_int_type()
+            let two = parameters(2)
+            let one = parameters(1)
+            let first = METHOD_OVERRIDE_CLASS(LIST[Type]([two[0], l.get_function_type(LIST[Type]([two[1], int_type]))]), two)
+            let second = METHOD_OVERRIDE_CLASS(LIST[Type]([one[0], l.get_function_type(LIST[Type]([one[0], int_type]))]), one)
+
+            is_null(first.function_results_differing_from(second))
+        si
+
+        // Parameters are paired by where each first appears, not where
+        // each is declared: `f[N, T](source: T, selector: T -> N)` still
+        // pairs its `T` with the other's `T`.
+        @test()
+        Type_parameters_pair_by_first_appearance_rather_than_declaration_order() is
+            let l = lookup()
+            let generic = parameters(2)
+            let concrete = parameters(1)
+            let first = METHOD_OVERRIDE_CLASS(LIST[Type]([generic[1], l.get_function_type(LIST[Type]([generic[1], generic[0]]))]), generic)
+            let second = METHOD_OVERRIDE_CLASS(LIST[Type]([concrete[0], l.get_function_type(LIST[Type]([concrete[0], l.get_bool_type()]))]), concrete)
+
+            let differing = first.function_results_differing_from(second)
+
+            is_true(differing?)
+            is_true(differing!.contains(1))
+        si
     si
 si
