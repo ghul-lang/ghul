@@ -81,25 +81,25 @@ A member of a trait or an open class doesn't get it. Neither does a session's ce
 
 A parameter attribute is recognised only where a formal parameter can appear: the parameter list of a named function or method, or of a lambda literal. It is not valid on a `let` or on a primary-constructor parameter. A parameter attribute on an element of a parenthesised expression that turns out not to be a lambda (an ordinary value tuple) is an error. The compiler does not ignore it.
 
-`System.Obsolete` marks a declaration as deprecated. This works when the attribute is written as a pragma in ghūl, and when a .NET assembly carries it. Every use of the declaration from elsewhere is then reported as `<name> is deprecated: <message>`, or as `<name> is deprecated` when the attribute has no message. The report is a `deprecated` warning, which can be suppressed like any other warning. It is an error when the attribute's second argument is `true`. Using a class's constructor counts as using the class. A use inside a declaration that is itself deprecated is not reported, so one deprecated member can use another. Hover shows the message under the signature, and completion marks the item as deprecated.
+`Ghul.Obsolete` marks a declaration as deprecated. This works when the attribute is written as a pragma in ghūl, and when a .NET assembly carries it. Every use of the declaration from elsewhere is then reported as `<name> is deprecated: <message>`, or as `<name> is deprecated` when the attribute has no message. The report is a `deprecated` warning, which can be suppressed like any other warning. It is an error when the attribute's second argument is `true`. Using a class's constructor counts as using the class. A use inside a declaration that is itself deprecated is not reported, so one deprecated member can use another. Hover shows the message under the signature, and completion marks the item as deprecated.
 
 ```ghul
-@System.Obsolete("use scaled instead")
+@Ghul.Obsolete("use scaled instead")
 doubled(x: int) -> int => x * 2;
 
-@System.Obsolete("removed", true)
+@Ghul.Obsolete("removed", true)
 tripled(x: int) -> int => x * 3;
 ```
 
-`System.Runtime.CompilerServices.MethodImpl` tells the runtime how to treat the method it is written on. The options it names become the method's implementation flags, which is where the runtime reads them, and not an attribute on the method. So `NO_INLINING` stops the method from being inlined, and `SYNCHRONIZED` takes the lock. Reflection reads the flags with `get_method_implementation_flags`, and finds no `MethodImplAttribute` among the method's custom attributes. Options combine with `|`. Written on a property or an indexer, the attribute applies to each of its accessors, `get_` and `set_`, since a property has no implementation flags of its own:
+`Ghul.MethodImpl` tells the runtime how to treat the method it is written on. The options it names become the method's implementation flags, which is where the runtime reads them, and not an attribute on the method. So `NO_INLINING` stops the method from being inlined, and `SYNCHRONIZED` takes the lock. Reflection reads the flags with `get_method_implementation_flags`, and finds no `MethodImplAttribute` among the method's custom attributes. Options combine with `|`. Written on a property or an indexer, the attribute applies to each of its accessors, `get_` and `set_`, since a property has no implementation flags of its own:
 
 ```ghul
-@System.Runtime.CompilerServices.MethodImpl(
-    System.Runtime.CompilerServices.MethodImplOptions.NO_INLINING)
+@Ghul.MethodImpl(
+    Ghul.MethodImplOptions.NO_INLINING)
 measured(x: int) -> int => x + 1;
 
-@System.Runtime.CompilerServices.MethodImpl(
-    System.Runtime.CompilerServices.MethodImplOptions.NO_INLINING | System.Runtime.CompilerServices.MethodImplOptions.NO_OPTIMIZATION)
+@Ghul.MethodImpl(
+    Ghul.MethodImplOptions.NO_INLINING | Ghul.MethodImplOptions.NO_OPTIMIZATION)
 traced(x: int) -> int => x + 2;
 ```
 
