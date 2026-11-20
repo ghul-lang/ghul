@@ -476,10 +476,10 @@ A **positional** target list `(a, b, ...)` matches the source by the first of th
 2. a `deconstruct(...)` instance method whose parameters are all `T ref`
 3. the positional members `` `0 ``, `` `1 ``, ...
 
-The `deconstruct` method covers .NET types such as `Collections.KEY_VALUE_PAIR[K, V]`, ghūl classes that write each `T ref` parameter with postfix `!`, and classes with a primary constructor, which get a synthesised `deconstruct` (see [primary constructors](#primary-constructors)). A type with none of these cannot be destructured positionally. Use the by-name form for it.
+The `deconstruct` method covers .NET types such as `Collections.KeyValuePair[K, V]`, ghūl classes that write each `T ref` parameter with postfix `!`, and classes with a primary constructor, which get a synthesised `deconstruct` (see [primary constructors](#primary-constructors)). A type with none of these cannot be destructured positionally. Use the by-name form for it.
 
 ```ghul
-for (key, value) in dict do          // KEY_VALUE_PAIR.deconstruct
+for (key, value) in dict do          // KeyValuePair.deconstruct
     write_line("{key}={value}");
 od
 
@@ -624,7 +624,7 @@ The single-parameter shorthand without parentheses (`x => …`) cannot have a pa
 ```ghul
 let add = ((a, b): (int, int)) => a + b;
 
-entries |> each(((key, value): Collections.KEY_VALUE_PAIR[string, int]) =>
+entries |> each(((key, value): Collections.KeyValuePair[string, int]) =>
     write_line("{key}={value}"));
 ```
 
@@ -1902,7 +1902,7 @@ The collection types are:
 - `Collections.LIST[T]`: the mutable list
 - `MAP` and `Map`: the mutable dictionary and its read-only trait, named in the same way as `LIST` and `List`
 - `SET`: the mutable hash set. `Set` (the .NET `IReadOnlySet<T>`) is its read-only trait, and `MutableSet` (`ISet<T>`) is its mutable trait.
-- `STACK`, `QUEUE`, `PRIORITY_QUEUE` and `LINKED_LIST`: the mutable stack, queue, priority queue and linked list
+- `STACK`, `QUEUE`, `PriorityQueue` and `LINKED_LIST`: the mutable stack, queue, priority queue and linked list
 - `MutableList`, `MutableMap`, `Bag` and `MutableBag`
 
 ghūl has no map literal syntax. To write a map with fixed contents, write a list literal of key and value pairs, and build the map from it with `MAP()`. The constructor throws if a key appears twice:
@@ -2181,7 +2181,7 @@ ghūl compiles to .NET IL, and can use most types in any .NET assembly. The comp
 
 - Method, property and field names become `snake_case`.
 - Enum members become `UPPER_SNAKE_CASE`.
-- Type names keep their .NET names, without .NET's generic arity suffix, except a short list of core types that ghūl names in `UPPER_SNAKE_CASE` (`LIST`, `MAP`, `SET`, `RANDOM`, `TASK`, ...), listed below. So `SortedSet<T>` is `Collections.SortedSet[T]`.
+- Type names keep their .NET names, without .NET's generic arity suffix, except a short list of core types that ghūl names in `UPPER_SNAKE_CASE` (`LIST`, `MAP`, `SET`, `TASK`, ...), listed below. So `SortedSet<T>` is `Collections.SortedSet[T]`.
 - The namespace `System.Collections.Generic` is `Collections`, and `System.IO` is `IO`.
 
 Some common types have different names:
@@ -2209,11 +2209,11 @@ The core types have ghūl names in ghūl namespaces:
 - The language's own types are in `Ghul`: `System.GC`, `System.ObsoleteAttribute`, `System.Runtime.CompilerServices.MethodImplAttribute` and `MethodImplOptions` are `Ghul.GC`, `Ghul.ObsoleteAttribute`, `Ghul.MethodImplAttribute` and `Ghul.MethodImplOptions`, and `System.IFormattable` is `Ghul.Formattable`. `System.Threading.Thread` is `Tasks.Thread`.
 - `System.Uri` is `IO.Uri`.
 - The hashes are in `Crypto`: `System.Security.Cryptography.MD5`, `SHA1` and `SHA256` are `Crypto.MD5`, `Crypto.SHA1` and `Crypto.SHA256`, and each has `hash_data(bytes)`, which returns the digest. `System.Security.Cryptography.RandomNumberGenerator`, the secure generator, is `Crypto.RandomNumberGenerator`.
-- `System.Random` is `Ghul.RANDOM`.
+- `System.Random` is `Ghul.Random`. The UPPER_SNAKE_CASE spelling `Ghul.RANDOM` still works.
 - `System.Type` is `Ghul.Type`.
-- `System.Lazy<T>` is `Ghul.LAZY[T]`.
+- `System.Lazy<T>` is `Ghul.Lazy[T]`; `Ghul.LAZY[T]` still works.
 - `System.FlagsAttribute` is `Ghul.FlagsAttribute`.
-- `KeyValuePair<K, V>` is `Collections.KEY_VALUE_PAIR[K, V]`.
+- `KeyValuePair<K, V>` is `Collections.KeyValuePair[K, V]`; `Collections.KEY_VALUE_PAIR` still works. `Ghul.Box`, `Collections.PriorityQueue`, `Ghul.Pipes.IndexedValue` and `Ghul.Interop.Pinned` are the PascalCase names of the library types that were `BOX`, `PRIORITY_QUEUE`, `INDEXED_VALUE` and `PINNED`; the old spellings still work.
 - `IComparer<T>` and `IEqualityComparer<T>` are `Collections.Comparer[T]` and `Collections.EqualityComparer[T]`, as above.
 
 The old name of each of these types still refers to the same type wherever a type can be named. A `use` of an old name imports the type under that old name. Diagnostics, hover and completion show only the new name.
