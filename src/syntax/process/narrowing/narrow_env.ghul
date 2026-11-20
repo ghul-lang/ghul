@@ -114,10 +114,23 @@ namespace Syntax.Process is
             _path_narrow_created_at = Collections.MAP[ACCESS_PATH, int]()
         si
 
-        _is_heap_fact(v: Symbol) -> bool =>
-            isa Semantic.Symbols.Field(v) \/
-            isa Semantic.Symbols.Property(v) \/
-            is_closure_assigned(v)
+        _is_heap_fact(v: Symbol) -> bool => is_heap_fact(v)
+
+        // Whether a call or a heap store can change what `v` holds, so
+        // facts on it take crossings. A field or a property can, and so
+        // can a local a closure body assigns. An immutable top-level
+        // `let` cannot: it is stored as a field so sibling functions can
+        // read it, but nothing writes it after its own statement, so its
+        // facts are a local's. Facts on paths through it are still heap
+        // facts.
+        is_heap_fact(v: Symbol) -> bool static =>
+            if let top_level: Semantic.Symbols.TOP_LEVEL_VARIABLE = v then
+                top_level.is_mutable_marked
+            else
+                isa Semantic.Symbols.Field(v) \/
+                isa Semantic.Symbols.Property(v) \/
+                is_closure_assigned(v)
+            fi
 
         // A local a closure body assigns is a heap fact. Facts on
         // other locals are never recorded as crossing a call, because
@@ -915,7 +928,7 @@ namespace Syntax.Process is
             let stale = Collections.LIST[Symbol]()
 
             for v in _narrows.keys do
-                if isa Semantic.Symbols.Field(v) \/ isa Semantic.Symbols.Property(v) then
+                if is_heap_fact(v) then
                     stale.add(v)
                 fi
             od
@@ -927,7 +940,7 @@ namespace Syntax.Process is
             let stale_presence = Collections.LIST[Symbol]()
 
             for v in _non_null do
-                if isa Semantic.Symbols.Field(v) \/ isa Semantic.Symbols.Property(v) then
+                if is_heap_fact(v) then
                     stale_presence.add(v)
                 fi
             od
