@@ -1669,6 +1669,31 @@ namespace Syntax.Process is
             od
         si
 
+        // Whether a reference to an overloaded function is still waiting
+        // for its member among the arguments, and the overloads taking the
+        // call's arguments agree but for what a function formal returns.
+        _agrees_but_for_a_group_result(
+            function_group: Semantic.Symbols.FUNCTION_GROUP,
+            want_instance: bool,
+            argument_types: Collections.LIST[Type],
+            argument_expressions: Trees.Expressions.Expression?[]
+        ) -> bool is
+            if !COMPILE_CALLS.has_unresolved_group_argument(argument_expressions) then
+                return false
+            fi
+
+            if
+                let push = _pack_push_candidates.find(
+                    function_group,
+                    want_instance,
+                    f => f.arguments.count == argument_types.count /\ _is_callable_at_group_arguments(f, argument_expressions))
+            then
+                return push.open_results.count > 0
+            fi
+
+            return false
+        si
+
         // Whether `function` takes a function, or a named delegate, at each
         // argument that is a reference to an overloaded function still
         // waiting for one.
@@ -3463,6 +3488,18 @@ namespace Syntax.Process is
 
                         call.compile_expressions_state.value = DUMMY(Semantic.Types.ERROR(), call.location)
                         return
+                    fi
+
+                    // The resolver ranks a candidate ahead of others that
+                    // agree with it but for what a function argument returns,
+                    // although the reference to an overloaded function there
+                    // has not yet said what it returns. That argument is
+                    // typed by the parameters they agree on first, as when
+                    // nothing resolved, and what it then returns chooses.
+                    if _agrees_but_for_a_group_result(function_group, want_instance, argument_types, slots.expressions) then
+                        if let agreed = try_overload_after_null(function_group, arguments, argument_types, want_instance, named_restrict, slots, call.arguments.location, call) then
+                            overload_result = agreed
+                        fi
                     fi
 
                     if overload_result.needs_retry then

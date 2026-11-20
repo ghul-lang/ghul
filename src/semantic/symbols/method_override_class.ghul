@@ -70,12 +70,23 @@ namespace Semantic is
         // in the result of a function type, every parameter of it matching,
         // where every other argument matches; null where any argument
         // differs in more than that.
+        //
+        // Where the two declare different numbers of type parameters, as
+        // `f[T.., N](selector: T.. -> N)` beside `f[T..](selector: T.. -> bool)`
+        // do, their parameters are paired by the order each first appears
+        // in the arguments, so a type parameter one side has and the other
+        // doesn't is left unpaired and matches nothing of ours.
         function_results_differing_from(other: METHOD_OVERRIDE_CLASS) -> SET[int]? is
-            if other.generic_arguments_count != generic_arguments_count \/ other.arguments.count != arguments.count then
+            if other.arguments.count != arguments.count then
                 return null
             fi
 
-            let theirs = _in_our_terms(other)
+            let theirs =
+                if other.generic_arguments_count == generic_arguments_count then
+                    _in_our_terms(other)
+                else
+                    _in_our_terms_by_occurrence(other)
+                fi
             let result = SET[int]()
 
             for i in 0..arguments.count do
@@ -112,6 +123,48 @@ namespace Semantic is
             od
 
             return true
+        si
+
+        // `other`'s arguments with each of its type parameters replaced by
+        // the one of ours that first appears at the same place in the order
+        // of first appearance; any left over on either side stays as it is.
+        _in_our_terms_by_occurrence(other: METHOD_OVERRIDE_CLASS) -> Type[] is
+            let ours = _first_appearances(arguments, generic_arguments)
+            let theirs = _first_appearances(other.arguments, other.generic_arguments)
+            let substitution = MAP[Symbols.Symbol, Type]()
+
+            for i in 0..ours.count do
+                if i < theirs.count then
+                    substitution[theirs[i].symbol] = ours[i]
+                fi
+            od
+
+            return other.arguments |> map(t => t.specialize(substitution)) |> Ghul.Intrinsics.ARRAY()
+        si
+
+        // `parameters` in the order each first appears in `types`, read
+        // left to right and into each type's arguments; those that never
+        // appear are left out.
+        _first_appearances(types: Type[], parameters: Type[]) -> LIST[Type] static is
+            let result = LIST[Type]()
+
+            visit(type: Type) is
+                for p in parameters do
+                    if type.symbol == p.symbol /\ !(result |> any(r => r.symbol == p.symbol)) then
+                        result.add(p)
+                    fi
+                od
+
+                for a in type.arguments do
+                    visit(a)
+                od
+            si
+
+            for t in types do
+                visit(t)
+            od
+
+            return result
         si
 
         // `other`'s arguments with its own type parameters replaced by
