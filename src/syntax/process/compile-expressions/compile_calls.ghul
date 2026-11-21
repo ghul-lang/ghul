@@ -1439,6 +1439,26 @@ namespace Syntax.Process is
         feed_pack_from_expected(function: Semantic.Symbols.Function, expected: Semantic.Types.Type?) =>
             _feed_pack_from_expected(function, expected)
 
+        // A call whose candidates tied on an argument still being inferred,
+        // and which waits for it: its result is a named unknown that waits
+        // on the argument, so a call it is passed to waits as well rather
+        // than choosing among its own candidates against an error. Null
+        // when the call did not wait.
+        _waiting_call_result(
+            call: Trees.Expressions.CALL,
+            waiting: Semantic.Types.INFERRED_VARIABLE_TYPE?
+        ) -> Semantic.Types.Type? is
+            if !waiting? then
+                return null
+            fi
+
+            if let caller = _symbol_table.current_function then
+                return Semantic.RESULT_ORIGINS.waiting_call_result(call, call.location, cast Semantic.Scope(caller))
+            fi
+
+            return null
+        si
+
         // A generic callee whose return still carries its own type
         // parameter, called with an argument whose type is still being
         // inferred: nothing has bound the parameter yet, and the
@@ -1468,23 +1488,15 @@ namespace Syntax.Process is
                 return null
             fi
 
-            let origin =
-                Semantic.RESULT_ORIGINS.origin_for(
-                    call,
-                    call.location,
-                    cast Semantic.Scope(caller),
-                    "$call@{call.location.start_line}:{call.location.start_column}")
+            let result = Semantic.RESULT_ORIGINS.waiting_call_result(call, call.location, cast Semantic.Scope(caller))
 
-            if !origin? then
+            if !result? then
                 return null
             fi
 
-            origin.description = "the result of this call"
-            origin.is_reported_by_its_input = true
-
             Semantic.OBLIGATIONS.defer(Semantic.OBLIGATIONS.UNBOUND_RETURN, awaited, call.location)
 
-            return Semantic.Types.INFERRED_VARIABLE_TYPE(origin)
+            return result
         si
 
         // A generic callee whose return still carries its own type
@@ -3504,6 +3516,13 @@ namespace Syntax.Process is
                         if let spread = _try_spread(function_group, arguments, argument_types, call.arguments, want_instance) then
                             slots = spread
                             overload_result = _overload_resolver.resolve(call.arguments.location, function_group, argument_types, true, want_instance, false, named_restrict, call.expected_type)
+                        fi
+                    fi
+
+                    if !overload_result? then
+                        if let waiting = _waiting_call_result(call, _overload_resolver.waiting_on) then
+                            call.compile_expressions_state.value = DUMMY(waiting, call.location)
+                            return
                         fi
                     fi
 

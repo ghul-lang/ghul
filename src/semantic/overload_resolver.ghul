@@ -35,6 +35,11 @@ namespace Semantic is
         _callee_parameter_slot: CALLEE_PARAMETER_SLOT
         _delegate_shape: DELEGATE_SHAPE
 
+        // The argument the last resolution left waiting on, where it found
+        // nothing because its candidates tied on that argument. Null when it
+        // chose, or found nothing for any other reason.
+        waiting_on: Types.INFERRED_VARIABLE_TYPE? public
+
         super()
 
         init(..) is
@@ -87,6 +92,7 @@ namespace Semantic is
         ) -> OVERLOAD_RESOLVE_RESULT?
         is
             let mark = _logger.mark()
+            waiting_on = null
 
             try
                 return _resolve(location, group, arguments, want_infer, want_instance, is_constructor_call, restrict_to, return_constraint)
@@ -523,6 +529,26 @@ namespace Semantic is
                 CANDIDATE_SPECIFICITY.can_rank(arguments) \/
                 (want_infer /\ !CANDIDATE_SPECIFICITY.has_actual_settled_elsewhere(arguments))
 
+            // The candidates tie only because an argument is still being
+            // inferred, as a parameter of the function or literal the call
+            // is written in is on its first walk: whichever the formals
+            // below would choose bounds the argument by its formal, and a
+            // later walk that learns the argument's type from elsewhere
+            // finds it already bounded by the wrong candidate. The call
+            // waits for the argument instead. If nothing settles it, the
+            // fixing step reports the argument.
+            if is_ambiguous /\ want_infer /\ !CANDIDATE_SPECIFICITY.can_rank(arguments) then
+                if
+                    let waiting: Types.INFERRED_VARIABLE_TYPE = CALL_ARGUMENT_WAIT.awaited(_settled_elsewhere(arguments)) /\
+                    !OBLIGATIONS.has_default_for(waiting.origin)
+                then
+                    OBLIGATIONS.defer(OBLIGATIONS.OVERLOAD_ARGUMENT, waiting, location)
+                    waiting_on = waiting
+
+                    return null
+                fi
+            fi
+
             // Return-type-context filter: when the caller supplied a
             // return-type constraint (e.g. a return statement whose
             // function returns `Tasks.TASK[int]`, or an assignment-
@@ -760,6 +786,27 @@ namespace Semantic is
 
             return null
         si
+
+        // The parts of the arguments that something other than this call
+        // can settle. A function literal passed to the call takes its
+        // parameter types from the overload chosen, and its own return
+        // type from what its body makes of them, so a call waiting on
+        // either would wait for itself. A return type that is something
+        // the body reads from outside the literal can still be settled
+        // elsewhere.
+        _settled_elsewhere(arguments: Type[]) -> Type[] =>
+            arguments
+                |> filter(a => !a.is_function \/ isa Types.FUNCTION(a))
+                |> map(a => if let f: Types.FUNCTION = a then f.arguments[f.arguments.count - 1] else a fi)
+                |> filter(a => !_is_literal_return(a))
+                |> list()
+
+        _is_literal_return(type: Type) -> bool =>
+            if let placeholder: Types.INFERRED_VARIABLE_TYPE = type, origin: Symbols.INFERRED_RESULT_ORIGIN = placeholder.origin then
+                origin.is_literal_return
+            else
+                false
+            fi
 
         // A function whose signature is inferred takes an argument that
         // widens a parameter, such as `int[]` where the parameter settled as
