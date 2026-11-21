@@ -69,17 +69,21 @@ namespace InferenceStrip is
         // the unstripped build's: the same output could hide a target that
         // inference picked differently.
         casts: bool public
+        // With --conversions: the sites are scalar conversions, `double(n)`,
+        // judged by the same disassembly comparison as the casts.
+        conversions: bool public
         ildasm: string public
 
         init(..) is
             casts = false
+            conversions = false
             ildasm = "ildasm"
         si
 
         // The stripping sites of every source of the task, numbered per
         // file by the compiler's `list` selection.
         list_sites(task: TASK) is
-            let selection = if casts then "cast:list" else "list" fi
+            let selection = if conversions then "conversion:list" elif casts then "cast:list" else "list" fi
 
             for i in 0..task.sources.count do
                 let listing = Path.combine(work, "sites.txt")
@@ -162,6 +166,10 @@ namespace InferenceStrip is
                     fi
 
                     return (verdict = "=", detail = "")
+                elif conversions /\ only_widening_differs(il, task.baseline_il ?? "") then
+                    // Not stripped: the program is the same, but it calls the
+                    // widening where it converted inline.
+                    return (verdict = "V", detail = "the runtime's widening called in place of the conversion")
                 fi
             fi
 
@@ -198,6 +206,24 @@ namespace InferenceStrip is
             fi
 
             (verdict = "=", detail = "")
+        si
+
+        // Whether two disassemblies differ only where one converts a scalar
+        // with a conversion instruction and the other calls the runtime's
+        // widening for it, which takes the instruction's place one for
+        // one. Offsets and stack depths move with the call's size, so the
+        // labels, branch targets and `.maxstack` are compared without them.
+        only_widening_differs(stripped: string, baseline: string) -> bool is
+            let normal = (il: string) -> string is
+                let without_labels = Regex.replace(il, "IL_[0-9a-f]{{4}}: ", "")
+                let without_targets = Regex.replace(without_labels, "IL_[0-9a-f]{{4}}", "IL")
+                let without_depth = Regex.replace(without_targets, "\\.maxstack [0-9]+", ".maxstack")
+                let widening = Regex.replace(without_depth, "call [^ ]+ \\['ghul-runtime'\\]Ghul\\.Internal\\.WIDENINGS::[a-z_]+\\([^)]*\\)", "CONVERT")
+
+                Regex.replace(widening, "conv\\.(ovf\\.)?[a-z0-9.]+", "CONVERT")
+            si
+
+            normal(stripped) =~ normal(baseline)
         si
 
         // The built program's disassembly, without the lines that differ
@@ -421,7 +447,7 @@ namespace InferenceStrip is
 
     entry(args: ARRAY[string]) -> int is
         if args.count < 3 \/ !(args[0] =~ "run") then
-            write_line("usage: inference-strip run <tasks-directory> <work-directory> --compiler <ghul.dll> [--task <text>] [--skip <task,...>] [--bisect] [--collect <dir>] [--json <file>]")
+            write_line("usage: inference-strip run <tasks-directory> <work-directory> --compiler <ghul.dll> [--task <text>] [--skip <task,...>] [--bisect] [--casts | --conversions] [--collect <dir>] [--json <file>]")
             return 1
         fi
 
@@ -434,6 +460,7 @@ namespace InferenceStrip is
         let json: string? mut = null
         let collect: string? mut = null
         let want_casts mut = false
+        let want_conversions mut = false
         let ildasm mut = "ildasm"
         let sites_path: string? mut = null
         let shard mut = 0
@@ -464,6 +491,10 @@ namespace InferenceStrip is
                 i = i + 2
             elif args[i] =~ "--casts" then
                 want_casts = true
+                i = i + 1
+            elif args[i] =~ "--conversions" then
+                want_casts = true
+                want_conversions = true
                 i = i + 1
             elif args[i] =~ "--ildasm" then
                 ildasm = Path.get_full_path(args[i + 1])
@@ -496,6 +527,7 @@ namespace InferenceStrip is
         let harness = HARNESS(compiler, work, tasks_directory)
 
         harness.casts = want_casts
+        harness.conversions = want_conversions
         harness.ildasm = ildasm
         let tasks = LIST[TASK]()
         let directories = LIST[string](Directory.get_directories(tasks_directory))
@@ -611,6 +643,9 @@ namespace InferenceStrip is
         when "X" then "run failed"
         when "W" then "output differs"
         when "N" then "warnings differ"
+        when "P" then "some sites stripped, the rest kept"
+        when "J" then "sites strip alone, not all together"
+        when "V" then "IL differs only by a widening call in place of a conversion"
         else "unknown"
         esac
 
