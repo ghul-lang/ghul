@@ -57,6 +57,19 @@ namespace IR.Program is
         /// through a function the target makes for it that takes the
         /// instance, or null where the method is static.
         TEST_METHOD(name: string, test: FUNCTION_INSTANCE, is_public: bool, is_static: bool, ..)
+
+        /// Records a parameter of the method the next METHOD call records.
+        /// The method's own type argument is the parameter's type.
+        METHOD_PARAMETER(name: string, ..)
+
+        /// Records a method the type declares, after a METHOD_PARAMETER
+        /// call for each of its parameters, called through a function the
+        /// target makes for it that takes the instance, or null where the
+        /// method is static, and then the method's own arguments. The
+        /// builder method's type arguments are the parameters' types and,
+        /// where the method returns a value, its type. `index` tells apart
+        /// the functions the target makes for overloads.
+        METHOD(name: string, function: FUNCTION_INSTANCE, is_public: bool, is_static: bool, index: int, ..)
     si
 
     /// What a description of each type calls, where the program describes
@@ -182,7 +195,10 @@ namespace IR.Program is
                     pending.remove_at(pending.count - 1)
 
                     for call in calls(type) do
-                        if !isa RTTI_CALL.KIND(call) /\ !isa RTTI_CALL.CONSTRUCTOR(call) /\ !isa RTTI_CALL.ATTRIBUTE(call) /\ !isa RTTI_CALL.TEST_METHOD(call) then
+                        // A method's signature is recorded with type
+                        // objects alone, so its types are not described for
+                        // it.
+                        if !isa RTTI_CALL.KIND(call) /\ !isa RTTI_CALL.CONSTRUCTOR(call) /\ !isa RTTI_CALL.ATTRIBUTE(call) /\ !isa RTTI_CALL.TEST_METHOD(call) /\ !isa RTTI_CALL.METHOD(call) /\ !isa RTTI_CALL.METHOD_PARAMETER(call) then
                             let method = call.method.definition
                             let holds = method != base /\ method != parameter
 
@@ -368,6 +384,7 @@ namespace IR.Program is
                 _add_constructors(result, type, false)
                 _add_markers(result, type)
                 _add_test_methods(result, type)
+                _add_methods(result, type)
             fi
 
             return result
@@ -395,6 +412,8 @@ namespace IR.Program is
                     result.add(constructor.constructor)
                 elif let test: RTTI_CALL.TEST_METHOD = call then
                     result.add(test.test)
+                elif let method: RTTI_CALL.METHOD = call then
+                    result.add(method.function)
                 elif let attribute: RTTI_CALL.ATTRIBUTE = call then
                     result.add(attribute.constructor)
                 fi
@@ -636,6 +655,109 @@ namespace IR.Program is
             fi
         si
 
+        // The methods `type` declares that are not tests, each after a call
+        // for each of its parameters: those of the program's own types
+        // where the program describes all its types, and those of a type
+        // marked `@reflected()`. A method with type parameters of
+        // its own, one taking an argument by reference, and one taking more
+        // arguments than the builder has a method for are left out.
+        _add_methods(result: LIST[RTTI_CALL], type: CLASS_INSTANCE) is
+            let definition = type.definition
+            let parameter = _method("_parameter")
+
+            if !parameter? then
+                return
+            fi
+
+            let index mut = 0
+
+            for symbol in definition.symbols do
+                if let group: Semantic.Symbols.FUNCTION_GROUP = symbol then
+                    for function in group.functions do
+                        if !_is_described_method(definition, function) then
+                            continue
+                        fi
+
+                        let instance = FUNCTION_INSTANCE(function, type.type_map)
+                        let types = LIST[Type]()
+
+                        for argument in function.arguments do
+                            if let specialized = instance.specialize(argument) then
+                                types.add(specialized)
+                            fi
+                        od
+
+                        let return_type = function.return_type
+
+                        if !return_type? then
+                            continue
+                        fi
+
+                        let returns_value = !return_type.is_void
+                        let builder =
+                            if returns_value then
+                                _method("_method_{function.arguments.count}")
+                            else
+                                _method("_action_{function.arguments.count}")
+                            fi
+
+                        if !builder? \/ types.count != function.arguments.count then
+                            continue
+                        fi
+
+                        if returns_value then
+                            if let specialized = instance.specialize(return_type) then
+                                types.add(specialized)
+                            else
+                                continue
+                            fi
+                        fi
+
+                        for i in 0..function.arguments.count do
+                            result.add(RTTI_CALL.METHOD_PARAMETER(function.argument_names[i], _at(parameter, types[i])))
+                        od
+
+                        result.add(RTTI_CALL.METHOD(function.name, instance, !function.is_private /\ !function.name.starts_with('_'), !function.is_instance, index, _at_all(builder, types)))
+
+                        index = index + 1
+                    od
+                fi
+            od
+        si
+
+        // Whether `function` is a method `definition` declares itself that a
+        // description records: neither a test, a constructor, an accessor
+        // nor an operator, with no type parameters of its own and no
+        // argument taken by reference.
+        _is_described_method(definition: Classy, function: Function) -> bool is
+            if function.owner != definition \/ function.is_marked_test \/ function.is_constructor \/ function.is_generic then
+                return false
+            fi
+
+            // Under `--rtti-roots` only a type marked `@reflected()` has its
+            // methods described: a type described because a marked one
+            // reaches it is described for its values, not its methods.
+            let all = !IoC.CONTAINER.instance.build_flags.want_rtti_roots_only
+
+            if !definition.is_marked_reflected /\ !(all /\ PROGRAM_FUNCTIONS.contains(function)) then
+                return false
+            fi
+
+            let name = function.name
+
+            if name.length == 0 \/ !(name[0].is_letter \/ name[0] == '_') \/ name =~ "init" then
+                return false
+            fi
+
+            for argument in function.arguments do
+                if isa Semantic.Types.REFERENCE(argument) then
+                    return false
+                fi
+            od
+
+            return true
+        si
+
         _method(name: string) -> Function? is
             let method: Function mut
 
@@ -644,6 +766,19 @@ namespace IR.Program is
             fi
 
             return null
+        si
+
+        // `method` at the type arguments `types`, in order.
+        _at_all(method: Function, types: LIST[Type]) -> FUNCTION_INSTANCE is
+            let map = MAP[Symbol, Type]()
+
+            for i in 0..method.generic_arguments.count do
+                if i < types.count then
+                    map[method.generic_arguments[i].symbol] = types[i]
+                fi
+            od
+
+            return FUNCTION_INSTANCE(method, map)
         si
 
         // `method` at the type argument `type`, where it takes one.
