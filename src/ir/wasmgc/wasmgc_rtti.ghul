@@ -116,6 +116,19 @@ namespace IR.WasmGC is
                     body.add_range(_function_value(made))
                 elif let parameter: RTTI_CALL.PARAMETER = call then
                     body.add(INDEX_INSTRUCTION(Opcode.GLOBAL_GET, strings.literal(parameter.name)))
+                elif let parameter: RTTI_CALL.METHOD_PARAMETER = call then
+                    body.add(INDEX_INSTRUCTION(Opcode.GLOBAL_GET, strings.literal(parameter.name)))
+                elif let described: RTTI_CALL.METHOD = call then
+                    let invoker = _method_invoker(call.method, described, numbering)
+
+                    if !invoker? then
+                        return null
+                    fi
+
+                    body.add(INDEX_INSTRUCTION(Opcode.GLOBAL_GET, strings.literal(described.name)))
+                    body.add(Wasm.I32_CONSTANT(if described.is_public then 1 else 0 fi))
+                    body.add(Wasm.I32_CONSTANT(if described.is_static then 1 else 0 fi))
+                    body.add_range(_function_value(invoker))
                 elif let constructor: RTTI_CALL.CONSTRUCTOR = call then
                     let made = _constructor(type, call.method, constructor.constructor, numbering)
 
@@ -249,6 +262,34 @@ namespace IR.WasmGC is
                 if !test.is_static then
                     _receiver(body, test.test)
                 fi
+
+                body.add(INDEX_INSTRUCTION(Opcode.CALL, index))
+
+                return numbering.reserve(() -> FUNCTION => FUNCTION(signature, [], body))
+            fi
+
+            return null
+        si
+
+        // `(object?, A...) -> R`, calling the method on the object, or with
+        // no receiver where it is static, with the arguments that follow
+        // it; null where the method was not compiled.
+        _method_invoker(method: FUNCTION_INSTANCE, described: RTTI_CALL.METHOD, numbering: WASMGC_FUNCTION_NUMBERING) -> int? is
+            if let index = numbering.indexed(described.function), signature = _signature_of(method, 3) then
+                let body = LIST[INSTRUCTION]()
+                let callee = described.function
+
+                if !described.is_static then
+                    _receiver(body, callee)
+                fi
+
+                for i in 0..callee.definition.arguments.count do
+                    body.add(INDEX_INSTRUCTION(Opcode.LOCAL_GET, i + 2))
+
+                    if let value_type = _registry.value_type(callee.specialize(callee.definition.arguments[i])) then
+                        _cast_from_root(body, value_type)
+                    fi
+                od
 
                 body.add(INDEX_INSTRUCTION(Opcode.CALL, index))
 
