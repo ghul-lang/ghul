@@ -4071,17 +4071,48 @@ namespace IR.LLVMTarget is
                 let state = _current.load(Types.i32, LLVM.Values.global(flag), 4)
 
                 _current.branch(_current.compare(IntegerPredicate.EQ, state, _i32(0)), run, carry_on)
+                    .attach("prof", _module.rarely_taken())
 
                 _note_guard(_current, flag, carry_on)
 
                 _start(run)
 
+                _emit_call(_initialiser(flag, callee), [])
+
+                // The flag is set by now, but the call could have changed
+                // it as far as the optimiser can tell; storing it again here
+                // lets a later test of it, inlined from elsewhere, fold away.
                 _current.store(_i32(1), LLVM.Values.global(flag), 4)
-                _emit_call(callee, [])
                 _current.branch(carry_on)
 
                 _start(carry_on)
             fi
+        si
+
+        // The module's function that sets `flag` and runs the static
+        // constructor `callee`, added the first time it is asked for: kept
+        // out of line, so a test of the flag inlined into a caller costs
+        // one branch where the type is already initialised.
+        _initialiser(flag: string, callee: FUNCTION) -> FUNCTION is
+            let name = "$ghul_initialise.{flag}"
+
+            if let existing = _module.function_named(name) then
+                return existing
+            fi
+
+            let initialiser = FUNCTION(name, LLVM.Type.VOID, [])
+
+            initialiser.linkage = LLVM.Linkage.INTERNAL
+            initialiser.attributes.add(LLVM.Attribute.FLAG("cold"))
+            initialiser.attributes.add(LLVM.Attribute.FLAG("noinline"))
+
+            let entry = initialiser.add_block("entry")
+
+            entry.store(_i32(1), LLVM.Values.global(flag), 4)
+            entry.call(callee, [])
+            entry.return_void()
+
+            return _module.add_function(initialiser)
         si
 
         // The type object `descriptor` stands for, a constant beside it, so
