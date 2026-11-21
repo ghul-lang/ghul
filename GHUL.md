@@ -15,7 +15,7 @@ These mistakes cost the most rework. A section below explains each one. The last
 - **`write_line` must be imported.** Write `use IO.Std.write_line` before the code that calls it. Or start the file with `use default`, which imports `write_line`, the pipes, the collections and the maths functions.
 - **Strings have no `+` operator.** Join strings with interpolation: `"{a}{b}"`.
 - **`==` on a `string` compares references.** Compare text with `=~`. Use `==` for scalars, enums and references.
-- **Numbers widen only in arithmetic and ordering.** `1 + 2.5` is `3.5`: an `int`, `long` or `single` operand widens to the other operand's wider type. Nothing else converts implicitly: `let n: int = 2.5`, `decimal` and the small and unsigned types need `double(n)` or `cast`, and `==` never widens. A big integer is a `bigint`, written with the `n` suffix, and a complex number a `complex`, written `3r + 4j`. Do not use `System.Numerics.BigInteger`.
+- **Numbers widen only in arithmetic and ordering.** `1 + 2.5` is `3.5`: an `int`, `long` or `single` operand widens to the other operand's wider type, and an `int` or `long` widens to `bigint`. Nothing else converts implicitly: `let n: int = 2.5`, `decimal` and the small and unsigned types need `double(n)` or `cast`, and `==` never widens. A big integer is a `bigint`, written with the `n` suffix, and a complex number a `complex`, written `3r + 4j`. Do not use `System.Numerics.BigInteger`.
 - **There is no `new`.** Construct a value by calling its type: `Box(42)`, `LIST[int]()`. `new` is an ordinary identifier.
 - **The closing keyword of a block mirrors its opening keyword**: `is` ... `si`, `if` ... `fi`, `do` ... `od`, `case` ... `esac`, `try` ... `yrt`. There are no braces.
 - **A bare `let` is immutable.** A local declared `let count mut = 0` can be reassigned.
@@ -320,7 +320,7 @@ od
 write_line("{factorial}");     // 265252859812191058636308480000000
 ```
 
-A `bigint` takes part in no widening, so mixed operands are an error. If `total` is a `bigint`, `total * 2` is an error; write `total * 2n`. `==` and `!=` on two `bigint`s compare their values, as they do on two `decimal`s, so `factorial(25) == factorial(24) * 25n` is true. `=~` gives the same answer.
+An `int` or `long` operand widens to `bigint` in arithmetic, `%` included, and in ordering, so if `total` is a `bigint`, `total * 2` and `total < 100` are valid. Nothing else mixes with a `bigint`: a `single`, `double` or `decimal` operand is an error, the bitwise operators never widen, and neither does equality, so `total == 2` is an error; write `total == 2n`. `==` and `!=` on two `bigint`s compare their values, as they do on two `decimal`s, so `factorial(25) == factorial(24) * 25n` is true. `=~` gives the same answer.
 
 A fractional literal is a `double` unless it has a suffix: `s` for single, `d` for double, `m` for decimal, in either case. The `m` suffix also works on a literal with only digits, to write an integral decimal (`100m`). Exponent notation is valid: `1.5e3`, `1.5E-3`.
 
@@ -334,7 +334,7 @@ let z = 3r + 4j;
 write_line("{z * z} {z.magnitude} {complex.sqrt(-4r)}");   // <-7; 24> 5 <0; 2>
 ```
 
-ghūl converts between scalar types implicitly in one place: an arithmetic or ordering operator whose operands are two of `int`, `long`, `single` and `double` widens the narrower operand, and works in the wider type. `int` widens to `long`, `single` and `double`; `long` to `single` and `double`; `single` to `double`; and each of the four to `complex`. So `3 * 0.5` is `1.5`, an `int` times a `long` is a `long`, and `n < 2.5` compares as `double`. Where two results are reachable, the narrower wins: `long * single` and `int * single` are `single`. `%` widens between `int` and `long`; shifts and the bitwise operators never widen. An operator over the exact operand types is always chosen over a widened one.
+ghūl converts between scalar types implicitly in one place: an arithmetic or ordering operator whose operands are two of `int`, `long`, `single` and `double` widens the narrower operand, and works in the wider type. `int` widens to `long`, `single` and `double`; `long` to `single` and `double`; `single` to `double`; and each of the four to `complex`; `int` and `long` also widen to `bigint`. So `3 * 0.5` is `1.5`, an `int` times a `long` is a `long`, and `n < 2.5` compares as `double`. Where two results are reachable, the narrower wins: `long * single` and `int * single` are `single`. `%` widens between `int` and `long`, and from either to `bigint`; shifts and the bitwise operators never widen. An operator over the exact operand types is always chosen over a widened one.
 
 Equality doesn't widen. Ordering compares magnitudes, so it widens; `==` compares representation, so its operand types must already match. `i == d` and `i =~ d` with `i: int` and `d: double` are errors: convert one explicitly, as in `double(i) == d`, for value equality. Any other mix, such as `decimal` with `double`, or an assignment of a `double` to an `int`, also needs a `cast`.
 
