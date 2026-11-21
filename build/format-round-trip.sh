@@ -14,6 +14,13 @@
 # every reformat shows up as a diff and the tool cannot be run on save.
 # The first pass is allowed to change things, since it is normalising
 # source a person wrote; it is the second pass onwards that must not.
+#
+# Those checks miss a change of layout: a formatter that lays something out
+# differently still builds and is still a fixpoint. build/format-corpus/
+# holds sources already laid out as the formatter writes them at 76 columns,
+# copied from ghul-rosetta-code, and formatting them must change nothing. A
+# deliberate change of layout updates the corpus in the same change, with
+# --format-in-place --format-width 76 over it.
 
 set -euo pipefail
 
@@ -58,6 +65,17 @@ dotnet "$compiler" --format-in-place "$work/pass3/src" "$work/pass3/analysis-pro
 if ! diff -rq "$work/pass2" "$work/pass3" > "$work/fixpoint.diff"; then
     echo "formatting already-formatted source changed it:" >&2
     cat "$work/fixpoint.diff" >&2
+    exit 1
+fi
+
+echo "Checking the formatter keeps the corpus's layout ..."
+
+cp -r build/format-corpus "$work/corpus"
+dotnet "$compiler" --format-in-place --format-width 76 "$work/corpus"
+
+if ! diff -ru build/format-corpus "$work/corpus" > "$work/corpus.diff"; then
+    echo "formatting build/format-corpus/ changed its layout:" >&2
+    cat "$work/corpus.diff" >&2
     exit 1
 fi
 

@@ -1,0 +1,231 @@
+use default
+
+use Token = (line: int, column: int, name: string, value: string)
+
+class LEXER is
+    _source: string
+    _at: int
+    _line: int
+    _column: int
+
+    init(source: string) is
+        _source = source
+        _line = 1
+        _column = 1
+    si
+
+    tokens() -> Token{} is
+        do
+            _skip()
+
+            let line = _line, column = _column
+
+            if _at >= _source.length then
+                yield (line, column, "End_of_input", "")
+                return
+            fi
+
+            let start = _at
+            let c = _advance()
+
+            if c.is_letter \/ c == '_' then
+                while _is_word(_peek(0)) do _advance() od
+
+                let word = _source[start.._at]
+
+                yield
+                    case word
+                    when "if", "else", "while", "print", "putc" then
+                        (line, column, "Keyword_{word}", "")
+                    else
+                        (line, column, "Identifier", word)
+                    esac
+            elif c.is_digit then
+                while (_peek(0)).is_digit do _advance() od
+
+                if _is_word(_peek(0)) then
+                    throw _error(line, column, "invalid number")
+                fi
+
+                yield (line, column, "Integer", _source[start.._at])
+            elif c == '\'' then
+                let code = _character(line, column)
+
+                yield (line, column, "Integer", "{code}")
+            elif c == '"' then
+                _string(line, column)
+
+                yield (line, column, "String", _source[start.._at])
+            else
+                yield (line, column, _operator(c, line, column), "")
+            fi
+        od
+    si
+
+    _peek(offset: int) -> char =>
+        if _at + offset < _source.length then
+            _source[_at + offset]
+        else
+            char(0)
+        fi
+
+    _advance() -> char is
+        let c = _source[_at]
+
+        _at = _at + 1
+
+        if c == '\n' then
+            _line = _line + 1
+            _column = 1
+        else
+            _column = _column + 1
+        fi
+
+        c
+    si
+
+    _is_word(c: char) -> bool => c.is_letter_or_digit \/ c == '_'
+
+    _skip() is
+        do
+            if (_peek(0)).is_white_space then
+                _advance()
+            elif _peek(0) == '/' /\ _peek(1) == '*' then
+                let line = _line, column = _column
+
+                _advance()
+                _advance()
+
+                while !(_peek(0) == '*' /\ _peek(1) == '/') do
+                    if _at >= _source.length then
+                        throw _error(line, column, "end of file in comment")
+                    fi
+
+                    _advance()
+                od
+
+                _advance()
+                _advance()
+            else
+                break
+            fi
+        od
+    si
+
+    _escape(line: int, column: int) -> char =>
+        case _advance()
+        when 'n' then '\n'
+        when '\\' then '\\'
+        else
+            throw _error(line, column, "unknown escape sequence")
+        esac
+
+    _character(line: int, column: int) -> int is
+        if _peek(0) == '\'' then
+            throw _error(line, column, "empty character constant")
+        fi
+
+        let c mut = _advance()
+
+        if c == '\\' then
+            c = _escape(line, column)
+        fi
+
+        if _peek(0) != '\'' then
+            throw _error(line, column, "multi-character constant")
+        fi
+
+        _advance()
+
+        int(c)
+    si
+
+    _string(line: int, column: int) is
+        while _peek(0) != '"' do
+            if _at >= _source.length then
+                throw _error(line, column, "end of file in string literal")
+            elif _peek(0) == '\n' then
+                throw _error(line, column, "end of line in string literal")
+            elif _advance() == '\\' then
+                _escape(line, column)
+            fi
+        od
+
+        _advance()
+    si
+
+    _either(next: char, both: string, single: string) -> string is
+        if _peek(0) == next then
+            _advance()
+            return both
+        fi
+
+        single
+    si
+
+    _doubled(c: char, name: string, line: int, column: int) -> string =>
+        if _peek(0) == c then
+            _advance()
+            name
+        else
+            throw _error(line, column, "unrecognized character '{c}'")
+        fi
+
+    _operator(c: char, line: int, column: int) -> string =>
+        case c
+        when '*' then "Op_multiply"
+        when '/' then "Op_divide"
+        when '%' then "Op_mod"
+        when '+' then "Op_add"
+        when '-' then "Op_subtract"
+        when '<' then _either('=', "Op_lessequal", "Op_less")
+        when '>' then
+            _either('=', "Op_greaterequal", "Op_greater")
+        when '=' then _either('=', "Op_equal", "Op_assign")
+        when '!' then _either('=', "Op_notequal", "Op_not")
+        when '&' then _doubled('&', "Op_and", line, column)
+        when '|' then _doubled('|', "Op_or", line, column)
+        when '(' then "LeftParen"
+        when ')' then "RightParen"
+        when '{' then "LeftBrace"
+        when '}' then "RightBrace"
+        when ';' then "Semicolon"
+        when ',' then "Comma"
+        else
+            throw _error(line, column, "unrecognized character '{c}'")
+        esac
+
+    _error(line: int, column: int, message: string) -> Ghul.Exception =>
+        Ghul.Exception("line {line}, column {column}: {message}")
+si
+
+lex(source: string) is
+    try
+        for (line, column, name, value) in LEXER(source).tokens() do
+            let row = "{line,5} {column,6}   {name,-15} {value}"
+
+            write_line(row.trim_end())
+        od
+    catch e: Ghul.Exception
+        write_line("error at {e.message}")
+    yrt
+si
+
+let lines = LIST()
+
+while let line = IO.Std.read_line() do
+    lines.add(line)
+od
+
+lex("{lines |> join("\n")}\n")
+
+for
+    source in [
+        "''", "'\\r'", "'xx'", "/* never closed", "\"no closing quote",
+        "\"a\nb\"", "a | b", "123abc"
+    ]
+do
+    write_line("")
+    write_line(source)
+    lex(source)
+od

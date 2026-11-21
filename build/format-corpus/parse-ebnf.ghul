@@ -1,0 +1,366 @@
+use default
+
+union Rule is
+    TERMINAL(text: string)
+    NAME(name: string)
+    SEQUENCE(parts: Rule[])
+    CHOICE(options: Rule[])
+    REPEAT(body: Rule)
+    OPTIONAL(body: Rule)
+si
+
+@suppress("non-pascal-case-name")
+class BAD_GRAMMAR(text: string init): Ghul.Exception is
+    super(text)
+si
+
+class GRAMMAR is
+    title: string? public
+    comment: string? public
+    rules: MAP[string, Rule]
+    order: LIST[string]
+
+    init() is
+        rules = MAP()
+        order = LIST()
+    si
+si
+
+in_name(c: char) -> bool => c.is_letter_or_digit \/ c == '_'
+
+class READER(source: string) is
+    _at: int
+
+    skip() is
+        while _at < source.length /\ source[_at].is_white_space do
+            _at = _at + 1
+        od
+    si
+
+    peek: char => (
+        skip()
+        if _at < source.length then source[_at] else '\u0000' fi
+    )
+
+    take(c: char) -> bool is
+        if peek == c then
+            _at = _at + 1
+            return true
+        fi
+
+        false
+    si
+
+    literal() -> string? is
+        let quote = peek
+
+        if quote != '"' /\ quote != '\'' then
+            return null
+        fi
+
+        let end = source.index_of(quote, _at + 1)
+
+        if end < 0 then
+            throw BAD_GRAMMAR("unterminated literal")
+        fi
+
+        let text = source.substring(_at + 1, end - _at - 1)
+
+        _at = end + 1
+
+        return text
+    si
+
+    name() -> string? is
+        if !peek.is_letter then
+            return null
+        fi
+
+        let start = _at
+
+        while _at < source.length /\ in_name(source[_at]) do
+            _at = _at + 1
+        od
+
+        return source.substring(start, _at - start)
+    si
+
+    factor() -> Rule? is
+        if let text = literal() then
+            return Rule.TERMINAL(text)
+        elif let called = name() then
+            return Rule.NAME(called)
+        elif take('[') then
+            let inside = expression()
+
+            if !take(']') then
+                throw BAD_GRAMMAR("] expected")
+            fi
+
+            return Rule.OPTIONAL(inside)
+        elif take('(') then
+            let inside = expression()
+
+            if !take(')') then
+                throw BAD_GRAMMAR(") expected")
+            fi
+
+            return inside
+        elif take('{') then
+            let inside = expression()
+
+            if !take('}') then
+                throw BAD_GRAMMAR("}} expected")
+            fi
+
+            return Rule.REPEAT(inside)
+        fi
+
+        return null
+    si
+
+    term() -> Rule is
+        let parts = LIST()
+
+        while let part = factor() do
+            parts.add(part)
+        od
+
+        case parts
+        when [part] then part
+        else Rule.SEQUENCE(parts)
+        esac
+    si
+
+    expression() -> Rule is
+        let options = LIST([term()])
+
+        while take('|') do
+            options.add(term())
+        od
+
+        case options
+        when [option] then option
+        else Rule.CHOICE(options)
+        esac
+    si
+
+    grammar() -> GRAMMAR is
+        let result = GRAMMAR()
+
+        result.title = literal()
+
+        if !take('{') then
+            throw BAD_GRAMMAR("missing opening {{")
+        fi
+
+        while let defined = name() do
+            if !take('=') then
+                throw BAD_GRAMMAR("= expected after {defined}")
+            fi
+
+            result.rules[defined] = expression()
+            result.order.add(defined)
+
+            if !take('.') /\ !take(';') then
+                throw BAD_GRAMMAR(". or ; expected after {defined}")
+            fi
+        od
+
+        if !take('}') then
+            throw BAD_GRAMMAR("missing closing }}")
+        fi
+
+        result.comment = literal()
+
+        if peek != '\u0000' then
+            throw BAD_GRAMMAR("unexpected text after the grammar")
+        fi
+
+        for rule in result.rules.values do
+            check(result, rule)
+        od
+
+        result
+    si
+
+    check(grammar: GRAMMAR, rule: Rule) is
+        case rule
+        when (called): Rule.NAME then
+            if !grammar.rules.contains_key(called) then
+                throw BAD_GRAMMAR("undefined: {called}")
+            fi
+        when (parts): Rule.SEQUENCE then
+            parts |> each(check(grammar, *))
+        when (options): Rule.CHOICE then
+            options |> each(check(grammar, *))
+        when (body): Rule.REPEAT then check(grammar, body)
+        when (body): Rule.OPTIONAL then check(grammar, body)
+        else
+        esac
+    si
+si
+
+show(rule: Rule) -> string =>
+    case rule
+    when (text): Rule.TERMINAL then "\"{text}\""
+    when (called): Rule.NAME then called
+    when (parts): Rule.SEQUENCE then
+        parts |> map(show) |> join(" ")
+    when (options): Rule.CHOICE then
+        "({options |> map(show) |> join(" | ")})"
+    when (body): Rule.REPEAT then "{{ {show(body)} }}"
+    when (body): Rule.OPTIONAL then "[ {show(body)} ]"
+    esac
+
+class MATCHER(grammar: GRAMMAR, text: string) is
+    blank(at: int) -> int => (
+        let i mut = at
+
+        while i < text.length /\ text[i].is_white_space do
+            i = i + 1
+        od
+
+        i
+    )
+
+    ends(rule: Rule, at: int) -> int{} is
+        let result = LIST()
+
+        case rule
+        when (literal): Rule.TERMINAL then
+            let start = blank(at)
+            let fits = start + literal.length <= text.length
+
+            if fits /\ text.substring(start, literal.length) =~ literal then
+                result.add(start + literal.length)
+            fi
+        when (called): Rule.NAME then
+            result.add_range(ends(grammar.rules[called], at))
+        when (parts): Rule.SEQUENCE then
+            let reached mut = [at]
+
+            for part in parts do
+                let next = LIST()
+
+                for position in reached do
+                    for end in ends(part, position) do
+                        if !next.contains(end) then
+                            next.add(end)
+                        fi
+                    od
+                od
+
+                reached = next
+            od
+
+            result.add_range(reached)
+        when (options): Rule.CHOICE then
+            for option in options do
+                for end in ends(option, at) do
+                    if !result.contains(end) then
+                        result.add(end)
+                    fi
+                od
+            od
+        when (body): Rule.REPEAT then
+            let pending = LIST([at])
+
+            while pending.count > 0 do
+                let position = pending[pending.count - 1]
+
+                pending.remove_at(pending.count - 1)
+
+                if !result.contains(position) then
+                    result.add(position)
+
+                    for end in ends(body, position) do
+                        if end > position then
+                            pending.add(end)
+                        fi
+                    od
+                fi
+            od
+        when (body): Rule.OPTIONAL then
+            result.add(at)
+
+            for end in ends(body, at) do
+                if end != at then result.add(end) fi
+            od
+        esac
+
+        result
+    si
+
+    accepts() -> bool =>
+        let start = grammar.rules[grammar.order[0]] in
+        start |> ends(0) |> any(end => blank(end) == text.length)
+si
+
+let cases = [
+    (
+        grammar =
+            "\"a\" {{\n    a = \"a1\" ( \"a2\" | \"a3\" ) {{ \"a4\" }} "
+            "[ \"a5\" ] \"a6\" ;\n}} \"z\"",
+        tests = [
+            "a1a3a4a4a5a6", "a1 a2a6", "a1 a3 a4 a6", "a1 a4 a5 a6",
+            "a1 a2 a4 a5 a5 a6", "a1 a2 a4 a5 a6 a7", "your ad here"
+        ]
+    ),
+    (
+        grammar =
+            "{{\n"
+            "    expr = term {{ plus term }} .\n"
+            "    term = factor {{ times factor }} .\n"
+            "    factor = number | '(' expr ')' .\n"
+            "    plus = \"+\" | \"-\" .\n"
+            "    times = \"*\" | \"/\" .\n"
+            "    number = digit {{ digit }} .\n"
+            "    digit = \"0\" | \"1\" | \"2\" | \"3\" | \"4\" "
+            "| \"5\" | \"6\" | \"7\" | \"8\" | \"9\" .\n"
+            "}}",
+        tests = [
+            "2", "2*3 + 4/23 - 7", "(3 + 4) * 6-2+(4*(4))", "-2", "3 +",
+            "(4 + 3"
+        ]
+    ),
+    (grammar = "a = \"1\"", tests = ["1"]),
+    (grammar = "{{ a = \"1\" ;", tests = ["1"]),
+    (grammar = "{{ hello world = \"1\"; }}", tests = ["1"]),
+    (grammar = "{{ foo = bar . }}", tests = ["bar"])
+]
+
+for (source, tests) in cases do
+    write_line("grammar:")
+    source.split(['\n']) |> each(line => write_line("    {line}"))
+
+    try
+        let grammar = READER(source).grammar()
+
+        if let title = grammar.title then
+            write_line("title: {title}")
+        fi
+        if let comment = grammar.comment then
+            write_line("comment: {comment}")
+        fi
+
+        write_line("rules:")
+
+        for rule in grammar.order do
+            write_line("    {rule} = {show(grammar.rules[rule])}")
+        od
+
+        write_line("tests:")
+
+        for test in tests do
+            let passes = MATCHER(grammar, test).accepts()
+            let verdict = if passes then "pass" else "fail" fi
+
+            write_line("    \"{test}\": {verdict}")
+        od
+    catch e: BAD_GRAMMAR
+        write_line("invalid grammar: {e.message}")
+    yrt
+
+    write_line()
+od

@@ -1,0 +1,122 @@
+use default
+
+use MEMBER = (key: string, value: Json)
+
+union Json is
+    TEXT(value: string)
+    ARRAY(items: Json[])
+    OBJECT(members: MEMBER[])
+si
+
+union Resolved is
+    FOUND(value: Json) default
+    FAILED(reason: string)
+si
+
+text(value: string) -> Json => Json.TEXT(value)
+member(key: string, value: Json) -> MEMBER => (key = key, value = value)
+
+render(value: Json) -> string =>
+    case value
+    when leaf: Json.TEXT then "\"{leaf.value}\""
+    when list: Json.ARRAY then
+        "[{list.items |> map(render) |> join(", ")}]"
+    when record: Json.OBJECT then
+        "{{" "{record.members |> map(render_member) |> join(", ")}" "}}"
+    esac
+
+render_member(entry: MEMBER) -> string =>
+    "\"{entry.key}\": {render(entry.value)}"
+
+as_index(token: string) -> int? =>
+    if
+        token.length > 0 /\
+        (token |> all(digit => digit >= '0' /\ digit <= '9'))
+    then
+        int.parse(token)
+    else
+        null
+    fi
+
+step(node: Json, token: string) -> Resolved =>
+    case node
+    when list: Json.ARRAY then
+        if let position = as_index(token) then
+            if position < list.items.count then
+                Resolved.FOUND(list.items[position])
+            else
+                Resolved.FAILED("index {position} is past the end")
+            fi
+        else
+            Resolved.FAILED("\"{token}\" is not an array index")
+        fi
+    when record: Json.OBJECT then
+        let named = record.members |> find(entry => entry.key =~ token) in
+        if let found = named then
+            Resolved.FOUND(found.value)
+        else
+            Resolved.FAILED("no member named \"{token}\"")
+        fi
+    else
+        Resolved.FAILED("\"{token}\" has nothing to descend into")
+    esac
+
+decode(token: string) -> string =>
+    token.replace("~1", "/").replace("~0", "~")
+
+resolve(document: Json, pointer: string) -> Resolved =>
+    if pointer.length == 0 then
+        Resolved.FOUND(document)
+    elif pointer[0] != '/' then
+        Resolved.FAILED("a pointer must be empty or start with a slash")
+    else
+        pointer[1..<0].split(['/'])
+            |> reduce(Resolved.FOUND(document), (running, token) =>
+                if running? then
+                    step(running.value, decode(token))
+                else
+                    running
+                fi
+            )
+    fi
+
+let wiki_link = "https://rosettacode.org/wiki/Rosetta_Code"
+let discord_link = "https://discord.com/channels/1011262808001880065"
+
+let document = Json.OBJECT([
+    member(
+        "wiki",
+        Json.OBJECT([
+            member(
+                "links",
+                Json.ARRAY([
+                    text(wiki_link),
+                    text(discord_link)
+                ])
+            )
+        ])
+    ),
+    member("", text("Rosetta")),
+    member(" ", text("Code")),
+    member("g/h", text("chrestomathy")),
+    member("i~j", text("site")),
+    member("abc", Json.ARRAY([text("is"), text("a")])),
+    member("def", Json.OBJECT([member("", text("programming"))]))
+])
+
+let pointers = [
+    "", "/", "/ ", "/abc", "/def/", "/g~1h", "/i~0j",
+    "/wiki/links/0", "/wiki/links/1", "/wiki/links/2",
+    "/wiki/name", "/no/such/thing", "bad/pointer"
+]
+
+pointers
+    |> each(pointer => (
+        let outcome = resolve(document, pointer)
+
+        if outcome? then
+            write_line("\"{pointer}\" -> {render(outcome.value)}")
+        else
+            write_line("\"{pointer}\" -> error: {outcome.reason}")
+        fi
+    ))
