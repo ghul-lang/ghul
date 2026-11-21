@@ -78,9 +78,14 @@ reprint it. A selection is `all`, `list`, or comma-separated site numbers and
 `a-b` ranges, and by default numbers locals' types, function literals'
 parameter and return types, and calls' type arguments.
 
-Two prefixes number one other kind of site, and only that kind:
+Three prefixes each number one other kind of site, and only that kind:
 
 - `cast:` numbers the targets of explicit casts: `cast double(n)` as `cast(n)`.
+- `conversion:` numbers the calls of a scalar type as a conversion with one
+  operand written as a name, a literal, a member, a call or an index:
+  `double(n)` as `n`. A listed site reads
+  `<n> conversion <line>,<column> unwrap <span of the type name> <its end>`;
+  removing the type name, the `(` after it and the matching `)` leaves the operand.
 - `signature:` numbers the signatures of the functions in a file with
   top-level statements that could be written with no types at all: named,
   with a body, with no modifier but `memo` or `pure`, and with no `ref`

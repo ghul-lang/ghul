@@ -1019,6 +1019,9 @@ namespace Syntax.Process.Printer is
                 _builder.begin_group()
                 _emit_pipe_chain(call)
                 _builder.end_group()
+            elif _strips_conversion(call) then
+                note(call.location)
+                call.arguments.expressions[0].accept(self)
             else
                 note(call.location)
                 emit_callee(call.function)
@@ -1028,6 +1031,38 @@ namespace Syntax.Process.Printer is
                 write(")")
             fi
         si
+
+        // Whether the call is a scalar conversion the stripper takes:
+        // a scalar type called with one positional operand that reads the
+        // same with the call taken away around it.
+        _strips_conversion(call: Expressions.CALL) -> bool is
+            if !stripper? \/ call.argument_names? \/ call.arguments.count != 1 then
+                return false
+            fi
+
+            let identifier = if let i: Expressions.IDENTIFIER = call.function then i else null fi
+
+            if !identifier? \/ identifier.identifier.is_qualified \/ !_is_scalar_conversion_name(identifier.identifier.name) then
+                return false
+            fi
+
+            let operand = call.arguments.expressions[0]
+
+            let plain =
+                isa Expressions.IDENTIFIER(operand) \/
+                isa Expressions.MEMBER(operand) \/
+                isa Expressions.INDEX(operand) \/
+                isa Expressions.Literals.INTEGER(operand) \/
+                isa Expressions.Literals.FLOAT(operand) \/
+                isa Expressions.Literals.CHARACTER(operand) \/
+                (if let inner: Expressions.CALL = operand then !_is_pipe_stage(inner) /\ !inner.is_yield_infix else false fi)
+
+            plain /\ _strip("conversion", call.location, "unwrap", identifier.location, identifier.location)
+        si
+
+        _is_scalar_conversion_name(name: string) -> bool =>
+            ["int", "uint", "long", "ulong", "short", "ushort", "byte", "ubyte", "word", "uword", "single", "double", "decimal", "bigint", "char"]
+                |> Ghul.Pipes.any(p => p =~ name)
 
         _is_pipe_stage(call: Expressions.CALL) -> bool =>
             call.is_thread_first /\ call.arguments.count >= 1
