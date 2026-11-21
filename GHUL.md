@@ -1920,6 +1920,15 @@ walk(t: Tree) -> Pipe[int] is
 si
 ```
 
+An `=>` body can be a generator too. A `yield` inside a parenthesized block that is the whole body yields from the function, and a `yield` inside a block within an `is` body yields from the enclosing generator. The body's value, if it has one, is discarded, as the value of an `is` body's last statement is:
+
+```ghul
+pair() -> int{} => (
+    yield 1
+    yield 2
+)
+```
+
 A generator's return type must be `T{}`, `Iterator[T]` or `Ghul.Pipes.Pipe[T]`. `yield` in a function with any other return type is an error. A generator that returns an `Iterator[T]` can be read once: the read uses the iterator that the generator returns. A function cannot be both a generator and asynchronous. As with `await`, `yield` is not yet supported inside a `catch` or `finally` handler.
 
 ## collections and pipes
