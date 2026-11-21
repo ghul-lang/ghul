@@ -329,6 +329,43 @@ namespace Semantic.UnitTests is
             is_true(resolver.waiting_on? /\ resolver.waiting_on == arguments[0], "the call should wait on the placeholder actual")
         si
 
+        // The fixture's tie, with the actual the result of a partial
+        // application or of some other call that is waiting.
+        tied_on_a_call_result(is_partial_application_result: bool) -> (group: FUNCTION_GROUP, arguments: LIST[Type]) is
+            let (group, _) = two_candidates_tied_on_a_placeholder_actual()
+
+            let origin = Semantic.Symbols.INFERRED_RESULT_ORIGIN(loc(), Semantic.BLOCK_SCOPE(), "result")
+            origin.is_partial_application_result = is_partial_application_result
+
+            return (group = group, arguments = LIST[Type]([cast Type(INFERRED_VARIABLE_TYPE(origin))]))
+        si
+
+        // A partial application's result follows from what its `*` is
+        // given, which is the call's own to give, so a call that waited on
+        // it would wait for itself.
+        @test()
+        A_tie_on_a_partial_applications_result_does_not_wait_on_it() is
+            let (group, arguments) = tied_on_a_call_result(true)
+
+            let resolver = OVERLOAD_RESOLVER(DIAGNOSTICS_STORE())
+
+            resolver.resolve(loc(), group, arguments, true, true, false)
+
+            is_true(!resolver.waiting_on?, "the call should not wait on a result only it can settle")
+        si
+
+        @test()
+        A_tie_on_another_calls_result_waits_on_it() is
+            let (group, arguments) = tied_on_a_call_result(false)
+
+            let resolver = OVERLOAD_RESOLVER(DIAGNOSTICS_STORE())
+
+            let result = resolver.resolve(loc(), group, arguments, true, true, false)
+
+            is_null(result, "an uninformative tie should not pick a candidate")
+            is_true(resolver.waiting_on? /\ resolver.waiting_on == arguments[0], "the call should wait on the other call's result")
+        si
+
         // A constructor the runtime supplies for a type with no type
         // parameters, such as string's from a sequence, has type parameters
         // of its own, and constructing binds them from the arguments.
