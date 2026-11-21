@@ -144,8 +144,8 @@ namespace Semantic.DotNet is
                 _hides[("System.Char", member)] = replacement
             od
 
-            _same_type_arithmetic = Collections.SET[string](["System.Numerics.Complex"])
-            _arithmetic_operators = Collections.SET[string](["op_Addition", "op_Subtraction", "op_Multiply", "op_Division"])
+            _same_type_arithmetic = Collections.SET[string](["System.Numerics.Complex", "System.Numerics.BigInteger"])
+            _arithmetic_operators = Collections.SET[string](["op_Addition", "op_Subtraction", "op_Multiply", "op_Division", "op_Modulus"])
         si
 
         // Whether `method` is a binary arithmetic operator of a type whose
@@ -168,17 +168,13 @@ namespace Semantic.DotNet is
         si
 
         // Whether `method` is the binary arithmetic operator of such a type
-        // whose signature is exactly (T, T) -> T, which a widened operand
-        // may reach, as an operator the core library declares
-        // @widen_operands() may be. Each overload is judged by its own
-        // parameter and return types, so a mixed one is never marked.
+        // whose signature is exactly (T, T) -> T, or its CompareTo(T) -> int,
+        // which a widened operand may reach, as an operator the core library
+        // declares @widen_operands() may be. Each overload is judged by its
+        // own parameter and return types, so a mixed one is never marked.
         //
         // - method: the reflected method
         is_widened_operand_arithmetic(method: Ghul.Reflection.MethodInfo) -> bool static is
-            if !method.is_static \/ !_arithmetic_operators.contains(method.name) then
-                return false
-            fi
-
             let declaring_type = method.declaring_type
 
             if !declaring_type? \/ !declaring_type.full_name? \/ !_same_type_arithmetic.contains(declaring_type.full_name) then
@@ -186,6 +182,20 @@ namespace Semantic.DotNet is
             fi
 
             let parameters = method.get_parameters()
+
+            // The ordering the relational operators read: CompareTo over the
+            // type itself, returning int.
+            if !method.is_static then
+                return
+                    method.name =~ "CompareTo" /\
+                    (method.return_type.full_name ?? "") =~ "System.Int32" /\
+                    parameters.count == 1 /\
+                    parameters[0].parameter_type == declaring_type
+            fi
+
+            if !_arithmetic_operators.contains(method.name) then
+                return false
+            fi
 
             return
                 method.return_type == declaring_type /\

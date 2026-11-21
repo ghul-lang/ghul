@@ -90,10 +90,98 @@ namespace Semantic is
             return false
         si
 
+        // The marked widened form of `operator`, the static operator
+        // `name` that widening reached over operands of `left` and `right`,
+        // where `left_widened` and `right_widened` say which operand was
+        // widened to reach it. A form is a static operator of the same name
+        // in the holder, marked @widened_form(), with the operator's result
+        // type. An operand that was not widened keeps the operator's
+        // parameter type; one that was takes a parameter its own type is,
+        // or widens to through a marked widening. The form taking the
+        // fewest such further widenings is the one, and none where two tie.
+        widened_form(
+            name: string,
+            operator: Symbols.Function,
+            left: Type,
+            left_widened: bool,
+            right: Type,
+            right_widened: bool
+        ) -> Symbols.Function? is
+            if operator.is_instance \/ operator.arguments.count != 2 \/ !operator.return_type? then
+                return null
+            fi
+
+            let forms = Collections.LIST[Symbols.Function]()
+
+            for holder in _holders() do
+                if let group: Symbols.FUNCTION_GROUP = holder.find_member(name) then
+                    for f in group.functions do
+                        forms.add(f)
+                    od
+                fi
+            od
+
+            let best: Symbols.Function? mut = null
+            let best_cost mut = 0
+            let tied mut = false
+
+            for f in forms do
+                if !f.is_widened_form \/ f.is_instance \/ f.arguments.count != 2 \/ !f.return_type? \/ !f.return_type.matches(operator.return_type!) then
+                    continue
+                fi
+
+                let left_cost = _form_parameter_cost(f.arguments[0], operator.arguments[0], left, left_widened)
+                let right_cost = _form_parameter_cost(f.arguments[1], operator.arguments[1], right, right_widened)
+
+                if left_cost < 0 \/ right_cost < 0 then
+                    continue
+                fi
+
+                let cost = left_cost + right_cost
+
+                if !best? \/ cost < best_cost then
+                    best = f
+                    best_cost = cost
+                    tied = false
+                elif cost == best_cost then
+                    tied = true
+                fi
+            od
+
+            if tied then
+                return null
+            fi
+
+            return best
+        si
+
+        // What the form's parameter costs an operand: 0 where it takes the
+        // operand's own type, 1 where the operand widens to it, and -1 where
+        // it can't take the operand.
+        _form_parameter_cost(parameter: Type, operator_parameter: Type, operand: Type, widened: bool) -> int is
+            if !widened then
+                return if parameter.matches(operator_parameter) then 0 else -1 fi
+            fi
+
+            if parameter.matches(operator_parameter) then
+                return -1
+            fi
+
+            if parameter.matches(operand) then
+                return 0
+            fi
+
+            if widens(operand, parameter) then
+                return 1
+            fi
+
+            return -1
+        si
+
         _all() -> Collections.LIST[Symbols.Function] is
             let result = Collections.LIST[Symbols.Function]()
 
-            if let holder = _holder() then
+            for holder in _holders() do
                 for symbol in holder.symbols do
                     if let group: Symbols.FUNCTION_GROUP = symbol then
                         for f in group.functions do
@@ -103,31 +191,40 @@ namespace Semantic is
                         _add_if_widening(f, result)
                     fi
                 od
-            fi
+            od
 
             return result
         si
 
-        // The holder as source in this compilation, or reflected from a
-        // referenced runtime, where name lookup does not reach it.
-        _holder() -> Symbols.Symbol? is
+        // The holders: one declared in this compilation's source, and on
+        // .NET one reflected from a referenced runtime, where name lookup
+        // does not reach it. A library's own holder adds to the runtime's.
+        _holders() -> Collections.LIST[Symbols.Symbol] is
+            let result = Collections.LIST[Symbols.Symbol]()
+
             if _has_holder_for_testing then
-                return _holder_for_testing
+                if let holder = _holder_for_testing then
+                    result.add(holder)
+                fi
+
+                return result
             fi
 
             if
                 let internal = IoC.CONTAINER.instance.namespaces.try_find_namespace(".Ghul.Internal"),
                 holder = internal.find_member("WIDENINGS")
             then
-                return holder
+                result.add(holder)
             fi
 
             @IF.dotnet()
             if let holder = IoC.CONTAINER.instance.dotnet_symbol_table.value.get_symbol("Ghul.Internal.WIDENINGS") then
-                return holder
+                if !result.contains(holder) then
+                    result.add(holder)
+                fi
             fi
 
-            return null
+            return result
         si
 
         _add_if_widening(f: Symbols.Function, into: Collections.LIST[Symbols.Function]) is

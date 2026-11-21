@@ -2939,6 +2939,25 @@ namespace Syntax.Process is
                 return null
             fi
 
+            // A marked widened form of the operator takes a widened operand
+            // as the real it was, so the operation runs on it directly.
+            if
+                let form = widenings.widened_form(
+                    binary.operation.name,
+                    chosen.function,
+                    left_type,
+                    chosen.left?,
+                    right_type,
+                    chosen.right?
+                ),
+                left = _convert_operand(binary.left.location, left_value, form.arguments[0]),
+                right = _convert_operand(binary.right.location, right_value, form.arguments[1])
+            then
+                _symbol_use_locations.add_symbol_use(binary.operation.location, form)
+
+                return (function = form, left = left, right = right)
+            fi
+
             return (
                 function = chosen.function,
                 left = _widen(binary.left.location, left_value, chosen.left),
@@ -2968,6 +2987,32 @@ namespace Syntax.Process is
             od
         si
 
+        // `value` as `target`, by the explicit conversion where its type
+        // differs; null where there is no explicit conversion between them.
+        _convert_operand(location: Source.LOCATION, value: Value, target: Type) -> Value? is
+            if value.type!.matches(target) then
+                return value
+            fi
+
+            return _explicit_conversion(location, value, target)
+        si
+
+        // `target(value)`, as the explicit conversion compiles it; null where
+        // that conversion isn't valid.
+        _explicit_conversion(location: Source.LOCATION, value: Value, target: Type) -> Value? is
+            let use snapshot = _logger.speculate_then_backtrack()
+
+            let converted = _calls.construct_from_value(location, target, value)
+
+            let errors = snapshot.backtrack()
+
+            if converted? /\ errors.count == 0 then
+                return converted
+            fi
+
+            return null
+        si
+
         _widen(location: Source.LOCATION, value: Value, widening: Semantic.Symbols.Function?) -> Value is
             if !widening? then
                 return value
@@ -2975,25 +3020,12 @@ namespace Syntax.Process is
 
             _symbol_use_locations.add_symbol_use(location, widening)
 
-            // A widening is applied as the explicit conversion to the type it
-            // widens to, so a widened operand costs what `cast T(x)` costs:
-            // the mark says the conversion widens. A conversion the language
-            // has no explicit form for is the marked function's to perform.
-            let target = widening.return_type!
-            let caster = IoC.CONTAINER.instance.type_caster
-
-            let use snapshot = _logger.speculate_then_backtrack()
-
-            let converted: Value? =
-                if caster.check_cast_is_valid(location, value.type!, target) then
-                    IR.Values.SCALAR_CONVERSION(caster.cast_value(location, value, target, true, true))
-                else
-                    null
-                fi
-
-            let errors = snapshot.backtrack()
-
-            if converted? /\ errors.count == 0 then
+            // A widening is applied as the explicit conversion `T(x)` to the
+            // type it widens to, compiled by the same code, so a widened
+            // operand costs what the conversion written out costs: the mark
+            // says the conversion widens. A conversion the language has no
+            // explicit form for is the marked function's to perform.
+            if let converted = _explicit_conversion(location, value, widening.return_type!) then
                 return converted
             fi
 
