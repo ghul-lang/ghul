@@ -91,64 +91,13 @@ namespace Semantic.Symbols is
 
             let imported = _find_imported(name)
 
-            if !declared? /\ !imported? then
-                return _find_old_name(name)
-            elif !declared? then
+            if !declared? then
                 return imported
             elif !imported? then
                 return declared
             fi
 
             return DotNet.GLOBAL_OVERLOAD_MERGE.merge([declared, imported])
-        si
-
-        // Where the core library declares the core types in source, an
-        // old name such as `System.Exception` is the type it declares
-        // under its ghūl name, and a namespace an old name lies in, such
-        // as `System`, is a namespace, as the reflected ones are on .NET.
-        _find_old_name(name: string) -> Symbol? is
-            let container = IoC.CONTAINER.instance
-
-            if !container.target_profile.has_source_core_library then
-                return null
-            fi
-
-            let qn = qualified_name.trim_start(['.'])
-            let full_name = if qn.length == 0 then name else "{qn}.{name}" fi
-
-            // An old name stands for its new one. A new name the core
-            // library does not declare yet, because it is from before the
-            // type moved, is looked for in the type's earlier homes.
-            let renamed = CORE_TYPE_ALIASES.renamed_in_source(full_name) ?? (if CORE_TYPE_ALIASES.has_earlier_home(full_name) then full_name else null fi)
-
-            if renamed? then
-                for home in CORE_TYPE_ALIASES.homes(renamed) do
-                    // A type's earlier home can be the old name itself, which
-                    // is not declared, or the lookup would not be here.
-                    if home =~ full_name then
-                        continue
-                    fi
-
-                    let dot = home.last_index_of('.')
-
-                    if let owner = container.namespaces.try_find_namespace(".{home.substring(0, dot)}") then
-                        // Only what the home itself declares: looking it up
-                        // through find_direct would fall back to its other
-                        // spelling, and the two would look each other up.
-                        if let found = owner.find_declared(home.substring(dot + 1)) then
-                            return found
-                        fi
-                    fi
-                od
-
-                return null
-            fi
-
-            if CORE_TYPE_ALIASES.is_namespace_in_source(full_name) then
-                return container.namespaces.find_or_add_namespace(name, ".{full_name}", false)
-            fi
-
-            return null
         si
 
         @IF.dotnet()
