@@ -15,7 +15,7 @@ These mistakes cost the most rework. A section below explains each one. The last
 - **`write_line` must be imported.** Write `use IO.Std.write_line` before the code that calls it. Or start the file with `use default`, which imports `write_line`, the pipes, the collections and the maths functions.
 - **Strings have no `+` operator.** Join strings with interpolation: `"{a}{b}"`.
 - **`==` on a `string` compares references.** Compare text with `=~`. Use `==` for scalars, enums and references.
-- **Numbers widen only in arithmetic and ordering.** `1 + 2.5` is `3.5`: an `int`, `long` or `single` operand widens to the other operand's wider type. Nothing else converts implicitly: `let n: int = 2.5`, `decimal` and the small and unsigned types need `double(n)` or `cast`, and `==` never widens. A big integer is a `bigint`, written with the `n` suffix. Do not use `System.Numerics.BigInteger`.
+- **Numbers widen only in arithmetic and ordering.** `1 + 2.5` is `3.5`: an `int`, `long` or `single` operand widens to the other operand's wider type. Nothing else converts implicitly: `let n: int = 2.5`, `decimal` and the small and unsigned types need `double(n)` or `cast`, and `==` never widens. A big integer is a `bigint`, written with the `n` suffix, and a complex number a `complex`, written `3r + 4j`. Do not use `System.Numerics.BigInteger`.
 - **There is no `new`.** Construct a value by calling its type: `Box(42)`, `LIST[int]()`. `new` is an ordinary identifier.
 - **The closing keyword of a block mirrors its opening keyword**: `is` ... `si`, `if` ... `fi`, `do` ... `od`, `case` ... `esac`, `try` ... `yrt`. There are no braces.
 - **A bare `let` is immutable.** A local declared `let count mut = 0` can be reassigned.
