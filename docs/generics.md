@@ -4,7 +4,7 @@ Read this file when you are writing generic library code. It continues sections 
 
 ## generics
 
-Code can reach a bound's *static* members through the type parameter, written `T.member(...)`. .NET's generic-math interfaces are built on this mechanism. They are named in `Ghul.Math`, with the leading `I` dropped: `Ghul.Math.Number[T]` is .NET's `INumber<T>`, `Ghul.Math.BinaryInteger[T]` is `IBinaryInteger<T>`, and so on. The `System.Numerics` names still compile, as .NET interop, and name the same types. `Ghul.Parsable[T]`, which is .NET's `IParsable<T>`, works the same way:
+Code can reach a bound's *static* members through the type parameter, written `T.member(...)`. .NET's generic-math interfaces are built on this mechanism. They are named in `Ghul.Math`, with the leading `I` dropped: `Ghul.Math.Number[T]` is .NET's `INumber<T>`, `Ghul.Math.BinaryInteger[T]` is `IBinaryInteger<T>`, and so on. `Ghul.Parsable[T]`, which is .NET's `IParsable<T>`, works the same way:
 
 ```ghul
 use Ghul.Parsable;
