@@ -305,6 +305,8 @@ namespace Lexical is
             _input = i
 
             _trivia = Collections.LIST[TRIVIA]()
+            _escape_spelling = ""
+            _escape_text = ""
 
             if is_internal_file then
                 _cursor = INTERNAL_LOCATION_CURSOR()
@@ -431,8 +433,50 @@ namespace Lexical is
         current_string: string =>
             _token_pair.value_string
 
+        // An escape, after its `\`, with how it was written left in
+        // `_escape_text` for the formatter.
         read_escape() -> char is
-            let c: char mut = next_char()
+            _escape_spelling = ""
+
+            let c = _read_escape()
+
+            _escape_text = "\\{_escape_spelling}"
+
+            return c
+        si
+
+        _escape_spelling: string
+        _escape_text: string
+
+        // The next character of an escape, kept as part of its spelling.
+        _escape_char() -> char is
+            let c = next_char()
+            _escape_spelling = "{_escape_spelling}{c}"
+            c
+        si
+
+        // Puts back a character an escape read but does not include.
+        _unread_escape_char(c: char) is
+            _escape_spelling = _escape_spelling.substring(0, _escape_spelling.length - 1)
+            prev_char(c)
+        si
+
+        // Records where a literal was written with the escape just read:
+        // `offset` characters into the literal's value.
+        _note_escape(offset: int) is
+            let here = location
+
+            _trivia.add(
+                TRIVIA.ESCAPE(
+                    offset,
+                    _escape_text,
+                    LOCATION(here.file_name, here.end_line, here.end_column, here.end_line, here.end_column)
+                )
+            )
+        si
+
+        _read_escape() -> char is
+            let c: char mut = _escape_char()
             let result: int mut = 0
             if c == 't' then
                 return cast char(9)
@@ -451,12 +495,12 @@ namespace Lexical is
                 let escape_location = character_location
 
                 for i in 0..4 do
-                    c = next_char()
+                    c = _escape_char()
 
                     if let digit = c.to_digit(16) then
                         result = 16 * result + digit
                     else
-                        prev_char(c)
+                        _unread_escape_char(c)
                         _logger.lexer_error(escape_location, "expected-four-hex-digits-after-u", "expected four hex digits after \\u")
                         return cast char(0)
                     fi
@@ -468,10 +512,10 @@ namespace Lexical is
 
                 while c >= '0' /\ c <= '7' do
                     result = 8 * result + cast int(c - '0')
-                    c = next_char()
+                    c = _escape_char()
                 od
 
-                prev_char(c)
+                _unread_escape_char(c)
                 return cast char(result)
             else
                 return c
@@ -770,6 +814,7 @@ namespace Lexical is
                 while c != cast char(39) do
                     if c == cast char(92) then
                         c = read_escape()
+                        _note_escape(_buffer.length)
                         _buffer.append(c)
                         c = next_char()
                     else
@@ -879,7 +924,9 @@ namespace Lexical is
             return TOKEN_PAIR(r, location, s)
         si
 
-        read_string_fragment() -> (fragment: string, c: char) is
+        // A string fragment, `base` characters into the literal it is
+        // chained onto.
+        read_string_fragment(base: int) -> (fragment: string, c: char) is
             let fragment = Text.StringBuilder()
 
             let c mut = next_char()
@@ -887,6 +934,7 @@ namespace Lexical is
             while !_end_of_file /\ c != '\n' /\ c != '"' do
                 if c == cast char(92) then
                     c = read_escape()
+                    _note_escape(base + fragment.length)
                     fragment.append(c)
                     c = next_char()
                 elif c == '{' then
@@ -1056,7 +1104,7 @@ namespace Lexical is
                         )
                     )
 
-                    let (next_fragment, next_terminator) = read_string_fragment()
+                    let (next_fragment, next_terminator) = read_string_fragment(buffer.length)
                     buffer.append(next_fragment)
                     c = next_terminator
                     saved_loc = location
@@ -1087,7 +1135,7 @@ namespace Lexical is
         si
 
         string_enter() -> TOKEN_PAIR is
-            let (fragment, c) mut = read_string_fragment()
+            let (fragment, c) mut = read_string_fragment(0)
 
             let loc: Source.LOCATION mut
             (fragment, c, loc) = chain_adjacent_string_fragments(fragment, c)
@@ -1162,7 +1210,7 @@ namespace Lexical is
             let fragment mut = ""
 
             if c == '}' then
-                (fragment, c) = read_string_fragment()
+                (fragment, c) = read_string_fragment(0)
             fi
 
             let loc: Source.LOCATION mut
