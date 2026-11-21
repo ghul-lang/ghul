@@ -1059,15 +1059,61 @@ namespace Syntax.Process is
                 fi
             fi
 
+            return (cast Value(Load.SYMBOL(null, function_group)), _construct_with(location, function, type, arguments, argument_types))
+        si
+
+        // What `T(x)` builds once its constructor is chosen: a scalar
+        // conversion, a call to the constructor a runtime supplies, or a
+        // construction.
+        _construct_with(
+            location: LOCATION,
+            function: Semantic.Symbols.Function,
+            type: Semantic.Types.Type,
+            arguments: Value[],
+            argument_types: Type[]
+        ) -> Value is
             if function.is_scalar_conversion then
-                return (cast Value(Load.SYMBOL(null, function_group)), _convert_scalar(location, arguments[0], type))
+                return _convert_scalar(location, arguments[0], type)
             fi
 
             if let target = function.constructor_target then
-                return (cast Value(Load.SYMBOL(null, function_group)), _call_constructor_target(function, target, type, arguments, argument_types))
+                return _call_constructor_target(function, target, type, arguments, argument_types)
             fi
 
-            return (cast Value(Load.SYMBOL(null, function_group)), _function_caller.call_constructor(function, arguments, type))
+            return _function_caller.call_constructor(function, arguments, type)
+        si
+
+        /// `type(value)` for a value already compiled, as `T(x)` compiles:
+        /// the constructor overload resolution chooses for the value's type,
+        /// built the same way. Null where `type` has no constructor that
+        /// takes it. Diagnostics are the caller's to keep or discard.
+        ///
+        /// - location: where the construction stands
+        /// - type: the type constructed
+        /// - value: the single argument
+        construct_from_value(location: LOCATION, type: Semantic.Types.Type, value: Value) -> Value? is
+            let named = cast Semantic.Types.NAMED?(type)
+
+            if !named? \/ !value.type? then
+                return null
+            fi
+
+            let function_group = cast Semantic.Symbols.FUNCTION_GROUP?(named.scope.find_direct("init"))
+
+            if !function_group? then
+                return null
+            fi
+
+            let arguments = Collections.LIST[Value]([value])
+            let argument_types = Collections.LIST[Type]([value.type!])
+
+            let overload_result = _overload_resolver.resolve(location, function_group, argument_types, false, true, true, null)
+
+            if !overload_result? \/ overload_result.function.is_generic then
+                return null
+            fi
+
+            return _construct_with(location, overload_result.function, type, arguments, argument_types)
         si
 
         // A scalar constructed from another scalar is that scalar cast to it,

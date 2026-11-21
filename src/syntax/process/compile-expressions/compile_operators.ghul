@@ -2994,16 +2994,15 @@ namespace Syntax.Process is
                 return value
             fi
 
-            let caster = IoC.CONTAINER.instance.type_caster
+            return _explicit_conversion(location, value, target)
+        si
 
+        // `target(value)`, as the explicit conversion compiles it; null where
+        // that conversion isn't valid.
+        _explicit_conversion(location: Source.LOCATION, value: Value, target: Type) -> Value? is
             let use snapshot = _logger.speculate_then_backtrack()
 
-            let converted: Value? =
-                if caster.check_cast_is_valid(location, value.type!, target) then
-                    IR.Values.SCALAR_CONVERSION(caster.cast_value(location, value, target, true, true))
-                else
-                    null
-                fi
+            let converted = _calls.construct_from_value(location, target, value)
 
             let errors = snapshot.backtrack()
 
@@ -3021,25 +3020,12 @@ namespace Syntax.Process is
 
             _symbol_use_locations.add_symbol_use(location, widening)
 
-            // A widening is applied as the explicit conversion to the type it
-            // widens to, so a widened operand costs what `cast T(x)` costs:
-            // the mark says the conversion widens. A conversion the language
-            // has no explicit form for is the marked function's to perform.
-            let target = widening.return_type!
-            let caster = IoC.CONTAINER.instance.type_caster
-
-            let use snapshot = _logger.speculate_then_backtrack()
-
-            let converted: Value? =
-                if caster.check_cast_is_valid(location, value.type!, target) then
-                    IR.Values.SCALAR_CONVERSION(caster.cast_value(location, value, target, true, true))
-                else
-                    null
-                fi
-
-            let errors = snapshot.backtrack()
-
-            if converted? /\ errors.count == 0 then
+            // A widening is applied as the explicit conversion `T(x)` to the
+            // type it widens to, compiled by the same code, so a widened
+            // operand costs what the conversion written out costs: the mark
+            // says the conversion widens. A conversion the language has no
+            // explicit form for is the marked function's to perform.
+            if let converted = _explicit_conversion(location, value, widening.return_type!) then
                 return converted
             fi
 
