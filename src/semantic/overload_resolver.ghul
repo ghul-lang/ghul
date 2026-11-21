@@ -523,6 +523,25 @@ namespace Semantic is
                 CANDIDATE_SPECIFICITY.can_rank(arguments) \/
                 (want_infer /\ !CANDIDATE_SPECIFICITY.has_actual_settled_elsewhere(arguments))
 
+            // The candidates tie only because an argument is still being
+            // inferred, as a parameter of the function or literal the call
+            // is written in is on its first walk: whichever the formals
+            // below would choose bounds the argument by its formal, and a
+            // later walk that learns the argument's type from elsewhere
+            // finds it already bounded by the wrong candidate. The call
+            // waits for the argument instead, until the fixing step gives
+            // up on it and lets the tie be broken as before.
+            if is_ambiguous /\ want_infer /\ !CANDIDATE_SPECIFICITY.can_rank(arguments) then
+                if
+                    let waiting: Types.INFERRED_VARIABLE_TYPE = CALL_ARGUMENT_WAIT.awaited(arguments) /\
+                    !OBLIGATIONS.has_default_for(waiting.origin)
+                then
+                    OBLIGATIONS.defer(OBLIGATIONS.OVERLOAD_ARGUMENT, waiting, location)
+
+                    return null
+                fi
+            fi
+
             // Return-type-context filter: when the caller supplied a
             // return-type constraint (e.g. a return statement whose
             // function returns `Tasks.TASK[int]`, or an assignment-
