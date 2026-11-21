@@ -602,6 +602,7 @@ namespace Syntax.Process is
             let all_tuple_literals mut = true
 
             let lub = LEAST_UPPER_BOUND_MAP()
+            lub.widens_scalars = true
 
             let arm_join = Semantic.EXPECTED_ARM_JOIN(expected_type)
 
@@ -637,7 +638,18 @@ namespace Syntax.Process is
                 debug_indent()
 
                 if expected_type? then
-                    if !expected_type.is_void /\ !expected_type.is_assignable_from(value.type!) then
+                    branch.compile_expressions_state.widened_value = null
+
+                    if
+                        !expected_type.is_void /\
+                        !expected_type.is_assignable_from(value.type!) /\
+                        Semantic.WIDENING_PROTOTYPE.into_typed_slots /\
+                        !is_expectation_open
+                    then
+                        branch.compile_expressions_state.widened_value = _visitor.widen_value(branch.location, value, expected_type)
+                    fi
+
+                    if !expected_type.is_void /\ !expected_type.is_assignable_from(value.type!) /\ !branch.compile_expressions_state.widened_value? then
                         // set_expected_type assigns both fields together — caller pairs them
                         use IoC.CONTAINER.instance.name_display.qualifying_alike(value.type, type)
                         _logger.error(branch.location, "branch-types-incompatible", string.format(`if.expected_type_error_message!, value.type, type))
@@ -739,6 +751,12 @@ namespace Syntax.Process is
                     od
                 fi
 
+                if type? then
+                    for i in `if.branches do
+                        _widen_arm(i.body, type)
+                    od
+                fi
+
                 let decision = _arm_null_join.decide(type, seen_genuine_null_values, seen_null_values)
 
                 if decision == ArmNullJoinDecision.WIDEN_VALUE_OPTIONAL \/ decision == ArmNullJoinDecision.WIDEN_REFERENCE_OPTIONAL then
@@ -782,6 +800,22 @@ namespace Syntax.Process is
                 return
             else
                 `if.compile_expressions_state.value = IR.Values.BLOCK(type)
+            fi
+        si
+
+        // An arm whose value widens to the joined type through a declared
+        // widening produces the converted value.
+        _widen_arm(arm: Trees.Statements.LIST, type: Type) is
+            arm.compile_expressions_state.widened_value = null
+
+            if
+                let value = arm.value, value_type = value.type /\
+                !value_type.matches(type) /\
+                !type.is_assignable_from(value_type)
+            then
+                if let widened = _visitor.widen_value(arm.location, value, type) then
+                    arm.compile_expressions_state.widened_value = widened
+                fi
             fi
         si
 
@@ -1269,6 +1303,7 @@ namespace Syntax.Process is
             let seen_genuine_null_values mut = false
 
             let lub = LEAST_UPPER_BOUND_MAP()
+            lub.widens_scalars = true
 
             // As in an if: the arms are still matched against an open
             // expected type, so the call it came from learns its type
@@ -1299,7 +1334,18 @@ namespace Syntax.Process is
                 fi
 
                 if expected_type? then
-                    if !expected_type.is_void /\ !expected_type.is_assignable_from(value.type!) then
+                    body.compile_expressions_state.widened_value = null
+
+                    if
+                        !expected_type.is_void /\
+                        !expected_type.is_assignable_from(value.type!) /\
+                        Semantic.WIDENING_PROTOTYPE.into_typed_slots /\
+                        !is_expectation_open
+                    then
+                        body.compile_expressions_state.widened_value = _visitor.widen_value(body.location, value, expected_type)
+                    fi
+
+                    if !expected_type.is_void /\ !expected_type.is_assignable_from(value.type!) /\ !body.compile_expressions_state.widened_value? then
                         // set_expected_type assigns both fields together — caller pairs them
                         use IoC.CONTAINER.instance.name_display.qualifying_alike(value.type, type)
                         _logger.error(body.location, "branch-types-incompatible", string.format(`case.expected_type_error_message!, value.type, type))
@@ -1334,6 +1380,12 @@ namespace Syntax.Process is
 
             if is_expectation_open then
                 type = lub.get_result()
+
+                if type? then
+                    for m in `case.matches do
+                        _widen_arm(m.statements, type)
+                    od
+                fi
 
                 let decision = _arm_null_join.decide(type, seen_genuine_null_values, seen_null_values)
 

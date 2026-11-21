@@ -976,6 +976,42 @@ namespace Syntax.Process is
             fi
 
             if overload_result == null then
+                if let widened = _widened_call_candidate(location, function_group, argument_types, false, true, true, named_restrict) then
+                    use RETRY_SITE_STATS.enter("calls.constructor_widened_arguments")
+                    _logger.roll_back()
+                    _logger.speculate()
+                    _flow.restore()
+
+                    let widened_types = Collections.LIST[Type]()
+
+                    for (index, a) in argument_expressions |> index() do
+                        _visitor.rewalk(a)
+
+                        if let a.value? /\ value.type? then
+                            arguments[index] = value
+                            argument_types[index] = value.type!
+                        fi
+
+                        let w = widened.widenings[index]
+
+                        widened_types.add(if w? then w.return_type! else argument_types[index] fi)
+                    od
+
+                    overload_result = _overload_resolver.resolve(location, function_group, widened_types, false, true, true, [widened.function])
+
+                    if overload_result? then
+                        for (index, a) in argument_expressions |> index() do
+                            if let w = widened.widenings[index] then
+                                _symbol_use_locations.add_symbol_use(a.location, w)
+                                arguments[index] = _widen_argument(a.location, arguments[index], w)
+                                argument_types[index] = widened_types[index]
+                            fi
+                        od
+                    fi
+                fi
+            fi
+
+            if overload_result == null then
                 return (cast Value(Load.SYMBOL(null, function_group)), _unresolved_construction(cache_key, location, type, argument_types))
             fi
 
@@ -1114,6 +1150,178 @@ namespace Syntax.Process is
             fi
 
             return _construct_with(location, overload_result.function, type, arguments, argument_types)
+        si
+
+        // Where no overload takes the arguments as written, the overload a
+        // scalar argument reaches by widening to its parameter type through
+        // the library's marked widenings, as an operand widens. A widened
+        // argument must meet a parameter of exactly the type it widens to,
+        // never a type parameter it would be inferred from. The fewest
+        // widenings win, then the overload whose widened parameters each
+        // equal or widen to every other's; with no single such overload it
+        // reaches nothing. Only settled, non-function argument types take
+        // part. The resolution is speculative: nothing it reports stands.
+        _widened_call_candidate(
+            location: LOCATION,
+            function_group: Semantic.Symbols.FUNCTION_GROUP,
+            argument_types: Collections.LIST[Type],
+            want_infer: bool,
+            want_instance: bool,
+            is_constructor_call: bool,
+            restrict: Semantic.Symbols.Function[]?
+        ) -> (function: Semantic.Symbols.Function, widenings: Collections.LIST[Semantic.Symbols.Function?])? is
+            for t in argument_types do
+                if t.is_error \/ !t.is_settled \/ t.is_function \/ t.is_wild then
+                    return null
+                fi
+            od
+
+            let widenings = IoC.CONTAINER.instance.operand_widenings
+
+            let reached = Collections.LIST[(function: Semantic.Symbols.Function, widenings: Collections.LIST[Semantic.Symbols.Function?], types: Collections.LIST[Type], count: int)]()
+
+            let search = if restrict? then restrict else function_group.functions fi
+
+            for f in search do
+                if
+                    f.arguments.count != argument_types.count \/
+                    (!want_instance /\ f.is_instance) \/
+                    f.is_static_constructor
+                then
+                    continue
+                fi
+
+                let chosen = Collections.LIST[Semantic.Symbols.Function?]()
+                let types = Collections.LIST[Type]()
+                let count mut = 0
+
+                for i in 0..argument_types.count do
+                    let formal = f.arguments[i]
+                    let actual = argument_types[i]
+
+                    let widening: Semantic.Symbols.Function? mut = null
+
+                    if !formal.is_wild /\ !formal.matches(actual) then
+                        for w in widenings.from(actual) do
+                            if w.return_type? /\ w.return_type.matches(formal) then
+                                widening = w
+                            fi
+                        od
+                    fi
+
+                    chosen.add(widening)
+
+                    if widening? then
+                        types.add(widening.return_type!)
+                        count = count + 1
+                    else
+                        types.add(actual)
+                    fi
+                od
+
+                if count == 0 then
+                    continue
+                fi
+
+                let use snapshot = _logger.speculate_then_backtrack()
+
+                let result = _overload_resolver.resolve(location, function_group, types, want_infer, want_instance, is_constructor_call, [f])
+
+                snapshot.backtrack()
+
+                if result? /\ !result.needs_retry then
+                    reached.add((function = f, widenings = chosen, types = types, count = count))
+                fi
+            od
+
+            if reached.count == 0 then
+                return null
+            fi
+
+            let fewest mut = reached[0].count
+
+            for r in reached do
+                if r.count < fewest then
+                    fewest = r.count
+                fi
+            od
+
+            let least = Collections.LIST[(function: Semantic.Symbols.Function, widenings: Collections.LIST[Semantic.Symbols.Function?], types: Collections.LIST[Type], count: int)]()
+
+            for r in reached do
+                if r.count == fewest then
+                    least.add(r)
+                fi
+            od
+
+            let winner: (function: Semantic.Symbols.Function, widenings: Collections.LIST[Semantic.Symbols.Function?])? mut = null
+
+            for c in least do
+                let narrowest mut = true
+
+                for other in least do
+                    if other.function == c.function then
+                        continue
+                    fi
+
+                    for i in 0..c.types.count do
+                        if !c.types[i].matches(other.types[i]) /\ !widenings.widens(c.types[i], other.types[i]) then
+                            narrowest = false
+                        fi
+                    od
+                od
+
+                if narrowest then
+                    if winner? then
+                        return null
+                    fi
+
+                    winner = (function = c.function, widenings = c.widenings)
+                fi
+            od
+
+            return winner
+        si
+
+        /// `value` as `target`, by the declared widening from its type to
+        /// exactly `target`; null where there is none.
+        widen_value(location: LOCATION, value: Value, target: Type) -> Value? is
+            let value_type = value.type
+
+            if !value_type? then
+                return null
+            fi
+
+            for w in IoC.CONTAINER.instance.operand_widenings.from(value_type) do
+                if w.return_type? /\ w.return_type.matches(target) then
+                    return _widen_argument(location, value, w)
+                fi
+            od
+
+            return null
+        si
+
+        // `value` widened by `widening`, applied as the explicit conversion
+        // `T(x)` to the type it widens to, so a widened argument costs what
+        // the conversion written out costs.
+        _widen_argument(location: LOCATION, value: Value, widening: Semantic.Symbols.Function?) -> Value is
+            if !widening? then
+                return value
+            fi
+
+            let target = widening.return_type!
+
+            let use snapshot = _logger.speculate_then_backtrack()
+
+            let converted = construct_from_value(location, target, value)
+
+            let errors = snapshot.backtrack()
+
+            if converted? /\ errors.count == 0 then
+                return converted
+            fi
+
+            return widening.call(location, null, [value], widening.return_type, _function_caller)
         si
 
         // A scalar constructed from another scalar is that scalar cast to it,
@@ -3516,6 +3724,44 @@ namespace Syntax.Process is
                         if let spread = _try_spread(function_group, arguments, argument_types, call.arguments, want_instance) then
                             slots = spread
                             overload_result = _overload_resolver.resolve(call.arguments.location, function_group, argument_types, true, want_instance, false, named_restrict, call.expected_type)
+                        fi
+                    fi
+
+                    if !overload_result? /\ !slots.has_spread then
+                        if let widened = _widened_call_candidate(call.arguments.location, function_group, argument_types, true, want_instance, false, named_restrict) then
+                            use RETRY_SITE_STATS.enter("calls.widened_arguments")
+                            _logger.roll_back()
+                            _logger.speculate()
+                            _flow.restore()
+
+                            let widened_types = Collections.LIST[Type]()
+
+                            for index in 0..call.arguments.expressions.count do
+                                let a = call.arguments.expressions[index]
+
+                                _visitor.rewalk(a)
+
+                                if let a.value? /\ value.type? then
+                                    arguments[index] = value
+                                    argument_types[index] = value.type!
+                                fi
+
+                                let w = widened.widenings[index]
+
+                                widened_types.add(if w? then w.return_type! else argument_types[index] fi)
+                            od
+
+                            overload_result = _overload_resolver.resolve(call.arguments.location, function_group, widened_types, true, want_instance, false, [widened.function], call.expected_type)
+
+                            if overload_result? then
+                                for index in 0..arguments.count do
+                                    if let w = widened.widenings[index] then
+                                        _symbol_use_locations.add_symbol_use(call.arguments.expressions[index].location, w)
+                                        arguments[index] = _widen_argument(call.arguments.expressions[index].location, arguments[index], w)
+                                        argument_types[index] = widened_types[index]
+                                    fi
+                                od
+                            fi
                         fi
                     fi
 

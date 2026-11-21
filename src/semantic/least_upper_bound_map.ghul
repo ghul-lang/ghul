@@ -18,6 +18,13 @@ namespace Semantic is
         _mode: LubMode
 
         types: LIST[Type]
+
+        // Whether a join of scalars may take the one every other widens to
+        // through a declared widening, rather than a common ancestor. Set
+        // where each joined value moves into the joined type and is
+        // converted to it.
+        widens_scalars: bool public
+
         element_names: LIST[string?]?
 
         result: MAP[Symbol,LIST[Type]]?
@@ -464,6 +471,12 @@ namespace Semantic is
                 return best_assignable
             fi
 
+            if widens_scalars then
+                if let widened = _try_get_widened_scalar() then
+                    return widened
+                fi
+            fi
+
             let best_array = _try_get_best_array()
             if best_array? then
                 return best_array
@@ -529,6 +542,36 @@ namespace Semantic is
             fi
 
             return type
+        si
+
+        // The one joined type every other joined type widens to in one
+        // declared step; null where there is no such single type.
+        _try_get_widened_scalar() -> Type? is
+            let widenings = IoC.CONTAINER.instance.operand_widenings
+
+            for t in types do
+                if t.is_optional \/ !t.is_settled \/ t.is_error \/ t.is_wild then
+                    return null
+                fi
+            od
+
+            let found: Type? mut = null
+
+            for candidate in types do
+                if found? /\ found.matches(candidate) then
+                    continue
+                fi
+
+                if types |> all(t => t.matches(candidate) \/ widenings.widens(t, candidate)) then
+                    if found? then
+                        return null
+                    fi
+
+                    found = candidate
+                fi
+            od
+
+            return found
         si
 
         _try_get_best_assignable() -> Type? is
