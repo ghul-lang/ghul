@@ -1,0 +1,104 @@
+namespace Syntax.Process.UnitTests is
+    use Collections.LIST
+
+    use Source.LOCATION
+
+    use Syntax.Process.SYNTHESISE_TOP_LEVEL_ENTRY
+    use Trees.Definitions.FUNCTION
+
+    use Assertions
+
+    // Tests for SYNTHESISE_TOP_LEVEL_ENTRY.leaves_a_type_to_infer: whether a
+    // file-level function's signature leaves a parameter or return type
+    // for the file's inference unit to infer. Builds plain trees; no
+    // semantic resolution.
+    class LEAVES_A_TYPE_TO_INFER_TESTS is
+        init() is si
+
+        loc() -> LOCATION => LOCATION("test.ghul", 1, 1, 1, 1)
+
+        id(name: string) -> Trees.Identifiers.Identifier =>
+            Trees.Identifiers.Identifier(loc(), name)
+
+        named(name: string) -> Trees.TypeExpressions.TypeExpression =>
+            Trees.TypeExpressions.NAMED(loc(), id(name))
+
+        parameter(name: string, typed: bool) -> Trees.Variables.VARIABLE is
+            let result = Trees.Variables.VARIABLE(
+                loc(),
+                Trees.Variables.SIMPLE_VARIABLE_LEFT(loc(), id(name)),
+                if typed then named("int") else Trees.TypeExpressions.INFER(loc()) fi,
+                false,
+                false,
+                null
+            )
+
+            result.untyped_deferred = !typed
+
+            return result
+        si
+
+        value() -> Trees.Expressions.Expression =>
+            Trees.Expressions.IDENTIFIER(loc(), id("x"))
+
+        block(items: Trees.Statements.Statement[]) -> Trees.Bodies.Body =>
+            Trees.Bodies.BLOCK(loc(), Trees.Statements.LIST(loc(), items))
+
+        expression_body() -> Trees.Bodies.Body =>
+            Trees.Bodies.EXPRESSION(loc(), value())
+
+        returning_a_value() -> Trees.Bodies.Body =>
+            block([Trees.Statements.RETURN(loc(), value())])
+
+        returning_nothing() -> Trees.Bodies.Body =>
+            block([Trees.Statements.RETURN(loc(), null)])
+
+        function(parameters: Trees.Variables.VARIABLE[], return_type: Trees.TypeExpressions.TypeExpression, body: Trees.Bodies.Body) -> FUNCTION =>
+            FUNCTION(
+                loc(),
+                id("f"),
+                Trees.TypeExpressions.LIST(loc(), LIST[Trees.TypeExpressions.TypeExpression]()),
+                Trees.Variables.LIST(loc(), parameters),
+                return_type,
+                Trees.Modifiers.LIST(loc(), null, null),
+                body
+            )
+
+        infer() -> Trees.TypeExpressions.TypeExpression => Trees.TypeExpressions.INFER(loc())
+
+        @test()
+        given_an_untyped_parameter_and_a_written_return__should_leave_a_type() is
+            is_true(SYNTHESISE_TOP_LEVEL_ENTRY.leaves_a_type_to_infer(function([parameter("a", true), parameter("b", false)], named("int"), expression_body())))
+        si
+
+        @test()
+        given_every_type_written__should_leave_none() is
+            is_false(SYNTHESISE_TOP_LEVEL_ENTRY.leaves_a_type_to_infer(function([parameter("a", true)], named("int"), expression_body())))
+        si
+
+        @test()
+        given_typed_parameters_and_an_expression_body_with_no_return_type__should_leave_the_return() is
+            is_true(SYNTHESISE_TOP_LEVEL_ENTRY.leaves_a_type_to_infer(function([parameter("a", true)], infer(), expression_body())))
+        si
+
+        @test()
+        given_typed_parameters_and_a_block_returning_a_value__should_leave_the_return() is
+            is_true(SYNTHESISE_TOP_LEVEL_ENTRY.leaves_a_type_to_infer(function([parameter("a", true)], infer(), returning_a_value())))
+        si
+
+        @test()
+        given_typed_parameters_and_a_block_returning_no_value__should_leave_none() is
+            is_false(SYNTHESISE_TOP_LEVEL_ENTRY.leaves_a_type_to_infer(function([parameter("a", true)], infer(), returning_nothing())))
+        si
+
+        @test()
+        given_typed_parameters_and_a_block_that_yields__should_leave_the_return() is
+            is_true(SYNTHESISE_TOP_LEVEL_ENTRY.leaves_a_type_to_infer(function([parameter("a", true)], infer(), block([Trees.Statements.YIELD(loc(), value())]))))
+        si
+
+        @test()
+        given_no_parameters_and_no_return_type__should_leave_the_return() is
+            is_true(SYNTHESISE_TOP_LEVEL_ENTRY.leaves_a_type_to_infer(function([], infer(), returning_nothing())))
+        si
+    si
+si
