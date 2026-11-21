@@ -1,0 +1,77 @@
+namespace Semantic.UnitTests is
+    use Collections.LIST
+
+    use Source.LOCATION
+
+    use Semantic.Symbols.CLASS
+    use Semantic.Symbols.FUNCTION_GENERIC_ARGUMENT
+    use Semantic.Symbols.NAMESPACE
+    use Semantic.Symbols.STATIC_CLOSURE
+    use Semantic.Symbols.TypeParameterConstraintKind
+    use Semantic.Types.Type
+    use Assertions
+
+    // Pins that a closure with no frame, whose method declares the type
+    // parameters it captures, gives those parameters the constraints the
+    // enclosing generic declared. Without them .NET rejects the method
+    // when a bound is needed, such as `T: Addable[T]` where Addable's own
+    // parameter is bounded.
+    class CLOSURE_FRAMELESS_TYPE_PARAMETER_CONSTRAINT_TESTS is
+        init() is si
+
+        loc() -> LOCATION => LOCATION("test.ghul", 1, 1, 1, 1)
+
+        owner() -> NAMESPACE => NAMESPACE(loc(), "Test", null, ".Test", false)
+
+        class_type(name: string) -> Type is
+            let c = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), name, LIST[string](), Semantic.BLOCK_SCOPE())
+            c.set_type(Semantic.Types.NAMED(c))
+            return c.type!
+        si
+
+        @test()
+        A_captured_bound_should_be_a_bound_of_the_closure_method() is
+            let shared_owner = owner()
+            let subject = STATIC_CLOSURE(loc(), shared_owner, "$anon", shared_owner, false)
+
+            let bound = class_type("Addable")
+            let t = FUNCTION_GENERIC_ARGUMENT(loc(), shared_owner, "T", 0)
+            t.set_ancestor_types([bound] |> LIST())
+
+            subject.add_type_argument_reference(t)
+            subject.set_type_arguments()
+
+            let bounds = subject.get_argument_type_bounds(0)
+
+            are_equal(1, bounds.count)
+            are_same(bound, bounds[0])
+        si
+
+        @test()
+        A_captured_kind_constraint_should_be_a_constraint_of_the_closure_method() is
+            let shared_owner = owner()
+            let subject = STATIC_CLOSURE(loc(), shared_owner, "$anon", shared_owner, false)
+
+            let t = FUNCTION_GENERIC_ARGUMENT(loc(), shared_owner, "T", 0)
+            t.set_constraint_kind(TypeParameterConstraintKind.VALUE)
+            t.set_has_constructor_constraint(true)
+
+            subject.add_type_argument_reference(t)
+            subject.set_type_arguments()
+
+            is_true(subject.get_argument_constraint_kind(0) == TypeParameterConstraintKind.VALUE)
+            is_true(subject.get_argument_has_constructor_constraint(0))
+        si
+
+        @test()
+        An_unbounded_captured_parameter_should_have_no_bounds() is
+            let shared_owner = owner()
+            let subject = STATIC_CLOSURE(loc(), shared_owner, "$anon", shared_owner, false)
+
+            subject.add_type_argument_reference(FUNCTION_GENERIC_ARGUMENT(loc(), shared_owner, "T", 0))
+            subject.set_type_arguments()
+
+            are_equal(0, subject.get_argument_type_bounds(0).count)
+        si
+    si
+si
