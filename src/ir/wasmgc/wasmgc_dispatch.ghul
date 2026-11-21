@@ -63,6 +63,8 @@ namespace IR.WasmGC is
         _box_equalities: MAP[CLASS_INSTANCE, int]
         _generic_calls: LIST[(method: Function, arguments: Type[])]
         _found: LIST[CLASS_INSTANCE]
+        _trait_calls: SET[Function]
+        _no_arguments: LIST[Type]
 
         /// Reaches, while discovering, a function a dispatched generic call
         /// can run without naming it.
@@ -82,6 +84,8 @@ namespace IR.WasmGC is
             _box_equalities = MAP[CLASS_INSTANCE, int]()
             _generic_calls = LIST[(method: Function, arguments: Type[])]()
             _found = LIST[CLASS_INSTANCE]()
+            _trait_calls = SET[Function]()
+            _no_arguments = LIST[Type]()
         si
 
         /// The trait table's size, once `plan` has packed it.
@@ -278,9 +282,25 @@ namespace IR.WasmGC is
             od
         si
 
+        /// Records, while discovering, a call to the trait method `method`,
+        /// which takes no type arguments of its own, so that each class
+        /// found instantiated reaches its implementation, a trait's default
+        /// included, before the walk ends.
+        ///
+        /// - method: the root trait method called
+        note_trait_call(method: Function) is
+            if !_trait_calls.add(method) then
+                return
+            fi
+
+            for type in LIST[CLASS_INSTANCE](_found) do
+                _reach_generic(type, method, _no_arguments)
+            od
+        si
+
         /// Records, while discovering, that a value of `type` can exist, and
-        /// reaches its implementation of every generic trait method a call
-        /// was recorded at.
+        /// reaches its implementation of every trait method a call was
+        /// recorded at.
         ///
         /// - type: the class found instantiated
         note_generic_implementor(type: CLASS_INSTANCE) is
@@ -288,6 +308,10 @@ namespace IR.WasmGC is
 
             for call in LIST[(method: Function, arguments: Type[])](_generic_calls) do
                 _reach_generic(type, call.method, call.arguments)
+            od
+
+            for method in LIST[Function](_trait_calls) do
+                _reach_generic(type, method, _no_arguments)
             od
         si
 
