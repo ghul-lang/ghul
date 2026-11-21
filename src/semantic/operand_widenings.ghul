@@ -116,7 +116,7 @@ namespace Semantic is
             for holder in _holders() do
                 if let group: Symbols.FUNCTION_GROUP = holder.find_member(name) then
                     for f in group.functions do
-                        forms.add(f)
+                        _add_unless_declared(f, forms)
                     od
                 fi
             od
@@ -229,8 +229,39 @@ namespace Semantic is
 
         _add_if_widening(f: Symbols.Function, into: Collections.LIST[Symbols.Function]) is
             if f.is_widening /\ !f.is_instance /\ f.arguments.count == 1 /\ f.return_type? then
-                into.add(f)
+                _add_unless_declared(f, into)
             fi
+        si
+
+        // A library may declare a widening or a widened form that a
+        // referenced runtime declares too. The two are one conversion, so
+        // the first holder's, which is the compilation's own, stands for
+        // both; counted twice, they would tie with each other.
+        _add_unless_declared(f: Symbols.Function, into: Collections.LIST[Symbols.Function]) is
+            for g in into do
+                if _same_signature(f, g) then
+                    return
+                fi
+            od
+
+            into.add(f)
+        si
+
+        _same_signature(a: Symbols.Function, b: Symbols.Function) -> bool is
+            let a_return = a.return_type
+            let b_return = b.return_type
+
+            if a.is_instance != b.is_instance \/ a.arguments.count != b.arguments.count \/ !a_return? \/ !b_return? then
+                return false
+            fi
+
+            for i in 0..a.arguments.count do
+                if !a.arguments[i].matches(b.arguments[i]) then
+                    return false
+                fi
+            od
+
+            return a_return.matches(b_return)
         si
     si
     // An operator reached by widening the left operand, the right one, or
