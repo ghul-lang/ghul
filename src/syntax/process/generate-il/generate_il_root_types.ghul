@@ -10,9 +10,11 @@ namespace Syntax.Process is
     // one function, `TYPE_DESCRIPTIONS._add_roots(roots: ROOT_TYPES)`,
     // whose declared body throws. Where the program describes its types,
     // its body is generated here instead: a call on `roots` naming each
-    // class of the program's own that declares a test, and one for each
-    // of its global functions that is a test. A source library's tests
-    // are not the program's, so none is listed.
+    // class of the program's own that declares a test, one for each of
+    // its global functions that is a test, and calls describing each of
+    // its other global functions and those of a library namespace marked
+    // `@reflected()`. A source library's tests are not the program's, so
+    // none is listed.
     partial GENERATE_IL is
         _root_types_found: bool
         _root_types_function: Function?
@@ -68,10 +70,12 @@ namespace Syntax.Process is
             enter_block()
 
             let roots = Load.ARGUMENT(symbol, 0)
+            let listed = Collections.SET[Classy]()
 
             for test in _program_tests() do
                 if let owner: Classy = test.owner then
                     if let add = add_type then
+                        listed.add(owner)
                         add(Call.INSTANCE(roots, add, [TYPEOF(add.arguments[0], Semantic.Types.NAMED(owner))], void_type))
                     fi
                 elif let add = add_global_test then
@@ -91,6 +95,18 @@ namespace Syntax.Process is
                 fi
             od
 
+            if let add = add_type then
+                for classy in _listed_types() do
+                    if listed.add(classy) then
+                        add(Call.INSTANCE(roots, add, [TYPEOF(add.arguments[0], Semantic.Types.NAMED(classy))], void_type))
+                    fi
+                od
+            fi
+
+            for function in _described_globals() do
+                _add_global_function(roots, roots_type, function)
+            od
+
             _backend.write(current_block)
 
             leave_block()
@@ -99,6 +115,168 @@ namespace Syntax.Process is
 
             _backend.finish_body(symbol)
             _backend.end_body()
+        si
+
+        // Records `function` on `roots`: a call for each of its parameters,
+        // then one passing the function itself, through the builder method
+        // whose parameters and type arguments are exactly its signature.
+        // A function taking more arguments than the builder has a method
+        // for is left out.
+        _add_global_function(roots: Value, roots_type: Type, function: Function) is
+            let lookup = _innate_symbol_lookup
+            let void_type = lookup.get_void_type()
+            let string_type = lookup.get_string_type()
+            let return_type = function.return_type
+
+            if !return_type? then
+                return
+            fi
+
+            let returns_value = !return_type.is_void
+
+            let type_arguments = Collections.LIST[Type](function.arguments)
+            let function_types = Collections.LIST[Type](function.arguments)
+
+            if returns_value then
+                type_arguments.add(return_type)
+            fi
+
+            function_types.add(return_type)
+
+            let function_type = lookup.get_function_type(function_types.to_array())
+            let count = function.arguments.count
+
+            let builder =
+                _specialized_builder(
+                    roots_type,
+                    if returns_value then "_global_function_{count}" else "_global_action_{count}" fi,
+                    type_arguments,
+                    Semantic.KNOWN_SIGNATURE([string_type, string_type, lookup.get_bool_type(), function_type], true))
+
+            if !builder? then
+                return
+            fi
+
+            let parameters = Collections.LIST[Function]()
+
+            for argument in function.arguments do
+                if let parameter = _specialized_builder(roots_type, "_parameter", Collections.LIST[Type]([argument]), Semantic.KNOWN_SIGNATURE([string_type], true)) then
+                    parameters.add(parameter)
+                else
+                    return
+                fi
+            od
+
+            for i in 0..count do
+                add(Call.INSTANCE(roots, parameters[i], [Literal.STRING(function.argument_names[i], string_type)], void_type))
+            od
+
+            let `namespace = function.owner?.qualified_name ?? ""
+
+            add(
+                Call.INSTANCE(
+                    roots,
+                    builder,
+                    [
+                        Literal.STRING(if `namespace.starts_with('.') then `namespace.substring(1) else `namespace fi, string_type),
+                        Literal.STRING(function.name, string_type),
+                        Literal.NUMBER(if function.is_private \/ function.name.starts_with('_') then 0 else 1 fi, lookup.get_bool_type()),
+                        MAKE_CLOSURE(function_type, function, NULL(lookup.get_object_type()))
+                    ],
+                    void_type))
+        si
+
+        // The generic method of `owner` named `name` that, at
+        // `type_arguments`, has exactly the parameters `signature` lists,
+        // specialized at them.
+        _specialized_builder(owner: Type, name: string, type_arguments: Collections.LIST[Type], signature: Semantic.KNOWN_SIGNATURE) -> Function? is
+            if let group: Semantic.Symbols.FUNCTION_GROUP = owner.find_member(name) then
+                for candidate in group.functions do
+                    if candidate.is_generic /\ candidate.generic_arguments.count == type_arguments.count then
+                        if let specialized: Function = candidate.specialize(type_arguments.to_array()) /\ signature.matches(specialized) then
+                            return specialized
+                        fi
+                    fi
+                od
+            fi
+
+            return null
+        si
+
+        // The types listed beside those declaring tests: every class, struct,
+        // union and enum of the program's own that has no type parameters,
+        // where the program describes all its types, and every type marked
+        // `@reflected()`.
+        _listed_types() -> Collections.LIST[Classy] is
+            let result = Collections.LIST[Classy]()
+            let flags = IoC.CONTAINER.instance.build_flags
+            let all = !flags.want_rtti_roots_only
+
+            for `namespace in IoC.CONTAINER.instance.namespaces do
+                for symbol in `namespace.symbols do
+                    if let classy: Classy = symbol /\ !classy.location.is_reflected /\ !classy.is_trait /\ !classy.is_generic then
+                        if classy.is_marked_reflected \/ Semantic.RTTI_INCLUDES.includes(classy) \/ (all /\ flags.unit_of(classy.location).is_users) then
+                            result.add(classy)
+                        fi
+                    fi
+                od
+            od
+
+            return result
+        si
+
+        // The global functions reflection describes as static methods of
+        // their namespace's `$globals` type: the program's own where the
+        // program describes all its types, and those of a namespace marked
+        // `@reflected()`, other than tests, functions
+        // with type parameters of their own and functions taking an
+        // argument by reference.
+        _described_globals() -> Collections.LIST[Function] is
+            let result = Collections.LIST[Function]()
+
+            for `namespace in IoC.CONTAINER.instance.namespaces do
+                for symbol in `namespace.symbols do
+                    if let group: Semantic.Symbols.FUNCTION_GROUP = symbol then
+                        for function in group.functions do
+                            if _is_described_global(`namespace, function) then
+                                result.add(function)
+                            fi
+                        od
+                    fi
+                od
+            od
+
+            return result
+        si
+
+        _is_described_global(`namespace: Semantic.Symbols.NAMESPACE, function: Function) -> bool is
+            // An intrinsic has no body of its own: a target computes it
+            // where it is called, so no function value can hold it.
+            if function.is_marked_test \/ function.is_generic \/ function.owner != `namespace \/ function.intrinsic_operation? then
+                return false
+            fi
+
+            // Under `--rtti-roots` only a namespace marked `@reflected()` is
+            // described, as only a type marked so is.
+            let all = !IoC.CONTAINER.instance.build_flags.want_rtti_roots_only
+
+            if !`namespace.is_marked_reflected /\ !Semantic.RTTI_INCLUDES.includes(`namespace) /\ !(all /\ PROGRAM_FUNCTIONS.contains(function)) then
+                return false
+            fi
+
+            let name = function.name
+
+            if name.length == 0 \/ !(name[0].is_letter \/ name[0] == '_') then
+                return false
+            fi
+
+            for argument in function.arguments do
+                if isa Semantic.Types.REFERENCE(argument) then
+                    return false
+                fi
+            od
+
+            return true
         si
 
         // The program's own tests: each global function marked `@test()`,

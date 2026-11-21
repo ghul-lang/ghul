@@ -132,6 +132,17 @@ namespace IR.Program is
                     fi
                 elif let parameter: RTTI_CALL.PARAMETER = call then
                     arguments.add(_string(parameter.name))
+                elif let parameter: RTTI_CALL.METHOD_PARAMETER = call then
+                    arguments.add(_string(parameter.name))
+                elif let described: RTTI_CALL.METHOD = call then
+                    if let invoke = _method_invoker(type, described, call.method) then
+                        arguments.add(_string(described.name))
+                        arguments.add(_bool(described.is_public))
+                        arguments.add(_bool(described.is_static))
+                        arguments.add(invoke)
+                    else
+                        return null
+                    fi
                 elif let constructor: RTTI_CALL.CONSTRUCTOR = call then
                     if let make = _maker(type, constructor.constructor, call.method, 0) then
                         arguments.add(make)
@@ -171,7 +182,7 @@ namespace IR.Program is
             let pending = LIST[RTTI_CALL]()
 
             for call in calls do
-                if isa RTTI_CALL.PARAMETER(call) \/ call.method.definition.name =~ "_attribute_type" then
+                if isa RTTI_CALL.PARAMETER(call) \/ isa RTTI_CALL.METHOD_PARAMETER(call) \/ call.method.definition.name =~ "_attribute_type" then
                     pending.add(call)
                     continue
                 fi
@@ -181,6 +192,8 @@ namespace IR.Program is
                         _can_call(constructor.constructor)
                     elif let attribute: RTTI_CALL.ATTRIBUTE = call then
                         _can_call(attribute.constructor)
+                    elif let method: RTTI_CALL.METHOD = call then
+                        _can_call(method.function)
                     else
                         true
                     fi
@@ -298,6 +311,54 @@ namespace IR.Program is
                     Values.Call.STATIC(callee, Collections.LIST[Value]().to_array(), void_type, null)
                 else
                     Values.Call.INSTANCE(_instance(type, invoker), callee, Collections.LIST[Value]().to_array(), void_type)
+                fi
+
+            _add_body(invoker, LIST[Value]([call, Values.RET()]))
+
+            return _value(value_type, invoker)
+        si
+
+        // `(object?, A...) -> R`, calling the method on the object cast to
+        // `type`, or with no receiver where it is static, with the
+        // arguments that follow it.
+        _method_invoker(type: CLASS_INSTANCE, described: RTTI_CALL.METHOD, method: FUNCTION_INSTANCE) -> Value? is
+            let value_type = _parameter(method, 3)
+            let callee = _member_of(type, described.function, described.name)
+
+            if !value_type? \/ !callee? then
+                return null
+            fi
+
+            // A function type lists its result after its parameters, where
+            // it has one.
+            let has_result = value_type.arguments.count == callee.arguments.count + 2
+
+            if !has_result /\ value_type.arguments.count != callee.arguments.count + 1 then
+                return null
+            fi
+
+            let lookup = IoC.CONTAINER.instance.innate_symbol_lookup
+            let names = LIST[string](["instance"])
+            let types = LIST[Type]([lookup.get_object_type()])
+
+            for i in 0..callee.arguments.count do
+                names.add("argument_{i}")
+                types.add(value_type.arguments[i + 1])
+            od
+
+            let result_type = if has_result then value_type.arguments[value_type.arguments.count - 1] else lookup.get_void_type() fi
+            let invoker = _function(type, "$call_{described.index}_{described.name}", names.to_array(), types.to_array(), result_type)
+            let arguments = LIST[Value]()
+
+            for i in 0..callee.arguments.count do
+                arguments.add(Values.Load.ARGUMENT(invoker, i + 1))
+            od
+
+            let call: Value =
+                if described.is_static then
+                    Values.Call.STATIC(callee, arguments.to_array(), callee.return_type, null)
+                else
+                    Values.Call.INSTANCE(_instance(type, invoker), callee, arguments.to_array(), callee.return_type)
                 fi
 
             _add_body(invoker, LIST[Value]([call, Values.RET()]))
