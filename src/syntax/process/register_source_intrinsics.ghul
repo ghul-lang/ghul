@@ -155,6 +155,12 @@ namespace Syntax.Process is
                 intrinsic.generic_argument_constraint_kinds = declaration.generic_argument_constraint_kinds
                 intrinsic.generic_argument_has_constructor_constraint = declaration.generic_argument_has_constructor_constraint
             fi
+
+            if _operator_home(declaration)? then
+                for home in Semantic.Symbols.TYPE_HOMED_OPERATORS.homes(declaration) do
+                    _stand_in_for_inherited(home, intrinsic)
+                od
+            fi
         si
 
         // A function with a body declared at namespace scope in
@@ -252,6 +258,43 @@ namespace Syntax.Process is
 
             owner.add_member(result)
         si
+
+        // An intrinsic operator placed on a type stands in its group for
+        // the trait members of the same signature the type inherits, as the
+        // `/` on `int` does for the `/` that `DivisionOperators[int, int, int]` declares.
+        // Overrides were resolved before the intrinsic existed, so the
+        // inherited member was pulled down into the group beside it, and
+        // the two would tie in every resolution that cannot rank them, as
+        // one with an operand still waiting for its type cannot. The slot is
+        // left with no overrider: a call through it reaches the intrinsic
+        // by STATIC_SLOT_RESOLVER.resolve_innate, not as an ordinary call.
+        _stand_in_for_inherited(home: Semantic.Symbols.Classy, intrinsic: Semantic.Symbols.Function) is
+            let group = cast Semantic.Symbols.FUNCTION_GROUP?(home.find_member(intrinsic.name))
+
+            if !group? \/ intrinsic.is_generic then
+                return
+            fi
+
+            let signature = Semantic.METHOD_OVERRIDE_CLASS(intrinsic.arguments)
+
+            let implemented =
+                group.functions |>
+                    Ghul.Pipes.filter(f =>
+                        f != intrinsic /\
+                        !f.is_generic /\
+                        _is_trait_member(f) /\
+                        f.arguments.count == intrinsic.arguments.count /\
+                        Semantic.METHOD_OVERRIDE_CLASS(f.arguments) =~ signature
+                    ) |>
+                    Collections.LIST()
+
+            for inherited in implemented do
+                group.remove(inherited)
+            od
+        si
+
+        _is_trait_member(function: Semantic.Symbols.Function) -> bool =>
+            if let owner: Semantic.Symbols.Symbol = function.owner then owner.is_trait else false fi
 
         _orders_by_opcode(owner: Semantic.Scope?) -> bool is
             if let classy = cast Semantic.Symbols.Classy?(owner) then
