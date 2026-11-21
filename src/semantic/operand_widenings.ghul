@@ -111,23 +111,21 @@ namespace Semantic is
                 return null
             fi
 
-            let holder = _holder()
+            let forms = Collections.LIST[Symbols.Function]()
 
-            if !holder? then
-                return null
-            fi
-
-            let group = cast Symbols.FUNCTION_GROUP?(holder.find_member(name))
-
-            if !group? then
-                return null
-            fi
+            for holder in _holders() do
+                if let group: Symbols.FUNCTION_GROUP = holder.find_member(name) then
+                    for f in group.functions do
+                        forms.add(f)
+                    od
+                fi
+            od
 
             let best: Symbols.Function? mut = null
             let best_cost mut = 0
             let tied mut = false
 
-            for f in group.functions do
+            for f in forms do
                 if !f.is_widened_form \/ f.is_instance \/ f.arguments.count != 2 \/ !f.return_type? \/ !f.return_type.matches(operator.return_type!) then
                     continue
                 fi
@@ -183,7 +181,7 @@ namespace Semantic is
         _all() -> Collections.LIST[Symbols.Function] is
             let result = Collections.LIST[Symbols.Function]()
 
-            if let holder = _holder() then
+            for holder in _holders() do
                 for symbol in holder.symbols do
                     if let group: Symbols.FUNCTION_GROUP = symbol then
                         for f in group.functions do
@@ -193,31 +191,40 @@ namespace Semantic is
                         _add_if_widening(f, result)
                     fi
                 od
-            fi
+            od
 
             return result
         si
 
-        // The holder as source in this compilation, or reflected from a
-        // referenced runtime, where name lookup does not reach it.
-        _holder() -> Symbols.Symbol? is
+        // The holders: one declared in this compilation's source, and on
+        // .NET one reflected from a referenced runtime, where name lookup
+        // does not reach it. A library's own holder adds to the runtime's.
+        _holders() -> Collections.LIST[Symbols.Symbol] is
+            let result = Collections.LIST[Symbols.Symbol]()
+
             if _has_holder_for_testing then
-                return _holder_for_testing
+                if let holder = _holder_for_testing then
+                    result.add(holder)
+                fi
+
+                return result
             fi
 
             if
                 let internal = IoC.CONTAINER.instance.namespaces.try_find_namespace(".Ghul.Internal"),
                 holder = internal.find_member("WIDENINGS")
             then
-                return holder
+                result.add(holder)
             fi
 
             @IF.dotnet()
             if let holder = IoC.CONTAINER.instance.dotnet_symbol_table.value.get_symbol("Ghul.Internal.WIDENINGS") then
-                return holder
+                if !result.contains(holder) then
+                    result.add(holder)
+                fi
             fi
 
-            return null
+            return result
         si
 
         _add_if_widening(f: Symbols.Function, into: Collections.LIST[Symbols.Function]) is
