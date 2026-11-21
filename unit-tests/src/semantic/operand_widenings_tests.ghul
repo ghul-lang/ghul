@@ -136,5 +136,70 @@ namespace Semantic.UnitTests is
             is_true(!widenings.choose(LIST[WIDENED_OPERATOR]([to_other, to_long, to_double]))?)
             is_true(!widenings.choose(LIST[WIDENED_OPERATOR]([to_double, to_other, to_long]))?)
         si
+
+        add_form(holder: CLASS, left: Type, right: Type, result: Type) -> STATIC_METHOD is
+            let f = STATIC_METHOD(loc(), loc(), holder, "*", Semantic.BLOCK_SCOPE())
+            f.arguments = LIST[Type]([left, right])
+            f.return_type = result
+            f.mark_widened_form()
+            holder.add_member(f)
+            return f
+        si
+
+        operator_over(type: Type) -> Function is
+            let owner = new_class("OPERATORS")
+            let f = STATIC_METHOD(loc(), loc(), owner, "*", Semantic.BLOCK_SCOPE())
+            f.arguments = LIST[Type]([type, type])
+            f.return_type = type
+            return f
+        si
+
+        // long stands for complex here: the operator is over long, and a
+        // widened int or double operand may reach a form over long and a
+        // real instead.
+        @test()
+        Widened_form_should_take_the_real_operand_as_written() is
+            let holder = holder()
+            let form = add_form(holder, _long, _double, _long)
+            let widenings = OPERAND_WIDENINGS(holder)
+
+            are_equal(form, widenings.widened_form("*", operator_over(_long), _long, false, _double, true))
+        si
+
+        @test()
+        Widened_form_should_take_a_real_operand_that_widens_to_its_parameter() is
+            let holder = holder()
+            let form = add_form(holder, _long, _double, _long)
+            let widenings = OPERAND_WIDENINGS(holder)
+
+            are_equal(form, widenings.widened_form("*", operator_over(_long), _long, false, _int, true))
+        si
+
+        @test()
+        Widened_form_should_not_apply_where_no_operand_was_widened_or_the_types_do_not_fit() is
+            let holder = holder()
+            add_form(holder, _long, _double, _long)
+            let widenings = OPERAND_WIDENINGS(holder)
+
+            is_true(!widenings.widened_form("*", operator_over(_long), _long, false, _long, false)?)
+            is_true(!widenings.widened_form("*", operator_over(_long), _long, false, _other, true)?)
+            is_true(!widenings.widened_form("+", operator_over(_long), _long, false, _double, true)?)
+        si
+
+        @test()
+        Widened_form_should_prefer_the_exact_real_and_reach_nothing_on_a_tie() is
+            let holder = holder()
+            let exact = add_form(holder, _long, _int, _long)
+            add_form(holder, _long, _double, _long)
+            let widenings = OPERAND_WIDENINGS(holder)
+
+            are_equal(exact, widenings.widened_form("*", operator_over(_long), _long, false, _int, true))
+
+            let tied_holder = holder()
+            add_form(tied_holder, _long, _double, _long)
+            add_form(tied_holder, _long, _double, _long)
+
+            is_true(!OPERAND_WIDENINGS(tied_holder).widened_form("*", operator_over(_long), _long, false, _double, true)?)
+        si
     si
 si
