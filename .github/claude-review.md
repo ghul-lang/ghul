@@ -97,7 +97,7 @@ Every new or edited `error`/`warn`/`info`/`hint` call (and `set_constraint` mess
 - Terse - a noun phrase or short fragment, subject usually implicit.
 - No user advice (`try`, `consider`, `rewrite as`, `did you mean`) folded into the main message string. `error`/`warn` accept a related location and message (`error(location, message, related_location, related_message)`, conventionally prefixed `"help: ..."`) - that's the sanctioned place for a fix hint, and even there it must be **specific**: never just a generally-plausible-sounding suggestion. Reject a help string that assumes something about the flagged value or code shape the surrounding logic hasn't actually established - e.g. "copy into a local variable" is wrong advice where the value is already a local, or where the code checked can't tell either way.
 - No second-person, no apologies, no `please`.
-- No CLI flag names, issue references, URLs, or markdown in the rendered text.
+- No issue references, URLs, or markdown in the rendered text.
 
 ### Cross-assembly tests
 
