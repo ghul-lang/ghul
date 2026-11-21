@@ -29,8 +29,8 @@ namespace Syntax.Process is
     // arguments, each is declared only where the statements name it.
     //
     // It also marks the functions of a file without a namespace block that
-    // are written with no types in their signatures, whose signatures are
-    // then inferred, and forms the file's inference unit: those functions,
+    // leave types out of their signatures, whose signatures are then
+    // inferred, and forms the file's inference unit: those functions,
     // the entry, and the file's functions that call them or read a
     // top-level `let`, which compile-expressions walks as one body. No
     // function is moved.
@@ -209,9 +209,9 @@ namespace Syntax.Process is
             od
         si
 
-        // The file's functions written with no type anywhere in their
-        // signature have their signatures inferred from the file's own uses
-        // of them. They, the entry and the file's other functions that call
+        // The file's functions that leave a type out of their signature
+        // have the types they leave out inferred from the file's own uses
+        // of them; the types they write are fixed. They, the entry and the file's other functions that call
         // them or read its top-level `let`s are walked together as one
         // inference body, so a call in any of them bounds a parameter of
         // another and the `let`s are typed from every use. Every other
@@ -231,7 +231,7 @@ namespace Syntax.Process is
                 for d in list do
                     // A function carrying a pragma is a method the pragma
                     // describes, whose signature is written out.
-                    if let function = cast Definitions.FUNCTION?(d) /\ _is_unannotated(function) /\ _count_named(functions, function.name!.name) == 1 then
+                    if let function = cast Definitions.FUNCTION?(d) /\ _is_inferable(function) /\ _count_named(functions, function.name!.name) == 1 then
                         inferred.add(function)
                     fi
                 od
@@ -437,7 +437,7 @@ namespace Syntax.Process is
             result
         si
 
-        _is_unannotated(function: Definitions.FUNCTION) -> bool =>
+        _is_inferable(function: Definitions.FUNCTION) -> bool =>
             !function.is_poisoned /\
             function.name? /\
             !function.is_top_level_entry /\
@@ -447,8 +447,28 @@ namespace Syntax.Process is
             function.body? /\
             function.generic_arguments.count == 0 /\
             _has_only_literal_markers(function.modifiers) /\
-            function.type_expression.is_inferred /\
-            function.arguments |> all(a => a.untyped_deferred /\ !a.is_poisoned /\ a.left.is_simple_name /\ a.name? /\ !a.initializer?)
+            function.arguments |> all(a => !a.is_poisoned /\ a.left.is_simple_name /\ a.name? /\ !a.initializer?) /\
+            _leaves_a_type_to_infer(function)
+
+        // Whether a function's signature leaves a type unwritten: a
+        // parameter or the return. One whose parameters are all written,
+        // with a block body that returns no value and yields nothing,
+        // returns nothing whatever its uses, so it has no type left to
+        // infer and stays a function of the file's namespace.
+        _leaves_a_type_to_infer(function: Definitions.FUNCTION) -> bool =>
+            if function.arguments |> any(a => a.untyped_deferred) then
+                true
+            elif !function.type_expression.is_inferred then
+                false
+            elif function.arguments.count == 0 then
+                true
+            elif let body = function.body then
+                isa Trees.Bodies.EXPRESSION(body) \/
+                VALUE_RETURN_SCANNER().returns_a_value(body) \/
+                YIELD_SCANNER().body_has_yield(body)
+            else
+                false
+            fi
 
         // Whether a function written with types can be walked with the
         // file's inference unit: one with a body and no type parameters of
