@@ -264,13 +264,14 @@ namespace Syntax.Process.Printer is
                 return
             fi
 
-            _emit_literal_characters(literal.value_string, literal.location.end)
+            _emit_literal_characters(literal.value_string, literal.location.start, literal.location.end)
         si
 
         // A literal's characters, brace-escaped, split back into the
         // adjacent literals the author chained it from, each on the line the
-        // author put it on.
-        _emit_literal_characters(value: string, end: int) is
+        // author put it on, with each escape written as the author wrote it.
+        _emit_literal_characters(value: string, start: int, end: int) is
+            let escapes = escapes_within(start, end)
             let i mut = 0
 
             while i <= value.length do
@@ -296,7 +297,9 @@ namespace Syntax.Process.Printer is
 
                 let c = value[i]
 
-                if c == '{' then
+                if escapes.contains_key(i) then
+                    write(escapes[i])
+                elif c == '{' then
                     write('{')
                     write('{')
                 elif c == '}' then
@@ -342,12 +345,20 @@ namespace Syntax.Process.Printer is
             write(text.to_string())
         si
 
-        _next_string_break(end: int) -> TRIVIA? =>
-            if _has_trivia /\ isa TRIVIA.STRING_BREAK(_peek) /\ _peek.location.start < end then
-                _peek
-            else
-                null
-            fi
+        // The next chaining point inside a literal ending at `end`, passing
+        // over the escapes before it, which are found by where they are.
+        _next_string_break(end: int) -> TRIVIA? is
+            while _has_trivia /\ isa TRIVIA.ESCAPE(_peek) /\ _peek.location.start <= end do
+                _consume()
+            od
+
+            return
+                if _has_trivia /\ isa TRIVIA.STRING_BREAK(_peek) /\ _peek.location.start < end then
+                    _peek
+                else
+                    null
+                fi
+        si
 
         // --- faithfulness fix: the inherited write_escape_char renders
         //     control characters via string.format("X", ci), which returns
@@ -396,7 +407,7 @@ namespace Syntax.Process.Printer is
         visit(string: Expressions.Literals.STRING) is
             note(string.location)
             write(cast char(34))
-            _emit_literal_characters(string.value_string, string.location.end)
+            _emit_literal_characters(string.value_string, string.location.start, string.location.end)
             write(cast char(34))
         si
 
@@ -411,8 +422,11 @@ namespace Syntax.Process.Printer is
             write("'")
 
             let c = character.value_string[0]
+            let escapes = escapes_within(character.location.start, character.location.end)
 
-            if c == '\'' then
+            if escapes.contains_key(0) then
+                write(escapes[0])
+            elif c == '\'' then
                 write("\\'")
             elif c == cast char(34) then
                 write(c)
