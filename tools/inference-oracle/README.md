@@ -94,7 +94,7 @@ dotnet run --project tools/inference-oracle -- corpus integration-tests/executio
 annotated, and compares the IL as `check` does. A program is one of:
 
 - a subdirectory holding a `test.ghul` (the integration-test layout; a
-  `ghulflags` file beside it is passed to every compile);
+  options its `test.json` asks for are passed to every compile);
 - a subdirectory holding a `.ghulproj`, or one level further down when a
   directory keeps several solutions as projects of their own;
 - the directory itself, when it holds a `.ghulproj`, so one project such as

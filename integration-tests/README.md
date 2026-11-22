@@ -4,13 +4,11 @@ The directories under `integration-tests` form the main test suite for the [ghū
 
 ## Publishing the compiler
 
-Each test calls the published compiler via the `ghul.json` file in the test directory. Before running any tests you must publish the compiler:
+The `local` configuration in `ghul-test.json`, which runs by default, builds each test with the compiler published to `publish/`. Before running any tests you must publish the compiler:
 
 ```sh
 dotnet publish --output publish
 ```
-
-The template `ghul.json` refers to `dotnet ../../../publish/ghul.dll` so the runner finds the freshly built compiler.
 
 ## Running tests
 
@@ -35,7 +33,7 @@ If a test fails a `failed` file is left behind. You can rerun only the failed te
 ## Creating new tests
 
 1. Run `./integration-tests/create.sh` and enter a new test name when prompted.
-2. Edit the generated `.ghul` sources and `ghulflags` as needed.
+2. Edit the generated `.ghul` sources and `test.json` as needed.
 3. Execute the test (it will fail initially):
 
    ```sh
@@ -53,7 +51,17 @@ Each test directory contains a `.vscode/tasks.json` file with `Run test` (test t
 
 ## Test folder structure
 
-A test directory must contain one or more `.ghul` source files and a `ghulflags` file. Optional files influence behaviour:
+A test directory must contain one or more `.ghul` source files and a `test.json`, which says how the test is built and is `{}` for a test built the default way. Its keys, all optional:
+
+| Key | Meaning |
+| --- | --- |
+| `build_targets` | The targets the test runs under, from `dotnet`, `wasm` and `llvm`. The runner builds and runs the test once per target. See 'Targets' below. |
+| `check_only` | `true` to check the program without generating code, as `--type-check` does. |
+| `library` | `true` to build a library, with no entry point, as `--library` does. |
+| `optimise` | The llvm optimisation level, 0 to 3, passed as `--optimise` to an llvm build after the configuration's own flags. |
+| `flags` | Any other compiler options, space-separated, such as `--target llvm` for a test about one target. |
+
+A `test.json` may also override the keys of the run's configuration, such as `compiler` or `run_targets`; ghul-test's README lists them. Optional files influence behaviour:
 
 | File | Purpose |
 | --- | --- |
@@ -64,10 +72,8 @@ A test directory must contain one or more `.ghul` source files and a `ghulflags`
 | `il.expected` | Expected IL disassembly output. |
 | `il.item` | If present, scopes the IL disassembly to one type or member (`Namespace.TYPE` or `Namespace.TYPE::member`). Without it the whole assembly is disassembled. |
 | `format.expected` | Expected output of running the formatter over the test's sources. When present, the runner also rebuilds and reruns the formatted copy and asserts it still builds and produces `run.expected`. Not supported under `--use-dotnet-build`. |
-| `ghul.json` | Configuration file pointing at the compiler (created from the template). |
 | `disabled*` | Any file beginning with `disabled` causes the test to be skipped. |
 | `tags` | Zero or more whitespace-separated tag names, used to select a subset of tests with `--tag`. See 'Tags' below. |
-| `targets` | The targets the test runs under, from `dotnet`, `wasm` and `llvm`. The runner builds and runs the test once per target. See 'Targets' below. |
 
 ## Tags
 
@@ -112,10 +118,10 @@ The suite is organised by what a test asserts - `execution/`, `semantic/`,
 A test belongs in one of three places:
 
 - **A program that should mean the same thing on every target** lives under
-  its kind and carries a `targets` file naming the targets it runs under,
-  `dotnet wasm llvm` or any subset. The runner builds and runs it once per
-  target, adding `--target <name>` to its `ghulflags` - which must not name a
-  target itself - and reports each run as `<test>[<target>]`. Each run
+  its kind and its `test.json` names the targets it runs under in
+  `build_targets`, `["dotnet", "wasm", "llvm"]` or any subset. The runner builds and runs it once per
+  target, adding `--target <name>` to its flags - which must not name a
+  target themselves - and reports each run as `<test>[<target>]`. Each run
   happens in its own `.targets/<target>/<test>/` directory under the test,
   holding copies of the sources, inputs and expectations, so the runs neither
   collide nor leave artifacts in the test directory. The last part is the
@@ -128,8 +134,8 @@ A test belongs in one of three places:
   target out, so the gap stays visible.
 - **A test whose subject is .NET itself** - an IL snapshot, a .NET API the
   core library doesn't declare, an `IL.*` pragma, `decimal`, DllImport - has
-  no meaning on wasm or llvm. It lives under its kind with a `targets` file
-  naming only `dotnet`. That file is what keeps it out of a run that builds
+  no meaning on wasm or llvm. It lives under its kind with `build_targets`
+  naming only `dotnet`. That is what keeps it out of a run that builds
   every test for another target, such as the `host-llvm-all` configuration,
   which builds the whole suite for llvm with the native compiler in
   `hosts/llvm/`, as a contributor without .NET runs it. A test that should
@@ -138,10 +144,10 @@ A test belongs in one of three places:
 - **A test about a target's own behaviour** - what it cannot compile yet,
   the shape of the module or IR it writes, a host operation only it has -
   lives under that target's directory, `wasm/` or `llvm/`, with `--target
-  <name>` in its `ghulflags`.
+  <name>` in the `flags` of its `test.json`.
 
 Don't copy a program that an execution test already holds into `wasm/` or
-`llvm/`: give the execution test a `targets` file instead.
+`llvm/`: give the execution test `build_targets` instead.
 
 A run under `wasm` needs the runtime library, which a wasm build compiles in
 from source rather than loading from an assembly. The `local` configuration in
@@ -151,15 +157,15 @@ ghul-test gives them to every wasm run. CI checks it out under `libraries/`,
 at the release a user would get, or at its head on the scheduled run.
 Without the libraries a wasm run fails to compile, which is the right answer: the
 test asserts the program on that target, and silently skipping it would hide
-the gap the `targets` file exists to show.
+the gap `build_targets` exists to show.
 
 A run under `llvm` links with ghul-llvm, which is not on every machine. So the
 `local` configuration lists only `dotnet` and `wasm` in its `run_targets`, and
-passes over every llvm run: a `targets` file's `llvm` variant and a test whose
-`ghulflags` name `--target llvm` alike, reporting how many it passed over.
+passes over every llvm run: the `llvm` run of a test whose `build_targets` name
+it and a test whose flags name `--target llvm` alike, reporting how many it passed over.
 Those runs are made by the `llvm` configuration, which runs them alone, on a
-machine with ghul-llvm on the PATH. A test author adding `llvm` to a `targets`
-file runs it that way:
+machine with ghul-llvm on the PATH. A test author adding `llvm` to a test's
+`build_targets` runs it that way:
 
 ```sh
 PATH="$(dirname "$(build/ghul-llvm.sh /tmp/ghul-llvm)"):$PATH" \
@@ -181,9 +187,9 @@ them unoptimised together with every `wasm` run.
 
 `build/wasm-validate.sh` and `build/llvm-validate.sh` hand every module the
 compiler writes for their target to an engine. They select tests by the target
-the `ghulflags` name, wherever the test lives, so a target test outside
-`wasm/` or `llvm/` is checked too. A test that runs under the target through a
-`targets` file is left to ghul-test: under `wasm`, the configuration that runs
+a test's flags name, wherever the test lives, so a target test outside
+`wasm/` or `llvm/` is checked too. A test that runs under the target through
+`build_targets` is left to ghul-test: under `wasm`, the configuration that runs
 the suite builds it with the core library and runs it; under `llvm`, only a
 configuration whose `run_targets` names `llvm` does, as described above.
 
@@ -246,7 +252,7 @@ ghul apply to them cleanly.
 
 ## Expectation comparison workflow
 
-1. The runner invokes the compiler using the arguments in `ghulflags` and the test sources. Compiler output goes to `compiler.out`.
+1. The runner invokes the compiler with the options the test's `test.json` asks for and the test sources. Compiler output goes to `compiler.out`.
 2. Error and warning lines are `grep`ed into `err.grep` and `warn.grep`, sorted into `err.sort` and `warn.sort`, then compared to the `*.expected` files.
 3. If compilation succeeds the test binary is executed and its output compared to `run.expected`.
 4. If `il.expected` exists the generated `il.out` file is diffed as well.

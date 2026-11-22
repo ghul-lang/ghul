@@ -68,7 +68,7 @@ assignment resolves.
 ## Adding a test
 
 Give each test its own directory containing a `.ghulproj`, the `.ghul` sources,
-an empty `ghulflags`, and the expected-output files. A test that needs a C#
+a `test.json` holding `{}`, and the expected-output files. A test that needs a C#
 library gets its **own private copy** — never a `ProjectReference` to another
 test's `.csproj`. Parallel `dotnet build` invocations of one shared project race
 on `bin/Debug/<framework>/<project>.deps.json`, which MSBuild writes under an
