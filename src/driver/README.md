@@ -67,6 +67,13 @@ U+0001 and `build-done` that gives the exit status. A line `quit`, or the end of
 the input, ends the server. It is how an interactive session on the llvm target
 builds each cell.
 
+Before each build the server resets what the compiler keeps outside its
+container, in `Compiler.BUILD_STATE`: the counters that number synthesised
+names start again and the static caches are emptied, so a build compiles
+exactly what a process of its own would. State a new static adds that outlives
+a build belongs there. `build/build-server-equivalence.sh` compares a series
+of server builds with cold compiles on wasm and llvm.
+
 ## Fork server
 
 `--fork-server`, on the native compiler for the wasm and llvm targets, takes
