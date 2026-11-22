@@ -576,41 +576,86 @@ namespace Compiler is
         // them, so compiling the libraries first gives a library's names
         // that do not depend on the program it is compiled with.
         build_libraries_first() is
+            build_libraries()
+            build_program()
+        si
+
+        // Takes the library files queued so far through every pass before
+        // infer-effects: the first half of `build_libraries_first`, which a
+        // fork server runs once and then builds each program from.
+        build_libraries() is
             _want_entry_point_selection = true
 
             Syntax.Process.PURE_SLOTS.clear()
             IR.Emitter.SRM_MEMBER_ORDER.clear()
             Syntax.Process.KILL_LEDGER.clear_all()
 
+            build(_per_file_passes, _files_where(true))
+        si
+
+        // Takes the program files queued so far through the same passes,
+        // then runs the passes from infer-effects on over every file: the
+        // second half of `build_libraries_first`.
+        build_program() is
             _move_top_level_entry_file_first()
 
-            let per_file = LIST[Pass]()
-            let whole_program = LIST[Pass]()
+            build(_per_file_passes, _files_where(false))
+            build(_whole_program_passes, source_files)
+
+            are_tables_current = true
+        si
+
+        // The number of files queued so far.
+        source_file_count: int => source_files.count
+
+        // Runs the post-parse passes over the files queued from position
+        // `first` on.
+        //
+        // - first: the position of the first file to run them over
+        post_parse_from(first: int) is
+            let files = LIST[SOURCE_FILE]()
+
+            for i in first..source_files.count do
+                files.add(source_files[i])
+            od
+
+            post_parse(files)
+        si
+
+        _per_file_passes: LIST[Pass] is
+            let result = LIST[Pass]()
 
             for pass in build_passes do
                 if pass.order < _infer_effects_pass.order then
-                    per_file.add(pass)
-                else
-                    whole_program.add(pass)
+                    result.add(pass)
                 fi
             od
 
-            let libraries = LIST[SOURCE_FILE]()
-            let program = LIST[SOURCE_FILE]()
+            return result
+        si
+
+        _whole_program_passes: LIST[Pass] is
+            let result = LIST[Pass]()
+
+            for pass in build_passes do
+                if pass.order >= _infer_effects_pass.order then
+                    result.add(pass)
+                fi
+            od
+
+            return result
+        si
+
+        _files_where(library: bool) -> LIST[SOURCE_FILE] is
+            let result = LIST[SOURCE_FILE]()
 
             for file in source_files do
-                if file.library? then
-                    libraries.add(file)
-                else
-                    program.add(file)
+                if file.library? == library then
+                    result.add(file)
                 fi
             od
 
-            build(per_file, libraries)
-            build(per_file, program)
-            build(whole_program, source_files)
-
-            are_tables_current = true
+            return result
         si
 
         // The file carrying the synthesised top-level entry compiles

@@ -1,0 +1,63 @@
+namespace Driver.UnitTests is
+    use Collections.LIST
+
+    use Driver.FORK_ARGUMENTS
+
+    use Assertions
+
+    // Which builds a fork server's snapshot can serve: those whose
+    // arguments match the server's apart from the outputs and the
+    // program's own files, with the program's files after the libraries'.
+    class FORK_ARGUMENTS_TESTS is
+        init() is si
+
+        is_library(path: string) -> bool => path.starts_with("lib/")
+
+        server() -> LIST[string] =>
+            LIST[string](["--fork-server", "--target", "llvm", "lib/a.ghul", "lib/b.ghul", "-o", "srv/prog"])
+
+        can_serve(request: ARRAY[string]) -> bool =>
+            FORK_ARGUMENTS.can_serve(server(), LIST[string](request), path => is_library(path))
+
+        @test()
+        Calling__can_serve__with_other_outputs_and_program_files__returns_true() is
+            is_true(can_serve(["--target", "llvm", "lib/a.ghul", "lib/b.ghul", "main.ghul", "-o", "out/main", "--llvm-output", "out/main.ll"]))
+        si
+
+        @test()
+        Calling__can_serve__with_a_different_flag__returns_false() is
+            is_false(can_serve(["--target", "wasm", "lib/a.ghul", "lib/b.ghul", "main.ghul"]))
+        si
+
+        @test()
+        Calling__can_serve__with_an_extra_flag__returns_false() is
+            is_false(can_serve(["--target", "llvm", "--rtti", "lib/a.ghul", "lib/b.ghul", "main.ghul"]))
+        si
+
+        @test()
+        Calling__can_serve__with_a_library_file_missing__returns_false() is
+            is_false(can_serve(["--target", "llvm", "lib/a.ghul", "main.ghul"]))
+        si
+
+        @test()
+        Calling__can_serve__with_library_files_in_another_order__returns_false() is
+            is_false(can_serve(["--target", "llvm", "lib/b.ghul", "lib/a.ghul", "main.ghul"]))
+        si
+
+        @test()
+        Calling__can_serve__with_a_program_file_before_a_library_file__returns_false() is
+            is_false(can_serve(["--target", "llvm", "main.ghul", "lib/a.ghul", "lib/b.ghul"]))
+        si
+
+        @test()
+        Calling__program_files__skips_option_values_and_library_files() is
+            let files = FORK_ARGUMENTS.program_files(
+                LIST[string](["lib/a.ghul", "one.ghul", "-o", "named.ghul", "two.ghul"]),
+                path => is_library(path))
+
+            are_equal(2, files.count)
+            is_true(files[0] =~ "one.ghul")
+            is_true(files[1] =~ "two.ghul")
+        si
+    si
+si

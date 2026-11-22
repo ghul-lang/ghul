@@ -1562,11 +1562,56 @@ jobs:
         ghul_llvm="$(dirname "$(dirname "$(command -v ghul-llvm)")")"
         build/llvm-cells.sh publish/ghul.dll "$ghul_llvm" "$host"
 
-  # The llvm tests' one name: every shard and the cell scenarios passed. As
+  # The native compiler's --fork-server against cold compiles of the same
+  # arguments: a sample of the execution tests built both ways for wasm and
+  # llvm, byte for byte, with the same diagnostics, and the server's count
+  # of builds served from its snapshot checked.
+  fork_server_equivalence:
+    needs: [version, llvm_pass_1]
+    if: needs.version.outputs.build == 'true'
+    name: Check fork-server builds match cold builds
+
+    runs-on: ubuntu-latest
+
+    timeout-minutes: 15
+
+    steps:
+    - uses: actions/checkout@v7
+
+    # The runtime the version job chose for the whole run.
+    - name: Checkout ghul-runtime
+      uses: actions/checkout@v7
+      with:
+        repository: ghul-lang/ghul-runtime
+        path: libraries/ghul-runtime
+        ref: ${{ needs.version.outputs.runtime }}
+
+    - name: Fetch ghul-llvm
+      run: |
+        ghul_llvm="$(build/ghul-llvm.sh "$RUNNER_TEMP/ghul-llvm" "${{ needs.version.outputs.ghul_llvm }}")"
+        test -x "$ghul_llvm"
+        dirname "$ghul_llvm" >> "$GITHUB_PATH"
+
+    - name: Download the native compiler
+      uses: actions/download-artifact@v8
+      with:
+        name: ghul-compiler-llvm-pass-1
+
+    - name: Install the native compiler
+      run: |
+        mkdir -p "$RUNNER_TEMP/native"
+        tar -xzf llvm-pass-1.tar.gz -O pass-1/ghul > "$RUNNER_TEMP/native/ghul"
+        chmod +x "$RUNNER_TEMP/native/ghul"
+
+    - name: Compare fork-server builds with cold builds
+      run: build/fork-server-equivalence.sh "$RUNNER_TEMP/native/ghul" libraries/ghul-runtime
+
+  # The llvm tests' one name: every shard, the cell scenarios and the fork
+  # server's equivalence passed. As
   # for integration_tests, `always()` makes a failed build fail this job
   # rather than skip it.
   llvm_tests:
-    needs: [version, llvm_test_shards, llvm_cells]
+    needs: [version, llvm_test_shards, llvm_cells, fork_server_equivalence]
     name: Run llvm tests
 
     if: always()
@@ -1576,14 +1621,15 @@ jobs:
     timeout-minutes: 5
 
     steps:
-    - name: Check every shard and the cell scenarios passed
+    - name: Check every shard, the cell scenarios and the fork server passed
       env:
         SHARDS: ${{ needs.llvm_test_shards.result }}
         CELLS: ${{ needs.llvm_cells.result }}
+        FORK_SERVER: ${{ needs.fork_server_equivalence.result }}
         BUILD: ${{ needs.version.outputs.build }}
       run: |
-        echo "shards: $SHARDS, cells: $CELLS"
-        for result in "$SHARDS" "$CELLS"; do
+        echo "shards: $SHARDS, cells: $CELLS, fork server: $FORK_SERVER"
+        for result in "$SHARDS" "$CELLS" "$FORK_SERVER"; do
           [ "$result" = success ] || { [ "$result" = skipped ] && [ "$BUILD" != true ]; } || exit 1
         done
 

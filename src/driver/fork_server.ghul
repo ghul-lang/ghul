@@ -1,0 +1,248 @@
+@@IF.llvm()
+
+namespace Driver is
+    use Collections.LIST
+
+    use IO.File
+    use IO.Path
+    use IO.Std
+
+    use Ghul.Exception
+
+    // A fork server: the source libraries compiled once, through every pass
+    // before infer-effects, and each build then compiled in a child process
+    // forked from that state, so every build starts from the same snapshot
+    // and nothing one build does reaches the next.
+    //
+    // The protocol is --build-server's. Each line read is the path of a
+    // response file holding a build's arguments. The build's diagnostics go
+    // to standard error as they would from a process of its own, followed by
+    // a line starting with U+0001 that says how it ended. A line "quit", or
+    // the end of the input, ends the server, which then writes a line
+    // starting with U+0001 counting the builds the snapshot served and those
+    // compiled cold.
+    //
+    // A build whose arguments differ from the server's other than in its
+    // outputs and its program's source files, or that comes after a library
+    // file has changed on disk, is compiled cold in its child instead.
+    partial MAIN is
+        @extern("", "fork")
+        _fork() -> int static
+
+        @extern("", "waitpid")
+        _waitpid(pid: int, status: int ref, options: int) -> int static
+
+        // The collector's own hooks for a fork: its marker threads are
+        // stopped around the fork, and started again on both sides of it.
+        @extern("", "GC_atfork_prepare")
+        _gc_atfork_prepare() static
+
+        @extern("", "GC_atfork_parent")
+        _gc_atfork_parent() static
+
+        @extern("", "GC_atfork_child")
+        _gc_atfork_child() static
+
+        @extern("", "strdup")
+        _strdup(text: string) -> word static
+
+        @extern("", "execv")
+        _execv(path: string, argv: word) -> int static
+
+        serve_forked_builds(arguments: LIST[string]) is
+            let is_library_file = (path: string) -> bool => library_sources.library_for(Path.get_full_path(path))?
+
+            if FORK_ARGUMENTS.program_files(arguments, is_library_file).count > 0 then
+                throw INPUT_EXCEPTION("--fork-server compiles the libraries only: each build's response file gives its program's source files")
+            fi
+
+            let library_texts = LIST[(path: string, text: string)]()
+
+            for path in ghul_source_files do
+                if SOURCE_FILE_CATEGORIZER.is_ghul(path) then
+                    library_texts.add((path, File.read_all_text(path)))
+                fi
+            od
+
+            start_build()
+
+            compiler.post_parse()
+            compiler.build_libraries()
+
+            let served mut = 0
+            let cold mut = 0
+
+            do
+                let line = Std.`in.read_line()
+
+                if !line? \/ line =~ "quit" then
+                    break
+                fi
+
+                if line.length == 0 then
+                    continue
+                fi
+
+                let request = LIST[string]()
+
+                MAIN.add_arguments(request, ["@{line}"])
+
+                let from_snapshot =
+                    FORK_ARGUMENTS.can_serve(arguments, request, is_library_file) /\
+                    _unchanged(library_texts)
+
+                if from_snapshot then
+                    served = served + 1
+                else
+                    cold = cold + 1
+                fi
+
+                Std.out.flush()
+                Std.error.flush()
+
+                _gc_atfork_prepare()
+
+                let pid = _fork()
+
+                if pid == 0 then
+                    _gc_atfork_child()
+
+                    if from_snapshot then
+                        _build_from_snapshot(request, is_library_file)
+                    else
+                        _build_cold(line)
+                    fi
+                fi
+
+                _gc_atfork_parent()
+
+                let status mut = 1
+
+                if pid < 0 then
+                    Std.error.write_line("error: --fork-server could not start a process for the build")
+                else
+                    let raw mut = 0
+
+                    _waitpid(pid, raw ref, 0)
+
+                    status = _exit_status(raw)
+                fi
+
+                Std.error.write("\u0001build-done {status}\n")
+                Std.error.flush()
+            od
+
+            Std.error.write("\u0001fork-server served {served} cold {cold}\n")
+            Std.error.flush()
+        si
+
+        // Whether every library file still reads as it did when the
+        // snapshot was taken.
+        _unchanged(library_texts: LIST[(path: string, text: string)]) -> bool is
+            for (path, text) in library_texts do
+                if !File.exists(path) \/ !(File.read_all_text(path) =~ text) then
+                    return false
+                fi
+            od
+
+            return true
+        si
+
+        // The exit status a cold build would end with: its own, or 128 plus
+        // the number of the signal that ended it.
+        _exit_status(raw: int) -> int static =>
+            if (raw & 0x7f) == 0 then
+                (raw >> 8) & 0xff
+            else
+                128 + (raw & 0x7f)
+            fi
+
+        // In the child: the program's files compiled on top of the
+        // snapshot, ending as a cold build of the same arguments ends.
+        _build_from_snapshot(request: LIST[string], is_library_file: string -> bool) is
+            let result mut = 1
+
+            try
+                _set_outputs(request, is_library_file)
+
+                let first = compiler.source_file_count
+
+                for path in FORK_ARGUMENTS.program_files(request, is_library_file) do
+                    library_sources.list_file(Path.get_full_path(path))
+                    queue_source_file(path, false)
+                od
+
+                compiler.post_parse_from(first)
+                compiler.build_program()
+
+                result = finish_build()
+            catch e: BUILD_ENDED
+                throw e
+            catch e: INPUT_EXCEPTION
+                Std.error.write_line("error: {e.message}")
+
+                result = 1
+            catch e: Exception
+                Std.error.write(e)
+                Std.error.write("\n")
+
+                result = 1
+            yrt
+
+            if result == 0 then
+                Std.error.write("*** succeeded ***")
+            else
+                Std.error.write("!!! failed !!!")
+            fi
+
+            Std.error.write("\n")
+
+            Driver.COMPILER_ENVIRONMENT.exit(result)
+        si
+
+        // The outputs `request` asks for, set as parsing its arguments
+        // would set them: the first source file names the output unless an
+        // -o does, and --llvm-output is the request's or none.
+        _set_outputs(request: LIST[string], is_library_file: string -> bool) is
+            let output = OUTPUT_FILE_NAME_GENERATOR()
+            let llvm_output: string? mut = null
+            let i mut = 0
+
+            while i < request.count do
+                let argument = request[i]
+
+                if (argument =~ "-o" \/ argument =~ "--output") /\ i + 1 < request.count then
+                    output.force(request[i + 1])
+                    i = i + 1
+                elif argument =~ "--llvm-output" /\ i + 1 < request.count then
+                    llvm_output = request[i + 1]
+                    i = i + 1
+                elif SOURCE_FILE_CATEGORIZER.is_ghul(argument) then
+                    output.seen_file(argument)
+                fi
+
+                i = i + 1
+            od
+
+            output_file_name_generator = output
+            flags.llvm_output = llvm_output
+        si
+
+        // In the child: the build compiled cold, by this compiler run
+        // afresh on the build's response file.
+        _build_cold(response_file: string) static is
+            let path = Driver.COMPILER_ENVIRONMENT.process_path
+
+            if path? then
+                let argv: ARRAY[word] = [_strdup(path), _strdup("@{response_file}"), 0w]
+
+                _execv(path, Ghul.Interop.elements(argv))
+            fi
+
+            Std.error.write_line("error: --fork-server could not run the compiler for a build its snapshot cannot serve")
+            Std.error.flush()
+
+            Driver.COMPILER_ENVIRONMENT.exit(1)
+        si
+    si
+si
