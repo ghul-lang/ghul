@@ -11,6 +11,9 @@
 # Any host's compiler writes the same module, so it can be the native
 # compiler or the .NET one.
 #
+# ghul-test is `dotnet ghul-test` unless GHUL_TEST names another runner, such
+# as the one build/fetch-ghul-test.sh fetches.
+#
 # Usage: build/wasm-validate.sh [test-root [compiler command...]]
 #        (defaults: integration-tests, and `dotnet publish/ghul.dll` after
 #        `dotnet publish --output publish/`; run from the repository root)
@@ -58,7 +61,9 @@ else
     configuration=host-wasm
 fi
 
-if ! dotnet ghul-test --config "$configuration" --compiler "${compiler[*]}" --commands "$scratch/commands.jsonl" "$root" >"$scratch/ghul-test.out" 2>&1; then
+read -r -a ghul_test <<< "${GHUL_TEST:-dotnet ghul-test}"
+
+if ! "${ghul_test[@]}" --config "$configuration" --compiler "${compiler[*]}" --commands "$scratch/commands.jsonl" "$root" >"$scratch/ghul-test.out" 2>&1; then
     echo "wasm-validate: ghul-test could not list the build commands:" >&2
     tail -5 "$scratch/ghul-test.out" >&2
     exit 1
@@ -113,5 +118,11 @@ while read_command; do
 done < <(node "$(dirname "$0")/test-commands.mjs" "$scratch/commands.jsonl" --target wasm --in-place)
 
 echo "wasm-validate: $checked modules checked, $failed failed"
+
+# A run that checks nothing has lost its tests, not passed them.
+if [ "$checked" = 0 ]; then
+    echo "wasm-validate: no modules to check under $root" >&2
+    exit 1
+fi
 
 [ "$failed" -eq 0 ]
