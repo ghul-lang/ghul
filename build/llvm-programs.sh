@@ -13,8 +13,12 @@
 # image and runs each there, with no network, comparing what it writes to
 # standard output and the status it exits with against its test's.
 #
-# Usage: build/llvm-programs.sh collect <test-root> <dir>
+# Usage: build/llvm-programs.sh collect <test-root> <dir> [declared]
 #        build/llvm-programs.sh run <dir>
+#
+# With `declared`, `collect` takes only the programs of tests that ask for
+# llvm themselves, through their build_targets or their flags, not those a
+# configuration built for llvm.
 #
 # `run` needs docker. It fails when a program does not start, or writes or
 # exits other than its test expects.
@@ -22,12 +26,12 @@
 set -uo pipefail
 
 usage() {
-    echo "usage: build/llvm-programs.sh collect <test-root> <dir> | run <dir>" >&2
+    echo "usage: build/llvm-programs.sh collect <test-root> <dir> [declared] | run <dir>" >&2
     exit 2
 }
 
 collect() {
-    local root="$1" out="$2" count=0
+    local root="$1" out="$2" declared="${3:-}" count=0
 
     mkdir -p "$out"
 
@@ -36,6 +40,11 @@ collect() {
 
         dir="$(dirname "$program")"
         name="$(printf '%s' "${dir#"$root"/}" | tr '/' '_')"
+
+        if [ -n "$declared" ] && [[ "$dir" == */.targets/* ]] &&
+            ! grep -qs -E '"build_targets"[^]]*"llvm"' "${dir%%/.targets/*}/test.json"; then
+            continue
+        fi
 
         # A session is answered as the program prompts, which only the test
         # runner does; the suite has already run it.
@@ -124,7 +133,7 @@ run() {
 }
 
 case "${1:-}" in
-    collect) [ $# -eq 3 ] || usage; collect "$2" "$3" ;;
+    collect) { [ $# -eq 3 ] || { [ $# -eq 4 ] && [ "$4" = declared ]; }; } || usage; collect "$2" "$3" "${4:-}" ;;
     run) [ $# -eq 2 ] || usage; run "$2" ;;
     *) usage ;;
 esac

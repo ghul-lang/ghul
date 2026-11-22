@@ -86,8 +86,8 @@ build can start from the snapshot only if its arguments, apart from `-o`,
 the same order, with the program's files after the libraries', and every
 library file still reads as it did when the snapshot was taken. Any other
 build is compiled cold by the compiler run afresh on its response file, so a
-build's result never depends on which path it took.
-`build/fork-server-equivalence.sh` compares the two paths. When the server
+build's result never depends on which path it took. CI builds the
+integration tests for llvm and wasm through fork servers. When the server
 ends it writes a line starting U+0001 and `fork-server` that counts the builds
 served from the snapshot and those compiled cold.
 
