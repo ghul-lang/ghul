@@ -2977,45 +2977,34 @@ namespace Syntax.Process is
             argument_types: Collections.LIST[Type]
         ) -> Semantic.OVERLOAD_RESOLVE_RESULT? is
             let last = argument_types.count - 1
-            let value_type = argument_types[last]
 
-            if value_type.is_error \/ !value_type.is_settled \/ value_type.is_wild then
+            let search = Semantic.WIDENED_CALL_SEARCH(IoC.CONTAINER.instance.operand_widenings)
+
+            let target = search.narrowest_target(
+                argument_types[last],
+                t => (
+                    let types = Collections.LIST[Type](argument_types)
+                    types[last] = t
+                    let use snapshot = _logger.speculate_then_backtrack()
+                    let result = _overload_resolver.resolve(location, group, types, false, true, false)
+                    snapshot.backtrack()
+                    result? /\ !result.needs_retry
+                )
+            )
+
+            if !target? then
                 return null
             fi
 
-            let widenings = IoC.CONTAINER.instance.operand_widenings
+            let types = Collections.LIST[Type](argument_types)
+            types[last] = target
 
-            let best: (type: Type, result: Semantic.OVERLOAD_RESOLVE_RESULT)? mut = null
+            let result = _overload_resolver.resolve(location, group, types, false, true, false)
 
-            for w in widenings.from(value_type) do
-                let target = w.return_type
-
-                if !target? then
-                    continue
-                fi
-
-                let types = Collections.LIST[Type](argument_types)
-                types[last] = target
-
-                let use snapshot = _logger.speculate_then_backtrack()
-
-                let result = _overload_resolver.resolve(location, group, types, false, true, false)
-
-                snapshot.backtrack()
-
-                if result? /\ !result.needs_retry then
-                    if !best? \/ widenings.widens(target, best.type) then
-                        best = (type = target, result = result)
-                    elif !widenings.widens(best.type, target) then
-                        return null
-                    fi
-                fi
-            od
-
-            if let chosen = best, widened = _visitor.widen_value(location, arguments[last], chosen.type) then
+            if let resolved = result, widened = _visitor.widen_value(location, arguments[last], target) then
                 arguments[last] = widened
 
-                return chosen.result
+                return resolved
             fi
 
             return null

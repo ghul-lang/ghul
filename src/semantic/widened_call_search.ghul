@@ -1,0 +1,204 @@
+namespace Semantic is
+    use Types.Type
+
+    // The overload a call reaches only by widening some of its arguments,
+    // and the narrowest type a stored value reaches by one widening. Each
+    // search tries its candidates through `accepts`, so it never resolves
+    // anything itself.
+    class WIDENED_CALL_SEARCH is
+        _widenings: OPERAND_WIDENINGS
+
+        init(widenings: OPERAND_WIDENINGS) is
+            _widenings = widenings
+        si
+
+        // Whether a value widened to `widened` goes into a slot of type
+        // `slot`: `slot` is that type, or the optional of it.
+        widens_into(widened: Type, slot: Type) -> bool is
+            if widened.matches(slot) then
+                return true
+            fi
+
+            if let inner = slot.optional_inner_type then
+                return widened.matches(inner)
+            fi
+
+            return false
+        si
+
+        // The widening that takes an `actual` argument to a `formal`
+        // parameter; null where the parameter is a type to infer, takes
+        // the argument as it is, or no widening reaches it.
+        widening_for(formal: Type, actual: Type) -> Symbols.Function? is
+            if formal.is_wild \/ formal.matches(actual) then
+                return null
+            fi
+
+            let found: Symbols.Function? mut = null
+
+            for w in _widenings.from(actual) do
+                if let target = w.return_type /\ widens_into(target, formal) then
+                    found = w
+                fi
+            od
+
+            return found
+        si
+
+        // Of `candidates`, the one overload that `accepts` takes once some
+        // arguments are widened to its parameters. The fewest widenings
+        // win, then the overload whose widened argument types each equal
+        // or widen to every other's; with no single such overload it is
+        // null. Only settled argument types that are not functions, types
+        // to infer or errors take part.
+        find(
+            candidates: Collections.Iterable[Symbols.Function],
+            argument_types: Collections.LIST[Type],
+            want_instance: bool,
+            accepts: (Symbols.Function, Collections.LIST[Type]) -> bool
+        ) -> WIDENED_CALL? is
+            for t in argument_types do
+                if t.is_error \/ !t.is_settled \/ t.is_function \/ t.is_wild then
+                    return null
+                fi
+            od
+
+            let reached = Collections.LIST[WIDENED_CALL]()
+
+            for f in candidates do
+                if
+                    f.arguments.count != argument_types.count \/
+                    (!want_instance /\ f.is_instance) \/
+                    f.is_static_constructor
+                then
+                    continue
+                fi
+
+                let chosen = Collections.LIST[Symbols.Function?]()
+
+                for i in 0..argument_types.count do
+                    chosen.add(widening_for(f.arguments[i], argument_types[i]))
+                od
+
+                let call = WIDENED_CALL(f, chosen)
+
+                if call.widening_count > 0 /\ accepts(f, call.widened_types(argument_types)) then
+                    reached.add(call)
+                fi
+            od
+
+            if reached.count == 0 then
+                return null
+            fi
+
+            let fewest mut = reached[0].widening_count
+
+            for r in reached do
+                if r.widening_count < fewest then
+                    fewest = r.widening_count
+                fi
+            od
+
+            let least = Collections.LIST[WIDENED_CALL]()
+
+            for r in reached do
+                if r.widening_count == fewest then
+                    least.add(r)
+                fi
+            od
+
+            let winner: WIDENED_CALL? mut = null
+
+            for c in least do
+                let c_types = c.widened_types(argument_types)
+                let narrowest mut = true
+
+                for other in least do
+                    if other.function == c.function then
+                        continue
+                    fi
+
+                    let other_types = other.widened_types(argument_types)
+
+                    for i in 0..c_types.count do
+                        if !c_types[i].matches(other_types[i]) /\ !_widenings.widens(c_types[i], other_types[i]) then
+                            narrowest = false
+                        fi
+                    od
+                od
+
+                if narrowest then
+                    if winner? then
+                        return null
+                    fi
+
+                    winner = c
+                fi
+            od
+
+            return winner
+        si
+
+        // The narrowest type that a value of `value_type` widens to and
+        // `accepts` takes; null where none does, or where two are taken
+        // and neither widens to the other.
+        narrowest_target(value_type: Type, accepts: (Type) -> bool) -> Type? is
+            if value_type.is_error \/ !value_type.is_settled \/ value_type.is_wild then
+                return null
+            fi
+
+            let best: Type? mut = null
+
+            for w in _widenings.from(value_type) do
+                let target = w.return_type
+
+                if !target? \/ !accepts(target) then
+                    continue
+                fi
+
+                if !best? \/ _widenings.widens(target, best) then
+                    best = target
+                elif !_widenings.widens(best, target) then
+                    return null
+                fi
+            od
+
+            return best
+        si
+    si
+
+    // An overload reached by widening, with the widening for each
+    // argument; a null widening leaves its argument as written.
+    class WIDENED_CALL(
+        function: Symbols.Function public,
+        widenings: Collections.LIST[Symbols.Function?] public
+    ) is
+        widening_count: int is
+            let count mut = 0
+
+            for w in widenings do
+                if w? then
+                    count = count + 1
+                fi
+            od
+
+            return count
+        si
+
+        // `argument_types` with each widened argument's type replaced by
+        // the type it widens to.
+        widened_types(argument_types: Collections.LIST[Type]) -> Collections.LIST[Type] is
+            let result = Collections.LIST[Type]()
+
+            for i in 0..argument_types.count do
+                if let w = widenings[i], target = w.return_type then
+                    result.add(target)
+                else
+                    result.add(argument_types[i])
+                fi
+            od
+
+            return result
+        si
+    si
+si
