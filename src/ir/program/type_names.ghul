@@ -3,9 +3,9 @@ namespace IR.Program is
 
     use Semantic.Types.Type
 
-    /// The names a whole-program target gives its types' descriptors, the
-    /// full names .NET reports, so `get_type()` gives the same text on every
-    /// target.
+    /// The names a whole-program target gives its types' descriptors,
+    /// as ghūl source writes them, so `get_type()` reports `int`,
+    /// `ARRAY[string]` or `Box[int]` rather than .NET's names.
     class TYPE_NAMES is
         /// The name of `type`.
         ///
@@ -21,53 +21,47 @@ namespace IR.Program is
             scalar: (Type?) -> Scalar?,
             is_string: (Type?) -> bool
         ) -> string static is
+            let name_of_argument = (argument: Type) => name_of(argument, classes, string_type, scalar, is_string)
+
             if let boxed = classes.boxed_type(type) then
-                return name_of(boxed, classes, string_type, scalar, is_string)
+                return name_of_argument(boxed)
             elif type == string_type then
-                return "System.String"
+                return "string"
             elif type == classes.root then
-                return "System.Object"
-            elif classes.core.bigint? /\ type.definition == classes.core.bigint then
-                return "System.Numerics.BigInteger"
+                return "object"
             elif classes.is_array(type) then
-                return "{name_of(classes.array_element(type), classes, string_type, scalar, is_string)}[]"
+                return "ARRAY[{name_of_argument(classes.array_element(type))}]"
+            elif _is_tuple(type) then
+                return "({type.arguments |> Ghul.Pipes.map(name_of_argument) |> Ghul.Pipes.join(", ")})"
             elif type.arguments.count == 0 then
-                return _emitted_name(type.definition)
+                return _source_name(type.definition)
             fi
 
-            let result = StringBuilder()
+            return "{_source_name(type.definition)}[{type.arguments |> Ghul.Pipes.map(name_of_argument) |> Ghul.Pipes.join(", ")}]"
+        si
 
-            result.append(_emitted_name(type.definition))
-            result.append('[')
-
-            for i in 0..type.arguments.count do
-                if i > 0 then
-                    result.append(',')
+        // Whether `type` is one of the tuple classes a tuple type of its
+        // arity is held as.
+        _is_tuple(type: CLASS_INSTANCE) -> bool static =>
+            type.arguments.count > 1 /\
+            (
+                if let tuple: Semantic.Symbols.GENERIC = IoC.CONTAINER.instance.innate_symbol_lookup.get_tuple_type(type.arguments, null).symbol then
+                    cast Semantic.Symbols.Classy?(tuple.unspecialized_symbol) == type.definition
+                else
+                    false
                 fi
+            )
 
-                result.append(name_of(type.arguments[i], classes, string_type, scalar, is_string))
-            od
-
-            result.append(']')
-
-            return result.to_string()
-        si
-
-        // A type declared in a namespace is named as it is emitted on .NET,
-        // which keeps a file-private namespace that a qualified name leaves
-        // out, without the arity suffix a generic sharing its name with a
-        // sibling carries: the type arguments follow in brackets instead. Any
-        // other, such as a closure's frame, keeps its qualified name.
-        _emitted_name(definition: Semantic.Symbols.Classy) -> string static is
-            if !isa Semantic.Symbols.NAMESPACE(definition.owner) then
-                return definition.qualified_name
+        // A built-in type declared in Ghul.Intrinsics, such as bigint or
+        // complex, is named bare, as source writes it. Every other type is
+        // named by its qualified name, which leaves out a top-level file's
+        // own namespace and carries no arity suffix.
+        _source_name(definition: Semantic.Symbols.Classy) -> string static =>
+            if definition.owner? /\ definition.owner == IoC.CONTAINER.instance.innate_symbol_lookup.get_bigint_type().symbol?.owner then
+                definition.name
+            else
+                definition.qualified_name
             fi
-
-            let name = definition.il_qualified_name
-            let tick = name.last_index_of('`')
-
-            return if tick > name.last_index_of('.') then name.substring(0, tick) else name fi
-        si
 
         /// The name of `type`, any type a descriptor names.
         name_of(
@@ -79,13 +73,13 @@ namespace IR.Program is
         ) -> string static is
             // An enum is held as its integer, but is named as itself.
             if let `enum: Semantic.Symbols.ENUM_STRUCT = type.symbol then
-                return _emitted_name(`enum)
+                return _source_name(`enum)
             fi
 
             if let kind = scalar(type) then
                 return scalar_name(kind)
             elif is_string(type) then
-                return "System.String"
+                return "string"
             elif let held = classes.class_of(type) then
                 return name_of(held, classes, string_type, scalar, is_string)
             fi
@@ -93,23 +87,24 @@ namespace IR.Program is
             return "{type}"
         si
 
-        /// The .NET name of the scalar kind.
+        /// The ghūl name of the scalar kind. byte is the signed 8-bit
+        /// kind and ubyte the unsigned one, the opposite of .NET.
         scalar_name(scalar: Scalar) -> string static =>
             case scalar
-            when Scalar.BOOL then "System.Boolean"
-            when Scalar.CHAR then "System.Char"
-            when Scalar.INT8 then "System.SByte"
-            when Scalar.UINT8 then "System.Byte"
-            when Scalar.INT16 then "System.Int16"
-            when Scalar.UINT16 then "System.UInt16"
-            when Scalar.INT32 then "System.Int32"
-            when Scalar.UINT32 then "System.UInt32"
-            when Scalar.INT64 then "System.Int64"
-            when Scalar.UINT64 then "System.UInt64"
-            when Scalar.INT_NATIVE then "System.IntPtr"
-            when Scalar.UINT_NATIVE then "System.UIntPtr"
-            when Scalar.FLOAT32 then "System.Single"
-            when Scalar.FLOAT64 then "System.Double"
+            when Scalar.BOOL then "bool"
+            when Scalar.CHAR then "char"
+            when Scalar.INT8 then "byte"
+            when Scalar.UINT8 then "ubyte"
+            when Scalar.INT16 then "short"
+            when Scalar.UINT16 then "ushort"
+            when Scalar.INT32 then "int"
+            when Scalar.UINT32 then "uint"
+            when Scalar.INT64 then "long"
+            when Scalar.UINT64 then "ulong"
+            when Scalar.INT_NATIVE then "word"
+            when Scalar.UINT_NATIVE then "uword"
+            when Scalar.FLOAT32 then "single"
+            when Scalar.FLOAT64 then "double"
             esac
     si
 si
