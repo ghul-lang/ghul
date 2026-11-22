@@ -1,0 +1,121 @@
+namespace Driver is
+    use Collections.Iterable
+    use Collections.LIST
+
+    // How a fork server tells whether a build can start from its snapshot.
+    // The snapshot is the libraries compiled with the server's own
+    // arguments, so a build can use it only where every argument that
+    // could change what the libraries compile to is the same. Only the
+    // output paths and the program's own source files may differ, and the
+    // program's files must come after the libraries', as a cold build would
+    // otherwise queue them in a different order.
+    class FORK_ARGUMENTS is
+        init() is si
+
+        // The arguments that are the program's alone: the outputs and the
+        // program's source files.
+        _is_output_option(argument: string) -> bool static =>
+            argument =~ "-o" \/ argument =~ "--output" \/ argument =~ "--llvm-output"
+
+        // `arguments` without the outputs, the program's source files and
+        // --fork-server itself: what has to match the server's for the
+        // snapshot to serve a build.
+        //
+        // - arguments: a build's arguments, response files expanded
+        // - is_library_file: whether a source file belongs to a library
+        snapshot_part(arguments: Iterable[string], is_library_file: string -> bool) -> LIST[string] static is
+            let result = LIST[string]()
+            let skip_value mut = false
+
+            for argument in arguments do
+                if skip_value then
+                    skip_value = false
+                elif _is_output_option(argument) then
+                    skip_value = true
+                elif argument =~ "--fork-server" then
+                    continue
+                elif SOURCE_FILE_CATEGORIZER.is_ghul(argument) /\ !is_library_file(argument) then
+                    continue
+                else
+                    result.add(argument)
+                fi
+            od
+
+            return result
+        si
+
+        // The program's source files in `arguments`, in order.
+        //
+        // - arguments: a build's arguments, response files expanded
+        // - is_library_file: whether a source file belongs to a library
+        program_files(arguments: Iterable[string], is_library_file: string -> bool) -> LIST[string] static is
+            let result = LIST[string]()
+            let skip_value mut = false
+
+            for argument in arguments do
+                if skip_value then
+                    skip_value = false
+                elif _is_output_option(argument) then
+                    skip_value = true
+                elif SOURCE_FILE_CATEGORIZER.is_ghul(argument) /\ !is_library_file(argument) then
+                    result.add(argument)
+                fi
+            od
+
+            return result
+        si
+
+        // Whether every program source file in `arguments` comes after the
+        // last library source file.
+        //
+        // - arguments: a build's arguments, response files expanded
+        // - is_library_file: whether a source file belongs to a library
+        program_follows_libraries(arguments: Iterable[string], is_library_file: string -> bool) -> bool static is
+            let skip_value mut = false
+            let seen_program mut = false
+
+            for argument in arguments do
+                if skip_value then
+                    skip_value = false
+                elif _is_output_option(argument) then
+                    skip_value = true
+                elif SOURCE_FILE_CATEGORIZER.is_ghul(argument) then
+                    if !is_library_file(argument) then
+                        seen_program = true
+                    elif seen_program then
+                        return false
+                    fi
+                fi
+            od
+
+            return true
+        si
+
+        // Whether a build with `request` as its arguments can start from a
+        // snapshot built with `server` as its arguments.
+        //
+        // - server: the server's arguments, response files expanded
+        // - request: the build's arguments, response files expanded
+        // - is_library_file: whether a source file belongs to a library
+        can_serve(server: Iterable[string], request: Iterable[string], is_library_file: string -> bool) -> bool static is
+            if !program_follows_libraries(request, is_library_file) then
+                return false
+            fi
+
+            let expected = snapshot_part(server, is_library_file)
+            let actual = snapshot_part(request, is_library_file)
+
+            if expected.count != actual.count then
+                return false
+            fi
+
+            for i in 0..expected.count do
+                if !(expected[i] =~ actual[i]) then
+                    return false
+                fi
+            od
+
+            return true
+        si
+    si
+si

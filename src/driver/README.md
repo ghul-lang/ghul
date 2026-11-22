@@ -67,6 +67,23 @@ U+0001 and `build-done` that gives the exit status. A line `quit`, or the end of
 the input, ends the server. It is how an interactive session on the llvm target
 builds each cell.
 
+## Fork server
+
+`--fork-server`, on the native compiler for the wasm and llvm targets, takes
+the source libraries named by its own arguments through every pass before
+infer-effects once, then serves builds with `--build-server`'s protocol, where a
+line may add a tab and the directory the build runs in. Each build runs in a child process forked from that state, which adds the
+program's files and finishes the compile, so no build sees another's work. A
+build can start from the snapshot only if its arguments, apart from `-o`,
+`--llvm-output` and the program's own source files, are the server's own in
+the same order, with the program's files after the libraries', and every
+library file still reads as it did when the snapshot was taken. Any other
+build is compiled cold by the compiler run afresh on its response file, so a
+build's result never depends on which path it took.
+`build/fork-server-equivalence.sh` compares the two paths. When the server
+ends it writes a line starting U+0001 and `fork-server` that counts the builds
+served from the snapshot and those compiled cold.
+
 ## Stripping annotations
 
 `--strip-annotations <selection> <files>` parses each file and prints it through
