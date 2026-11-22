@@ -21,6 +21,7 @@ set -uo pipefail
 
 root="${1:-integration-tests}"
 target=wasm
+test_flags="$(cd "$(dirname "$0")" && pwd)/test-flags.sh"
 compiler="$(pwd)/publish/ghul.dll"
 
 if ! command -v node >/dev/null 2>&1; then
@@ -40,15 +41,15 @@ trap 'rm -rf "$scratch"' EXIT
 checked=0
 failed=0
 
-# Every test under $root whose ghulflags name `--target $target`, printed
+# Every test under $root whose test.json flags name `--target $target`, printed
 # as its directory and its flags, tab-separated. A test that runs under the
-# target through a `targets` file is left to ghul-test, which builds it with
+# target through build_targets is left to ghul-test, which builds it with
 # the core library and runs it, so there is nothing an engine could add. A
 # `.targets` directory holds ghul-test's own copies of a test, not tests.
 tests_for_target() {
-    find "$root" -name ghulflags -not -path "*/.targets/*" | sort | while IFS= read -r flags_file; do
-        dir="$(dirname "$flags_file")"
-        flags="$(tr "\n" " " < "$flags_file")"
+    find "$root" -name test.json -not -path "*/.targets/*" | sort | while IFS= read -r settings_file; do
+        dir="$(dirname "$settings_file")"
+        flags="$("$test_flags" "$dir" "$target")"
 
         if [[ " $flags " == *" --target $target "* ]]; then
             printf "%s\t%s\n" "$dir" "$flags"
@@ -75,7 +76,7 @@ while IFS=$'\t' read -r dir flags_text; do
     fi
 
     # Compiled from the test's own directory, as ghul-test compiles it, so
-    # a path its ghulflags name is read from there.
+    # a path its flags name is read from there.
     if ! (cd "$dir" && dotnet "$compiler" "${flags[@]}" -o "$out/module.wasm" ./*.ghul) >"$out/compiler.out" 2>&1; then
         echo "wasm-validate: $dir did not compile:" >&2
         head -5 "$out/compiler.out" >&2

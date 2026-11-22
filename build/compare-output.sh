@@ -30,6 +30,7 @@ while [ $# -gt 0 ] ; do
 done
 
 ROOT=$(pwd)
+export TEST_FLAGS="$ROOT/build/test-flags.sh"
 
 if [ ! -f "$ROOT/ghul.ghulproj" ] ; then
     echo "run from the root of the compiler repository" >&2
@@ -66,7 +67,7 @@ fi
 
 {
     for t in "${TESTS[@]}" ; do
-        find "$ROOT/integration-tests/$t" -name ghulflags -not -path '*/argument-pack-grid/*' -printf '%h\n'
+        find "$ROOT/integration-tests/$t" -name test.json -not -path '*/argument-pack-grid/*' -not -path '*/.targets/*' -printf '%h\n'
     done
     if $SMOKE ; then
         grep -rlw smoke "$ROOT/integration-tests" --include=tags | xargs -r -n1 dirname
@@ -95,7 +96,7 @@ compile_one() {
     files=$(find . -name '*.ghul' | sort)
     [ -z "$files" ] && return
     # shellcheck disable=SC2086
-    dotnet "$compiler/ghul.dll" $extra $(cat ghulflags) $files -o "$out/$name.dll" > "$out/$name.log" 2>&1
+    dotnet "$compiler/ghul.dll" $extra $("$TEST_FLAGS" .) $files -o "$out/$name.dll" > "$out/$name.log" 2>&1
     echo $? > "$out/$name.status"
     rm -f "$out/$name.runtimeconfig.json"
 }

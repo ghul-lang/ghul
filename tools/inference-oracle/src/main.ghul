@@ -583,15 +583,35 @@ namespace InferenceOracle is
         result
     si
 
-    // The flags a program's `ghulflags` asks for, on one line.
+    // The compiler options a program's `test.json` asks for, on one line,
+    // as ghul-test passes them for a .NET build.
     program_flags(source: string) -> string is
-        let path = Path.combine(source, "ghulflags")
+        let path = Path.combine(source, "test.json")
 
         if !File.exists(path) then
             return ""
         fi
 
-        File.read_all_text(path).split(['\n', '\r', ' ']) |> filter(f => f.length > 0) |> map(f => quote(f)) |> join(" ")
+        let use document = System.Text.Json.JsonDocument.parse(File.read_all_text(path), _[System.Text.Json.JsonDocumentOptions])
+        let settings = document.root_element
+        let words = LIST[string]()
+        let value: System.Text.Json.JsonElement mut
+
+        if settings.try_get_property("check_only", value ref) /\ value.value_kind == System.Text.Json.JsonValueKind.TRUE then
+            words.add("--type-check")
+        fi
+
+        if settings.try_get_property("library", value ref) /\ value.value_kind == System.Text.Json.JsonValueKind.TRUE then
+            words.add("--library")
+        fi
+
+        if settings.try_get_property("flags", value ref) /\ value.value_kind == System.Text.Json.JsonValueKind.STRING then
+            for flag in value.get_string()!.split(['\n', '\r', ' ']) |> filter(f => f.length > 0) do
+                words.add(flag)
+            od
+        fi
+
+        words |> map(f => quote(f)) |> join(" ")
     si
 
     // The site counts `--annotate-inferred` reports on its standard error.

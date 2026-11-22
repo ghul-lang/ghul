@@ -23,6 +23,7 @@ set -uo pipefail
 
 root="${1:-integration-tests}"
 target=llvm
+test_flags="$(cd "$(dirname "$0")" && pwd)/test-flags.sh"
 compiler="$(pwd)/publish/ghul.dll"
 ghul_llvm="${GHUL_LLVM:-ghul-llvm}"
 
@@ -42,15 +43,15 @@ trap 'rm -rf "$scratch"' EXIT
 checked=0
 failed=0
 
-# Every test under $root whose ghulflags name `--target $target`, printed
+# Every test under $root whose test.json flags name `--target $target`, printed
 # as its directory and its flags, tab-separated. A test that runs under the
-# target through a `targets` file is left to ghul-test, run by a configuration
+# target through build_targets is left to ghul-test, run by a configuration
 # whose run_targets names llvm. A `.targets` directory holds ghul-test's own
 # copies of a test, not tests.
 tests_for_target() {
-    find "$root" -name ghulflags -not -path "*/.targets/*" | sort | while IFS= read -r flags_file; do
-        dir="$(dirname "$flags_file")"
-        flags="$(tr "\n" " " < "$flags_file")"
+    find "$root" -name test.json -not -path "*/.targets/*" | sort | while IFS= read -r settings_file; do
+        dir="$(dirname "$settings_file")"
+        flags="$("$test_flags" "$dir" "$target")"
 
         if [[ " $flags " == *" --target $target "* ]]; then
             printf "%s\t%s\n" "$dir" "$flags"

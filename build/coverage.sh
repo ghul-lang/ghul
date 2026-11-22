@@ -104,8 +104,8 @@ ensure_tool coverlet.console coverlet
 
 # ---- build the compiler with debug information -----------------------------
 # Only the integration and cross-assembly suites need publish/: they spawn
-# the compiler out of process, from a path each test's ghul.json names
-# explicitly. DebugType/DebugSymbols are what the ghūl MSBuild targets
+# the compiler out of process, from the publish/ the configuration in
+# ghul-test.json names. DebugType/DebugSymbols are what the ghūl MSBuild targets
 # consult to decide whether to pass --debug to the compiler; setting them
 # here rather than in ghul.ghulproj keeps ordinary builds, and the released
 # package, free of debug information and the JIT optimization it suppresses.
