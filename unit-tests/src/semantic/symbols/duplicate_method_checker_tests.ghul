@@ -1,0 +1,75 @@
+namespace Semantic.UnitTests is
+    use Collections.LIST
+
+    use Source.LOCATION
+
+    use Semantic.DUPLICATE_METHOD_CHECKER
+    use Semantic.Types.Type
+
+    use Semantic.Symbols.CLASS
+    use Semantic.Symbols.Function
+    use Semantic.Symbols.GLOBAL_FUNCTION
+    use Semantic.Symbols.INNATE_FUNCTION
+    use Semantic.Symbols.NAMESPACE
+
+    use Logging.DIAGNOSTICS_STORE
+
+    use Assertions
+
+    // Tests for DUPLICATE_METHOD_CHECKER: functions of one name declared
+    // with the same signature are duplicates, but the stand-ins registered
+    // for `@intrinsic` declarations are not declarations of their own.
+    class DUPLICATE_METHOD_CHECKER_TESTS is
+        _a: Type
+
+        init() is
+            _a = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "A", LIST[string](), Semantic.BLOCK_SCOPE()).type!
+        si
+
+        loc() -> LOCATION => LOCATION("test.ghul", 1, 1, 1, 1)
+
+        space(name: string) -> NAMESPACE => NAMESPACE(loc(), name, null, ".{name}", false)
+
+        at(line: int) -> LOCATION => LOCATION("test.ghul", line, 1, line, 1)
+
+        declaration(owner: NAMESPACE, line: int) -> GLOBAL_FUNCTION is
+            let result = GLOBAL_FUNCTION(at(line), at(line), owner, "f", Semantic.BLOCK_SCOPE())
+            result.arguments = LIST[Type]([_a])
+            return result
+        si
+
+        stand_in(owner: NAMESPACE, declaration: Function) -> INNATE_FUNCTION is
+            let result = INNATE_FUNCTION(declaration.location, owner, "f", owner, "host.f")
+            result.arguments = declaration.arguments
+            result.stands_in_for = declaration
+            return result
+        si
+
+        errors_for(functions: ARRAY[Function]) -> int is
+            let logger = DIAGNOSTICS_STORE()
+
+            DUPLICATE_METHOD_CHECKER(logger).check("f", LIST[Function](functions), "duplicate-function", "duplicate function")
+
+            return logger.error_count
+        si
+
+        @test()
+        Calling__check__with_two_declarations_of_one_signature__reports_each() is
+            let ns = space("N")
+
+            are_equal(2, errors_for([declaration(ns, 1), declaration(ns, 2)]))
+        si
+
+        // Two library types can each declare the same intrinsic: the
+        // stand-ins registered for them in one namespace share a signature.
+        @test()
+        Calling__check__with_two_stand_ins_of_one_signature__reports_nothing() is
+            let intrinsics = space("Intrinsics")
+
+            let first = stand_in(intrinsics, declaration(space("A"), 1))
+            let second = stand_in(intrinsics, declaration(space("B"), 2))
+
+            are_equal(0, errors_for([first, second]))
+        si
+    si
+si
