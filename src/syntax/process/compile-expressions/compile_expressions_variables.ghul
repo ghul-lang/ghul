@@ -230,7 +230,14 @@ namespace Syntax.Process is
                             fi
                         fi
                     fi
-                elif
+                fi
+
+                // A written type is checked against the value on a walk
+                // after the one that installs it. A destructure leaf that
+                // writes its own type may be walked only once, so it is
+                // checked on the installing walk too.
+                if
+                    (!needs_set \/ (left.type_expression? /\ !left.is_refutable)) /\
                     left_state.explicit_type? /\
                     left_state.right_value? /\
                     Value.check_is_consumable(_logger, right_location, left_state.right_value)
@@ -246,7 +253,27 @@ namespace Syntax.Process is
                         _overload_resolver.match_propagator.propagate_match(explicit_type, right_value.type)
                     fi
 
-                    if
+                    // A destructure leaf's value is the element it reads,
+                    // so a number widens into the leaf's written type here,
+                    // as an initializer does into a typed local.
+                    left_state.widening = null
+                    left_state.widening_operand = null
+
+                    let operand = IR.Values.WRAPPER(IR.Values.DUMMY(right_value.type!, left.location))
+
+                    let widened =
+                        if !left.is_refutable /\ !explicit_type.is_assignable_from(right_value.type!) then
+                            widen_value(left.location, operand, explicit_type)
+                        else
+                            null
+                        fi
+
+                    if widened? then
+                        operand.value = right_value
+                        left_state.right_value = widened
+                        left_state.widening = widened
+                        left_state.widening_operand = operand
+                    elif
                         !left.is_refutable /\
                         !explicit_type.is_assignable_from(right_value.type!)
                     then
@@ -256,9 +283,18 @@ namespace Syntax.Process is
                         // typically wider than `T`, and the cast may
                         // fail — that's the whole point of the
                         // construct.
+                        // A destructure leaf's own type is the annotation
+                        // the element contradicts, so the error is there.
+                        let location =
+                            if let leaf_type = left.type_expression then
+                                leaf_type.location
+                            else
+                                left_state.variable_location!
+                            fi
+
                         use IoC.CONTAINER.instance.name_display.qualifying_alike(right_value.type, explicit_type)
                         _logger.error(
-                            left_state.variable_location!,
+                            location,
                             "cannot-convert-type", "'{right_value.type}' is not assignable to '{explicit_type}'")
                     fi
                 fi
@@ -315,6 +351,8 @@ namespace Syntax.Process is
                 if let aggregate = _variable_left_state.get_or_add(left).explicit_type then
                     _prepare_argument_sequences(left, aggregate)
                 fi
+
+                check_argument_leaf_types(left)
 
                 return true
             fi
@@ -574,6 +612,51 @@ namespace Syntax.Process is
             elif elements |> any(e => e.has_sequence_group) then
                 _logger.error(left.location, "sequence-pattern-not-allowed", "a sequence pattern is not allowed here")
             fi
+        si
+
+        // A leaf of a destructured parameter that writes its own type is
+        // typed by it, and checked against the element it reads exactly as
+        // a `let` leaf is: the element must be assignable to it, or widen
+        // into it. The element's type is the one the parameter's aggregate
+        // gave the leaf, kept as the leaf's source until a walk finds the
+        // leaf already at its written type.
+        check_argument_leaf_types(left: Trees.Variables.VariableLeft) is
+            let elements = left.elements
+
+            if !elements? then
+                return
+            fi
+
+            for element in elements do
+                if !element.is_simple_name then
+                    check_argument_leaf_types(element)
+                elif
+                    let te = element.type_expression,
+                    symbol = find(element.name!) /\
+                    isa Semantic.Types.SettableTyped(symbol)
+                then
+                    te.walk(self)
+
+                    let leaf_state = _variable_left_state.get_or_add(element)
+
+                    if let written = te.type /\ !written.is_error then
+                        if
+                            let element_type = symbol.type /\
+                            (!leaf_state.right_value? \/ element_type.compare(written) != Semantic.Types.MATCH.SAME)
+                        then
+                            leaf_state.right_value = IR.Values.DUMMY(element_type, element.location)
+                        fi
+
+                        leaf_state.explicit_type = written
+                        leaf_state.variable_location = element.location
+                        leaf_state.right_location = element.location
+
+                        (cast Semantic.Types.SettableTyped(symbol)).set_type(written)
+
+                        element.walk(self)
+                    fi
+                fi
+            od
         si
 
         // The element walk of a sequence pattern over a lazy sequence:

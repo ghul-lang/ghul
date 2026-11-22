@@ -627,7 +627,7 @@ add_pair((a, b): (int, int)) -> int => a + b;
 add_pair((3, 4));    // 7
 ```
 
-Patterns can nest, and can be mixed with ordinary parameters: `f(x: int, (a, b): (int, int), y: int)`. A namespace-scope function written with a pattern has types in its signature, so the type of the whole pattern is required. The element types come from the type of the whole pattern, so write the elements as plain names. The type of the whole pattern can be any type that can be destructured positionally: a tuple, or a type with a matching `deconstruct(...)` method. A formal argument list does not support the by-name group form (`(x = field, ...)`).
+Patterns can nest, and can be mixed with ordinary parameters: `f(x: int, (a, b): (int, int), y: int)`. A namespace-scope function written with a pattern has types in its signature, so the type of the whole pattern is required. The element types come from the type of the whole pattern. An element can also write its own type, as in a `let` destructure: the element must be assignable to it or widen into it, so `(x: double, y): (int, int)` gives `x` the type `double`, and `(x: string, y): (int, int)` is an error. The type of the whole pattern can be any type that can be destructured positionally: a tuple, or a type with a matching `deconstruct(...)` method. A formal argument list does not support the by-name group form (`(x = field, ...)`).
 
 Functions are first-class values. A function literal has the same form as a function, without a name. The compiler usually *infers* its argument types and return type from the body and from the context of the literal, so they are usually written without annotations. Either can be written explicitly. A literal with one argument needs no parentheses around it. `A -> B` is the type of a function from `A` to `B`.
 
@@ -663,7 +663,7 @@ let pairs = [(1, 2), (3, 4)];
 pairs |> map(((a, b)) => a + b);          // element types inferred from the sequence
 ```
 
-The single-parameter shorthand without parentheses (`x => …`) cannot have a pattern, and cannot have a type annotation. Both need the parentheses. Unlike in a named function, the compiler usually infers the type of the whole pattern, from the sequence or slot that the literal is passed to, or from how the parameter is used. Write the type explicitly when nothing gives it. As for a named function, the type can be any type that can be destructured positionally, and the elements are written as plain names. The type of the whole pattern accepts the full type syntax:
+The single-parameter shorthand without parentheses (`x => …`) cannot have a pattern, and cannot have a type annotation. Both need the parentheses. Unlike in a named function, the compiler usually infers the type of the whole pattern, from the sequence or slot that the literal is passed to, or from how the parameter is used. Write the type explicitly when nothing gives it. As for a named function, the type can be any type that can be destructured positionally, and an element can write its own type, checked against the element in the same way. The type of the whole pattern accepts the full type syntax:
 
 ```ghul
 let add = ((a, b): (int, int)) => a + b;
