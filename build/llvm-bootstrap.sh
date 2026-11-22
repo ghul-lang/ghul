@@ -12,6 +12,13 @@
 # libraries/, where CI puts it. ghul-llvm has to be on the PATH, or named
 # by GHUL_LLVM. The passes are written to a temporary directory, or to
 # LLVM_BOOTSTRAP_DIR where it is set, which is then kept.
+#
+# With LLVM_BOOTSTRAP_DIR set, LLVM_BOOTSTRAP_STEP splits the work in two:
+# `pass-1` builds the first pass and stops, so it can be used while the
+# second is built, and `rest` builds the second pass from the first pass
+# already in the directory, <dir>/pass-1/ghul, and makes every check. The
+# two steps can run on different machines: each lists the sources itself.
+# Unset, it does both.
 
 set -euo pipefail
 
@@ -19,6 +26,18 @@ root=$(cd "$(dirname "$0")/.." && pwd)
 
 compiler=${1:-$root/publish/ghul.dll}
 runtime=${2:-$root/libraries/ghul-runtime}
+
+step=${LLVM_BOOTSTRAP_STEP:-all}
+
+case "$step" in
+    all|pass-1|rest) ;;
+    *) echo "LLVM_BOOTSTRAP_STEP must be pass-1 or rest, not $step" >&2; exit 2 ;;
+esac
+
+if [ "$step" != all ] && [ -z "${LLVM_BOOTSTRAP_DIR:-}" ]; then
+    echo "LLVM_BOOTSTRAP_STEP needs LLVM_BOOTSTRAP_DIR, where the first pass is kept" >&2
+    exit 2
+fi
 
 if [ -n "${LLVM_BOOTSTRAP_DIR:-}" ]; then
     work=$LLVM_BOOTSTRAP_DIR
@@ -28,15 +47,27 @@ else
     trap 'rm -rf "$work"' EXIT
 fi
 
-"$root/build/llvm-self-sources.sh" "$work" "$runtime"
-
 cd "$root"
 
 build() {
     "$root/build/llvm-build-pass.sh" "$work" "$@"
 }
 
-build pass-1 dotnet "$compiler"
+"$root/build/llvm-self-sources.sh" "$work" "$runtime"
+
+if [ "$step" != rest ]; then
+    build pass-1 dotnet "$compiler"
+fi
+
+if [ "$step" = pass-1 ]; then
+    exit 0
+fi
+
+if [ ! -x "$work/pass-1/ghul" ]; then
+    echo "there is no first pass in $work to build the second from" >&2
+    exit 1
+fi
+
 build pass-2 "$work/pass-1/ghul"
 
 status=0
