@@ -5,7 +5,7 @@
 #
 # An llvm build links the program against musl and libghul statically, so
 # it should need nothing from the machine it runs on: no dynamic loader, no
-# shared libraries, no files. A test whose ghulflags ask for
+# shared libraries, no files. A test whose test.json flags ask for
 # `--llvm-link-mode dynamic` is linked against the system's glibc on purpose,
 # and is left out. `collect` gathers each program ghul-test kept
 # (run with GHUL_TEST_KEEP_ARTIFACTS set) with its arguments, input and
@@ -45,7 +45,7 @@ collect() {
 
         # A program that reads a file the compiler wrote while building it,
         # such as an inference trace, has nothing to read in an empty image.
-        if grep -qs -e '--trace-inference-file' "$dir/ghulflags" "${dir%%/.targets/*}/ghulflags"; then
+        if grep -qs -e '--trace-inference-file' "$dir/test.json" "${dir%%/.targets/*}/test.json"; then
             continue
         fi
 
@@ -53,7 +53,7 @@ collect() {
         # empty image does not have. A run of a test under one of its targets
         # sits somewhere under the test's .targets/, and the flags are the
         # test's own.
-        if grep -qs -e '--llvm-link-mode dynamic' "$dir/ghulflags" "${dir%%/.targets/*}/ghulflags"; then
+        if grep -qs -e '--llvm-link-mode dynamic' "$dir/test.json" "${dir%%/.targets/*}/test.json"; then
             continue
         fi
 

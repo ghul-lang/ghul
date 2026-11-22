@@ -26,7 +26,7 @@ dotnet ghul-test integration-tests/execution/argument-pack-grid
 for t in integration-tests/execution/argument-pack-grid/*/ ; do [ -f "$t/failed" ] && ./tasks/capture.sh "$t" ; done
 ```
 
-`generate` also removes any cell directory the grid no longer has. A cell whose combinators are declared over a .NET type, such as the delegate positions' `System.Converter`, gets a `targets` file naming `dotnet`, so a run that builds every test for another target passes it over.
+`generate` also removes any cell directory the grid no longer has. A cell whose combinators are declared over a .NET type, such as the delegate positions' `System.Converter`, gets a `test.json` whose `build_targets` name only `dotnet`, so a run that builds every test for another target passes it over.
 
 ## Reporting
 

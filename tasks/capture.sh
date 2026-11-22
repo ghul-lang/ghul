@@ -7,7 +7,7 @@ if [ ! -d $CASE ] ; then
     exit 1;
 fi
 
-if [ ! -f $CASE/ghulflags ] ; then
+if [ ! -f $CASE/test.json ] ; then
     echo "not run from a test case project"
     exit 1;
 fi
@@ -36,18 +36,11 @@ promote() {
     fi
 }
 
-# Matches how the runner reads the same flag, so the two cannot drift on
-# what counts as a library.
+# Matches how the runner reads the same setting, so the two cannot drift on
+# what counts as a library: test.json's library, or `--library` in its flags.
 is_library() {
-    local flag
-
-    for flag in $(cat "$CASE/ghulflags" 2>/dev/null) ; do
-        if [ "$flag" = "--library" ] ; then
-            return 0
-        fi
-    done
-
-    return 1
+    jq -e '.library == true or (((.flags // "") | split(" ")) | index("--library") != null)' \
+        "$CASE/test.json" >/dev/null 2>&1
 }
 
 # The runner compares text output ignoring whitespace, so a test whose output
