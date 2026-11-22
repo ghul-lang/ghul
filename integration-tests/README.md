@@ -180,11 +180,10 @@ PATH="$(dirname "$(build/ghul-llvm.sh /tmp/ghul-llvm)"):$PATH" \
 
 `build/ghul-llvm.sh` fetches the latest ghul-llvm release, as a user's build
 fetches it, and prints where its executable is. The CI job runs the tests in an image with no C compiler,
-linker or C library, and then runs each program again in an empty image with
-`build/llvm-programs.sh`, which fails any program that is not fully static.
+linker or C library.
 
 In CI the suite is built mainly for `llvm`, by the native compiler the run's
-first llvm bootstrap pass builds, placed in `hosts/llvm/`, through fork
+llvm lineage builds from the released native compiler (its stage 2), placed in `hosts/llvm/`, through fork
 servers. `ci-native-all` builds every test for `llvm` unoptimised, together
 with every `wasm` run, and `ci-native` builds the tests whose `build_targets`
 name `llvm` optimised as well. A test whose `build_targets` leave `llvm` out

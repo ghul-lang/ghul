@@ -58,14 +58,6 @@ concurrency:
 
 env:
   CI: true
-  # Where a release's llvm-built compilers come from. `chain`: the
-  # llvm_chain jobs, which build from the newest released llvm-built
-  # compiler and are checked byte for byte against the .NET-seeded build;
-  # llvm_chain_compare chooses each platform's archive by
-  # build/llvm-release-select.sh, and the release notes say where one comes
-  # from .NET alone or is left out. `bootstrap`: the .NET-seeded
-  # llvm_bootstrap jobs' archives, as releases carried before the chain.
-  LLVM_RELEASE_FROM: chain
   DOTNET_SKIP_FIRST_TIME_EXPERIENCE: 1
   DOTNET_CLI_TELEMETRY_OPTOUT: 1
   DOTNET_NOLOGO: 1
@@ -100,7 +92,7 @@ jobs:
     # The libraries every job in this run builds against, chosen once here
     # so that a release of either during the run can't give two jobs two
     # different versions: jobs whose outputs are compared, such as the
-    # native chain and the .NET-seeded llvm build, must have compiled the
+    # llvm lineage and the native compiler the .NET lineage builds, must have compiled the
     # same runtime and linked with the same ghul-llvm. The runtime is the
     # release a user of this compiler would get, chosen as ghul-cli chooses
     # it, so a run tests that pairing; a scheduled run takes the head
@@ -209,21 +201,15 @@ jobs:
           curl -sI -o /dev/null -w '%{http_code}' --retry 5 --retry-delay 5 --connect-timeout 30 --max-time 120 "$1"
         }
 
-        # The llvm-built compilers the merged pull request's run built: from
-        # llvm_bootstrap, where x64's is required and arm64's is optional, or
-        # with LLVM_RELEASE_FROM=chain what llvm_chain_compare chose for each
-        # platform, both optional, a missing one said in the notes.
+        # The native compilers the merged pull request's run built and
+        # tested: the llvm lineage's stage 2 for each platform.
         carry_llvm() {
-          if [ "${LLVM_RELEASE_FROM}" = chain ]; then
-            local triple
-            for triple in x86_64-unknown-linux-musl aarch64-unknown-linux-musl; do
-              gh run download "$1" -n "ghul-compiler-llvm-release-${triple}" -D "carried/llvm-release-${triple}" 2>/dev/null \
-                || echo "::warning::pull request run $1 chose no llvm-built compiler for ${triple}; the release will not carry one"
-            done
-          else
-            gh run download "$1" -n ghul-compiler-llvm -D carried/llvm 2>/dev/null \
-              && [ -f "carried/llvm/ghul-compiler-llvm-x86_64-unknown-linux-musl.tar.gz" ]
-          fi
+          local triple
+          for triple in x86_64-unknown-linux-musl aarch64-unknown-linux-musl; do
+            gh run download "$1" -n "ghul-compiler-llvm-${triple}" -D "carried/llvm-${triple}" 2>/dev/null \
+              && [ -f "carried/llvm-${triple}/ghul-compiler-llvm-${triple}.tar.gz" ] \
+              || return 1
+          done
         }
 
         resolve_latest() {
@@ -296,12 +282,6 @@ jobs:
              && [ -f "carried/wasm/ghul-compiler-wasm.tar.gz" ]; then
             compiler=$(tr -d '[:space:]' < carried/bootstrap-compiler-version.txt)
             build=false
-            # The arm64 archive is carried where the run built it, and
-            # otherwise left out, as that run's job was allowed to fail.
-            if [ "${LLVM_RELEASE_FROM}" != chain ]; then
-              gh run download "${run}" -n ghul-compiler-llvm-arm64 -D carried/llvm-arm64 2>/dev/null \
-                || echo "::warning::pull request run ${run} built no arm64 llvm-built compiler; the release will not carry one"
-            fi
             echo "carrying the packages pull request #${pr} built and tested in run ${run}, whose tested tree is this commit's"
           else
             echo "::warning::no successful pull request run tested tree ${tree} and packed ${{ steps.version.outputs.package }} (pull request ${pr:-not found}, run ${run:-not found}); building and testing here"
@@ -347,33 +327,19 @@ jobs:
         name: ghul-compiler-aot
         path: carried/aot/
 
-    - name: Upload the carried llvm-built compiler archive
-      if: steps.compiler_version.outputs.build == 'false' && env.LLVM_RELEASE_FROM != 'chain'
+    - name: Upload the carried x64 native compiler
+      if: steps.compiler_version.outputs.build == 'false'
       uses: actions/upload-artifact@v7
       with:
-        name: ghul-compiler-llvm
-        path: carried/llvm/
+        name: ghul-compiler-llvm-x86_64-unknown-linux-musl
+        path: carried/llvm-x86_64-unknown-linux-musl/
 
-    - name: Upload the carried arm64 llvm-built compiler archive
-      if: steps.compiler_version.outputs.build == 'false' && env.LLVM_RELEASE_FROM != 'chain' && hashFiles('carried/llvm-arm64/*.tar.gz') != ''
+    - name: Upload the carried arm64 native compiler
+      if: steps.compiler_version.outputs.build == 'false'
       uses: actions/upload-artifact@v7
       with:
-        name: ghul-compiler-llvm-arm64
-        path: carried/llvm-arm64/
-
-    - name: Upload the carried x64 llvm-built compiler choice
-      if: steps.compiler_version.outputs.build == 'false' && env.LLVM_RELEASE_FROM == 'chain' && hashFiles('carried/llvm-release-x86_64-unknown-linux-musl/*') != ''
-      uses: actions/upload-artifact@v7
-      with:
-        name: ghul-compiler-llvm-release-x86_64-unknown-linux-musl
-        path: carried/llvm-release-x86_64-unknown-linux-musl/
-
-    - name: Upload the carried arm64 llvm-built compiler choice
-      if: steps.compiler_version.outputs.build == 'false' && env.LLVM_RELEASE_FROM == 'chain' && hashFiles('carried/llvm-release-aarch64-unknown-linux-musl/*') != ''
-      uses: actions/upload-artifact@v7
-      with:
-        name: ghul-compiler-llvm-release-aarch64-unknown-linux-musl
-        path: carried/llvm-release-aarch64-unknown-linux-musl/
+        name: ghul-compiler-llvm-aarch64-unknown-linux-musl
+        path: carried/llvm-aarch64-unknown-linux-musl/
 
     - name: Upload the carried wasm-built compiler archive
       if: steps.compiler_version.outputs.build == 'false'
@@ -503,7 +469,7 @@ jobs:
 
   bootstrap:
     needs: [version]
-    name: Bootstrap compiler
+    name: .NET lineage - build from the released .NET compiler
     if: needs.version.outputs.build == 'true'
 
     # Three sequential compiler passes, and the compiler does not
@@ -727,325 +693,120 @@ jobs:
         ANALYSIS_TESTS_COMPILER_DLL: ${{ github.workspace }}/bootstrap-tool/ghul.dll
       run: dotnet test analysis-tests -p:SkipCompilerProjectRef=true
 
-  # The compiler's own source type-checked for the llvm target, against the
-  # runtime library's core and runtime sources a native build of it
-  # compiles in, so a gap in either, or a .NET-only declaration left
-  # uncarved, fails the pull request rather than the next native build of
-  # the compiler.
-  llvm_self_type_check:
-    needs: [version, bootstrap]
+  # The llvm lineage: the compiler built for llvm by the native compiler of
+  # the release the .NET lineage bootstraps from, as `bootstrap` builds it
+  # for .NET from that release's .NET compiler. Stage 0, the released native
+  # compiler, builds this source (stage 1), and stage 1 builds it again
+  # (stage 2). Stage 2 is the compiler the llvm and Rosetta Code tests run on
+  # and the one a release ships. llvm_fixed_point checks that it rebuilds
+  # itself, and llvm_cross_check that the .NET lineage builds the same
+  # binary. Every release carries a native compiler for each platform, so a
+  # stage 0 that cannot be fetched, or cannot build this source, fails the
+  # run.
+  llvm_lineage:
+    needs: [version]
     if: needs.version.outputs.build == 'true'
-    name: Type-check the compiler for llvm
-
-    runs-on: ubuntu-latest
-
-    timeout-minutes: 15
-
-    steps:
-    - uses: actions/checkout@v7
-
-    - name: Set up .NET 10
-      uses: actions/setup-dotnet@v6
-      with:
-        dotnet-version: '10.0.x'
-
-    - name: Download bootstrap compiler tool tree
-      uses: actions/download-artifact@v8
-      with:
-        name: ghul-compiler-tool
-        path: publish
-
-    - name: Restore local .NET tools
-      run: dotnet tool restore
-
-    # The runtime the version job chose for the whole run.
-    - name: Checkout ghul-runtime
-      uses: actions/checkout@v7
-      with:
-        repository: ghul-lang/ghul-runtime
-        path: libraries/ghul-runtime
-        ref: ${{ needs.version.outputs.runtime }}
-
-    - name: Type-check the compiler's source for llvm
-      run: build/llvm-self-type-check.sh
-
-    # ghul-project.json describes the same source for an editor analysing
-    # it with a compiler not hosted on .NET; the pinned ghul.cli must load
-    # it, and it must list what the native build compiles.
-    - name: Check ghul-project.json
-      run: build/manifest-check.sh
-
-  # The compiler reproduces itself on the llvm target, as bootstrap does on
-  # .NET: the bootstrapped compiler builds a native compiler from its own
-  # source, which builds the same source again, and the two passes must
-  # write the same module and the same executable. Run on the full suite
-  # only, as each pass is a full native build of the compiler.
-  # Pass 1 of the llvm bootstrap: the native compiler the PR's .NET compiler
-  # builds from this source. The native test shards build with it, starting
-  # while llvm_bootstrap builds pass 2 from it. llvm_bootstrap fails, and so
-  # the Gate, unless pass 2 is byte for byte this pass, so a run that can
-  # merge has tested the compiler that reproduces itself.
-  llvm_pass_1:
-    needs: [version, bootstrap]
-    if: needs.version.outputs.build == 'true'
-    name: Build the compiler natively
-
-    runs-on: ubuntu-latest
-
-    timeout-minutes: 20
-
-    steps:
-    - uses: actions/checkout@v7
-
-    - name: Set up .NET 10
-      uses: actions/setup-dotnet@v6
-      with:
-        dotnet-version: '10.0.x'
-
-    - name: Download bootstrap compiler tool tree
-      uses: actions/download-artifact@v8
-      with:
-        name: ghul-compiler-tool
-        path: publish
-
-    - name: Restore local .NET tools
-      run: dotnet tool restore
-
-    # The runtime the version job chose for the whole run.
-    - name: Checkout ghul-runtime
-      uses: actions/checkout@v7
-      with:
-        repository: ghul-lang/ghul-runtime
-        path: libraries/ghul-runtime
-        ref: ${{ needs.version.outputs.runtime }}
-
-    - name: Fetch ghul-llvm
-      run: |
-        ghul_llvm="$(build/ghul-llvm.sh "$RUNNER_TEMP/ghul-llvm" "${{ needs.version.outputs.ghul_llvm }}")"
-        test -x "$ghul_llvm"
-        dirname "$ghul_llvm" >> "$GITHUB_PATH"
-
-    - name: Build the compiler natively
-      env:
-        LLVM_BOOTSTRAP_DIR: ${{ runner.temp }}/llvm-bootstrap
-        LLVM_BOOTSTRAP_STEP: pass-1
-        GHUL_NATIVE_VERSION: ${{ needs.version.outputs.package }}
-      run: build/llvm-bootstrap.sh
-
-    # The executable and its module, which llvm_bootstrap compares with pass
-    # 2's. A tarball keeps the executable bit an artifact would lose.
-    - name: Pack pass 1
-      run: tar -C "${{ runner.temp }}/llvm-bootstrap" -czf llvm-pass-1.tar.gz pass-1/ghul pass-1/ghul.ll
-
-    - uses: actions/upload-artifact@v7
-      with:
-        name: ghul-compiler-llvm-pass-1
-        path: llvm-pass-1.tar.gz
-        retention-days: 1
-
-  llvm_bootstrap:
-    needs: [version, bootstrap, llvm_pass_1]
-    if: needs.version.outputs.build == 'true'
-    name: Bootstrap the compiler on llvm
-
-    runs-on: ubuntu-latest
-
-    timeout-minutes: 45
-
-    steps:
-    - uses: actions/checkout@v7
-
-    - name: Set up .NET 10
-      uses: actions/setup-dotnet@v6
-      with:
-        dotnet-version: '10.0.x'
-
-    - name: Download bootstrap compiler tool tree
-      uses: actions/download-artifact@v8
-      with:
-        name: ghul-compiler-tool
-        path: publish
-
-    - name: Restore local .NET tools
-      run: dotnet tool restore
-
-    # The runtime the version job chose for the whole run.
-    - name: Checkout ghul-runtime
-      uses: actions/checkout@v7
-      with:
-        repository: ghul-lang/ghul-runtime
-        path: libraries/ghul-runtime
-        ref: ${{ needs.version.outputs.runtime }}
-
-    - name: Fetch ghul-llvm
-      run: |
-        ghul_llvm="$(build/ghul-llvm.sh "$RUNNER_TEMP/ghul-llvm" "${{ needs.version.outputs.ghul_llvm }}")"
-        test -x "$ghul_llvm"
-        dirname "$ghul_llvm" >> "$GITHUB_PATH"
-
-    - name: Download pass 1
-      uses: actions/download-artifact@v8
-      with:
-        name: ghul-compiler-llvm-pass-1
-
-    - name: Unpack pass 1
-      run: mkdir -p "${{ runner.temp }}/llvm-bootstrap" && tar -C "${{ runner.temp }}/llvm-bootstrap" -xzf llvm-pass-1.tar.gz
-
-    - name: Build the compiler again with pass 1 and compare
-      env:
-        LLVM_BOOTSTRAP_DIR: ${{ runner.temp }}/llvm-bootstrap
-        LLVM_BOOTSTRAP_STEP: rest
-        GHUL_NATIVE_VERSION: ${{ needs.version.outputs.package }}
-      run: build/llvm-bootstrap.sh
-
-    # The unit tests on the ghul-testing runner, built for llvm from the
-    # compiler's own sources by the native compiler that pass 2 produced.
-    - name: Checkout ghul-testing
-      uses: actions/checkout@v7
-      with:
-        repository: ghul-lang/ghul-testing
-        path: libraries/ghul-testing
-        ref: ${{ needs.version.outputs.testing }}
-
-    - name: Run the unit tests on llvm
-      run: build/llvm-unit-tests.sh "${{ runner.temp }}/llvm-bootstrap" libraries/ghul-testing "${{ runner.temp }}/llvm-bootstrap/pass-2/ghul"
-
-    # Pass 2's module and executable, hashed for llvm_chain_compare.
-    - name: Hash pass 2
-      shell: bash
-      run: |
-        set -euo pipefail
-        (cd "${{ runner.temp }}/llvm-bootstrap/pass-2" && sha256sum ghul.ll ghul) > llvm-bootstrap-x86_64-unknown-linux-musl.sha256
-
-    - uses: actions/upload-artifact@v7
-      with:
-        name: llvm-bootstrap-sums-x86_64-unknown-linux-musl
-        path: llvm-bootstrap-x86_64-unknown-linux-musl.sha256
-
-    # The native compiler the second pass built, packed as the Native AOT
-    # compiler is so ghul-cli installs either the same way: the executable
-    # as `ghul-compiler` in a `ghul-compiler` directory. It compiles for wasm and llvm.
-    # Carried by the release build from the pull request run that built it.
-    - name: Pack the llvm-built compiler
-      shell: bash
-      run: |
-        set -euo pipefail
-        compiler="${{ runner.temp }}/llvm-bootstrap/pass-2/ghul"
-        # The release depends on the binary reporting the version it is
-        # published as.
-        test "$("$compiler")" = "ghūl ${{ needs.version.outputs.package }} llvm"
-        mkdir -p llvm-compiler/ghul-compiler
-        cp "$compiler" llvm-compiler/ghul-compiler/ghul-compiler
-        tar -C llvm-compiler -czf ghul-compiler-llvm-x86_64-unknown-linux-musl.tar.gz ghul-compiler
-        sha256sum ghul-compiler-llvm-x86_64-unknown-linux-musl.tar.gz > ghul-compiler-llvm-x86_64-unknown-linux-musl.tar.gz.sha256
-
-    - uses: actions/upload-artifact@v7
-      with:
-        name: ghul-compiler-llvm
-        path: |
-          ghul-compiler-llvm-x86_64-unknown-linux-musl.tar.gz
-          ghul-compiler-llvm-x86_64-unknown-linux-musl.tar.gz.sha256
-
-  # llvm_bootstrap on an arm64 runner with ghul-llvm's aarch64 release: the
-  # native compiler for linux-arm64, built and checked the same way and
-  # carried into the release beside the x64 one. Not in the Gate's needs, and
-  # allowed to fail without failing the run, so an arm64 gap or an
-  # unavailable arm runner does not hold every pull request; a release made
-  # without its archive says so in its notes.
-  llvm_bootstrap_arm64:
-    needs: [version, bootstrap]
-    if: needs.version.outputs.build == 'true'
-    name: Bootstrap the compiler on llvm (arm64)
-
-    runs-on: ubuntu-26.04-arm
-
-    continue-on-error: true
-
-    timeout-minutes: 45
-
-    steps:
-    - uses: actions/checkout@v7
-
-    - name: Set up .NET 10
-      uses: actions/setup-dotnet@v6
-      with:
-        dotnet-version: '10.0.x'
-
-    - name: Download bootstrap compiler tool tree
-      uses: actions/download-artifact@v8
-      with:
-        name: ghul-compiler-tool
-        path: publish
-
-    - name: Restore local .NET tools
-      run: dotnet tool restore
-
-    - name: Checkout ghul-runtime
-      uses: actions/checkout@v7
-      with:
-        repository: ghul-lang/ghul-runtime
-        path: libraries/ghul-runtime
-        ref: ${{ needs.version.outputs.runtime }}
-
-    - name: Fetch ghul-llvm
-      run: |
-        ghul_llvm="$(build/ghul-llvm.sh "$RUNNER_TEMP/ghul-llvm" "${{ needs.version.outputs.ghul_llvm }}")"
-        test -x "$ghul_llvm"
-        "$ghul_llvm" --version
-        dirname "$ghul_llvm" >> "$GITHUB_PATH"
-
-    - name: Build the compiler natively twice and compare
-      env:
-        LLVM_BOOTSTRAP_DIR: ${{ runner.temp }}/llvm-bootstrap
-        GHUL_NATIVE_VERSION: ${{ needs.version.outputs.package }}
-      run: build/llvm-bootstrap.sh
-
-    # Pass 2's module and executable, hashed for llvm_chain_compare.
-    - name: Hash pass 2
-      shell: bash
-      run: |
-        set -euo pipefail
-        (cd "${{ runner.temp }}/llvm-bootstrap/pass-2" && sha256sum ghul.ll ghul) > llvm-bootstrap-aarch64-unknown-linux-musl.sha256
-
-    - uses: actions/upload-artifact@v7
-      with:
-        name: llvm-bootstrap-sums-aarch64-unknown-linux-musl
-        path: llvm-bootstrap-aarch64-unknown-linux-musl.sha256
-
-    - name: Pack the llvm-built compiler
-      shell: bash
-      run: |
-        set -euo pipefail
-        compiler="${{ runner.temp }}/llvm-bootstrap/pass-2/ghul"
-        test "$("$compiler")" = "ghūl ${{ needs.version.outputs.package }} llvm"
-        mkdir -p llvm-compiler/ghul-compiler
-        cp "$compiler" llvm-compiler/ghul-compiler/ghul-compiler
-        tar -C llvm-compiler -czf ghul-compiler-llvm-aarch64-unknown-linux-musl.tar.gz ghul-compiler
-        sha256sum ghul-compiler-llvm-aarch64-unknown-linux-musl.tar.gz > ghul-compiler-llvm-aarch64-unknown-linux-musl.tar.gz.sha256
-
-    - uses: actions/upload-artifact@v7
-      with:
-        name: ghul-compiler-llvm-arm64
-        path: |
-          ghul-compiler-llvm-aarch64-unknown-linux-musl.tar.gz
-          ghul-compiler-llvm-aarch64-unknown-linux-musl.tar.gz.sha256
-
-  # The compiler built from a chain that starts at the newest released
-  # llvm-built compiler instead of at .NET: build/llvm-chain.sh, per
-  # platform. A second route to the binary llvm_bootstrap ships, so that a
-  # miscompile in either the released native compiler or the .NET one shows
-  # as a difference. Ships nothing, holds no pull request: not in the Gate,
-  # and allowed to fail without failing the run.
-  llvm_chain:
-    needs: [version, bootstrap]
-    if: needs.version.outputs.build == 'true'
-    name: Build the compiler from the released native one (${{ matrix.triple }})
+    name: llvm lineage - build from the released native compiler (${{ matrix.triple }})
 
     runs-on: ${{ matrix.runner }}
 
-    continue-on-error: true
+    timeout-minutes: 20
 
-    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            triple: x86_64-unknown-linux-musl
+          - runner: ubuntu-26.04-arm
+            triple: aarch64-unknown-linux-musl
+
+    steps:
+    - uses: actions/checkout@v7
+
+    # The runtime the version job chose for the whole run.
+    - name: Checkout ghul-runtime
+      uses: actions/checkout@v7
+      with:
+        repository: ghul-lang/ghul-runtime
+        path: libraries/ghul-runtime
+        ref: ${{ needs.version.outputs.runtime }}
+
+    - name: Fetch ghul-llvm
+      run: |
+        ghul_llvm="$(build/ghul-llvm.sh "$RUNNER_TEMP/ghul-llvm" "${{ needs.version.outputs.ghul_llvm }}")"
+        test -x "$ghul_llvm"
+        dirname "$ghul_llvm" >> "$GITHUB_PATH"
+
+    # Stage 0: the native compiler released with the .NET compiler the
+    # version job chose, checked against the sha256 published beside it.
+    - name: Fetch the released native compiler
+      id: stage0
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        set -euo pipefail
+        release="v${{ needs.version.outputs.compiler }}"
+        archive="ghul-compiler-llvm-${{ matrix.triple }}.tar.gz"
+        mkdir -p "$RUNNER_TEMP/stage-0"
+        cd "$RUNNER_TEMP/stage-0"
+        if ! gh release download "$release" --repo "${{ github.repository }}" --pattern "$archive" --pattern "$archive.sha256"; then
+          echo "::error::release $release carries no native compiler for ${{ matrix.triple }}"
+          exit 1
+        fi
+        sha256sum --check --quiet "$archive.sha256"
+        tar -xzf "$archive"
+        echo "stage 0 for ${{ matrix.triple }}: the native compiler released in $release" >> "$GITHUB_STEP_SUMMARY"
+        echo "compiler=$RUNNER_TEMP/stage-0/ghul-compiler/ghul-compiler" >> "$GITHUB_OUTPUT"
+
+    - name: Build stages 1 and 2
+      env:
+        GHUL_NATIVE_VERSION: ${{ needs.version.outputs.package }}
+      run: build/llvm-lineage.sh stage-2 "$RUNNER_TEMP/llvm-lineage" "${{ steps.stage0.outputs.compiler }}"
+
+    # Packed as a release carries it: the executable as `ghul-compiler` in a
+    # `ghul-compiler` directory, which ghul-cli installs. The release build
+    # carries this archive from the pull request run that built it.
+    - name: Pack stage 2
+      shell: bash
+      run: |
+        set -euo pipefail
+        compiler="$RUNNER_TEMP/llvm-lineage/stage-2/ghul"
+        test "$("$compiler")" = "ghūl ${{ needs.version.outputs.package }} llvm"
+        mkdir -p llvm-compiler/ghul-compiler
+        cp "$compiler" llvm-compiler/ghul-compiler/ghul-compiler
+        tar -C llvm-compiler -czf ghul-compiler-llvm-${{ matrix.triple }}.tar.gz ghul-compiler
+        sha256sum ghul-compiler-llvm-${{ matrix.triple }}.tar.gz > ghul-compiler-llvm-${{ matrix.triple }}.tar.gz.sha256
+        mkdir -p lineage
+        cp "$RUNNER_TEMP/llvm-lineage/stage-2.sha256" "$RUNNER_TEMP/llvm-lineage/stage-1-vs-2" lineage/
+
+    - uses: actions/upload-artifact@v7
+      with:
+        name: ghul-compiler-llvm-${{ matrix.triple }}
+        path: |
+          ghul-compiler-llvm-${{ matrix.triple }}.tar.gz
+          ghul-compiler-llvm-${{ matrix.triple }}.tar.gz.sha256
+
+    # Stage 2's module and executable, hashed, and whether stage 1 was
+    # identical to it, for llvm_fixed_point and llvm_cross_check.
+    - uses: actions/upload-artifact@v7
+      with:
+        name: llvm-lineage-${{ matrix.triple }}
+        path: lineage/
+
+  # Stage 2 has to rebuild itself. Where stages 1 and 2 were identical it
+  # does, as stage 1 built stage 2 and is the same compiler; otherwise stage
+  # 2 builds stage 3, which must be identical to it. Beside the tests, which
+  # start on stage 2 without waiting for this.
+  llvm_fixed_point:
+    needs: [version, llvm_lineage]
+    if: needs.version.outputs.build == 'true'
+    name: llvm lineage - check stage 2 rebuilds itself (${{ matrix.triple }})
+
+    runs-on: ${{ matrix.runner }}
+
+    timeout-minutes: 20
 
     strategy:
       fail-fast: false
@@ -1072,206 +833,183 @@ jobs:
         test -x "$ghul_llvm"
         dirname "$ghul_llvm" >> "$GITHUB_PATH"
 
-    # Stage 0: the llvm-built compiler of the newest release that carries
-    # one for this platform, checked against the sha256 published beside
-    # it. A release can lack one, when its chain and .NET-seeded builds
-    # disagreed, so the newest few releases are tried in turn; starting
-    # from an older release only means the chain may take a stage longer
-    # to settle. Where none of them carries one, there is nothing to start
-    # a chain from: the compiler comes from .NET alone this run, which
-    # llvm_bootstrap builds.
-    - name: Fetch the released llvm-built compiler
-      id: stage0
-      shell: bash
-      env:
-        GH_TOKEN: ${{ github.token }}
-      run: |
-        set -euo pipefail
-        archive=ghul-compiler-llvm-${{ matrix.triple }}.tar.gz
-        mkdir -p "$RUNNER_TEMP/stage-0"
-        cd "$RUNNER_TEMP/stage-0"
-        found=
-        for release in $(gh release list --repo "${{ github.repository }}" --exclude-pre-releases --exclude-drafts --limit 10 --json tagName --jq '.[].tagName'); do
-          if gh release download "$release" --repo "${{ github.repository }}" --pattern "$archive" --pattern "$archive.sha256" 2>download.log; then
-            found=$release
-            break
-          fi
-          echo "release $release carries no llvm-built compiler for ${{ matrix.triple }}"
-        done
-        if [ -z "$found" ]; then
-          echo "::warning::no recent release carries an llvm-built compiler for ${{ matrix.triple }}: nothing to start a chain from, so this run's compiler for it comes from .NET alone (llvm_bootstrap)"
-          echo "found=false" >> "$GITHUB_OUTPUT"
-          mkdir -p "$RUNNER_TEMP/llvm-chain"
-          echo no-stage0 > "$RUNNER_TEMP/llvm-chain/status"
-          exit 0
-        fi
-        echo "stage 0 is the llvm-built compiler released in $found"
-        echo "chain stage 0 for ${{ matrix.triple }}: $found" >> "$GITHUB_STEP_SUMMARY"
-        sha256sum --check --quiet "$archive.sha256"
-        tar -xzf "$archive"
-        echo "found=true" >> "$GITHUB_OUTPUT"
-        echo "compiler=$RUNNER_TEMP/stage-0/ghul-compiler/ghul-compiler" >> "$GITHUB_OUTPUT"
+    - name: Download stage 2
+      uses: actions/download-artifact@v8
+      with:
+        name: ghul-compiler-llvm-${{ matrix.triple }}
 
-    - name: Build the compiler from it to a fixed point
-      if: steps.stage0.outputs.found == 'true'
+    - name: Download stage 2's hashes
+      uses: actions/download-artifact@v8
+      with:
+        name: llvm-lineage-${{ matrix.triple }}
+        path: lineage
+
+    - name: Unpack stage 2
+      run: |
+        work="$RUNNER_TEMP/llvm-lineage"
+        mkdir -p "$work/stage-2"
+        tar -xzf ghul-compiler-llvm-${{ matrix.triple }}.tar.gz -O ghul-compiler/ghul-compiler > "$work/stage-2/ghul"
+        chmod +x "$work/stage-2/ghul"
+        cp lineage/* "$work/"
+
+    - name: Build stage 3 where stages 1 and 2 differ
       env:
-        LLVM_CHAIN_DIR: ${{ runner.temp }}/llvm-chain
         GHUL_NATIVE_VERSION: ${{ needs.version.outputs.package }}
-      run: build/llvm-chain.sh "${{ steps.stage0.outputs.compiler }}"
+      run: build/llvm-lineage.sh fixed-point "$RUNNER_TEMP/llvm-lineage"
 
-    - name: Name the stage the chain settled at
-      if: steps.stage0.outputs.found == 'true'
-      shell: bash
-      run: |
-        set -euo pipefail
-        cp "$RUNNER_TEMP/llvm-chain/final.sha256" "llvm-chain-${{ matrix.triple }}.sha256"
-        echo "settled at $(cat "$RUNNER_TEMP/llvm-chain/final")" >> "$GITHUB_STEP_SUMMARY"
-
-    - uses: actions/upload-artifact@v7
-      if: steps.stage0.outputs.found == 'true'
-      with:
-        name: llvm-chain-sums-${{ matrix.triple }}
-        path: llvm-chain-${{ matrix.triple }}.sha256
-
-    # Packed as llvm_bootstrap packs its pass 2, so a release can carry
-    # either.
-    - name: Pack the settled compiler
-      if: steps.stage0.outputs.found == 'true'
-      shell: bash
-      run: |
-        set -euo pipefail
-        compiler="$RUNNER_TEMP/llvm-chain/$(cat "$RUNNER_TEMP/llvm-chain/final")/ghul"
-        test "$("$compiler")" = "ghūl ${{ needs.version.outputs.package }} llvm"
-        mkdir -p llvm-compiler/ghul-compiler
-        cp "$compiler" llvm-compiler/ghul-compiler/ghul-compiler
-        tar -C llvm-compiler -czf ghul-compiler-llvm-${{ matrix.triple }}.tar.gz ghul-compiler
-        sha256sum ghul-compiler-llvm-${{ matrix.triple }}.tar.gz > ghul-compiler-llvm-${{ matrix.triple }}.tar.gz.sha256
-
-    - uses: actions/upload-artifact@v7
-      if: steps.stage0.outputs.found == 'true'
-      with:
-        name: ghul-compiler-llvm-chain-${{ matrix.triple }}
-        path: |
-          ghul-compiler-llvm-${{ matrix.triple }}.tar.gz
-          ghul-compiler-llvm-${{ matrix.triple }}.tar.gz.sha256
-
-    # How the chain ended, for llvm_chain_compare: also where it failed.
-    - uses: actions/upload-artifact@v7
-      if: always()
-      with:
-        name: llvm-chain-status-${{ matrix.triple }}
-        path: ${{ runner.temp }}/llvm-chain/status
-        if-no-files-found: ignore
-
-  # The two routes must give one binary: the chain's settled stage and
-  # llvm_bootstrap's pass 2, module and executable, byte for byte.
-  llvm_chain_compare:
-    needs: [version, llvm_bootstrap, llvm_bootstrap_arm64, llvm_chain]
-    if: ${{ !cancelled() && needs.version.outputs.build == 'true' }}
-    name: Compare the chain with the .NET-seeded build (${{ matrix.triple }})
+  # The compiler's unit tests on the ghul-testing runner, built for llvm by
+  # stage 2, and the analysis tests in the bootstrap category with stage 2
+  # as the analyser: the native compiler a release ships has to serve
+  # analysis mode.
+  llvm_lineage_tests:
+    needs: [version, bootstrap, llvm_lineage]
+    if: needs.version.outputs.build == 'true'
+    name: llvm lineage - unit and analysis tests on stage 2
 
     runs-on: ubuntu-latest
 
-    continue-on-error: true
+    timeout-minutes: 30
 
-    timeout-minutes: 5
+    steps:
+    - uses: actions/checkout@v7
+
+    - name: Set up .NET 10
+      uses: actions/setup-dotnet@v6
+      with:
+        dotnet-version: '10.0.x'
+
+    - name: Download bootstrap compiler tool tree
+      uses: actions/download-artifact@v8
+      with:
+        name: ghul-compiler-tool
+        path: publish
+
+    - name: Restore local .NET tools
+      run: dotnet tool restore
+
+    - name: Checkout ghul-runtime
+      uses: actions/checkout@v7
+      with:
+        repository: ghul-lang/ghul-runtime
+        path: libraries/ghul-runtime
+        ref: ${{ needs.version.outputs.runtime }}
+
+    - name: Checkout ghul-testing
+      uses: actions/checkout@v7
+      with:
+        repository: ghul-lang/ghul-testing
+        path: libraries/ghul-testing
+        ref: ${{ needs.version.outputs.testing }}
+
+    - name: Fetch ghul-llvm
+      run: |
+        ghul_llvm="$(build/ghul-llvm.sh "$RUNNER_TEMP/ghul-llvm" "${{ needs.version.outputs.ghul_llvm }}")"
+        test -x "$ghul_llvm"
+        dirname "$ghul_llvm" >> "$GITHUB_PATH"
+
+    - name: Download stage 2
+      uses: actions/download-artifact@v8
+      with:
+        name: ghul-compiler-llvm-x86_64-unknown-linux-musl
+
+    - name: Unpack stage 2
+      run: |
+        mkdir -p "$RUNNER_TEMP/stage-2"
+        tar -xzf ghul-compiler-llvm-x86_64-unknown-linux-musl.tar.gz -O ghul-compiler/ghul-compiler > "$RUNNER_TEMP/stage-2/ghul"
+        chmod +x "$RUNNER_TEMP/stage-2/ghul"
+        build/llvm-self-sources.sh "$RUNNER_TEMP/stage-2" libraries/ghul-runtime
+
+    - name: Run the unit tests on llvm
+      run: build/llvm-unit-tests.sh "$RUNNER_TEMP/stage-2" libraries/ghul-testing "$RUNNER_TEMP/stage-2/ghul"
+
+    - name: Run the analysis tests against stage 2
+      env:
+        ANALYSIS_TESTS_ON_DIR: ${{ runner.temp }}/stage-2
+      run: build/analysis-tests-on.sh llvm publish/ghul.dll libraries/ghul-runtime -- --filter TestCategory=bootstrap
+
+  # The two lineages advance in lockstep: the .NET compiler this run
+  # bootstrapped builds the native compiler from the same source, which has
+  # to be byte for byte the llvm lineage's stage 2. A difference means one
+  # lineage miscompiles.
+  llvm_cross_check:
+    needs: [version, bootstrap, llvm_lineage]
+    if: needs.version.outputs.build == 'true'
+    name: Cross-check - the native compiler .NET builds matches the llvm lineage (${{ matrix.triple }})
+
+    runs-on: ${{ matrix.runner }}
+
+    timeout-minutes: 20
 
     strategy:
       fail-fast: false
       matrix:
         include:
-          - triple: x86_64-unknown-linux-musl
-            bootstrap: ghul-compiler-llvm
-          - triple: aarch64-unknown-linux-musl
-            bootstrap: ghul-compiler-llvm-arm64
+          - runner: ubuntu-latest
+            triple: x86_64-unknown-linux-musl
+          - runner: ubuntu-26.04-arm
+            triple: aarch64-unknown-linux-musl
 
     steps:
     - uses: actions/checkout@v7
-      if: env.LLVM_RELEASE_FROM == 'chain'
 
-    - name: Download the .NET-seeded build's hashes
-      continue-on-error: true
+    - name: Set up .NET 10
+      uses: actions/setup-dotnet@v6
+      with:
+        dotnet-version: '10.0.x'
+
+    - name: Download bootstrap compiler tool tree
       uses: actions/download-artifact@v8
       with:
-        name: llvm-bootstrap-sums-${{ matrix.triple }}
+        name: ghul-compiler-tool
+        path: publish
 
-    - name: Download the chain's hashes
-      continue-on-error: true
+    - name: Restore local .NET tools
+      run: dotnet tool restore
+
+    - name: Checkout ghul-runtime
+      uses: actions/checkout@v7
+      with:
+        repository: ghul-lang/ghul-runtime
+        path: libraries/ghul-runtime
+        ref: ${{ needs.version.outputs.runtime }}
+
+    - name: Fetch ghul-llvm
+      run: |
+        ghul_llvm="$(build/ghul-llvm.sh "$RUNNER_TEMP/ghul-llvm" "${{ needs.version.outputs.ghul_llvm }}")"
+        test -x "$ghul_llvm"
+        dirname "$ghul_llvm" >> "$GITHUB_PATH"
+
+    - name: Build the native compiler with the .NET compiler
+      env:
+        LLVM_BOOTSTRAP_DIR: ${{ runner.temp }}/llvm-bootstrap
+        LLVM_BOOTSTRAP_STEP: pass-1
+        GHUL_NATIVE_VERSION: ${{ needs.version.outputs.package }}
+      run: build/llvm-bootstrap.sh
+
+    - name: Download stage 2's hashes
       uses: actions/download-artifact@v8
       with:
-        name: llvm-chain-sums-${{ matrix.triple }}
+        name: llvm-lineage-${{ matrix.triple }}
+        path: lineage
 
-    - name: Compare
+    - name: Compare with stage 2
       shell: bash
       run: |
         set -euo pipefail
-        bootstrap=llvm-bootstrap-${{ matrix.triple }}.sha256
-        chain=llvm-chain-${{ matrix.triple }}.sha256
-        if [ ! -f "$bootstrap" ]; then
-          echo "::warning::the .NET-seeded build for ${{ matrix.triple }} produced no compiler this run; nothing to compare"
-          exit 0
-        fi
-        if [ ! -f "$chain" ]; then
-          echo "::warning::the chain for ${{ matrix.triple }} produced no compiler this run (no released compiler to start from, or the chain failed: see llvm_chain); nothing to compare"
-          exit 0
-        fi
-        cat "$bootstrap" "$chain"
-        if ! diff "$bootstrap" "$chain"; then
-          echo "::error::the chain and the .NET-seeded build give different compilers for ${{ matrix.triple }}: one route miscompiles"
+        (cd "$RUNNER_TEMP/llvm-bootstrap/pass-1" && sha256sum ghul.ll ghul) > dotnet-built.sha256
+        paste lineage/stage-2.sha256 dotnet-built.sha256
+        if ! diff <(awk '{print $1}' lineage/stage-2.sha256) <(awk '{print $1}' dotnet-built.sha256) >/dev/null; then
+          echo "::error::the .NET lineage and the llvm lineage give different native compilers for ${{ matrix.triple }}: one of them miscompiles"
           exit 1
         fi
-        echo "the chain and the .NET-seeded build give one compiler for ${{ matrix.triple }}"
+        echo "the .NET lineage and the llvm lineage give one native compiler for ${{ matrix.triple }}"
 
-    # With the release built from the chain: what this platform ships.
-    - name: Download how the chain ended
-      if: ${{ always() && env.LLVM_RELEASE_FROM == 'chain' }}
-      continue-on-error: true
-      uses: actions/download-artifact@v8
-      with:
-        name: llvm-chain-status-${{ matrix.triple }}
-        path: select/
-
-    - name: Download the chain's archive
-      if: ${{ always() && env.LLVM_RELEASE_FROM == 'chain' }}
-      continue-on-error: true
-      uses: actions/download-artifact@v8
-      with:
-        name: ghul-compiler-llvm-chain-${{ matrix.triple }}
-        path: select/chain
-
-    - name: Download the .NET-seeded archive
-      if: ${{ always() && env.LLVM_RELEASE_FROM == 'chain' }}
-      continue-on-error: true
-      uses: actions/download-artifact@v8
-      with:
-        name: ${{ matrix.bootstrap }}
-        path: select/bootstrap
-
-    - name: Choose what the release carries
-      if: ${{ always() && env.LLVM_RELEASE_FROM == 'chain' }}
-      shell: bash
-      run: |
-        set -euo pipefail
-        mkdir -p select
-        # Any of these can be missing; llvm-release-select.sh decides what
-        # that means.
-        if [ -f select/status ]; then
-          mv select/status select/chain-status
-        fi
-        if [ -f llvm-chain-${{ matrix.triple }}.sha256 ]; then
-          cp llvm-chain-${{ matrix.triple }}.sha256 select/chain.sha256
-        fi
-        if [ -f llvm-bootstrap-${{ matrix.triple }}.sha256 ]; then
-          cp llvm-bootstrap-${{ matrix.triple }}.sha256 select/bootstrap.sha256
-        fi
-        build/llvm-release-select.sh ${{ matrix.triple }} select release
-
-    - uses: actions/upload-artifact@v7
-      if: ${{ always() && env.LLVM_RELEASE_FROM == 'chain' }}
-      with:
-        name: ghul-compiler-llvm-release-${{ matrix.triple }}
-        path: release/
-        if-no-files-found: ignore
+    # ghul-project.json describes the compiler's source for an editor
+    # analysing it with a compiler not hosted on .NET; the pinned ghul.cli
+    # must load it, and it must list what the native build compiles.
+    - name: Check ghul-project.json
+      if: matrix.triple == 'x86_64-unknown-linux-musl'
+      run: build/manifest-check.sh
 
   # The compiler builds a wasm compiler, which run by Node builds itself;
   # the two passes must write the same module and loader.
@@ -1380,7 +1118,7 @@ jobs:
       run: build/wasm-validate.sh
 
   # The integration suite, built and run as a user's build would build and
-  # run it: the native compiler from llvm_pass_1 builds every test for llvm,
+  # run it: the llvm lineage's stage 2 builds every test for llvm,
   # through fork servers, and hands each module to the ghul-llvm release
   # fetched from GitHub, in an image holding the .NET SDK and nothing to
   # compile, assemble or link C with, so a program that needs anything from
@@ -1389,14 +1127,12 @@ jobs:
   # llvm are built optimised as well, since a test that passes at one level
   # and not the other is a backend bug or a missing check. A test whose
   # build_targets leave llvm out, or tagged llvm-gap, is integration_shards'.
-  # The programs of the tests that ask for llvm themselves are then run
-  # again in an empty image by llvm_static. The
-  # suite runs in five shards, striped by discovery order, so no shard
+  # The suite runs in five shards, striped by discovery order, so no shard
   # collects a whole directory of like-cost tests. llvm_tests below judges
   # the shards and the cell scenarios under one name that does not change
   # with the shard count.
   llvm_test_shards:
-    needs: [version, bootstrap, llvm_pass_1]
+    needs: [version, llvm_lineage]
     if: needs.version.outputs.build == 'true'
     name: Run llvm integration tests (${{ matrix.shard }}/5)
 
@@ -1428,14 +1164,6 @@ jobs:
           exit 1
         fi
 
-    # The llvm configuration and llvm-validate.sh both run the compiler at
-    # publish/ghul.dll.
-    - name: Download bootstrap compiler tool tree
-      uses: actions/download-artifact@v8
-      with:
-        name: ghul-compiler-tool
-        path: publish
-
     - name: Restore local .NET tools
       run: dotnet tool restore
 
@@ -1456,19 +1184,19 @@ jobs:
     - name: Build the objects the llvm tests link
       run: build/llvm-test-objects.sh
 
-    # The tests are built by the native compiler from llvm_pass_1, in
-    # hosts/llvm/ where the ci-native configurations look for it.
+    # The tests are built by the llvm lineage's stage 2, in hosts/llvm/
+    # where the ci-native configurations look for it.
     - name: Download the native compiler
       uses: actions/download-artifact@v8
       with:
-        name: ghul-compiler-llvm-pass-1
+        name: ghul-compiler-llvm-x86_64-unknown-linux-musl
 
     # Run with no arguments the compiler prints its version and exits, which
     # checks that the unpacked compiler is this run's build.
     - name: Install the native compiler
       run: |
         mkdir -p hosts/llvm
-        tar -xzf llvm-pass-1.tar.gz -O pass-1/ghul > hosts/llvm/ghul
+        tar -xzf ghul-compiler-llvm-x86_64-unknown-linux-musl.tar.gz -O ghul-compiler/ghul-compiler > hosts/llvm/ghul
         chmod +x hosts/llvm/ghul
         test "$(hosts/llvm/ghul)" = "ghūl ${{ needs.version.outputs.package }} llvm"
 
@@ -1483,43 +1211,15 @@ jobs:
       with:
         node-version: '24'
 
-    # Optimised first, so the programs collected after it are the optimised
-    # ones; the unoptimised run then builds them again.
     - name: Run the optimised llvm integration tests
-      env:
-        GHUL_TEST_KEEP_ARTIFACTS: 1
       run: bash -c "set -o pipefail ; dotnet ghul-test --config ci-native --not-tag llvm-gap --shard ${{ matrix.shard }}/5 integration-tests | tee test-results-O2.txt"
 
-    - name: Collect the optimised programs
-      run: build/llvm-programs.sh collect integration-tests llvm-programs-O2
-
-    - uses: actions/upload-artifact@v7
-      with:
-        name: llvm-programs-O2-${{ matrix.shard }}
-        path: llvm-programs-O2
-
-    # The two runs divide the tests between shards differently, so an
-    # optimised program left here could be collected again below beside the
-    # unoptimised one another shard builds for the same test.
-    - name: Remove the optimised programs
-      run: find integration-tests -name binary.exe -type f -delete
-
     - name: Run the integration tests
-      env:
-        GHUL_TEST_KEEP_ARTIFACTS: 1
       run: bash -c "set -o pipefail ; dotnet ghul-test --config ci-native-all --not-tag llvm-gap --shard ${{ matrix.shard }}/5 integration-tests | tee test-results.txt"
 
     - name: Validate the llvm test modules
       if: matrix.shard == 1
-      run: build/llvm-validate.sh
-
-    - name: Collect the programs
-      run: build/llvm-programs.sh collect integration-tests llvm-programs declared
-
-    - uses: actions/upload-artifact@v7
-      with:
-        name: llvm-programs-O0-${{ matrix.shard }}
-        path: llvm-programs
+      run: build/llvm-validate.sh integration-tests "$PWD/hosts/llvm/ghul"
 
   # Cells compiled one after another, each against the ones before it, and
   # loaded into one process by the cell host from the same ghul-llvm release.
@@ -1660,43 +1360,6 @@ jobs:
 
     - name: Run the llvm integration tests
       run: bash -c "set -o pipefail ; dotnet ghul-test --config llvm integration-tests | tee test-results.txt"
-
-  # Runs the programs llvm_test_shards built in a `FROM scratch` image, which holds
-  # nothing but the programs themselves: no loader, no shared libraries, no
-  # files. A program that is not fully static fails to start there. This is
-  # a separate job because the SDK image llvm_test_shards runs in has no docker.
-  llvm_static:
-    needs: [version, llvm_test_shards]
-    if: needs.version.outputs.build == 'true'
-    name: Run llvm programs in an empty image (${{ matrix.optimisation }})
-
-    runs-on: ubuntu-latest
-
-    timeout-minutes: 10
-
-    strategy:
-      fail-fast: false
-      matrix:
-        optimisation: [O2, O0]
-
-    steps:
-    - uses: actions/checkout@v7
-
-    # Each shard uploads its own programs, every one in a directory named
-    # after its test, so the shards merge into one.
-    - name: Download the programs
-      uses: actions/download-artifact@v8
-      with:
-        pattern: llvm-programs-${{ matrix.optimisation }}-*
-        merge-multiple: true
-        path: llvm-programs
-
-    # Artifacts do not keep the execute bit.
-    - name: Make the programs executable
-      run: chmod +x llvm-programs/*/program
-
-    - name: Run the programs in an empty image
-      run: build/llvm-programs.sh run llvm-programs
 
   # The formatter is the AST serializer, so its output has to parse back to
   # the same tree. Nothing else tests that: its unit and analysis-mode tests
@@ -2256,7 +1919,7 @@ jobs:
   # Sharded, and gated by `rosetta_tests` below, for the reasons given on
   # the integration shards.
   rosetta_shards:
-    needs: [version, bootstrap, llvm_pass_1]
+    needs: [version, bootstrap, llvm_lineage]
     if: needs.version.outputs.build == 'true'
     name: Rosetta Code shard (${{ matrix.target }} ${{ matrix.shard }})
 
@@ -2265,7 +1928,7 @@ jobs:
     timeout-minutes: 15
 
     # Five shards build the tasks for wasm, as the playground runs them, with
-    # the native compiler from llvm_pass_1 through fork servers, and run them
+    # the llvm lineage's stage 2 through fork servers, and run them
     # under Node. One builds the tasks that cannot run on wasm, the ones
     # scripts/wasm-tasks.sh leaves out, for .NET with the bootstrapped
     # compiler.
@@ -2391,14 +2054,14 @@ jobs:
       if: matrix.target == 'wasm'
       uses: actions/download-artifact@v8
       with:
-        name: ghul-compiler-llvm-pass-1
+        name: ghul-compiler-llvm-x86_64-unknown-linux-musl
 
     # The ci-wasm configuration looks for the compiler in hosts/llvm/.
     - name: Install the native compiler
       if: matrix.target == 'wasm'
       run: |
         mkdir -p ghul-rosetta-code/hosts/llvm
-        tar -xzf llvm-pass-1.tar.gz -O pass-1/ghul > ghul-rosetta-code/hosts/llvm/ghul
+        tar -xzf ghul-compiler-llvm-x86_64-unknown-linux-musl.tar.gz -O ghul-compiler/ghul-compiler > ghul-rosetta-code/hosts/llvm/ghul
         chmod +x ghul-rosetta-code/hosts/llvm/ghul
         test "$(ghul-rosetta-code/hosts/llvm/ghul)" = "ghūl ${{ needs.version.outputs.package }} llvm"
 
@@ -2450,7 +2113,7 @@ jobs:
   # then a skipped job satisfies it. This job runs regardless and checks
   # that nothing was skipped that should have run.
   gate:
-    needs: [version, bootstrap, unit_tests, analysis_tests, llvm_self_type_check, llvm_pass_1, llvm_bootstrap, wasm_bootstrap, integration_tests, wasm_validation, llvm_tests, llvm_static, cross_assembly_tests, bare_invocation_test, native_aot_test, runtime_tests, examples_tests, format_round_trip, rosetta_tests]
+    needs: [version, bootstrap, unit_tests, analysis_tests, llvm_lineage, llvm_fixed_point, llvm_lineage_tests, llvm_cross_check, wasm_bootstrap, integration_tests, wasm_validation, llvm_tests, cross_assembly_tests, bare_invocation_test, native_aot_test, runtime_tests, examples_tests, format_round_trip, rosetta_tests]
     name: Gate
 
     if: always()
@@ -2489,7 +2152,7 @@ jobs:
   # pull request's packages skips every build and test job. `!cancelled()` opts out of
   # that rule and the gate's own result is what stands in for it.
   publish_release_package:
-    needs: [version, gate]
+    needs: [version, gate, create_release]
     name: Publish release package
 
     timeout-minutes: 5
@@ -2505,7 +2168,7 @@ jobs:
       packages: write
       id-token: write
 
-    if: ${{ !cancelled() && needs.gate.result == 'success' && github.event_name == 'push' }}
+    if: ${{ !cancelled() && needs.gate.result == 'success' && needs.create_release.result == 'success' && github.event_name == 'push' }}
 
     steps:
     - uses: actions/checkout@v7
@@ -2553,13 +2216,17 @@ jobs:
     - name: Publish analysis protocol release package to NuGet
       run: dotnet nuget push ./nupkg/ghul.analysis.protocol.${{ needs.version.outputs.package }}.nupkg --api-key ${{ steps.login_protocol.outputs.NUGET_API_KEY }} --source https://api.nuget.org/v3/index.json --skip-duplicate --no-symbols
 
+  # Before the packages are published: the llvm lineage starts from the
+  # native compiler released with the .NET compiler NuGet serves, so a
+  # version reaches NuGet only once its release carries its native
+  # compilers.
   create_release:
-    needs: [version, gate, publish_release_package, llvm_bootstrap_arm64, llvm_chain_compare]
+    needs: [version, gate]
     name: Create release
     runs-on: ubuntu-latest
 
     timeout-minutes: 5
-    if: ${{ !cancelled() && needs.gate.result == 'success' && needs.publish_release_package.result == 'success' && github.event_name == 'push' }}
+    if: ${{ !cancelled() && needs.gate.result == 'success' && github.event_name == 'push' }}
 
     permissions:
       contents: write
@@ -2581,46 +2248,23 @@ jobs:
         name: ghul-compiler-aot
         path: aot
 
-    - name: Download the llvm-built compiler archive
-      if: env.LLVM_RELEASE_FROM != 'chain'
+    - name: Download the x64 native compiler
       uses: actions/download-artifact@v8
       with:
-        name: ghul-compiler-llvm
+        name: ghul-compiler-llvm-x86_64-unknown-linux-musl
         path: llvm
+
+    - name: Download the arm64 native compiler
+      uses: actions/download-artifact@v8
+      with:
+        name: ghul-compiler-llvm-aarch64-unknown-linux-musl
+        path: llvm-arm64
 
     - name: Download the wasm-built compiler archive
       uses: actions/download-artifact@v8
       with:
         name: ghul-compiler-wasm
         path: wasm
-
-    # Absent where the pull request run's arm64 bootstrap failed.
-    - name: Download the arm64 llvm-built compiler archive
-      if: env.LLVM_RELEASE_FROM != 'chain'
-      continue-on-error: true
-      uses: actions/download-artifact@v8
-      with:
-        name: ghul-compiler-llvm-arm64
-        path: llvm-arm64
-
-    # With the release built from the chain: what llvm_chain_compare chose
-    # for each platform, with the notes that say where one is left out or
-    # comes from .NET alone.
-    - name: Download the chosen x64 llvm-built compiler
-      if: env.LLVM_RELEASE_FROM == 'chain'
-      continue-on-error: true
-      uses: actions/download-artifact@v8
-      with:
-        name: ghul-compiler-llvm-release-x86_64-unknown-linux-musl
-        path: llvm
-
-    - name: Download the chosen arm64 llvm-built compiler
-      if: env.LLVM_RELEASE_FROM == 'chain'
-      continue-on-error: true
-      uses: actions/download-artifact@v8
-      with:
-        name: ghul-compiler-llvm-release-aarch64-unknown-linux-musl
-        path: llvm-arm64
 
     # A push to main is normally one squashed pull request; the range covers
     # a direct push of several commits too, and the notes list each.
@@ -2629,26 +2273,6 @@ jobs:
         range="${{ github.event.before }}..${{ github.sha }}"
         git rev-parse -q --verify "${{ github.event.before }}^{commit}" >/dev/null || range="-1"
         git log --format="%s%n%n%b%n%n" ${range} >changelog.txt
-        if [ "${LLVM_RELEASE_FROM}" = chain ]; then
-          for notes in llvm/notes.txt llvm-arm64/notes.txt; do
-            if [ -f "${notes}" ]; then
-              cat "${notes}" >>changelog.txt
-              echo >>changelog.txt
-            fi
-          done
-          rm -f llvm/notes.txt llvm-arm64/notes.txt
-          if [ ! -d llvm ]; then
-            echo "::warning::this release has no x64 llvm-built compiler"
-            printf '%s\n\n' "This release has no llvm-built compiler for linux-x64." >>changelog.txt
-          fi
-          if [ ! -d llvm-arm64 ]; then
-            echo "::warning::this release has no arm64 llvm-built compiler"
-            printf '%s\n\n' "This release has no llvm-built compiler for linux-arm64." >>changelog.txt
-          fi
-        elif [ ! -f llvm-arm64/ghul-compiler-llvm-aarch64-unknown-linux-musl.tar.gz ]; then
-          echo "::warning::this release has no arm64 llvm-built compiler"
-          printf '%s\n\n' "This release has no llvm-built compiler for linux-arm64: its arm64 bootstrap did not succeed." >>changelog.txt
-        fi
 
     - name: Create a release
       env:

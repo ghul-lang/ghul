@@ -6,15 +6,16 @@
 # ghul-test builds and runs each test built for the llvm target where
 # ghul-llvm is present, but a test that is a library build, or one whose
 # compilation is the subject, never reaches LLVM there. This script builds
-# each test's module again as a library, with the compiler in publish/, and
-# has ghul-llvm verify and compile it to an object, so a module the
-# compiler accepts is one LLVM accepts too.
+# each test's module again as a library and has ghul-llvm verify and
+# compile it to an object, so a module the compiler accepts is one LLVM
+# accepts too. Any host's compiler writes the same module, so it can be the
+# native compiler or the .NET one.
 #
 # ghul-llvm is found on the PATH unless GHUL_LLVM names it.
 #
-# Usage: build/llvm-validate.sh [test-root]
-#        (default: integration-tests; run from the repository root
-#        after `dotnet publish --output publish/`)
+# Usage: build/llvm-validate.sh [test-root [compiler command...]]
+#        (defaults: integration-tests, and `dotnet publish/ghul.dll` after
+#        `dotnet publish --output publish/`; run from the repository root)
 #
 # Fails when ghul-llvm is missing, when a test that should build a module
 # does not, or when any module is rejected.
@@ -22,9 +23,16 @@
 set -uo pipefail
 
 root="${1:-integration-tests}"
+if [ $# -gt 0 ]; then
+    shift
+fi
 target=llvm
 test_flags="$(cd "$(dirname "$0")" && pwd)/test-flags.sh"
-compiler="$(pwd)/publish/ghul.dll"
+if [ $# -gt 0 ]; then
+    compiler=("$@")
+else
+    compiler=(dotnet "$(pwd)/publish/ghul.dll")
+fi
 ghul_llvm="${GHUL_LLVM:-ghul-llvm}"
 
 if ! command -v "$ghul_llvm" >/dev/null 2>&1; then
@@ -32,8 +40,8 @@ if ! command -v "$ghul_llvm" >/dev/null 2>&1; then
     exit 1
 fi
 
-if [ ! -f "$compiler" ]; then
-    echo "llvm-validate: no compiler at $compiler; publish first" >&2
+if [ $# -eq 0 ] && [ ! -f "${compiler[1]}" ]; then
+    echo "llvm-validate: no compiler at ${compiler[1]}; publish first" >&2
     exit 1
 fi
 
@@ -73,7 +81,7 @@ while IFS=$'\t' read -r dir flags_text; do
 
     checked=$((checked + 1))
 
-    if ! (cd "$dir" && dotnet "$compiler" "${flags[@]}" --library -o "$out/module.ll" ./*.ghul) >"$out/compiler.out" 2>&1; then
+    if ! (cd "$dir" && "${compiler[@]}" "${flags[@]}" --library -o "$out/module.ll" ./*.ghul) >"$out/compiler.out" 2>&1; then
         echo "llvm-validate: $dir did not compile:" >&2
         head -5 "$out/compiler.out" >&2
         failed=$((failed + 1))
