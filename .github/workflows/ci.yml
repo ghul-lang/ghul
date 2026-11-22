@@ -2056,14 +2056,16 @@ jobs:
 
     - name: Run Rosetta Code integration tests for wasm
       working-directory: ghul-rosetta-code
-      run: dotnet ghul-test --config ci-wasm --shard ${{ matrix.shard }} $(scripts/wasm-tasks.sh)
+      run: dotnet ghul-test --config ci-wasm --shard ${{ matrix.shard }} $(scripts/wasm-tasks.sh --fast)
 
   # The tasks scripts/wasm-tasks.sh leaves out, which cannot run on wasm,
-  # built for .NET with the bootstrapped compiler.
+  # built for .NET with the bootstrapped compiler; and the ones too slow
+  # on wasm for the shards above, built for llvm at -O2 with the llvm
+  # lineage's stage 2, which runs each in a fraction of the time.
   rosetta_dotnet:
-    needs: [version, bootstrap]
+    needs: [version, bootstrap, llvm_lineage]
     if: needs.version.outputs.build == 'true'
-    name: Rosetta Code shard (dotnet)
+    name: Rosetta Code shard (dotnet and llvm)
 
     runs-on: ubuntu-latest
 
@@ -2150,6 +2152,55 @@ jobs:
     - name: Run Rosetta Code integration tests for .NET
       working-directory: ghul-rosetta-code
       run: dotnet ghul-test --compiler "dotnet ${GITHUB_WORKSPACE}/bootstrap-tool/ghul.dll" $(scripts/wasm-tasks.sh --others)
+
+    - name: Checkout ghul-runtime
+      uses: actions/checkout@v7
+      with:
+        repository: ghul-lang/ghul-runtime
+        path: ghul-rosetta-code/libraries/ghul-runtime
+        ref: ${{ needs.version.outputs.runtime }}
+
+    - name: Find the ghul-raster version the tasks pin
+      id: raster
+      working-directory: ghul-rosetta-code
+      run: echo "version=$(sed -n 's/.*Include="ghul.raster" Version="\([^"]*\)".*/\1/p' Directory.Packages.props)" >> "$GITHUB_OUTPUT"
+
+    - name: Checkout ghul-raster
+      uses: actions/checkout@v7
+      with:
+        repository: ghul-lang/ghul-raster
+        path: ghul-rosetta-code/libraries/ghul-raster
+        ref: v${{ steps.raster.outputs.version }}
+
+    - name: Download the native compiler
+      uses: actions/download-artifact@v8
+      with:
+        name: ghul-compiler-llvm-x86_64-unknown-linux-musl
+
+    # The ci-llvm configuration looks for the compiler in hosts/llvm/.
+    - name: Install the native compiler
+      run: |
+        mkdir -p ghul-rosetta-code/hosts/llvm
+        tar -xzf ghul-compiler-llvm-x86_64-unknown-linux-musl.tar.gz -O ghul-compiler/ghul-compiler > ghul-rosetta-code/hosts/llvm/ghul
+        chmod +x ghul-rosetta-code/hosts/llvm/ghul
+        test "$(ghul-rosetta-code/hosts/llvm/ghul)" = "ghūl ${{ needs.version.outputs.package }} llvm"
+
+    # For build/ghul-llvm.sh.
+    - name: Checkout the compiler's build scripts
+      uses: actions/checkout@v7
+      with:
+        path: ghul
+        sparse-checkout: build
+
+    - name: Fetch ghul-llvm
+      run: |
+        ghul_llvm="$(ghul/build/ghul-llvm.sh "$RUNNER_TEMP/ghul-llvm" "${{ needs.version.outputs.ghul_llvm }}")"
+        test -x "$ghul_llvm"
+        dirname "$ghul_llvm" >> "$GITHUB_PATH"
+
+    - name: Run the Rosetta Code tasks too slow on wasm for llvm
+      working-directory: ghul-rosetta-code
+      run: dotnet ghul-test --config ci-llvm $(scripts/wasm-tasks.sh --slow)
 
 
   # The required status check; see the note on `integration_tests`.
