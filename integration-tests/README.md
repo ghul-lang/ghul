@@ -80,7 +80,7 @@ A `test.json` may also override the keys of the run's configuration, such as `co
 A test directory can carry a `tags` file naming zero or more of the tags below,
 space- or newline-separated. `ghul-test --tag <name>` (repeatable, matched as a
 union) restricts a run to tests carrying at least one of the requested tags —
-see `ghul-test`'s own README for the flag. Two uses this serves:
+see `ghul-test`'s own README for the flag. Three uses this serves:
 
 - **Cross-cutting feature tags** — run everything that touches a language
   feature regardless of which of `execution`/`il`/`parse`/`semantic` it lives
