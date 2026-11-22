@@ -1,0 +1,103 @@
+use default
+use Raster.IMAGE
+
+struct VEC(x: double, y: double, z: double) is
+    -(other: VEC) -> VEC => VEC(x - other.x, y - other.y, z - other.z)
+
+    ×(o: VEC) -> VEC =>
+        VEC(y * o.z - z * o.y, z * o.x - x * o.z, x * o.y - y * o.x)
+
+    ⋅(o: VEC) -> double => x * o.x + y * o.y + z * o.z
+
+    length: double => sqrt(self ⋅ self)
+si
+
+use Quad = VEC[]
+
+let around = 90
+let across = 8
+let yaw = 0.25
+let pitch = 0.6
+
+surface(u: double, v: double) -> VEC =>
+    let r = 1.0 + 0.5 * v * cos(u / 2.0) in
+    VEC(r * cos(u), r * sin(u), 0.5 * v * sin(u / 2.0))
+
+normal(u: double) -> VEC =>
+    let h = 1.0e-6 in
+    (surface(u + h, 0.0) - surface(u, 0.0)) ×
+    (surface(u, h) - surface(u, 0.0))
+
+turned(p: VEC) -> VEC =>
+    let
+        x = p.x * cos(yaw) - p.y * sin(yaw),
+        y = p.x * sin(yaw) + p.y * cos(yaw)
+    in
+        VEC(
+            x,
+            p.z * cos(pitch) - y * sin(pitch),
+            p.z * sin(pitch) + y * cos(pitch)
+        )
+
+angle(i: int) -> double => 2.0 * pi * i / around
+
+corner(i: int, j: int) -> VEC =>
+    let v = 2.0 * j / across - 1.0 in
+    turned(surface(angle(i), v))
+
+depth(quad: Quad) -> double => quad |> sum_by(c => c.z)
+
+brightness(quad: Quad) -> double =>
+    let n = (quad[1] - quad[0]) × (quad[3] - quad[0]) in
+    if n.length == 0.0 then 0.5
+    else 0.3 + 0.7 * abs(n.z) / n.length
+    fi
+
+quad(i: int, j: int) -> (at: int, corners: Quad) => (
+    at = i,
+    corners = [
+        corner(i, j), corner(i + 1, j),
+        corner(i + 1, j + 1), corner(i, j + 1)
+    ]
+)
+
+let quads = [quad(i, j) for i in 0..around for j in 0..across]
+    |> sort((p, q) => depth(p.corners) <> depth(q.corners))
+    |> list()
+
+let start = normal(0.0)
+let finish = normal(2.0 * pi)
+let turn = start ⋅ finish / (start.length * finish.length)
+
+write_line("a Möbius strip of width 1 around a circle of radius 1")
+write_line("{quads.count} quadrilaterals, drawn farthest first")
+write_line(
+    "cosine between the normal before and after one circuit: "
+    "{turn:F3}"
+)
+
+let image = IMAGE(420, 300)
+
+image.view(-1.75, -1.25, 1.75, 1.25)
+image.clear(248ub, 248ub, 244ub)
+image.stroke(0.6)
+
+for q in quads do
+    let light = brightness(q.corners)
+    let tone = 0.5 + 0.5 * cos(angle(q.at))
+    let outline = q.corners |> map(p => (x = p.x, y = p.y)) |> list()
+
+    image.color(
+        ubyte(light * (230.0 - 170.0 * tone)),
+        ubyte(light * (120.0 + 30.0 * tone)),
+        ubyte(light * (60.0 + 150.0 * tone))
+    )
+    image.fill(outline)
+
+    image.color(30ub, 30ub, 40ub)
+    image.line(outline ++ [outline[0]] |> list())
+od
+
+image.write("mobius.png")
+
+image.show("mobius.png")

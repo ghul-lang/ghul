@@ -1,0 +1,118 @@
+use default
+
+union Decoded is
+    VALUES(values: int[])
+    ERROR(message: string)
+si
+
+encode_one(value: int) -> string =>
+    if value >= 128 then
+        "|!{encode_one(value - 128)}"
+    elif value < 32 then
+        "|{char(value + 64)}"
+    else
+        case value
+        when 34 then "|\""
+        when 124 then "||"
+        when 127 then "|?"
+        else "{char(value)}"
+        esac
+    fi
+
+encode(values: int{}) -> string => values |> map(encode_one) |> join("")
+
+decode(text: string) -> Decoded is
+    let quoted =
+        text.length >= 2 /\ text.starts_with("\"") /\ text.ends_with("\"")
+
+    let body = if quoted then text[1..<1] else text fi
+
+    let values = LIST()
+    let at mut = 0
+
+    while at < body.length do
+        let high mut = 0
+
+        if body.substring(at).starts_with("|!") then
+            high = 128
+            at = at + 2
+        fi
+
+        if at >= body.length then
+            return Decoded.ERROR("'|!' at the end")
+        fi
+
+        if body[at] != '|' then
+            values.add(high + int(body[at]))
+            at = at + 1
+        elif at + 1 >= body.length then
+            return Decoded.ERROR("'|' at the end")
+        else
+            let code = body[at + 1]
+            at = at + 2
+
+            let value =
+                case code
+                when '?' then 127
+                when '"' then 34
+                when '|' then 124
+                else
+                    if code >= '@' /\ code <= 'z' then
+                        int(code) % 32
+                    else
+                        return Decoded.ERROR("'|{code}' at {at - 2}")
+                    fi
+                esac
+
+            values.add(high + value)
+        fi
+    od
+
+    Decoded.VALUES(values)
+si
+
+show(values: int{}) -> string =>
+    values
+        |> map(v =>
+            if v >= 32 /\ v < 127 then
+                "{char(v)}"
+            else
+                "[{v}]"
+            fi
+        )
+        |> join("")
+
+let samples = [
+    [12, 72, 101, 108, 108, 111, 7, 10, 13],
+    "ALERT|G" |> map(int),
+    "\"quoted|text\"" |> map(int),
+    [13, 10, 0, 5, 244, 13, 255]
+]
+
+for sample in samples do
+    write_line("{show(sample)} -> {encode(sample)}")
+od
+
+write_line()
+
+let encoded = [
+    "|LHello|G|J|M", "\"|m|j|@|e|!t|m|!|?\"", "abc|", "abc|!", "|1"
+]
+
+for text in encoded do
+    let decoded = decode(text)
+
+    case decoded
+    when (values): Decoded.VALUES then
+        write_line("{text} -> {show(values)}")
+    when (message): Decoded.ERROR then
+        write_line("{text} -> error: {message}")
+    esac
+od
+
+let all_values = 0..256 |> list()
+let round_trip = decode(encode(all_values))
+
+write_line()
+let same = round_trip =~ Decoded.VALUES(all_values)
+write_line("all 256 values round-trip: {same}")

@@ -1,0 +1,104 @@
+use default
+
+union SExpr is
+    LIST(items: SExpr[])
+    SYMBOL(name: string)
+    STRING(text: string)
+    INTEGER(value: int)
+    REAL(value: double)
+si
+
+use SExpr.LIST
+use SExpr.SYMBOL
+use SExpr.STRING
+use SExpr.INTEGER
+use SExpr.REAL
+
+delimits(character: char) -> bool =>
+    character == '(' \/
+    character == ')' \/
+    character == '"' \/
+    character <= ' '
+
+skip_space(text: string, at: int) -> int => (
+    let i mut = at
+
+    while i < text.length /\ text[i] <= ' ' do
+        i = i + 1
+    od
+
+    i
+)
+
+atom(token: string) -> SExpr is
+    let whole mut = 0
+
+    if int.try_parse(token, whole ref) then
+        return INTEGER(whole)
+    fi
+
+    let real mut = 0.0
+
+    if double.try_parse(token, real ref) then
+        return REAL(real)
+    fi
+
+    return SYMBOL(token)
+si
+
+read(text: string, at: int) -> (value: SExpr, next: int) is
+    let start = skip_space(text, at)
+
+    if text[start] == '(' then
+        let items = Collections.LIST()
+        let i mut = skip_space(text, start + 1)
+
+        while text[i] != ')' do
+            let (value, next) = read(text, i)
+
+            items.add(value)
+
+            i = skip_space(text, next)
+        od
+
+        return (LIST(items.to_array()), i + 1)
+    fi
+
+    if text[start] == '"' then
+        let close mut = start + 1
+
+        while text[close] != '"' do
+            close = close + 1
+        od
+
+        return (STRING(text[start + 1..close]), close + 1)
+    fi
+
+    let end mut = start
+
+    while end < text.length /\ !delimits(text[end]) do
+        end = end + 1
+    od
+
+    return (atom(text[start..end]), end)
+si
+
+render(node: SExpr) -> string =>
+    case node
+    when (items): LIST then
+        "({items |> map(render) |> join(" ")})"
+    when (name): SYMBOL then name
+    when (text): STRING then "\"{text}\""
+    when (value): INTEGER then "{value}"
+    when (value): REAL then "{value}"
+    esac
+
+let source =
+    "((data \"quoted data\" 123 4.5)\n"
+    " (data (!@# (4.5) \"(more\" \"data)\")))"
+
+let (parsed, _) = read(source, 0)
+
+write_line(source)
+write_line("")
+write_line(render(parsed))

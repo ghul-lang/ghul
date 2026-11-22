@@ -1,0 +1,93 @@
+use default
+use System.Net.IPAddress
+use System.Net.IPEndPoint
+use System.Net.Sockets.TcpListener
+use Text.Encoding
+
+// The test's entry: a minimal FTP server on the loopback interface holding
+// one directory with one file, speaking just enough FTP for the task's
+// requests. Not part of the published solution.
+stand_in() -> string is
+    let control = TcpListener(IPAddress.loopback, 0)
+
+    control.start()
+
+    let ascii = text => Encoding.ascii.get_bytes(text)
+
+    let port_of =
+        listener =>
+            if let bound: IPEndPoint = listener.local_endpoint then
+                bound.port
+            else
+                throw Ghul.Exception("the listener has no address")
+            fi
+
+    Tasks.TASK.run(() is
+        do
+            let connection = control.accept_tcp_client().get_stream()
+            let reader = IO.StreamReader(connection)
+            let writer = IO.StreamWriter(connection)
+            let data mut = TcpListener(IPAddress.loopback, 0)
+
+            writer.auto_flush = true
+            writer.write("220 stand-in ready\r\n")
+
+            let send = bytes is
+                let client = data.accept_tcp_client()
+
+                writer.write("150 sending\r\n")
+                client.get_stream().write(bytes, 0, bytes.count)
+                client.close()
+                writer.write("226 done\r\n")
+            si
+
+            let line mut = reader.read_line()
+
+            while line? do
+                let command = line.split([' '])[0]
+
+                case command
+                when "USER" then
+                    writer.write("331 password please\r\n")
+                when "PASS" then
+                    writer.write("230 logged in\r\n")
+                when "PWD" then writer.write("257 \"/\"\r\n")
+                when "CWD" then
+                    writer.write("250 directory changed\r\n")
+                when "TYPE" then
+                    writer.write("200 type set\r\n")
+                when "PASV" then
+                    data = TcpListener(IPAddress.loopback, 0)
+                    data.start()
+
+                    let p = port_of(data)
+
+                    let (high, low) = (p / 256, p % 256)
+
+                    writer.write("227 passive (127,0,0,1,{high},{low})\r\n")
+                when "NLST" then send(ascii("readme.txt\r\n"))
+                when "RETR" then send(ascii("Hello from FTP\n"))
+                when "QUIT" then writer.write("221 bye\r\n")
+                else writer.write("502 not here\r\n")
+                esac
+
+                line = reader.read_line()
+            od
+        od
+    si)
+
+    "ftp://127.0.0.1:{port_of(control)}/pub/"
+si
+
+@entry()
+test_entry() is
+    let server = stand_in()
+
+    write_line("listing:")
+    IO.Std.write(list(server))
+
+    let file = download("{server}readme.txt")
+
+    write_line("downloaded {file.count} bytes:")
+    IO.Std.write(Encoding.ascii.get_string(file))
+si

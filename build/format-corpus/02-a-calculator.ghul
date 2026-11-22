@@ -1,0 +1,186 @@
+use default
+use IO.Std.read_line
+use IO.Std.write
+
+union Expression is
+    NUMBER(value: int)
+    ADD(left: Expression, right: Expression)
+    SUBTRACT(left: Expression, right: Expression)
+    MULTIPLY(left: Expression, right: Expression)
+    DIVIDE(left: Expression, right: Expression)
+si
+
+use Expression.NUMBER
+use Expression.ADD
+use Expression.SUBTRACT
+use Expression.MULTIPLY
+use Expression.DIVIDE
+
+struct PARSED(expression: Expression, next: int)
+
+skip_spaces(text: string, at: int) -> int =>
+    if at < text.length /\ text[at] == ' ' then
+        skip_spaces(text, at + 1)
+    else
+        at
+    fi
+
+parse_term(text: string, at: int) -> PARSED? is
+    let start = skip_spaces(text, at)
+
+    if start == text.length then
+        return null
+    fi
+
+    if text[start] == '(' then
+        if let (expression, next) = parse_expression(text, start + 1) then
+            let close = skip_spaces(text, next)
+
+            if close < text.length /\ text[close] == ')' then
+                return PARSED(expression, close + 1)
+            fi
+        fi
+
+        return null
+    fi
+
+    let end mut = start
+
+    while end < text.length /\ text[end].is_digit do
+        end = end + 1
+    od
+
+    if end == start then
+        return null
+    fi
+
+    let digits = text[start..end]
+
+    return PARSED(NUMBER(int.parse(digits)), end)
+si
+
+operator_at(text: string, position: int, operators: string) -> int? =>
+    let here = skip_spaces(text, position) in
+    if here < text.length /\ operators.contains(text[here]) then
+        here
+    else
+        null
+    fi
+
+build(operator: char, left: Expression, right: Expression) -> Expression =>
+    case operator
+    when '+' then ADD(left, right)
+    when '-' then SUBTRACT(left, right)
+    when '*' then MULTIPLY(left, right)
+    when '/' then DIVIDE(left, right)
+    else throw Ghul.Exception("not an operator: {operator}")
+    esac
+
+parse_run(
+    text: string,
+    at: int,
+    operators: string,
+    operand: (string, int) -> PARSED?
+) -> PARSED? is
+    if let (left, next) = operand(text, at) then
+        let expression mut = left
+        let position mut = next
+
+        while let here = operator_at(text, position, operators) do
+            if let (right, after) = operand(text, here + 1) then
+                expression = build(text[here], expression, right)
+                position = after
+            else
+                return null
+            fi
+        od
+
+        return PARSED(expression, position)
+    fi
+
+    return null
+si
+
+parse_factor(text: string, at: int) -> PARSED? =>
+    parse_run(text, at, "*/", parse_term)
+
+parse_expression(text: string, at: int) -> PARSED? =>
+    parse_run(text, at, "+-", parse_factor)
+
+parse(text: string) -> Expression? is
+    if let
+        (expression, next) = parse_expression(text, 0) /\ skip_spaces(
+            text,
+            next
+        ) == text.length
+    then
+        return expression
+    fi
+
+    return null
+si
+
+evaluate(expression: Expression) -> int =>
+    case expression
+    when (value): NUMBER then value
+    when (left, right): ADD then
+        evaluate(left) + evaluate(right)
+    when (left, right): SUBTRACT then
+        evaluate(left) - evaluate(right)
+    when (left, right): MULTIPLY then
+        evaluate(left) * evaluate(right)
+    when (left, right): DIVIDE then
+        evaluate(left) / evaluate(right)
+    esac
+
+node(expression: Expression) -> (label: string, children: Expression[]) =>
+    case expression
+    when (value): NUMBER then
+        ("{value}", LIST())
+    when (left, right): ADD then
+        ("+", [left, right])
+    when (left, right): SUBTRACT then
+        ("-", [left, right])
+    when (left, right): MULTIPLY then
+        ("*", [left, right])
+    when (left, right): DIVIDE then
+        ("/", [left, right])
+    esac
+
+draw(expression: Expression, prefix: string, stem: string) is
+    let (label, children) = node(expression)
+
+    write_line("{stem}{label}")
+
+    for child in children |> index() do
+        let last = child.index == children.count - 1
+
+        draw(
+            child.value,
+            "{prefix}{if last then "   " else "|  " fi}",
+            "{prefix}{if last then "\\- " else "+- " fi}"
+        )
+    od
+si
+
+prompt() -> string? is
+    write("expression: ")
+
+    read_line()
+si
+
+while let source = prompt() do
+    if let tree = parse(source) then
+        draw(tree, "", "")
+
+        try
+            write_line("= {evaluate(tree)}")
+        catch _: Ghul.DivideByZeroException
+            write_line("= undefined: division by zero")
+        yrt
+    else
+        write_line("cannot be parsed")
+    fi
+
+    write_line("")
+od
