@@ -287,13 +287,30 @@ namespace Syntax.Process is
             //    A test against the optional of a plain value type is
             //    the exception: narrowing first would unwrap the source
             //    before the test could find it absent.
-            let lifted =
-                PATTERN_CHECKER.is_lifted_test(
-                    narrow_type,
-                    if let target = _visitor.try_get_narrowing_target(c.scrutinee) then _flow.declared_type_of(target) else null fi
-                )
+            let scrutinee_target = _visitor.try_get_narrowing_target(c.scrutinee)
+            let declared_source = if let target = scrutinee_target then _flow.declared_type_of(target) else null fi
 
-            if narrow_type? /\ !lifted then
+            let lifted = PATTERN_CHECKER.is_lifted_test(narrow_type, declared_source)
+
+            // A tuple type that spreads across a destructure pattern's
+            // elements is tested element by element, so nothing narrows
+            // the scrutinee as a whole.
+            let spreads_early =
+                narrow_type? /\
+                !c.pattern.is_simple_name /\
+                PATTERN_CHECKER.spreads(
+                    narrow_type,
+                    if let target = scrutinee_target then
+                        _flow.current_env.narrowed_type_of(target) ??
+                        (if _flow.current_env.is_non_null(target) then declared_source?.optional_inner_type ?? declared_source else declared_source fi)
+                    else
+                        null
+                    fi,
+                    c.pattern.elements!.count)
+
+            let narrows = narrow_type? /\ !lifted /\ !spreads_early
+
+            if narrows then
                 let then_env =
                     _condition_analyzer.apply_refutable_binding_then_narrow(
                         c.scrutinee,
@@ -323,6 +340,14 @@ namespace Syntax.Process is
                     DUMMY(Semantic.Types.ERROR(), c.scrutinee.location)
             fi
 
+            // Where the clause narrowed nothing, a destructure pattern is
+            // checked against the scrutinee's type as walked, which is
+            // what flow analysis knows of it here. A single name keeps
+            // the declared type: its binding unwraps that type's
+            // optional, which a presence narrowing has already removed
+            // from the type as walked.
+            let flow_source_type = if !narrows /\ !c.pattern.is_simple_name then c.scrutinee.value?.type else null fi
+
             // Peel a flow-narrowing projection back to its wrapper —
             // the presence test and destructure path want the
             // optional shape, not the already-projected `T`.
@@ -350,9 +375,22 @@ namespace Syntax.Process is
             // can fire when the scrutinee's type is still inferred —
             // that's what gives recursive lambdas inference parity
             // with `isa V(x) ... let (a, b) = x`.
+            let clause_spreads =
+                spreads_early \/
+                (
+                    narrow_type? /\
+                    !scrutinee_target? /\
+                    !pattern.is_simple_name /\
+                    PATTERN_CHECKER.spreads(narrow_type, c.scrutinee.value?.type, pattern.elements!.count)
+                )
+
+            if clause_spreads then
+                _variable_left_state.get_or_add(pattern).explicit_type = narrow_type
+            fi
+
             let specialized_narrow: Type? mut = null
 
-            if narrow_type? then
+            if narrow_type? /\ !clause_spreads then
                 specialized_narrow = narrow_type
 
                 if let receiver_type = c.scrutinee.value?.type then
@@ -378,6 +416,7 @@ namespace Syntax.Process is
                 // mutate, so a call result would otherwise be left with
                 // the written form.
                 _variable_left_state.get_or_add(pattern).narrow_type = specialized_narrow
+                _variable_left_state.get_or_add(pattern).tests_whole = true
 
                 if pattern.is_simple_name then
                     _variable_left_state.get_or_add(pattern).explicit_type = specialized_narrow
@@ -435,11 +474,12 @@ namespace Syntax.Process is
             //    the already-narrowed `scrutinee.value.type` here
             //    would make every narrow look like a no-op and
             //    spuriously fire the redundancy warning.
-            let source_type: Type? mut = null
-            let target_variable = _visitor.try_get_narrowing_target(c.scrutinee)
+            let source_type: Type? mut = flow_source_type
 
-            if target_variable? then
-                source_type = _flow.declared_type_of(target_variable)
+            if source_type? then
+                // already known
+            elif scrutinee_target? then
+                source_type = declared_source
             elif let c.scrutinee.value? then
                 source_type = value.type
             fi
@@ -453,9 +493,9 @@ namespace Syntax.Process is
             _pattern_checker.check_pattern(
                 pattern,
                 source_type,
-                narrow_type,
+                if clause_spreads then null else narrow_type fi,
                 c.location,
-                !pattern.has_intrinsic_refutability
+                !pattern.has_intrinsic_refutability /\ !_visitor.pattern_has_failing_test(pattern, true)
             )
 
             // 7. Per-clause guard — walked after the clause's names
@@ -1056,8 +1096,15 @@ namespace Syntax.Process is
                 let synthesized: IR.Values.Value mut =
                     IR.Values.DUMMY(scrutinee_type, arm.location)
 
-                if target_type? then
+                // A tuple type that spreads across the pattern's elements
+                // is tested element by element, so the pattern reads the
+                // scrutinee at its own type.
+                if
+                    target_type? /\
+                    (pattern.left.is_simple_name \/ !PATTERN_CHECKER.spreads(target_type, scrutinee_type, pattern.left.elements!.count))
+                then
                     synthesized = IR.Values.CAST(target_type, synthesized, false)
+                    _variable_left_state.get_or_add(pattern.left).tests_whole = true
                 fi
 
                 left_state.right_value = synthesized
@@ -1090,10 +1137,14 @@ namespace Syntax.Process is
             // on the bare form — a destructure of a non-nullable tuple
             // is a valid arm that simply always matches, not an error
             // the way `if let v = some_int` is.
+            // A spread tuple type is tested element by element, so the
+            // pattern as a whole has no target of its own to check.
+            let arm_target = if _variable_left_state.get(pattern_left)?.is_spread ?? false then null else target_type fi
+
             _pattern_checker.check_pattern(
                 pattern_left,
                 scrutinee_type,
-                target_type,
+                arm_target,
                 arm.location,
                 false
             )
@@ -1113,7 +1164,7 @@ namespace Syntax.Process is
             // arm ran and no arm has run yet, so the fact holds on entry
             // to every arm.
             if
-                target_type? /\ !PATTERN_CHECKER.is_lifted_test(target_type, scrutinee_type) /\
+                arm_target? /\ !PATTERN_CHECKER.is_lifted_test(arm_target, scrutinee_type) /\
                 _case_scrutinee_expression_stack.count > 0
             then
                 let scrutinee_expression =
@@ -1241,7 +1292,7 @@ namespace Syntax.Process is
             fi
 
             if !`case.is_poisoned then
-                _case_exhaustiveness_checker.check(`case)
+                _case_exhaustiveness_checker.check(`case, left => _visitor.pattern_has_failing_test(left, false))
             fi
 
             // Deferred from `pre_case`, and placed after the check so it

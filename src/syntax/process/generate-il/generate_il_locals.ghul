@@ -624,6 +624,52 @@ namespace Syntax.Process is
             return _type_caster.cast_value(probe.location, value, formal, true, false)
         si
 
+        // Tests that a value in a pattern has the type written after
+        // its group, leaving `fail` when it does not, and returns the
+        // value at that type. A plain value type is tested through its
+        // optional, as the top-level clause test is, since it has no
+        // absent value of its own to report a failed test with.
+        _gen_narrowing_test(
+            left: Variables.VariableLeft,
+            value: Value,
+            written: Semantic.Types.Type,
+            fail: Values.Breakable
+        ) -> Value is
+            let target =
+                PATTERN_CHECKER.runtime_test_type(
+                    _variable_left_state.get(left)?.narrow_type ?? written,
+                    value.type,
+                    _innate_symbol_lookup
+                )
+
+            let already = value.type?.matches(target) ?? false
+
+            if already /\ target.is_value_type /\ !target.is_optional then
+                return value
+            fi
+
+            let tested = if already then value else _type_caster.cast_value(left.location, value, target, true, false) fi
+            let temp = TEMP(current_block, "narrow", tested)
+            let tested_type = tested.type!
+
+            if tested_type.is_value_type then
+                let has_value_member = tested_type.find_member("has_value")
+                let value_member = tested_type.find_member("value")
+
+                if has_value_member? /\ value_member? then
+                    add(Values.BREAK(fail, BRANCH.Z, has_value_member.load(LOCATION.internal, temp.load(), _symbol_loader)))
+
+                    return value_member.load(LOCATION.internal, temp.load(), _symbol_loader)
+                fi
+
+                return temp.load()
+            fi
+
+            add(Values.BREAK(fail, BRANCH.Z, temp.load()))
+
+            return temp.load()
+        si
+
         // TODO use Pre/Visit instead
         gen_destructuring_initialize(left: Variables.VariableLeft, value: Value) is
             gen_destructuring_initialize(left, value, null)
@@ -694,18 +740,24 @@ namespace Syntax.Process is
 
             let narrowed mut = value
 
-            let type_expression = left.type_expression
             if
-                type_expression? /\
-                type_expression.type? /\
-                narrow_fail?
+                let left_state = _variable_left_state.get(left),
+                test_type = left_state.test_type /\
+                !left_state.is_spread /\
+                narrow_fail? /\
+                PATTERN_CHECKER.can_fail_test(test_type, value.type)
             then
-                let cast_value = IR.Values.CAST(type_expression.type, value, false)
-                let temp = TEMP(current_block, "narrow", cast_value)
+                narrowed = _gen_narrowing_test(left, value, test_type, narrow_fail)
+            fi
 
-                add(Values.BREAK(narrow_fail, BRANCH.Z, temp.load()))
-
-                narrowed = temp.load()
+            if
+                let leaf_state = _variable_left_state.get(left),
+                widened = leaf_state.widening,
+                operand = leaf_state.widening_operand /\
+                !narrow_fail?
+            then
+                operand.value = narrowed
+                narrowed = widened
             fi
 
             if left.is_simple_name then

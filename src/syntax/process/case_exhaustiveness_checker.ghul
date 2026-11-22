@@ -33,6 +33,8 @@ namespace Syntax.Process is
         // open, and listing them all would bury the point.
         _MAX_REPORTED_WITNESSES: int static => 8
 
+        _has_failing_test: (Trees.Variables.VariableLeft) -> bool
+
         init(
             logger: Logger,
             innate_symbol_lookup: Semantic.Lookups.InnateSymbolLookup
@@ -43,9 +45,15 @@ namespace Syntax.Process is
             _classifier = CASE_DOMAIN_CLASSIFIER(innate_symbol_lookup)
             _builder = CASE_PATTERN_BUILDER()
             _usefulness = CASE_USEFULNESS()
+            _has_failing_test = left => false
         si
 
-        check(`case: Trees.Statements.CASE) is
+        // `has_failing_test` says whether a pattern holds a type test,
+        // anywhere inside it, that the value at that position can fail:
+        // an arm with one covers nothing here, as an unmodelled arm does.
+        check(`case: Trees.Statements.CASE, has_failing_test: (Trees.Variables.VariableLeft) -> bool) is
+            _has_failing_test = has_failing_test
+
             let expression_value = `case.expression?.value
 
             if !expression_value? then
@@ -82,7 +90,12 @@ namespace Syntax.Process is
                     continue
                 fi
 
-                let arm_rows = _builder.build_rows(arm, domain)
+                let arm_rows =
+                    if let pattern = arm.pattern /\ has_failing_test(pattern.left) then
+                        null
+                    else
+                        _builder.build_rows(arm, domain)
+                    fi
 
                 // An arm whose shape could not be modelled covers
                 // nothing as far as this check is concerned, and is
@@ -179,7 +192,7 @@ namespace Syntax.Process is
                 fi
 
                 if let pattern = arm.pattern then
-                    if !pattern.is_explicit_type /\ !pattern.left.has_intrinsic_refutability then
+                    if !pattern.is_explicit_type /\ !pattern.left.has_intrinsic_refutability /\ !_has_failing_test(pattern.left) then
                         return
                     fi
                 fi

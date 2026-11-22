@@ -230,7 +230,14 @@ namespace Syntax.Process is
                             fi
                         fi
                     fi
-                elif
+                fi
+
+                // A written type is checked against the value on a walk
+                // after the one that installs it. A destructure leaf that
+                // writes its own type may be walked only once, so it is
+                // checked on the installing walk too.
+                if
+                    (!needs_set \/ ((left.type_expression? \/ left_state.spread_type_location?) /\ (!left.is_refutable \/ left_state.test_type?))) /\
                     left_state.explicit_type? /\
                     left_state.right_value? /\
                     Value.check_is_consumable(_logger, right_location, left_state.right_value)
@@ -246,7 +253,40 @@ namespace Syntax.Process is
                         _overload_resolver.match_propagator.propagate_match(explicit_type, right_value.type)
                     fi
 
+                    // A destructure leaf's value is the element it reads,
+                    // so a number widens into the leaf's written type here,
+                    // as an initializer does into a typed local.
+                    left_state.widening = null
+                    left_state.widening_operand = null
+
+                    let operand = IR.Values.WRAPPER(IR.Values.DUMMY(right_value.type!, left.location))
+
+                    let widened =
+                        if !left.is_refutable /\ !explicit_type.is_assignable_from(right_value.type!) then
+                            widen_value(left.location, operand, explicit_type)
+                        else
+                            null
+                        fi
+
                     if
+                        left.is_refutable /\
+                        left_state.test_type? /\
+                        !explicit_type.matches(right_value.type!) /\
+                        PATTERN_CHECKER.should_emit_value_type_narrow_error(explicit_type, explicit_type, right_value.type)
+                    then
+                        // A plain value is never anything but its own type,
+                        // so a test against another value type cannot pass.
+                        _logger.error(
+                            left.type_expression?.location ?? left_state.spread_type_location ?? left.location,
+                            "cannot-narrow-type", "cannot narrow '{explicit_type}'")
+                    fi
+
+                    if widened? then
+                        operand.value = right_value
+                        left_state.right_value = widened
+                        left_state.widening = widened
+                        left_state.widening_operand = operand
+                    elif
                         !left.is_refutable /\
                         !explicit_type.is_assignable_from(right_value.type!)
                     then
@@ -256,9 +296,18 @@ namespace Syntax.Process is
                         // typically wider than `T`, and the cast may
                         // fail — that's the whole point of the
                         // construct.
+                        // A destructure leaf's own type is the annotation
+                        // the element contradicts, so the error is there.
+                        let location =
+                            if let leaf_type = left.type_expression then
+                                leaf_type.location
+                            else
+                                left_state.spread_type_location ?? left_state.variable_location!
+                            fi
+
                         use IoC.CONTAINER.instance.name_display.qualifying_alike(right_value.type, explicit_type)
                         _logger.error(
-                            left_state.variable_location!,
+                            location,
                             "cannot-convert-type", "'{right_value.type}' is not assignable to '{explicit_type}'")
                     fi
                 fi
@@ -305,6 +354,52 @@ namespace Syntax.Process is
             fi
         si
 
+        _can_take_apart(type: Type?, count: int) -> bool is
+            if !type? \/ type.is_inferred \/ type.is_error then
+                return true
+            fi
+
+            let strategy = DESTRUCTURE_RESOLVER.resolve_strategy(type, count)
+
+            if strategy.is_deconstruct then
+                return true
+            fi
+
+            for m in strategy.members do
+                if !m? then
+                    return false
+                fi
+            od
+
+            return true
+        si
+
+        // Whether a pattern holds a type test that the value at that
+        // position can fail. With `include_written` false, only the tests
+        // no type is written for at that node count: a type spread from
+        // a group, or a group's implied tuple type. Meaningful once the
+        // pattern has been walked.
+        pattern_has_failing_test(left: Trees.Variables.VariableLeft, include_written: bool) -> bool is
+            if
+                let state = _variable_left_state.get(left), test_type = state.test_type /\
+                (include_written \/ !left.type_expression?) /\
+                !state.is_spread /\
+                PATTERN_CHECKER.can_fail_test(test_type, state.right_value?.type)
+            then
+                return true
+            fi
+
+            if let elements = left.elements then
+                for e in elements do
+                    if pattern_has_failing_test(e, include_written) then
+                        return true
+                    fi
+                od
+            fi
+
+            return false
+        si
+
         pre(left: Trees.Variables.DESTRUCTURING_VARIABLE_LEFT) -> bool is
             // A destructured formal argument has no initializer to walk
             // a value from - its leaves' types are already assigned by
@@ -346,8 +441,70 @@ namespace Syntax.Process is
                 return true
             fi
 
+            // A tuple type on the group is the same as the element types
+            // written on its elements: the group reads the value at the
+            // value's own type, and each element takes its element type,
+            // which a refutable pattern tests and any other converts to.
+            // A refutable group with no type of its own, over a value it
+            // cannot take apart, whose elements all have types, is the
+            // same pattern as the group typed with the tuple of them.
+            if
+                left.is_refutable /\
+                !left_state.explicit_type? /\
+                !left.is_sequence /\
+                !(left.elements.count > 0 /\ left.elements[0].source_field_name?) /\
+                !_can_take_apart(from.type, left.elements.count)
+            then
+                if let implied = PATTERN_CHECKER.written_pattern_type(left, _innate_symbol_lookup) then
+                    left_state.explicit_type = implied
+                    left_state.test_type = implied
+                    left_state.spread_type_location = left.location
+                fi
+            fi
+
+            let is_spread =
+                !left_state.tests_whole /\
+                !left.is_sequence /\
+                !(left.elements.count > 0 /\ left.elements[0].source_field_name?) /\
+                PATTERN_CHECKER.spreads(left_state.explicit_type, from.type, left.elements.count)
+
+            left_state.is_spread = is_spread
+
+            if is_spread then
+                let written = PATTERN_CHECKER.tuple_arguments(left_state.explicit_type, left.elements.count)!
+                let written_location = left.type_expression?.location ?? left_state.spread_type_location ?? left.location
+
+                for i in 0..left.elements.count do
+                    let element_state = _variable_left_state.get_or_add(left.elements[i])
+
+                    if !left.elements[i].type_expression? then
+                        element_state.explicit_type = written[i]
+                        element_state.spread_type_location = written_location
+                    fi
+                od
+            elif
+                let written = left_state.explicit_type, source = from.type /\
+                !left.is_refutable /\
+                !written.is_inferred /\ !source.is_inferred /\
+                !written.is_assignable_from(source)
+            then
+                // A written type that does not spread is one the value
+                // must already have, as for `let x: T = e`.
+                use IoC.CONTAINER.instance.name_display.qualifying_alike(source, written)
+                _logger.error(
+                    left.type_expression?.location ?? left_state.spread_type_location ?? left.location,
+                    "cannot-convert-type", "'{source}' is not assignable to '{written}'")
+            fi
+
+            if left.is_refutable then
+                for e in left.elements do
+                    let element_state = _variable_left_state.get_or_add(e)
+                    element_state.test_type = element_state.explicit_type
+                od
+            fi
+
             let from_type mut =
-                if left_state.explicit_type? then
+                if left_state.explicit_type? /\ !is_spread then
                     left_state.explicit_type
                 else
                     from.type
@@ -1092,6 +1249,26 @@ namespace Syntax.Process is
                     _attribute_resolver.resolve(pragma, target)
                 od
             fi
+        si
+
+        // A loop's destructure pattern over the elements it reads,
+        // typed as a `let` pattern is: types written in it spread,
+        // convert and are checked against the element type.
+        walks_as_pattern(variable: Trees.Variables.VARIABLE) -> bool =>
+            !variable.left.is_simple_name /\ !variable.left.is_sequence
+
+        walk_loop_pattern(variable: Trees.Variables.VARIABLE, element_type: Type) is
+            let state = _variable_left_state.get_or_add(variable.left)
+
+            if let te_type = variable.type_expression.type /\ variable.is_explicit_type then
+                state.explicit_type = te_type
+            fi
+
+            state.right_value = IR.Values.DUMMY(element_type, variable.location)
+            state.variable_location = variable.location
+            state.right_location = variable.location
+
+            variable.left.walk(self)
         si
 
         // TODO used by for loop - needs removing
