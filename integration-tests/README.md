@@ -92,6 +92,10 @@ see `ghul-test`'s own README for the flag. Two uses this serves:
   substitute for the full suite, which CI always runs regardless — see
   'Local CI' in the workspace `CLAUDE.md`. Run it with
   `dotnet ghul-test --tag smoke integration-tests`.
+- **`llvm-gap`** — a test that passes on .NET but not yet on llvm. CI builds
+  it for .NET and leaves it out of the llvm runs. The list may only shrink:
+  `build/llvm-gaps.sh check <base>` fails a change that tags a test its base
+  does not. When a fix makes a tagged test pass on llvm, take the tag off.
 
 Current feature tags: `parser`, `narrowing`, `optionals`, `unions`, `generics`,
 `traits`, `classes`, `structs`, `enums`, `tuples`, `lambdas`, `async`,
@@ -179,11 +183,13 @@ fetches it, and prints where its executable is. The CI job runs the tests in an 
 linker or C library, and then runs each program again in an empty image with
 `build/llvm-programs.sh`, which fails any program that is not fully static.
 
-In CI the `ci` configuration makes the `dotnet` runs alone. Every `llvm` and
-`wasm` run is built by the native compiler the run's first llvm bootstrap pass
-builds, placed in `hosts/llvm/`: the `ci-native` configuration makes the
-`llvm` runs optimised as the compiler does by default, and `ci-native-o0` makes
-them unoptimised together with every `wasm` run.
+In CI the suite is built mainly for `llvm`, by the native compiler the run's
+first llvm bootstrap pass builds, placed in `hosts/llvm/`, through fork
+servers. `ci-native-all` builds every test for `llvm` unoptimised, together
+with every `wasm` run, and `ci-native` builds the tests whose `build_targets`
+name `llvm` optimised as well. A test whose `build_targets` leave `llvm` out
+is built for .NET by `ci-dotnet-only`, as is every test tagged `llvm-gap`, by
+`ci`.
 
 `build/wasm-validate.sh` and `build/llvm-validate.sh` hand every module the
 compiler writes for their target to an engine. They select tests by the target

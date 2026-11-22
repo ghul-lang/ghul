@@ -574,38 +574,31 @@ jobs:
         path: ./analysis-protocol/nupkg/ghul.analysis.protocol.${{ needs.version.outputs.package }}.nupkg
 
 
-  # The suite is far larger than one runner can hold: on 4 vCPU it takes
-  # around eight minutes end to end. `--shard` divides it between runners
-  # instead, striped by discovery order so no shard collects a whole
-  # directory of like-cost tests. Each shard reports its share of the
-  # discovered tests, so the log shows none was dropped.
-  #
-  # Five shards rather than more: the account runs at most twenty jobs at
-  # once, and with pull request runs, release builds and reviews sharing
-  # them, further shards wait for a runner rather than run in parallel, and
-  # each one adds its own setup time.
+  # The integration tests that need .NET: those whose build_targets name
+  # dotnet, and those tagged llvm-gap, which do not pass on llvm yet. Every
+  # other test is built for llvm and wasm by llvm_test_shards instead. The
+  # llvm-gap tag may only come off tests: the check below fails a pull
+  # request that tags more of them than its base does.
   #
   # This job is not the required status check - `integration_tests` below
-  # is, and its name is what branch protection lists. Changing the shard
-  # count is therefore a change to this file alone.
+  # is, and its name is what branch protection lists.
   integration_shards:
     needs: [version, bootstrap]
     if: needs.version.outputs.build == 'true'
-    name: Integration shard
+    name: Run .NET integration tests
 
     runs-on: ubuntu-latest
 
     timeout-minutes: 15
 
-    strategy:
-      # One shard failing says nothing about the others, and a rerun to find
-      # out costs another bootstrap.
-      fail-fast: false
-      matrix:
-        shard: [1, 2, 3, 4, 5]
-
     steps:
     - uses: actions/checkout@v7
+
+    - name: Check no more tests are tagged llvm-gap than on the base
+      if: github.event_name == 'pull_request'
+      run: |
+        git fetch --quiet --depth=1 origin "${{ github.base_ref }}"
+        build/llvm-gaps.sh check FETCH_HEAD
 
     - name: Set up .NET 10
       uses: actions/setup-dotnet@v6
@@ -640,22 +633,22 @@ jobs:
         path: libraries/ghul-runtime
         ref: ${{ needs.version.outputs.runtime }}
 
-    # The `ci` configuration in ghul-test.json: the compiler installed above
+    # The `ci` configurations in ghul-test.json: the compiler installed above
     # as the local tool and the runtime the bootstrapped compiler ships with.
-    # It runs the .NET builds only: the wasm and llvm builds are the native
-    # shards' (llvm_test_shards).
     - name: Run integration tests
-      run: bash -c "set -o pipefail ; dotnet ghul-test --config ci --shard ${{ matrix.shard }}/5 integration-tests | tee test-results.txt"
+      run: |
+        set -o pipefail
+        dotnet ghul-test --config ci-dotnet-only integration-tests | tee test-results.txt
+        dotnet ghul-test --config ci --tag llvm-gap integration-tests | tee -a test-results.txt
 
     - uses: actions/upload-artifact@v7
       with:
-        name: test-results-${{ matrix.shard }}
+        name: test-results
         path: test-results.txt
 
 
-  # The required status check. A shard's own job carries the matrix leg in
-  # its name, so the name changes whenever the shard count does; this job's
-  # does not, which keeps the shard count out of branch protection.
+  # The required status check, under a name that stays the same whichever
+  # jobs run the suite.
   #
   # `always()` is load-bearing. Without it a failed bootstrap skips the
   # shards, which skips this job, and a skipped job satisfies a required
@@ -673,7 +666,7 @@ jobs:
     timeout-minutes: 5
 
     steps:
-    - name: Check every shard passed
+    - name: Check the .NET integration tests passed
       env:
         RESULT: ${{ needs.integration_shards.result }}
         BUILD: ${{ needs.version.outputs.build }}
@@ -1386,22 +1379,25 @@ jobs:
     - name: Validate the wasm test modules in Node
       run: build/wasm-validate.sh
 
-  # The llvm target's integration tests, built and run as a user's build
-  # would build and run them: the compiler hands each module to the
-  # ghul-llvm release fetched from GitHub, in an image holding the .NET SDK
-  # and nothing to compile, assemble or link C with, so a program that needs
-  # anything from the machine fails here. Run at both optimisation levels,
-  # since a test that passes at one and not the other is a backend bug or a
-  # missing check. The programs are then run again in an empty image by
-  # llvm_static. Each level runs in two shards, striped by discovery order as
-  # the .NET integration shards are: one job ran close to its fifteen minutes
-  # under load, and the limit stays where it is. llvm_tests below judges the
-  # shards and the cell scenarios under one name that does not change with
-  # the shard count, as integration_tests does for the .NET shards.
+  # The integration suite, built and run as a user's build would build and
+  # run it: the native compiler from llvm_pass_1 builds every test for llvm,
+  # through fork servers, and hands each module to the ghul-llvm release
+  # fetched from GitHub, in an image holding the .NET SDK and nothing to
+  # compile, assemble or link C with, so a program that needs anything from
+  # the machine fails here. Every test is built unoptimised, and every test
+  # built for wasm runs too, under Node; the tests whose build_targets name
+  # llvm are built optimised as well, since a test that passes at one level
+  # and not the other is a backend bug or a missing check. A test whose
+  # build_targets leave llvm out, or tagged llvm-gap, is integration_shards'.
+  # The programs are then run again in an empty image by llvm_static. The
+  # suite runs in five shards, striped by discovery order, so no shard
+  # collects a whole directory of like-cost tests. llvm_tests below judges
+  # the shards and the cell scenarios under one name that does not change
+  # with the shard count.
   llvm_test_shards:
     needs: [version, bootstrap, llvm_pass_1]
     if: needs.version.outputs.build == 'true'
-    name: Run llvm tests (${{ matrix.optimisation }}, ${{ matrix.shard }}/2)
+    name: Run llvm integration tests (${{ matrix.shard }}/5)
 
     runs-on: ubuntu-latest
 
@@ -1412,8 +1408,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        optimisation: [O2, O0]
-        shard: [1, 2]
+        shard: [1, 2, 3, 4, 5]
 
     steps:
     - uses: actions/checkout@v7
@@ -1476,21 +1471,39 @@ jobs:
         chmod +x hosts/llvm/ghul
         test "$(hosts/llvm/ghul)" = "ghūl ${{ needs.version.outputs.package }} llvm"
 
-    # The unoptimised leg also runs every test built for wasm, under Node.
+    # --build-server: one test built twice in one server, each build compared
+    # with a cold compile. The fork servers the tests run through do not use it.
+    - name: Compare build-server builds with cold builds
+      if: matrix.shard == 1
+      run: build/build-server-equivalence.sh "$PWD/hosts/llvm/ghul" "$PWD/libraries/ghul-runtime" 40 1
+
     - name: Set up Node.js
-      if: matrix.optimisation == 'O0'
       uses: actions/setup-node@v7
       with:
         node-version: '24'
 
-    - name: Run the llvm integration tests
+    # Optimised first, so the programs collected after it are the optimised
+    # ones; the unoptimised run then builds them again.
+    - name: Run the optimised llvm integration tests
       env:
         GHUL_TEST_KEEP_ARTIFACTS: 1
-        CONFIG: ${{ matrix.optimisation == 'O0' && 'ci-native-o0' || 'ci-native' }}
-      run: bash -c "set -o pipefail ; dotnet ghul-test --config $CONFIG --shard ${{ matrix.shard }}/2 integration-tests | tee test-results.txt"
+      run: bash -c "set -o pipefail ; dotnet ghul-test --config ci-native --not-tag llvm-gap --shard ${{ matrix.shard }}/5 integration-tests | tee test-results-O2.txt"
+
+    - name: Collect the optimised programs
+      run: build/llvm-programs.sh collect integration-tests llvm-programs-O2
+
+    - uses: actions/upload-artifact@v7
+      with:
+        name: llvm-programs-O2-${{ matrix.shard }}
+        path: llvm-programs-O2
+
+    - name: Run the integration tests
+      env:
+        GHUL_TEST_KEEP_ARTIFACTS: 1
+      run: bash -c "set -o pipefail ; dotnet ghul-test --config ci-native-all --not-tag llvm-gap --shard ${{ matrix.shard }}/5 integration-tests | tee test-results.txt"
 
     - name: Validate the llvm test modules
-      if: matrix.optimisation == 'O2'
+      if: matrix.shard == 1
       run: build/llvm-validate.sh
 
     - name: Collect the programs
@@ -1498,7 +1511,7 @@ jobs:
 
     - uses: actions/upload-artifact@v7
       with:
-        name: llvm-programs-${{ matrix.optimisation }}-${{ matrix.shard }}
+        name: llvm-programs-O0-${{ matrix.shard }}
         path: llvm-programs
 
   # Cells compiled one after another, each against the ones before it, and
@@ -1562,60 +1575,11 @@ jobs:
         ghul_llvm="$(dirname "$(dirname "$(command -v ghul-llvm)")")"
         build/llvm-cells.sh publish/ghul.dll "$ghul_llvm" "$host"
 
-  # The native compiler's --fork-server against cold compiles of the same
-  # arguments: a sample of the execution tests built both ways for wasm and
-  # llvm, byte for byte, with the same diagnostics, and the server's count
-  # of builds served from its snapshot checked. Then --build-server: one test
-  # built twice in one server, each build compared with a cold compile.
-  fork_server_equivalence:
-    needs: [version, llvm_pass_1]
-    if: needs.version.outputs.build == 'true'
-    name: Check fork-server builds match cold builds
-
-    runs-on: ubuntu-latest
-
-    timeout-minutes: 15
-
-    steps:
-    - uses: actions/checkout@v7
-
-    # The runtime the version job chose for the whole run.
-    - name: Checkout ghul-runtime
-      uses: actions/checkout@v7
-      with:
-        repository: ghul-lang/ghul-runtime
-        path: libraries/ghul-runtime
-        ref: ${{ needs.version.outputs.runtime }}
-
-    - name: Fetch ghul-llvm
-      run: |
-        ghul_llvm="$(build/ghul-llvm.sh "$RUNNER_TEMP/ghul-llvm" "${{ needs.version.outputs.ghul_llvm }}")"
-        test -x "$ghul_llvm"
-        dirname "$ghul_llvm" >> "$GITHUB_PATH"
-
-    - name: Download the native compiler
-      uses: actions/download-artifact@v8
-      with:
-        name: ghul-compiler-llvm-pass-1
-
-    - name: Install the native compiler
-      run: |
-        mkdir -p "$RUNNER_TEMP/native"
-        tar -xzf llvm-pass-1.tar.gz -O pass-1/ghul > "$RUNNER_TEMP/native/ghul"
-        chmod +x "$RUNNER_TEMP/native/ghul"
-
-    - name: Compare fork-server builds with cold builds
-      run: build/fork-server-equivalence.sh "$RUNNER_TEMP/native/ghul" libraries/ghul-runtime
-
-    - name: Compare build-server builds with cold builds
-      run: build/build-server-equivalence.sh "$RUNNER_TEMP/native/ghul" libraries/ghul-runtime 40 1
-
-  # The llvm tests' one name: every shard, the cell scenarios and the fork
-  # server's equivalence passed. As
+  # The llvm tests' one name: every shard and the cell scenarios passed. As
   # for integration_tests, `always()` makes a failed build fail this job
   # rather than skip it.
   llvm_tests:
-    needs: [version, llvm_test_shards, llvm_cells, fork_server_equivalence]
+    needs: [version, llvm_test_shards, llvm_cells]
     name: Run llvm tests
 
     if: always()
@@ -1625,15 +1589,14 @@ jobs:
     timeout-minutes: 5
 
     steps:
-    - name: Check every shard, the cell scenarios and the fork server passed
+    - name: Check every shard and the cell scenarios passed
       env:
         SHARDS: ${{ needs.llvm_test_shards.result }}
         CELLS: ${{ needs.llvm_cells.result }}
-        FORK_SERVER: ${{ needs.fork_server_equivalence.result }}
         BUILD: ${{ needs.version.outputs.build }}
       run: |
-        echo "shards: $SHARDS, cells: $CELLS, fork server: $FORK_SERVER"
-        for result in "$SHARDS" "$CELLS" "$FORK_SERVER"; do
+        echo "shards: $SHARDS, cells: $CELLS"
+        for result in "$SHARDS" "$CELLS"; do
           [ "$result" = success ] || { [ "$result" = skipped ] && [ "$BUILD" != true ]; } || exit 1
         done
 
