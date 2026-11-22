@@ -3,24 +3,89 @@ namespace Semantic is
     use Symbols.Classy
     use Symbols.NAMESPACE
 
-    // The namespaces and types `--rtti-include` names, which reflection
-    // describes as it describes those marked `@reflected()`: a namespace's
-    // global functions and types, and a type's methods. `*` names every
-    // namespace and type, the libraries' included. Each name is resolved
-    // to the symbol it names, and symbols are what are compared.
+    // The namespaces and types given to `--rtti-include`, or to an
+    // `@@rtti(...)` file pragma, which reflection describes as it describes
+    // those marked `@reflected()`: a namespace's global functions and types,
+    // and a type's methods. `*` stands for every namespace and type, the
+    // libraries' included. Each name is resolved to its symbol, and symbols
+    // are what are compared.
     class RTTI_INCLUDES is
         init() is si
 
+        // Records the `@@rtti()` file pragmas of `source_file`, replacing
+        // what an earlier parse of the file recorded. A pragma turns on
+        // reflection for the build, as `--rtti` does, and each string it is
+        // given is included, as `--rtti-include` includes one. Only the
+        // file's own pragma list is read, not its tree.
+        record_pragmas(logger: Logger, source_file: Compiler.SOURCE_FILE) static is
+            let flags = IoC.CONTAINER.instance.build_flags
+            let file_name = source_file.file_name
+
+            flags.rtti_pragma_includes.remove(file_name)
+
+            let list = cast Syntax.Trees.Definitions.LIST?(source_file.definition)
+
+            if !list? then
+                return
+            fi
+
+            let file_pragmas = list.file_pragmas
+
+            if !file_pragmas? then
+                return
+            fi
+
+            let found = Collections.LIST[(name: string, location: Source.LOCATION)]()
+            let any mut = false
+
+            for pragma in file_pragmas do
+                if !pragma.is_name_equal_to("rtti") then
+                    continue
+                fi
+
+                any = true
+
+                for i in 0..pragma.arguments.expressions.count do
+                    let argument = pragma.arguments.expressions[i]
+
+                    if let name = pragma.try_get_string_literal_at(i) then
+                        found.add((name, argument.location))
+                    else
+                        logger.error(argument.location, "rtti-pragma-argument-not-string", "@@rtti() argument must be a string")
+                    fi
+                od
+            od
+
+            if any then
+                flags.want_rtti = true
+            fi
+
+            if found.count > 0 then
+                flags.rtti_pragma_includes[file_name] = found
+            fi
+        si
+
         // Reports each name that is not a namespace or a type.
         check(logger: Logger) static is
-            for name in _names do
-                if !(name =~ "*") /\ !_namespace_named(name)? /\ !_type_named(name)? then
+            for name in IoC.CONTAINER.instance.build_flags.rtti_includes do
+                if !_exists(name) then
                     logger.error(Source.LOCATION.internal, "rtti-include-not-found", "--rtti-include argument '{name}' must be a namespace or a type")
                 fi
             od
+
+            for entries in IoC.CONTAINER.instance.build_flags.rtti_pragma_includes.values do
+                for (name, location) in entries do
+                    if !_exists(name) then
+                        logger.error(location, "rtti-include-not-found", "@@rtti() argument '{name}' must be a namespace or a type")
+                    fi
+                od
+            od
         si
 
-        // Whether `--rtti-include` names `type`, or the namespace declaring it.
+        _exists(name: string) -> bool static =>
+            name =~ "*" \/ _namespace_named(name)? \/ _type_named(name)?
+
+        // Whether `type`, or the namespace declaring it, is included.
         includes(type: Classy) -> bool static is
             for name in _names do
                 if name =~ "*" then
@@ -39,7 +104,7 @@ namespace Semantic is
             return false
         si
 
-        // Whether `--rtti-include` names `namespace`.
+        // Whether `namespace` is included.
         includes(`namespace: NAMESPACE) -> bool static is
             for name in _names do
                 if name =~ "*" then
@@ -54,7 +119,17 @@ namespace Semantic is
             return false
         si
 
-        _names: Collections.LIST[string] static => IoC.CONTAINER.instance.build_flags.rtti_includes
+        _names: string{} static is
+            let flags = IoC.CONTAINER.instance.build_flags
+
+            yield in flags.rtti_includes
+
+            for entries in flags.rtti_pragma_includes.values do
+                for entry in entries do
+                    yield entry.name
+                od
+            od
+        si
 
         _namespace_named(name: string) -> NAMESPACE? static =>
             IoC.CONTAINER.instance.namespaces.try_find_namespace(".{name}")
