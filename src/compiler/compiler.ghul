@@ -21,6 +21,7 @@ namespace Compiler is
         build_passes: MutableList[Pass]
 
         _compile_expressions_pass: Pass
+        _infer_effects_pass: Pass
         _verify_compile_state_had_errors: bool
 
         is_full_compile_needed: bool public
@@ -162,7 +163,7 @@ namespace Compiler is
             // relations the crossing discharge reads. Reports nothing a
             // later pass consumes through the milestone, so it does not
             // advance it.
-            add_pass(
+            _infer_effects_pass = add_pass(
                 build_passes,
                 "infer-effects",
                 () -> void is
@@ -207,7 +208,9 @@ namespace Compiler is
                         IO.Std.error.write_line("effects round: {stopwatch.elapsed_milliseconds} ms (walk {walk_ms} solve {solve_ms - walk_ms} rounds {rounds_ms - solve_ms} judge {stopwatch.elapsed_milliseconds - rounds_ms})")
                     fi
                 si
-            ).advances_milestone = false
+            )
+
+            _infer_effects_pass.advances_milestone = false
 
             // After the effect rounds have re-walked whatever they were
             // going to, so the state checked is the state generate-il
@@ -560,6 +563,52 @@ namespace Compiler is
             _move_top_level_entry_file_first()
 
             build(build_passes, source_files)
+
+            are_tables_current = true
+        si
+
+        // A build where the core library is compiled from source: the
+        // library files are taken through every pass up to infer-effects
+        // before any program file is, and the passes from infer-effects on,
+        // which see the whole program, then run over every file. The
+        // compiler numbers the names it synthesises in bodies, such as
+        // closure frames and state machines, in the order it compiles
+        // them, so compiling the libraries first gives a library's names
+        // that do not depend on the program it is compiled with.
+        build_libraries_first() is
+            _want_entry_point_selection = true
+
+            Syntax.Process.PURE_SLOTS.clear()
+            IR.Emitter.SRM_MEMBER_ORDER.clear()
+            Syntax.Process.KILL_LEDGER.clear_all()
+
+            _move_top_level_entry_file_first()
+
+            let per_file = LIST[Pass]()
+            let whole_program = LIST[Pass]()
+
+            for pass in build_passes do
+                if pass.order < _infer_effects_pass.order then
+                    per_file.add(pass)
+                else
+                    whole_program.add(pass)
+                fi
+            od
+
+            let libraries = LIST[SOURCE_FILE]()
+            let program = LIST[SOURCE_FILE]()
+
+            for file in source_files do
+                if file.library? then
+                    libraries.add(file)
+                else
+                    program.add(file)
+                fi
+            od
+
+            build(per_file, libraries)
+            build(per_file, program)
+            build(whole_program, source_files)
 
             are_tables_current = true
         si
