@@ -6,16 +6,18 @@
 # against a compile in a process of its own. The first test is built again
 # at the end, so a build that follows every other one is compared too.
 #
-# usage: build/build-server-equivalence.sh <compiler> <ghul-runtime> [every]
+# usage: build/build-server-equivalence.sh <compiler> <ghul-runtime> [every [limit]]
 #
 # <compiler> is the native compiler or a .NET ghul.dll, run with dotnet.
 # <ghul-runtime> is a checkout of the runtime, core and runtime trees both.
-# Every <every>th test whose test.json is `{}` is taken (default 40). An llvm
+# Every <every>th test whose test.json is `{}` is taken (default 40), at most
+# <limit> of them (default all). With a limit of 1 one test is built twice,
+# the second build following the first in the same server. An llvm
 # build writes its module's text and links nothing, so ghul-llvm is not needed.
 set -euo pipefail
 
 if [ $# -lt 2 ]; then
-    echo "usage: build/build-server-equivalence.sh <compiler> <ghul-runtime> [every]" >&2
+    echo "usage: build/build-server-equivalence.sh <compiler> <ghul-runtime> [every [limit]]" >&2
     exit 2
 fi
 
@@ -23,6 +25,7 @@ root=$(cd "$(dirname "$0")/.." && pwd)
 compiler_path=$(cd "$(dirname "$1")" && pwd)/$(basename "$1")
 runtime=$(cd "$2" && pwd)
 every=${3:-40}
+limit=${4:-0}
 
 if [[ $compiler_path == *.dll ]]; then
     compiler=(dotnet "$compiler_path")
@@ -43,6 +46,7 @@ for directory in "$root"/integration-tests/execution/*/; do
     [ "$(tr -d '[:space:]' < "$directory/test.json" 2> /dev/null)" = '{}' ] || continue
     ls "$directory"/*.ghul > /dev/null 2>&1 || continue
     tests+=("${directory%/}")
+    [ "$limit" -eq 0 ] || [ "${#tests[@]}" -lt "$limit" ] || break
 done
 
 failures=0
