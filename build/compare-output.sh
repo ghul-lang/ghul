@@ -111,7 +111,7 @@ compile_one() {
     local out=$1 extra=$2 file=$3
     local test target dir executable output options sources name extension
     read_command < "$file"
-    name=$(echo "$test" | sed 's#^.*integration-tests/##; s#/#__#g')
+    name=$(echo "$test" | sed 's#^.*integration-tests/##; s#/#__#g; s#\[[a-z]*\]$##').$target
     if [ "$target" = dotnet ] ; then extension=dll ; else extension=${output##*.} ; fi
     [ -n "$extra" ] && options+=("$extra")
     (cd "$dir" && "$executable" "${options[@]}" "${sources[@]}" -o "$out/$name.$extension") > "$out/$name.log" 2>&1
