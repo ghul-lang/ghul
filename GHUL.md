@@ -514,6 +514,8 @@ An unnamed element of a tuple literal that is a bare identifier takes its name f
 
 Destructuring has two forms, **positional** and **by-name**. The syntax shows which form is used.
 
+A leaf of a `let` destructure can write its own type, and then behaves like `let x: T = element`: the element must be assignable to `T`, or a number that widens into it. So `let (total: long, count) = (3, 4)` makes `total` a `long`, and `let (name: string, age) = (3, 4)` is an error. The whole pattern can have a type instead, as in `let (a, b): (int, int) = pair`. A pattern can't have both: a type on the whole pattern and a type on any of its elements is an error.
+
 A **positional** target list `(a, b, ...)` matches the source by the first of these that applies:
 
 1. a value tuple with the same number of elements
@@ -627,7 +629,7 @@ add_pair((a, b): (int, int)) -> int => a + b;
 add_pair((3, 4));    // 7
 ```
 
-Patterns can nest, and can be mixed with ordinary parameters: `f(x: int, (a, b): (int, int), y: int)`. A namespace-scope function written with a pattern has types in its signature, so the type of the whole pattern is required. The element types come from the type of the whole pattern. An element can also write its own type, as in a `let` destructure: the element must be assignable to it or widen into it, so `(x: double, y): (int, int)` gives `x` the type `double`, and `(x: string, y): (int, int)` is an error. The type of the whole pattern can be any type that can be destructured positionally: a tuple, or a type with a matching `deconstruct(...)` method. A formal argument list does not support the by-name group form (`(x = field, ...)`).
+Patterns can nest, and can be mixed with ordinary parameters: `f(x: int, (a, b): (int, int), y: int)`. The pattern goes left of the `:` and the parameter's type on the right, as with any parameter: `(a, b): (int, int)` has the same shape as `a: int` or `ab: (int, int)`, and the element types come from that type. As a shorthand, the elements can write their types and the whole pattern none: `add_pair((a: int, b: int))` takes an `(int, int)`, the tuple of the element types. A function's signature needs every element typed for the shorthand. Writing both, a type on the whole pattern and a type on any element, is an error. The type of the whole pattern can be any type that can be destructured positionally: a tuple, or a type with a matching `deconstruct(...)` method. A formal argument list does not support the by-name group form (`(x = field, ...)`).
 
 Functions are first-class values. A function literal has the same form as a function, without a name. The compiler usually *infers* its argument types and return type from the body and from the context of the literal, so they are usually written without annotations. Either can be written explicitly. A literal with one argument needs no parentheses around it. `A -> B` is the type of a function from `A` to `B`.
 
@@ -663,7 +665,7 @@ let pairs = [(1, 2), (3, 4)];
 pairs |> map(((a, b)) => a + b);          // element types inferred from the sequence
 ```
 
-The single-parameter shorthand without parentheses (`x => …`) cannot have a pattern, and cannot have a type annotation. Both need the parentheses. Unlike in a named function, the compiler usually infers the type of the whole pattern, from the sequence or slot that the literal is passed to, or from how the parameter is used. Write the type explicitly when nothing gives it. As for a named function, the type can be any type that can be destructured positionally, and an element can write its own type, checked against the element in the same way. The type of the whole pattern accepts the full type syntax:
+The single-parameter shorthand without parentheses (`x => …`) cannot have a pattern, and cannot have a type annotation. Both need the parentheses. Unlike in a named function, the compiler usually infers the type of the whole pattern, from the sequence or slot that the literal is passed to, or from how the parameter is used. Write the type explicitly when nothing gives it. As for a named function, the type can be any type that can be destructured positionally. The elements can write their types instead, as in `((a: int, b: string)) => ...`, and in a literal an element left untyped is inferred: `((a: int, b)) => a + b`. Writing both, a type on the whole pattern and a type on any element, is an error. The type of the whole pattern accepts the full type syntax:
 
 ```ghul
 let add = ((a, b): (int, int)) => a + b;

@@ -103,7 +103,12 @@ namespace Syntax.Process is
                         // parameter at the aggregate type, under the
                         // synthesised name declare-members gave it.
                         let group_symbol = symbol_for(argument)
-                        let type = argument.type_expression.type
+                        let type =
+                            if argument.type_expression.is_inferred then
+                                _pattern_type(argument.left)
+                            else
+                                argument.type_expression.type
+                            fi
 
                         types.add(if type? then type else Semantic.Types.ERROR() fi)
                         names.add(if group_symbol? then group_symbol.name else "?" fi)
@@ -425,6 +430,31 @@ namespace Syntax.Process is
 
                 _assign_destructure_element_type(elements[i], if member? then member.type else null fi)
             od
+        si
+
+        // The type a pattern's written types give it: its own written
+        // type, or for a group with none, the tuple of its elements'.
+        // Null where some element writes no type.
+        _pattern_type(left: Trees.Variables.VariableLeft) -> Type? is
+            if let written = left.type_expression then
+                return written.type
+            fi
+
+            if left.is_simple_name then
+                return null
+            fi
+
+            let element_types = Collections.LIST[Type]()
+
+            for element in left.elements! do
+                if let element_type = _pattern_type(element) then
+                    element_types.add(element_type)
+                else
+                    return null
+                fi
+            od
+
+            return IoC.CONTAINER.instance.innate_symbol_lookup.get_tuple_type(element_types |> ARRAY(), null)
         si
 
         // Assigns `element_type` to every leaf under `element` -
