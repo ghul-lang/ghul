@@ -26,8 +26,6 @@ root="${1:-integration-tests}"
 if [ $# -gt 0 ]; then
     shift
 fi
-target=llvm
-test_flags="$(cd "$(dirname "$0")" && pwd)/test-flags.sh"
 if [ $# -gt 0 ]; then
     compiler=("$@")
 else
@@ -51,24 +49,41 @@ trap 'rm -rf "$scratch"' EXIT
 checked=0
 failed=0
 
-# Every test under $root whose test.json flags name `--target $target`, printed
-# as its directory and its flags, tab-separated. A test that runs under the
-# target through build_targets is left to ghul-test, run by a configuration
-# whose run_targets names llvm. A `.targets` directory holds ghul-test's own
-# copies of a test, not tests.
-tests_for_target() {
-    find "$root" -name test.json -not -path "*/.targets/*" | sort | while IFS= read -r settings_file; do
-        dir="$(dirname "$settings_file")"
-        flags="$("$test_flags" "$dir" "$target")"
+# The command ghul-test builds each llvm test with, one JSON line each, from
+# the configuration for this compiler: a .NET one is handed the reference
+# assemblies, and one hosted elsewhere is not. A test whose flags name the
+# target builds in its own directory; one that runs under llvm through
+# build_targets builds in a copy under .targets/ and is left to ghul-test.
+if [[ "${compiler[*]}" == *.dll ]]; then
+    configuration=llvm
+else
+    configuration=host-llvm
+fi
 
-        if [[ " $flags " == *" --target $target "* ]]; then
-            printf "%s\t%s\n" "$dir" "$flags"
-        fi
-    done
+if ! dotnet ghul-test --config "$configuration" --compiler "${compiler[*]}" --commands "$scratch/commands.jsonl" "$root" >"$scratch/ghul-test.out" 2>&1; then
+    echo "llvm-validate: ghul-test could not list the build commands:" >&2
+    tail -5 "$scratch/ghul-test.out" >&2
+    exit 1
+fi
+
+# read_command: reads one command test-commands.mjs wrote into test,
+# target, dir, executable, output, options and sources.
+read_command() {
+    local count i value
+    IFS= read -r -d '' test || return 1
+    IFS= read -r -d '' target
+    IFS= read -r -d '' dir
+    IFS= read -r -d '' executable
+    IFS= read -r -d '' output
+    options=()
+    IFS= read -r -d '' count
+    for ((i = 0; i < count; i++)); do IFS= read -r -d '' value; options+=("$value"); done
+    sources=()
+    IFS= read -r -d '' count
+    for ((i = 0; i < count; i++)); do IFS= read -r -d '' value; sources+=("$value"); done
 }
 
-while IFS=$'\t' read -r dir flags_text; do
-    dir="$(cd "$dir" && pwd)"
+while read_command; do
 
     if [ -e "$dir/fail.expected" ] || compgen -G "$dir/disabled*" >/dev/null; then
         continue
@@ -77,11 +92,10 @@ while IFS=$'\t' read -r dir flags_text; do
     out="$scratch/$checked"
     mkdir -p "$out"
 
-    read -r -a flags <<< "$flags_text"
 
     checked=$((checked + 1))
 
-    if ! (cd "$dir" && "${compiler[@]}" "${flags[@]}" --library -o "$out/module.ll" ./*.ghul) >"$out/compiler.out" 2>&1; then
+    if ! (cd "$dir" && "$executable" "${options[@]}" --library "${sources[@]}" -o "$out/module.ll") >"$out/compiler.out" 2>&1; then
         echo "llvm-validate: $dir did not compile:" >&2
         head -5 "$out/compiler.out" >&2
         failed=$((failed + 1))
@@ -93,7 +107,7 @@ while IFS=$'\t' read -r dir flags_text; do
         head -10 "$out/ghul-llvm.out" >&2
         failed=$((failed + 1))
     fi
-done < <(tests_for_target)
+done < <(node "$(dirname "$0")/test-commands.mjs" "$scratch/commands.jsonl" --target llvm --in-place)
 
 echo "llvm-validate: $checked modules checked, $failed failed"
 

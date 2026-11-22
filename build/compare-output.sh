@@ -2,7 +2,8 @@
 # Checks that the working tree's compiler produces the same bytes as a base
 # commit's compiler. Both are published, then each compiles the selected
 # integration tests, in release and with --debug, and the compiler's own
-# source. Every assembly and PDB is compared byte for byte, along with
+# source, with the arguments ghul-test builds each test with. Every assembly,
+# PDB and wasm module is compared byte for byte, along with
 # whether each compilation succeeded.
 #
 # usage: build/compare-output.sh [--base <ref>] [--jobs <n>] [--all | test-directory ...]
@@ -30,7 +31,6 @@ while [ $# -gt 0 ] ; do
 done
 
 ROOT=$(pwd)
-export TEST_FLAGS="$ROOT/build/test-flags.sh"
 
 if [ ! -f "$ROOT/ghul.ghulproj" ] ; then
     echo "run from the root of the compiler repository" >&2
@@ -87,21 +87,55 @@ echo "publishing base and working tree compilers"
 publish "$BASE_TREE" "$WORK/base-compiler"
 publish "$ROOT" "$WORK/new-compiler"
 
+# read_command: reads one command test-commands.mjs wrote into test,
+# target, dir, executable, output, options and sources.
+read_command() {
+    local count i value
+    IFS= read -r -d '' test || return 1
+    IFS= read -r -d '' target
+    IFS= read -r -d '' dir
+    IFS= read -r -d '' executable
+    IFS= read -r -d '' output
+    options=()
+    IFS= read -r -d '' count
+    for ((i = 0; i < count; i++)); do IFS= read -r -d '' value; options+=("$value"); done
+    sources=()
+    IFS= read -r -d '' count
+    for ((i = 0; i < count; i++)); do IFS= read -r -d '' value; sources+=("$value"); done
+}
+
+# compile_one <out> <extra> <command-file>: runs the build command in
+# <command-file>, with <extra> added to its options and its output in <out>,
+# named after the test.
 compile_one() {
-    local compiler=$1 out=$2 test=$3 extra=$4
-    local name
+    local out=$1 extra=$2 file=$3
+    local test target dir executable output options sources name extension
+    read_command < "$file"
     name=$(echo "$test" | sed 's#^.*integration-tests/##; s#/#__#g')
-    cd "$test" || return
-    local files
-    files=$(find . -name '*.ghul' | sort)
-    [ -z "$files" ] && return
-    # shellcheck disable=SC2086
-    dotnet "$compiler/ghul.dll" $extra $("$TEST_FLAGS" .) $files -o "$out/$name.dll" > "$out/$name.log" 2>&1
+    if [ "$target" = dotnet ] ; then extension=dll ; else extension=${output##*.} ; fi
+    [ -n "$extra" ] && options+=("$extra")
+    (cd "$dir" && "$executable" "${options[@]}" "${sources[@]}" -o "$out/$name.$extension") > "$out/$name.log" 2>&1
     echo $? > "$out/$name.status"
     rm -f "$out/$name.runtimeconfig.json"
 }
 
-export -f compile_one
+export -f read_command compile_one
+
+# The command ghul-test builds each test with, for every target but llvm,
+# whose builds link with ghul-llvm.
+for side in base new ; do
+    mapfile -t tests < "$WORK/tests.txt"
+    (cd "$ROOT" && dotnet ghul-test --config published --compiler "$WORK/$side-compiler/ghul.dll" --commands "$WORK/$side-commands.all" "${tests[@]}") > "$WORK/$side-commands.log" 2>&1 || { echo "ghul-test could not list the $side build commands, see $WORK/$side-commands.log" >&2; exit 2; }
+    mkdir -p "$WORK/$side-commands"
+    node "$ROOT/build/test-commands.mjs" "$WORK/$side-commands.all" --not-target llvm > "$WORK/$side-commands.records"
+    index=0
+    while read_command ; do
+        {
+            printf '%s\0' "$test" "$target" "$dir" "$executable" "$output" "${#options[@]}" "${options[@]}" "${#sources[@]}" "${sources[@]}"
+        } > "$WORK/$side-commands/$index"
+        index=$((index + 1))
+    done < "$WORK/$side-commands.records"
+done
 
 for side in base new ; do
     for mode in release debug ; do
@@ -109,9 +143,11 @@ for side in base new ; do
         extra=""
         [ $mode = debug ] && extra=--debug
         echo "compiling tests: $side $mode"
-        xargs -P "$JOBS" -I{} bash -c "compile_one '$WORK/$side-compiler' '$WORK/$side-$mode' '{}' '$extra'" < "$WORK/tests.txt"
+        find "$WORK/$side-commands" -type f | xargs -P "$JOBS" -I{} bash -c 'compile_one "$1" "$2" "$3"' _ "$WORK/$side-$mode" "$extra" {}
     done
 done
+
+COMPARED=0
 
 for mode in release debug ; do
     for status in "$WORK/base-$mode"/*.status ; do
@@ -122,14 +158,23 @@ for mode in release debug ; do
             DIFFERENCES=$((DIFFERENCES + 1))
             continue
         fi
-        for ext in dll pdb ; do
-            if [ -f "$WORK/base-$mode/$name.$ext" ] && ! cmp -s "$WORK/base-$mode/$name.$ext" "$new.$ext" ; then
+        for ext in dll pdb wasm ; do
+            [ -f "$WORK/base-$mode/$name.$ext" ] || continue
+            COMPARED=$((COMPARED + 1))
+            if ! cmp -s "$WORK/base-$mode/$name.$ext" "$new.$ext" ; then
                 echo "DIFFERENT $mode $name.$ext"
                 DIFFERENCES=$((DIFFERENCES + 1))
             fi
         done
     done
 done
+
+echo "$COMPARED test outputs compared"
+
+if [ $COMPARED -eq 0 ] ; then
+    echo "no test outputs to compare" >&2
+    DIFFERENCES=$((DIFFERENCES + 1))
+fi
 
 echo "compiling the compiler source with each compiler"
 
