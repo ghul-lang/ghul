@@ -2,7 +2,7 @@
 # Writes the response files that compile the compiler's own source for the
 # llvm target: libraries.rsp names the runtime library's sources, both its
 # core and its runtime trees, and sources.rsp the compiler's. Shared by
-# llvm-self-type-check.sh and llvm-bootstrap.sh.
+# llvm-bootstrap.sh, llvm-lineage.sh and the scripts that build on them.
 #
 # usage: build/llvm-self-sources.sh <output directory> <ghul-runtime>
 

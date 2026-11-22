@@ -1,6 +1,6 @@
 #!/bin/bash
 # Builds the compiler for llvm from its own source, as one pass of
-# llvm-bootstrap.sh or one stage of llvm-chain.sh: into <work>/<name>/ghul,
+# llvm-bootstrap.sh or one stage of llvm-lineage.sh: into <work>/<name>/ghul,
 # keeping the module as <work>/<name>/ghul.ll. Every pass and stage is
 # built by this one command line, so two routes that should produce the
 # same compiler are compared on their compilers alone.
