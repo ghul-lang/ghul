@@ -113,10 +113,15 @@ _visit(3)
 write_line("{seen.count}")
 ```
 
-A function with some types written and no return type returns what its body gives. An `=>` body returns its expression. An `is` body returns what its `return`s and `yield`s give, and returns nothing without one; the value of its last statement is not returned:
+A function with no return type returns what its body gives. An `=>` body returns its expression. An `is` body returns what its `return`s and `yield`s give, and the value of its last statement, as an `if`, a `case` or a `( )` block does:
 
 ```ghul
 halve(x: int) => x / 2
+
+scaled(factor, x: int) is
+    let y = x + 1
+    factor * y
+si
 
 sign(x: int) is
     if x < 0 then return "negative" fi
@@ -126,7 +131,7 @@ si
 label(name: string, value) -> string => "{name}={value}"
 ```
 
-A function with every parameter type written, no return type and an `is` body that returns no value and doesn't yield returns `void`, as in a namespace block, and isn't private to its file.
+A function with parameters, every one of them typed, and no return type doesn't return the value of its last statement, so one ending in a call that returns a value, such as `seen.add(n)`, returns nothing. Its `return`s still decide its return type, as `sign` above shows. With no `return` and no `yield` it returns `void`, as in a namespace block, and isn't private to its file.
 
 In a file with a namespace block, a function with no return type returns void, its return type isn't inferred, and every parameter needs its type. So does every function in a build with whole-file inference turned off (`--no-whole-file-inference`).
 
