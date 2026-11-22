@@ -642,11 +642,13 @@ namespace Syntax.Process is
                     _innate_symbol_lookup
                 )
 
-            if target.is_value_type /\ (value.type?.matches(target) ?? false) then
+            let already = value.type?.matches(target) ?? false
+
+            if already /\ target.is_value_type /\ !target.is_optional then
                 return value
             fi
 
-            let tested = _type_caster.cast_value(left.location, value, target, true, false)
+            let tested = if already then value else _type_caster.cast_value(left.location, value, target, true, false) fi
             let temp = TEMP(current_block, "narrow", tested)
             let tested_type = tested.type!
 
@@ -738,13 +740,14 @@ namespace Syntax.Process is
 
             let narrowed mut = value
 
-            let type_expression = left.type_expression
             if
-                type_expression? /\
-                type_expression.type? /\
-                narrow_fail?
+                let left_state = _variable_left_state.get(left),
+                test_type = left_state.test_type /\
+                !left_state.is_spread /\
+                narrow_fail? /\
+                PATTERN_CHECKER.can_fail_test(test_type, value.type)
             then
-                narrowed = _gen_narrowing_test(left, value, type_expression.type, narrow_fail)
+                narrowed = _gen_narrowing_test(left, value, test_type, narrow_fail)
             fi
 
             if

@@ -514,7 +514,23 @@ An unnamed element of a tuple literal that is a bare identifier takes its name f
 
 Destructuring has two forms, **positional** and **by-name**. The syntax shows which form is used.
 
-A leaf of a `let` destructure can write its own type, and then behaves like `let x: T = element`: the element must be assignable to `T`, or a number that widens into it. So `let (total: long, count) = (3, 4)` makes `total` a `long`, and `let (name: string, age) = (3, 4)` is an error. The whole pattern can have a type instead, as in `let (a, b): (int, int) = pair`. A pattern can't have both: a type on the whole pattern and a type on any of its elements is an error.
+Every type in a pattern is optional, at every depth and in every position, for a single name as much as for a pattern. Write one only to give a name an explicit type, or to test a value's type in a refutable pattern (`if let`, `while let`, a `case` arm). Otherwise the type comes from the value. The one exception is a signature that must be typed: every name in a parameter pattern of a method or a namespace-scope function needs a type, from the pattern's type or from its own.
+
+Wherever a tuple pattern can take a type on its right, it can take the same type spread across its elements. These three are the same pattern:
+
+```ghul
+((a, b), (c, d)): ((DOG, CAT), (CAT, DOG))
+((a, b): (DOG, CAT), (c, d): (CAT, DOG))
+((a: DOG, b: CAT), (c: CAT, d: DOG))
+```
+
+A tuple-typed group takes its types on the group or inside it, not both: `(a: int, b): (int, int)` is an error. A group typed as a variant or as a type with a `deconstruct`, such as `(value, left, right): Tree.NODE`, says nothing about its parts' types, so the elements inside it can have types of their own.
+
+What a type means depends on where the pattern is:
+
+- In `let` and `for`, the value is assigned to the type, as in `let x: T = e`: it must be assignable to `T`, or a number that widens into it. `let (total: long, count) = (3, 4)` makes `total` a `long`, and `let (name: string, age) = (3, 4)` is an error.
+- In `if let`, `while let` and a `case` arm, the type is a test: the pattern matches only when the value at that position has the type. A tuple type is tested element by element, so `((a, b), (c, d)): ((DOG, CAT), (CAT, DOG))` over a `((ANIMAL, ANIMAL), (ANIMAL, ANIMAL))` tests each of the four values. A value whose own type already has the written type is not tested.
+- In a parameter, the types give the parameter its type (see [functions](#functions)).
 
 A **positional** target list `(a, b, ...)` matches the source by the first of these that applies:
 
@@ -629,7 +645,7 @@ add_pair((a, b): (int, int)) -> int => a + b;
 add_pair((3, 4));    // 7
 ```
 
-Patterns can nest, and can be mixed with ordinary parameters: `f(x: int, (a, b): (int, int), y: int)`. The pattern goes left of the `:` and the parameter's type on the right, as with any parameter: `(a, b): (int, int)` has the same shape as `a: int` or `ab: (int, int)`, and the element types come from that type. As a shorthand, the elements can write their types and the whole pattern none: `add_pair((a: int, b: int))` takes an `(int, int)`, the tuple of the element types. A function's signature needs every element typed for the shorthand. Writing both, a type on the whole pattern and a type on any element, is an error. The type of the whole pattern can be any type that can be destructured positionally: a tuple, or a type with a matching `deconstruct(...)` method. A formal argument list does not support the by-name group form (`(x = field, ...)`).
+Patterns can nest, and can be mixed with ordinary parameters: `f(x: int, (a, b): (int, int), y: int)`. The pattern goes left of the `:` and the parameter's type on the right, as with any parameter: `(a, b): (int, int)` has the same shape as `a: int` or `ab: (int, int)`, and the element types come from that type. The types can be spread across the elements instead, as in any pattern: `add_pair((a: int, b: int))` takes an `(int, int)`. A function whose signature must be typed needs a type for every name in the pattern, from either place. The type of the whole pattern can be any type that can be destructured positionally: a tuple, or a type with a matching `deconstruct(...)` method. A formal argument list does not support the by-name group form (`(x = field, ...)`).
 
 Functions are first-class values. A function literal has the same form as a function, without a name. The compiler usually *infers* its argument types and return type from the body and from the context of the literal, so they are usually written without annotations. Either can be written explicitly. A literal with one argument needs no parentheses around it. `A -> B` is the type of a function from `A` to `B`.
 
@@ -665,7 +681,7 @@ let pairs = [(1, 2), (3, 4)];
 pairs |> map(((a, b)) => a + b);          // element types inferred from the sequence
 ```
 
-The single-parameter shorthand without parentheses (`x => …`) cannot have a pattern, and cannot have a type annotation. Both need the parentheses. Unlike in a named function, the compiler usually infers the type of the whole pattern, from the sequence or slot that the literal is passed to, or from how the parameter is used. Write the type explicitly when nothing gives it. As for a named function, the type can be any type that can be destructured positionally. The elements can write their types instead, as in `((a: int, b: string)) => ...`, and in a literal an element left untyped is inferred: `((a: int, b)) => a + b`. Writing both, a type on the whole pattern and a type on any element, is an error. The type of the whole pattern accepts the full type syntax:
+The single-parameter shorthand without parentheses (`x => …`) cannot have a pattern, and cannot have a type annotation. Both need the parentheses. Unlike in a named function, the compiler usually infers the type of the whole pattern, from the sequence or slot that the literal is passed to, or from how the parameter is used. Write the type explicitly when nothing gives it. As for a named function, the type can be any type that can be destructured positionally. The types can be spread across the elements instead, as in `((a: int, b: string)) => ...`, and an element left untyped is inferred: `((a: int, b)) => a + b`. The type of the whole pattern accepts the full type syntax:
 
 ```ghul
 let add = ((a, b): (int, int)) => a + b;
@@ -1650,7 +1666,7 @@ esac;
 A `when` arm can have a pattern instead of a list of expressions. The patterns are the same as in `if let`:
 
 - `when v: T then` tests the type `T`. When it matches, `v` holds the narrowed value.
-- `when (a, b) then` destructures a tuple scrutinee into named variables. Each element can have a type (`when (c: CAT, d: DOG) then`). `_` discards an element. A literal leaf, as in `when (1, label) then` or `when (Color.RED, label) then`, tests that position for equality. A leaf marked with `~`, as in `when (~expected, label) then`, tests the position against the value the name holds, and declares no variable.
+- `when (a, b) then` destructures a tuple scrutinee into named variables. A type after the pattern tests the value: `when (c, d): (CAT, DOG) then` matches when the first value is a `CAT` and the second a `DOG`, and so does `when (c: CAT, d: DOG) then`. `_` discards an element. A literal leaf, as in `when (1, label) then` or `when (Color.RED, label) then`, tests that position for equality. A leaf marked with `~`, as in `when (~expected, label) then`, tests the position against the value the name holds, and declares no variable.
 - `when _: T then` tests the type only, and declares no variable.
 
 Pattern arms follow the same refutability rules as `if let`. An optional scrutinee gives the pattern its unwrapped value. A value-type pattern on a plain value-type scrutinee has nothing to test. It is an error, reported once, and the pattern's variables get the error type:
