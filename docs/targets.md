@@ -75,7 +75,7 @@ At an instantiation where `T` is a value type that is not itself optional, wasm 
 - an absent value is null on wasm and llvm, and a non-null boxed `Ghul.MAYBE[T]` on .NET
 - a present value is the boxed value on wasm and llvm, so `isa Ghul.MAYBE[int](o)` is false there, where on .NET `o` is a boxed `Ghul.MAYBE[int]`
 
-A type object's name, as `typeof` and `get_type` give it, differs by target. On .NET a type object is .NET's own, so it reports the CLR name: `System.Int32` for `int`, ``System.Collections.Generic.IReadOnlyList`1[System.String]`` for `typeof string[]`. On wasm and llvm it reports the name as ghūl source writes it: `int`, `string`, `object`, `ARRAY[int]`, `Collections.List[string]`, `(int, string)`, and `Box[int]` for a class declared in a file with top-level statements. So code that compares a type's name with text is target-specific; comparing type objects with `==` is not.
+A type object's name, as `typeof` and `get_type` give it, differs by target. On .NET a type object is .NET's own, so it reports the CLR name: `System.Int32` for `int`, ``System.Collections.Generic.IReadOnlyList`1[System.String]`` for `typeof string[]`. On wasm and llvm it reports the name as ghūl source writes it: `int`, `string`, `object`, `ARRAY[int]`, `Collections.LIST[int]`, `(int, string)`, `Collections.List[string]` for `typeof string[]`, the list trait, and `Box[int]` for a class declared in a file with top-level statements. So code that compares a type's name with text is target-specific; comparing type objects with `==` is not.
 
 ## conditional compilation
 
