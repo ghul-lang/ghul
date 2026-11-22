@@ -128,7 +128,7 @@ for side in base new ; do
     read -r -a ghul_test <<< "${GHUL_TEST:-dotnet ghul-test}"
     (cd "$ROOT" && "${ghul_test[@]}" --config published --compiler "$WORK/$side-compiler/ghul.dll" --commands "$WORK/$side-commands.all" "${tests[@]}") > "$WORK/$side-commands.log" 2>&1 || { echo "ghul-test could not list the $side build commands, see $WORK/$side-commands.log" >&2; exit 2; }
     mkdir -p "$WORK/$side-commands"
-    node "$ROOT/build/test-commands.mjs" "$WORK/$side-commands.all" --not-target llvm > "$WORK/$side-commands.records"
+    node "$ROOT/build/test-commands.mjs" "$WORK/$side-commands.all" --not-target llvm > "$WORK/$side-commands.records" || { echo "could not read the $side build commands" >&2; exit 2; }
     index=0
     while read_command ; do
         {

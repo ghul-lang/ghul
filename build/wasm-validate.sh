@@ -69,6 +69,11 @@ if ! "${ghul_test[@]}" --config "$configuration" --compiler "${compiler[*]}" --c
     exit 1
 fi
 
+if ! node "$(dirname "$0")/test-commands.mjs" "$scratch/commands.jsonl" --target wasm --in-place > "$scratch/commands"; then
+    echo "wasm-validate: could not read ghul-test's build commands" >&2
+    exit 1
+fi
+
 # read_command: reads one command test-commands.mjs wrote into test,
 # target, dir, executable, output, options and sources.
 read_command() {
@@ -115,7 +120,7 @@ while read_command; do
     fi
 
     checked=$((checked + 1))
-done < <(node "$(dirname "$0")/test-commands.mjs" "$scratch/commands.jsonl" --target wasm --in-place)
+done < "$scratch/commands"
 
 echo "wasm-validate: $checked modules checked, $failed failed"
 

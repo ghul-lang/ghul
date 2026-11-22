@@ -71,6 +71,11 @@ if ! "${ghul_test[@]}" --config "$configuration" --compiler "${compiler[*]}" --c
     exit 1
 fi
 
+if ! node "$(dirname "$0")/test-commands.mjs" "$scratch/commands.jsonl" --target llvm --in-place > "$scratch/commands"; then
+    echo "llvm-validate: could not read ghul-test's build commands" >&2
+    exit 1
+fi
+
 # read_command: reads one command test-commands.mjs wrote into test,
 # target, dir, executable, output, options and sources.
 read_command() {
@@ -112,7 +117,7 @@ while read_command; do
         head -10 "$out/ghul-llvm.out" >&2
         failed=$((failed + 1))
     fi
-done < <(node "$(dirname "$0")/test-commands.mjs" "$scratch/commands.jsonl" --target llvm --in-place)
+done < "$scratch/commands"
 
 echo "llvm-validate: $checked modules checked, $failed failed"
 
