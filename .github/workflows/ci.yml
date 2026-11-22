@@ -630,26 +630,10 @@ jobs:
     - name: Restore local .NET tools
       run: dotnet tool restore
 
-    # A test that runs under wasm through a `targets` file is compiled
-    # against the runtime library's sources, its core and runtime trees: a
-    # wasm build loads no assemblies, so the library comes from its
-    # checkout, and the module runs under Node.
-    # The runtime the version job chose for the whole run.
-    - name: Checkout ghul-runtime
-      uses: actions/checkout@v7
-      with:
-        repository: ghul-lang/ghul-runtime
-        path: libraries/ghul-runtime
-        ref: ${{ needs.version.outputs.runtime }}
-
-    - name: Set up Node.js
-      uses: actions/setup-node@v7
-      with:
-        node-version: '24'
-
     # The `ci` configuration in ghul-test.json: the compiler installed above
-    # as the local tool, the runtime the bootstrapped compiler ships with, and
-    # the library checkouts above for a test that runs under wasm.
+    # as the local tool and the runtime the bootstrapped compiler ships with.
+    # It runs the .NET builds only: the wasm and llvm builds are the native
+    # shards' (llvm_test_shards).
     - name: Run integration tests
       run: bash -c "set -o pipefail ; dotnet ghul-test --config ci --shard ${{ matrix.shard }}/5 integration-tests | tee test-results.txt"
 
@@ -793,8 +777,71 @@ jobs:
   # source, which builds the same source again, and the two passes must
   # write the same module and the same executable. Run on the full suite
   # only, as each pass is a full native build of the compiler.
-  llvm_bootstrap:
+  # Pass 1 of the llvm bootstrap: the native compiler the PR's .NET compiler
+  # builds from this source. The native test shards build with it, starting
+  # while llvm_bootstrap builds pass 2 from it. llvm_bootstrap fails, and so
+  # the Gate, unless pass 2 is byte for byte this pass, so a run that can
+  # merge has tested the compiler that reproduces itself.
+  llvm_pass_1:
     needs: [version, bootstrap]
+    if: needs.version.outputs.build == 'true'
+    name: Build the compiler natively
+
+    runs-on: ubuntu-latest
+
+    timeout-minutes: 20
+
+    steps:
+    - uses: actions/checkout@v7
+
+    - name: Set up .NET 10
+      uses: actions/setup-dotnet@v6
+      with:
+        dotnet-version: '10.0.x'
+
+    - name: Download bootstrap compiler tool tree
+      uses: actions/download-artifact@v8
+      with:
+        name: ghul-compiler-tool
+        path: publish
+
+    - name: Restore local .NET tools
+      run: dotnet tool restore
+
+    # The runtime the version job chose for the whole run.
+    - name: Checkout ghul-runtime
+      uses: actions/checkout@v7
+      with:
+        repository: ghul-lang/ghul-runtime
+        path: libraries/ghul-runtime
+        ref: ${{ needs.version.outputs.runtime }}
+
+    - name: Fetch ghul-llvm
+      run: |
+        ghul_llvm="$(build/ghul-llvm.sh "$RUNNER_TEMP/ghul-llvm" "${{ needs.version.outputs.ghul_llvm }}")"
+        test -x "$ghul_llvm"
+        dirname "$ghul_llvm" >> "$GITHUB_PATH"
+
+    - name: Build the compiler natively
+      env:
+        LLVM_BOOTSTRAP_DIR: ${{ runner.temp }}/llvm-bootstrap
+        LLVM_BOOTSTRAP_STEP: pass-1
+        GHUL_NATIVE_VERSION: ${{ needs.version.outputs.package }}
+      run: build/llvm-bootstrap.sh
+
+    # The executable and its module, which llvm_bootstrap compares with pass
+    # 2's. A tarball keeps the executable bit an artifact would lose.
+    - name: Pack pass 1
+      run: tar -C "${{ runner.temp }}/llvm-bootstrap" -czf llvm-pass-1.tar.gz pass-1/ghul pass-1/ghul.ll
+
+    - uses: actions/upload-artifact@v7
+      with:
+        name: ghul-compiler-llvm-pass-1
+        path: llvm-pass-1.tar.gz
+        retention-days: 1
+
+  llvm_bootstrap:
+    needs: [version, bootstrap, llvm_pass_1]
     if: needs.version.outputs.build == 'true'
     name: Bootstrap the compiler on llvm
 
@@ -833,9 +880,18 @@ jobs:
         test -x "$ghul_llvm"
         dirname "$ghul_llvm" >> "$GITHUB_PATH"
 
-    - name: Build the compiler natively twice and compare
+    - name: Download pass 1
+      uses: actions/download-artifact@v8
+      with:
+        name: ghul-compiler-llvm-pass-1
+
+    - name: Unpack pass 1
+      run: mkdir -p "${{ runner.temp }}/llvm-bootstrap" && tar -C "${{ runner.temp }}/llvm-bootstrap" -xzf llvm-pass-1.tar.gz
+
+    - name: Build the compiler again with pass 1 and compare
       env:
         LLVM_BOOTSTRAP_DIR: ${{ runner.temp }}/llvm-bootstrap
+        LLVM_BOOTSTRAP_STEP: rest
         GHUL_NATIVE_VERSION: ${{ needs.version.outputs.package }}
       run: build/llvm-bootstrap.sh
 
@@ -1333,7 +1389,7 @@ jobs:
   # shards and the cell scenarios under one name that does not change with
   # the shard count, as integration_tests does for the .NET shards.
   llvm_test_shards:
-    needs: [version, bootstrap]
+    needs: [version, bootstrap, llvm_pass_1]
     if: needs.version.outputs.build == 'true'
     name: Run llvm tests (${{ matrix.optimisation }}, ${{ matrix.shard }}/2)
 
@@ -1394,21 +1450,32 @@ jobs:
     - name: Build the objects the llvm tests link
       run: build/llvm-test-objects.sh
 
-    # The compiler has no option for the optimisation level yet, so -O0 is
-    # passed to ghul-llvm by a wrapper the compiler runs in its place. This
-    # step goes once the compiler's debug option chooses -O0.
-    - name: Optimise at -O0
-      if: matrix.optimisation == 'O0'
+    # The tests are built by the native compiler from llvm_pass_1, in
+    # hosts/llvm/ where the ci-native configurations look for it.
+    - name: Download the native compiler
+      uses: actions/download-artifact@v8
+      with:
+        name: ghul-compiler-llvm-pass-1
+
+    - name: Install the native compiler
       run: |
-        ghul_llvm="$(command -v ghul-llvm)"
-        printf '#!/bin/sh\nexec "%s" -O0 "$@"\n' "$ghul_llvm" > "$RUNNER_TEMP/ghul-llvm-O0"
-        chmod +x "$RUNNER_TEMP/ghul-llvm-O0"
-        echo "GHUL_LLVM=$RUNNER_TEMP/ghul-llvm-O0" >> "$GITHUB_ENV"
+        mkdir -p hosts/llvm
+        tar -xzf llvm-pass-1.tar.gz -O pass-1/ghul > hosts/llvm/ghul
+        chmod +x hosts/llvm/ghul
+        hosts/llvm/ghul
+
+    # The unoptimised leg also runs every test built for wasm, under Node.
+    - name: Set up Node.js
+      if: matrix.optimisation == 'O0'
+      uses: actions/setup-node@v7
+      with:
+        node-version: '24'
 
     - name: Run the llvm integration tests
       env:
         GHUL_TEST_KEEP_ARTIFACTS: 1
-      run: bash -c "set -o pipefail ; dotnet ghul-test --config llvm --shard ${{ matrix.shard }}/2 integration-tests | tee test-results.txt"
+        CONFIG: ${{ matrix.optimisation == 'O0' && 'ci-native-o0' || 'ci-native' }}
+      run: bash -c "set -o pipefail ; dotnet ghul-test --config $CONFIG --shard ${{ matrix.shard }}/2 integration-tests | tee test-results.txt"
 
     - name: Validate the llvm test modules
       if: matrix.optimisation == 'O2'
@@ -2157,9 +2224,9 @@ jobs:
   # Sharded, and gated by `rosetta_tests` below, for the reasons given on
   # the integration shards.
   rosetta_shards:
-    needs: [version, bootstrap]
+    needs: [version, bootstrap, llvm_pass_1]
     if: needs.version.outputs.build == 'true'
-    name: Rosetta Code shard
+    name: Rosetta Code shard (${{ matrix.host }}, ${{ matrix.shard }}/${{ matrix.of }})
 
     runs-on: ubuntu-latest
 
@@ -2168,14 +2235,24 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4, 5]
+        include:
+          - { host: native, shard: 1, of: 4 }
+          - { host: native, shard: 2, of: 4 }
+          - { host: native, shard: 3, of: 4 }
+          - { host: native, shard: 4, of: 4 }
+          - { host: dotnet, shard: 1, of: 1 }
 
     # Build and run every ghul-rosetta-code task (latest main) against the
     # bootstrapped compiler. The tasks are the largest corpus of top-level
     # code, function literals and inferred locals outside the compiler,
     # and each carries an output-asserting test, so a change to inference
     # or narrowing that alters what a solution does shows up here.
+    # Every program on the task repository's llvm-tasks.txt is built
+    # unoptimised by the native compiler llvm_pass_1 built and run natively;
+    # the rest are built for .NET by the bootstrapped compiler.
     steps:
+    - uses: actions/checkout@v7
+
     # Pick `next` over `main` when it exists and is strictly ahead, as
     # the runtime and examples jobs do, so a compiler change the tasks
     # cannot build under until they are updated can land first.
@@ -2215,18 +2292,21 @@ jobs:
         dotnet-version: '10.0.x'
 
     - name: Download ghul.compiler package
+      if: matrix.host == 'dotnet'
       uses: actions/download-artifact@v8
       with:
         name: ghul-compiler-package
         path: nupkg
 
     - name: Download bootstrap compiler tool tree
+      if: matrix.host == 'dotnet'
       uses: actions/download-artifact@v8
       with:
         name: ghul-compiler-tool
         path: bootstrap-tool
 
     - name: Install the freshly-built compiler in ghul-rosetta-code
+      if: matrix.host == 'dotnet'
       working-directory: ghul-rosetta-code
       run: dotnet tool uninstall --local ghul.compiler || true; dotnet tool install --local ghul.compiler --version ${{ needs.version.outputs.package }} --add-source ../nupkg
 
@@ -2248,14 +2328,93 @@ jobs:
     # be in the package cache before the run decides; restoring any one task
     # puts it there.
     - name: Restore the runtime the tasks reference
+      if: matrix.host == 'dotnet'
       working-directory: ghul-rosetta-code
       run: dotnet restore "$(ls tasks/*/*.ghulproj | head -n 1)"
 
+    # A native build compiles the libraries from source, so the task
+    # repository's native configuration looks for them under libraries/, at
+    # the versions that repository pins.
+    - name: Read the library versions the tasks pin
+      if: matrix.host == 'native'
+      id: pins
+      working-directory: ghul-rosetta-code
+      run: |
+        set -euo pipefail
+        pin() {
+            sed -n "s/.*Include=\"$1\" Version=\"\([^\"]*\)\".*/\1/p" Directory.Packages.props
+        }
+        echo "runtime=$(pin ghul.runtime)" >> "$GITHUB_OUTPUT"
+        echo "raster=$(pin ghul.raster)" >> "$GITHUB_OUTPUT"
+
+    - name: Checkout ghul-runtime
+      if: matrix.host == 'native'
+      uses: actions/checkout@v7
+      with:
+        repository: ghul-lang/ghul-runtime
+        ref: v${{ steps.pins.outputs.runtime }}
+        path: ghul-rosetta-code/libraries/ghul-runtime
+
+    - name: Checkout ghul-raster
+      if: matrix.host == 'native'
+      uses: actions/checkout@v7
+      with:
+        repository: ghul-lang/ghul-raster
+        ref: v${{ steps.pins.outputs.raster }}
+        path: ghul-rosetta-code/libraries/ghul-raster
+
+    - name: Fetch ghul-llvm
+      if: matrix.host == 'native'
+      run: |
+        ghul_llvm="$(build/ghul-llvm.sh "$RUNNER_TEMP/ghul-llvm" "${{ needs.version.outputs.ghul_llvm }}")"
+        test -x "$ghul_llvm"
+        dirname "$ghul_llvm" >> "$GITHUB_PATH"
+
+    - name: Download the native compiler
+      if: matrix.host == 'native'
+      uses: actions/download-artifact@v8
+      with:
+        name: ghul-compiler-llvm-pass-1
+
+    - name: Install the native compiler in ghul-rosetta-code
+      if: matrix.host == 'native'
+      run: |
+        mkdir -p ghul-rosetta-code/hosts/llvm
+        tar -xzf llvm-pass-1.tar.gz -O pass-1/ghul > ghul-rosetta-code/hosts/llvm/ghul
+        chmod +x ghul-rosetta-code/hosts/llvm/ghul
+        ghul-rosetta-code/hosts/llvm/ghul
+
+    # The native programs are the task repository's llvm-tasks.txt; the .NET
+    # ones are every other program, a program being a directory holding a
+    # source named after it.
+    - name: Choose the programs
+      working-directory: ghul-rosetta-code
+      run: |
+        set -euo pipefail
+        export LC_ALL=C
+        find tasks -name '.*' -prune -o -type d -print | while read -r dir ; do
+            if [ -f "$dir/$(basename "$dir").ghul" ] ; then echo "$dir" ; fi
+        done | sort -u > ../programs-all.txt
+        sort -u llvm-tasks.txt > ../programs-native.txt
+        if [ -n "$(comm -13 ../programs-all.txt ../programs-native.txt)" ] ; then
+            echo "llvm-tasks.txt lists a program that is not under tasks/:" >&2
+            comm -13 ../programs-all.txt ../programs-native.txt >&2
+            exit 1
+        fi
+        comm -23 ../programs-all.txt ../programs-native.txt > ../programs-dotnet.txt
+        echo "programs: $(wc -l < ../programs-all.txt), native $(wc -l < ../programs-native.txt), .NET $(wc -l < ../programs-dotnet.txt)"
+
+    - name: Run Rosetta Code tests natively
+      if: matrix.host == 'native'
+      working-directory: ghul-rosetta-code
+      run: dotnet ghul-test --config native --shard ${{ matrix.shard }}/${{ matrix.of }} $(cat ../programs-native.txt)
+
     # --compiler names the bootstrapped compiler in place of each task's own,
     # for the reason given on the cross-assembly tests.
-    - name: Run Rosetta Code integration tests
+    - name: Run Rosetta Code tests on .NET
+      if: matrix.host == 'dotnet'
       working-directory: ghul-rosetta-code
-      run: dotnet ghul-test --compiler "dotnet ${GITHUB_WORKSPACE}/bootstrap-tool/ghul.dll" --shard ${{ matrix.shard }}/5 tasks
+      run: dotnet ghul-test --compiler "dotnet ${GITHUB_WORKSPACE}/bootstrap-tool/ghul.dll" $(cat ../programs-dotnet.txt)
 
 
   # The required status check; see the note on `integration_tests`.
@@ -2287,7 +2446,7 @@ jobs:
   # then a skipped job satisfies it. This job runs regardless and checks
   # that nothing was skipped that should have run.
   gate:
-    needs: [version, bootstrap, unit_tests, analysis_tests, llvm_self_type_check, llvm_bootstrap, wasm_bootstrap, integration_tests, wasm_validation, llvm_tests, llvm_static, cross_assembly_tests, bare_invocation_test, native_aot_test, runtime_tests, examples_tests, format_round_trip, rosetta_tests]
+    needs: [version, bootstrap, unit_tests, analysis_tests, llvm_self_type_check, llvm_pass_1, llvm_bootstrap, wasm_bootstrap, integration_tests, wasm_validation, llvm_tests, llvm_static, cross_assembly_tests, bare_invocation_test, native_aot_test, runtime_tests, examples_tests, format_round_trip, rosetta_tests]
     name: Gate
 
     if: always()
