@@ -249,6 +249,19 @@ namespace Syntax.Process is
                 fi
 
             if !lhs_type.is_assignable_from(value_type) then
+                if let widened = _visitor.widen_value(left.assign_location, value, lhs_type) then
+                    // The store was built from the value as written; build
+                    // it again from the widened value.
+                    left.compile_expressions_state.value = widened
+                    left.expression.compile_expressions_state.value = Need.STORE(widened)
+                    left.expression.walk(_visitor)
+
+                    visit_simple_left(left)
+                    return
+                fi
+            fi
+
+            if !lhs_type.is_assignable_from(value_type) then
                 use IoC.CONTAINER.instance.name_display.qualifying_alike(value_type, lhs_type)
                 _logger.error(left.assign_location, "cannot-convert-type", "'{value_type}' is not assignable to '{lhs_type}'")
                 return
@@ -898,6 +911,17 @@ namespace Syntax.Process is
             fi
         si
 
+        // Whether `expression`'s value widens to `target` by a declared
+        // widening; when it does, the expression produces the widened value.
+        _widen_expression(expression: Trees.Expressions.Expression, target: Semantic.Types.Type) -> bool is
+            if let value = expression.value, widened = _visitor.widen_value(expression.location, value, target) then
+                expression.compile_expressions_state.value = widened
+                return true
+            fi
+
+            return false
+        si
+
         visit_return(r: Trees.Statements.RETURN) is
             // Control does not fall through a return — the rest of
             // the enclosing block is unreachable.
@@ -1081,14 +1105,15 @@ namespace Syntax.Process is
                                 "return-value-from-void-function", "cannot return value from function of 'void' type"
                             )
                     elif !function.return_type!.is_assignable_from(value.type!) then
-                        // Implicit T → TASK[T] widening at return position
-                        // (the C# `async` return-rewrap rule applied to ghūl).
-                        // Synthesises Tasks.TASK.from_result(orig) around the
-                        // original expression and re-resolves the wrapper.
-                        // Restricted to return position — variable init /
-                        // argument passing slot boundaries don't widen this way.
-                        if _task_conversion.try_wrap_value_as_task_return(r, function.return_type!, _visitor) then
-                            // wrap succeeded — type now matches
+                        if _widen_expression(r.expression!, function.return_type!) then
+                            // a number widened to the return type
+                        elif _task_conversion.try_wrap_value_as_task_return(r, function.return_type!, _visitor) then
+                            // Implicit T → TASK[T] widening at return position
+                            // (the C# `async` return-rewrap rule applied to ghūl).
+                            // Synthesises Tasks.TASK.from_result(orig) around the
+                            // original expression and re-resolves the wrapper.
+                            // Restricted to return position: variable init and
+                            // argument passing don't wrap this way.
                         elif function.return_type_was_inferred /\ null_join.is_genuine_null(value.type!) then
                             // The return settled on an earlier value and
                             // this one says it can also be absent.

@@ -1052,5 +1052,93 @@ namespace Semantic.UnitTests is
 
             is_true(lub.get_result()?)
         si
+        // Scalars for the widening join: int widens to long, double and
+        // other; long widens to double. other and long are unrelated.
+        scalars() -> (int_type: Type, long_type: Type, double_type: Type, other: Type, widenings: OPERAND_WIDENINGS) is
+            let int_class = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "int", empty_names(), Semantic.BLOCK_SCOPE())
+            let long_class = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "long", empty_names(), Semantic.BLOCK_SCOPE())
+            let double_class = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "double", empty_names(), Semantic.BLOCK_SCOPE())
+            let other_class = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "other", empty_names(), Semantic.BLOCK_SCOPE())
+            let holder = CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), "WIDENINGS", empty_names(), Semantic.BLOCK_SCOPE())
+
+            add_widening(holder, "int_to_long", int_class.type!, long_class.type!)
+            add_widening(holder, "int_to_double", int_class.type!, double_class.type!)
+            add_widening(holder, "int_to_other", int_class.type!, other_class.type!)
+            add_widening(holder, "long_to_double", long_class.type!, double_class.type!)
+
+            return (int_class.type!, long_class.type!, double_class.type!, other_class.type!, OPERAND_WIDENINGS(holder))
+        si
+
+        add_widening(holder: CLASS, name: string, from: Type, to: Type) is
+            let f = Semantic.Symbols.STATIC_METHOD(loc(), loc(), holder, name, Semantic.BLOCK_SCOPE())
+            f.arguments = LIST[Type]([from])
+            f.return_type = to
+            f.mark_widening()
+            holder.add_member(f)
+        si
+
+        widening_join(widenings: OPERAND_WIDENINGS, types: LIST[Type]) -> Type? is
+            let lub = LEAST_UPPER_BOUND_MAP()
+            lub.widens_scalars = true
+            lub.set_widenings_for_testing(widenings)
+
+            for t in types do
+                lub.add(t)
+            od
+
+            return lub.get_result()
+        si
+
+        @test()
+        Calling__get_result__with_widens_scalars__should_take_the_type_every_other_widens_to() is
+            let s = scalars()
+
+            let joined = widening_join(s.widenings, LIST[Type]([s.int_type, s.double_type]))
+            is_true(joined? /\ joined.matches(s.double_type))
+
+            let three = widening_join(s.widenings, LIST[Type]([s.long_type, s.int_type, s.double_type]))
+            is_true(three? /\ three.matches(s.double_type))
+        si
+
+        @test()
+        Calling__get_result__without_widens_scalars__should_not_widen() is
+            let s = scalars()
+
+            let lub = LEAST_UPPER_BOUND_MAP()
+            lub.set_widenings_for_testing(s.widenings)
+            lub.add(s.int_type)
+            lub.add(s.double_type)
+
+            let joined = lub.get_result()
+            is_false(joined? /\ joined.matches(s.double_type))
+        si
+
+        // long and other both take an int, but neither widens to the other,
+        // so neither is the join.
+        @test()
+        Calling__get_result__with_widens_scalars_and_no_single_widest__should_not_pick_one() is
+            let s = scalars()
+
+            let joined = widening_join(s.widenings, LIST[Type]([s.int_type, s.long_type, s.other]))
+            is_false(joined? /\ (joined.matches(s.long_type) \/ joined.matches(s.other)))
+        si
+
+        // An optional member is not a plain scalar, so the join is not
+        // widened: the optional stays in the result.
+        @test()
+        Calling__get_result__with_widens_scalars_and_an_optional_member__should_not_widen() is
+            let s = scalars()
+
+            let joined = widening_join(s.widenings, LIST[Type]([s.int_type.as_optional(), s.double_type]))
+            is_false(joined? /\ joined.matches(s.double_type))
+        si
+
+        @test()
+        Calling__get_result__with_widens_scalars_and_one_type__should_return_it() is
+            let s = scalars()
+
+            let joined = widening_join(s.widenings, LIST[Type]([s.int_type, s.int_type]))
+            is_true(joined? /\ joined.matches(s.int_type))
+        si
     si
 si

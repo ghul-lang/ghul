@@ -2966,6 +2966,50 @@ namespace Syntax.Process is
             )
         si
 
+        // An indexer store whose value reaches an assigning indexer only by
+        // widening: the narrowest type the value widens to that an indexer
+        // accepts, with the stored value, the last of `arguments`, widened
+        // to it in place.
+        _widened_store(
+            location: LOCATION,
+            group: Semantic.Symbols.FUNCTION_GROUP,
+            arguments: Collections.LIST[Value],
+            argument_types: Collections.LIST[Type]
+        ) -> Semantic.OVERLOAD_RESOLVE_RESULT? is
+            let last = argument_types.count - 1
+
+            let search = Semantic.WIDENED_CALL_SEARCH(IoC.CONTAINER.instance.operand_widenings)
+
+            let target = search.narrowest_target(
+                argument_types[last],
+                t => (
+                    let types = Collections.LIST[Type](argument_types)
+                    types[last] = t
+                    let use snapshot = _logger.speculate_then_backtrack()
+                    let result = _overload_resolver.resolve(location, group, types, false, true, false)
+                    snapshot.backtrack()
+                    result? /\ !result.needs_retry
+                )
+            )
+
+            if !target? then
+                return null
+            fi
+
+            let types = Collections.LIST[Type](argument_types)
+            types[last] = target
+
+            let result = _overload_resolver.resolve(location, group, types, false, true, false)
+
+            if let resolved = result, widened = _visitor.widen_value(location, arguments[last], target) then
+                arguments[last] = widened
+
+                return resolved
+            fi
+
+            return null
+        si
+
         // Where an operator over one operand's type is marked to take a
         // widened operand, but the other operand has no widening to that
         // type, says which widening is missing.
@@ -3851,6 +3895,12 @@ namespace Syntax.Process is
                     )
 
                 logger_snapshot.backtrack()
+
+                if overload_result == null /\ need_store then
+                    if let widened = _widened_store(index.location, cast Semantic.Symbols.FUNCTION_GROUP?(symbol)!, arguments, argument_types) then
+                        overload_result = widened
+                    fi
+                fi
 
                 if overload_result == null then
                     if !need_store /\ index.indexes.count == 1 /\ _try_range_slice(index, left_value, index_value, argument_types[0]) then

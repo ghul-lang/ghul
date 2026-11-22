@@ -976,6 +976,25 @@ namespace Syntax.Process is
             fi
 
             if overload_result == null then
+                if let widened = _widened_call_candidate(location, function_group, argument_types, false, true, true, named_restrict) then
+                    overload_result =
+                        _apply_widened_call(
+                            "calls.constructor_widened_arguments",
+                            location,
+                            function_group,
+                            widened,
+                            Collections.LIST[Trees.Expressions.Expression](argument_expressions),
+                            arguments,
+                            argument_types,
+                            false,
+                            true,
+                            true,
+                            null
+                        )
+                fi
+            fi
+
+            if overload_result == null then
                 return (cast Value(Load.SYMBOL(null, function_group)), _unresolved_construction(cache_key, location, type, argument_types))
             fi
 
@@ -1114,6 +1133,123 @@ namespace Syntax.Process is
             fi
 
             return _construct_with(location, overload_result.function, type, arguments, argument_types)
+        si
+
+        // The overload this call reaches only by widening some of its
+        // arguments, tried by speculative resolution so nothing it reports
+        // stands.
+        _widened_call_candidate(
+            location: LOCATION,
+            function_group: Semantic.Symbols.FUNCTION_GROUP,
+            argument_types: Collections.LIST[Type],
+            want_infer: bool,
+            want_instance: bool,
+            is_constructor_call: bool,
+            restrict: Semantic.Symbols.Function[]?
+        ) -> Semantic.WIDENED_CALL? =>
+            _widened_call_search().find(
+                if restrict? then restrict else function_group.functions fi,
+                argument_types,
+                want_instance,
+                (f, types) => (
+                    let use snapshot = _logger.speculate_then_backtrack()
+                    let result = _overload_resolver.resolve(location, function_group, types, want_infer, want_instance, is_constructor_call, [f])
+                    snapshot.backtrack()
+                    result? /\ !result.needs_retry
+                )
+            )
+
+        _widened_call_search() -> Semantic.WIDENED_CALL_SEARCH =>
+            Semantic.WIDENED_CALL_SEARCH(IoC.CONTAINER.instance.operand_widenings)
+
+        // Resolve `widened` again from freshly walked arguments, then
+        // convert each widened argument in `arguments` to the type it
+        // widens to.
+        _apply_widened_call(
+            site: string,
+            location: LOCATION,
+            function_group: Semantic.Symbols.FUNCTION_GROUP,
+            widened: Semantic.WIDENED_CALL,
+            expressions: Collections.LIST[Trees.Expressions.Expression],
+            arguments: Collections.LIST[Value],
+            argument_types: Collections.LIST[Type],
+            want_infer: bool,
+            want_instance: bool,
+            is_constructor_call: bool,
+            expected_type: Type?
+        ) -> Semantic.OVERLOAD_RESOLVE_RESULT? is
+            use RETRY_SITE_STATS.enter(site)
+            _logger.roll_back()
+            _logger.speculate()
+            _flow.restore()
+
+            for (index, a) in expressions |> index() do
+                _visitor.rewalk(a)
+
+                if let a.value? /\ value.type? then
+                    arguments[index] = value
+                    argument_types[index] = value.type!
+                fi
+            od
+
+            let widened_types = widened.widened_types(argument_types)
+
+            let result = _overload_resolver.resolve(location, function_group, widened_types, want_infer, want_instance, is_constructor_call, [widened.function], expected_type)
+
+            if result? then
+                for (index, a) in expressions |> index() do
+                    if let w = widened.widenings[index] then
+                        _symbol_use_locations.add_symbol_use(a.location, w)
+                        arguments[index] = _widen_argument(a.location, arguments[index], w)
+                        argument_types[index] = widened_types[index]
+                    fi
+                od
+            fi
+
+            return result
+        si
+
+        /// `value` as `target`, by the declared widening from its type to
+        /// exactly `target`; null where there is none.
+        widen_value(location: LOCATION, value: Value, target: Type) -> Value? is
+            let value_type = value.type
+
+            if !value_type? then
+                return null
+            fi
+
+            let search = _widened_call_search()
+
+            for w in IoC.CONTAINER.instance.operand_widenings.from(value_type) do
+                if let widened = w.return_type /\ search.widens_into(widened, target) then
+                    return _widen_argument(location, value, w)
+                fi
+            od
+
+            return null
+        si
+
+        // `value` widened by `widening`, applied as the explicit conversion
+        // `T(x)` to the type it widens to, so a widened argument costs what
+        // the conversion written out costs.
+        _widen_argument(location: LOCATION, value: Value, widening: Semantic.Symbols.Function?) -> Value is
+            if !widening? then
+                return value
+            fi
+
+            let target = widening.return_type!
+
+            let use snapshot = _logger.speculate_then_backtrack()
+
+            let converted = construct_from_value(location, target, value)
+
+            let errors = snapshot.backtrack()
+
+            if converted? /\ errors.count == 0 then
+                return converted
+            fi
+
+            return widening.call(location, null, [value], widening.return_type, _function_caller)
         si
 
         // A scalar constructed from another scalar is that scalar cast to it,
@@ -3516,6 +3652,25 @@ namespace Syntax.Process is
                         if let spread = _try_spread(function_group, arguments, argument_types, call.arguments, want_instance) then
                             slots = spread
                             overload_result = _overload_resolver.resolve(call.arguments.location, function_group, argument_types, true, want_instance, false, named_restrict, call.expected_type)
+                        fi
+                    fi
+
+                    if !overload_result? /\ !slots.has_spread then
+                        if let widened = _widened_call_candidate(call.arguments.location, function_group, argument_types, true, want_instance, false, named_restrict) then
+                            overload_result =
+                                _apply_widened_call(
+                                    "calls.widened_arguments",
+                                    call.arguments.location,
+                                    function_group,
+                                    widened,
+                                    Collections.LIST[Trees.Expressions.Expression](call.arguments.expressions),
+                                    arguments,
+                                    argument_types,
+                                    true,
+                                    want_instance,
+                                    false,
+                                    call.expected_type
+                                )
                         fi
                     fi
 

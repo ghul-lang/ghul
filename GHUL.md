@@ -15,7 +15,7 @@ These mistakes cost the most rework. A section below explains each one. The last
 - **`write_line` must be imported.** Write `use IO.Std.write_line` before the code that calls it. Or start the file with `use default`, which imports `write_line`, the pipes, the collections and the maths functions.
 - **Strings have no `+` operator.** Join strings with interpolation: `"{a}{b}"`.
 - **`==` on a `string` compares references.** Compare text with `=~`. Use `==` for scalars, enums and references.
-- **Numbers widen only in arithmetic and ordering.** `1 + 2.5` is `3.5`: an `int`, `long` or `single` operand widens to the other operand's wider type, and an `int` or `long` widens to `bigint`. Nothing else converts implicitly: `let n: int = 2.5`, `decimal` and the small and unsigned types need `double(n)` or `cast`, and `==` never widens. A big integer is a `bigint`, written with the `n` suffix, and a complex number a `complex`, written `3r + 4j`. Do not use `System.Numerics.BigInteger`.
+- **Numbers widen to a wider number, never to a narrower one.** `1 + 2.5` is `3.5`, and an `int` passed to a `double` parameter, stored in a `double` local, field or element, or returned where a `double` is declared widens to `double`; `if c then 1 else 2.5 fi` and `[1, 2.5]` are `double`. `int` widens to `long`, `single` and `double`, `long` to `single` and `double`, `single` to `double`, and an `int` or `long` widens to `bigint`. Nothing else converts implicitly: `let n: int = 2.5`, `decimal` and the small and unsigned types need `double(n)` or `cast`, and `==` never widens. A big integer is a `bigint`, written with the `n` suffix, and a complex number a `complex`, written `3r + 4j`. Do not use `System.Numerics.BigInteger`.
 - **There is no `new`.** Construct a value by calling its type: `Box(42)`, `LIST[int]()`. `new` is an ordinary identifier.
 - **The closing keyword of a block mirrors its opening keyword**: `is` ... `si`, `if` ... `fi`, `do` ... `od`, `case` ... `esac`, `try` ... `yrt`. There are no braces.
 - **A bare `let` is immutable.** A local declared `let count mut = 0` can be reassigned.
@@ -349,7 +349,14 @@ let z = 3r + 4j;
 write_line("{z * z} {z.magnitude} {complex.sqrt(-4r)}");   // <-7; 24> 5 <0; 2>
 ```
 
-ghūl converts between scalar types implicitly in one place: an arithmetic or ordering operator whose operands are two of `int`, `long`, `single` and `double` widens the narrower operand, and works in the wider type. `int` widens to `long`, `single` and `double`; `long` to `single` and `double`; `single` to `double`; and each of the four to `complex`; `int` and `long` also widen to `bigint`. So `3 * 0.5` is `1.5`, an `int` times a `long` is a `long`, and `n < 2.5` compares as `double`. Where two results are reachable, the narrower wins: `long * single` and `int * single` are `single`. `%` widens between `int` and `long`, and from either to `bigint`; shifts and the bitwise operators never widen. An operator over the exact operand types is always chosen over a widened one.
+ghūl widens a number implicitly, never narrows it. `int` widens to `long`, `single` and `double`; `long` to `single` and `double`; `single` to `double`; and each of the four to `complex`; `int` and `long` also widen to `bigint`. A widening happens in these places, and nowhere else:
+
+- **An arithmetic or ordering operator** whose operands are two of these types widens the narrower operand and works in the wider type. So `3 * 0.5` is `1.5`, an `int` times a `long` is a `long`, and `n < 2.5` compares as `double`. Where two results are reachable, the narrower wins: `long * single` and `int * single` are `single`. `%` widens between `int` and `long`, and from either to `bigint`; shifts and the bitwise operators never widen. An operator over the exact operand types is always chosen over a widened one.
+- **A call argument** widens to the parameter's type, for a function, a method or a constructor: `sqrt(n)` with `n: int` calls `sqrt(double)`, and `values.add(n)` adds to a `LIST[double]`. An overload that takes the argument as it is wins over one the argument only reaches by widening, so with `f(int)` and `f(double)`, `f(n)` calls `f(int)`; among widened overloads the narrowest wins, so with `g(long)` and `g(double)`, `g(n)` calls `g(long)`. An `object` or type-parameter parameter takes the value as it is, unwidened.
+- **A typed slot**: a value stored in a local, field, property or indexer of a wider type, by a `let` with a type or by assignment, and a value returned from a function declared to return a wider type. So `let d: double = n`, `total = n` with `total: double`, `values[0] = n` with `values: LIST[double]`, and `return n` from a `-> double` function widen. A slot or parameter of the optional of a wider type, such as `double?`, takes the widened value too.
+- **A join**: the arms of an `if` or `case` expression, and the elements of an array literal, join to the widest of their types when each is one of these types or widens to it. `if c then 1 else 2.5 fi` is a `double`, and `[1, 2.5, 3L]` an array of `double`. Where the expression has an expected type, each arm or element widens to that type instead.
+
+A widening never reaches through a type argument: a `LIST[int]` is not a `LIST[double]`, and a tuple `(int, string)` doesn't widen to `(double, string)`, so the elements of a tuple don't widen in a join.
 
 Equality doesn't widen. Ordering compares magnitudes, so it widens; `==` compares representation, so its operand types must already match. `i == d` and `i =~ d` with `i: int` and `d: double` are errors: convert one explicitly, as in `double(i) == d`, for value equality. Any other mix, such as `decimal` with `double`, or an assignment of a `double` to an `int`, also needs a `cast`.
 
@@ -357,6 +364,7 @@ Upcasting is implicit: a value can be assigned to a variable of any ancestor typ
 
 ```ghul
 let a = 1.0 + 1;                 // ok, the int widens to double
+let h: double = 1;               // ok, the int widens to double
 let b = 1.0m + cast decimal(1);  // decimal never widens: explicit cast
 let o: object = "hello";         // ok, string is an object
 ```

@@ -1,0 +1,176 @@
+namespace Semantic.UnitTests is
+    use Collections.LIST
+
+    use Source.LOCATION
+
+    use Semantic.Types.Type
+
+    use Semantic.Symbols.CLASS
+    use Semantic.Symbols.Function
+    use Semantic.Symbols.STATIC_METHOD
+
+    use Assertions
+
+    class WIDENED_CALL_SEARCH_TESTS is
+        _int: Type
+        _long: Type
+        _double: Type
+        _other: Type
+
+        _int_to_long: Function
+        _int_to_double: Function
+
+        _search: WIDENED_CALL_SEARCH
+
+        // int widens to long, double and other; long widens to double.
+        // other and long are unrelated.
+        init() is
+            Fixtures.enter_function()
+
+            _int = new_class("int").type!
+            _long = new_class("long").type!
+            _double = new_class("double").type!
+            _other = new_class("other").type!
+
+            let holder = new_class("WIDENINGS")
+
+            _int_to_long = add_widening(holder, "int_to_long", _int, _long)
+            _int_to_double = add_widening(holder, "int_to_double", _int, _double)
+            add_widening(holder, "int_to_other", _int, _other)
+            add_widening(holder, "long_to_double", _long, _double)
+
+            _search = WIDENED_CALL_SEARCH(OPERAND_WIDENINGS(holder))
+        si
+
+        loc() -> LOCATION => LOCATION("test.ghul", 1, 1, 1, 1)
+
+        new_class(name: string) -> CLASS =>
+            CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), name, LIST[string](), Semantic.BLOCK_SCOPE())
+
+        add_widening(holder: CLASS, name: string, from: Type, to: Type) -> Function is
+            let f = STATIC_METHOD(loc(), loc(), holder, name, Semantic.BLOCK_SCOPE())
+            f.arguments = LIST[Type]([from])
+            f.return_type = to
+            f.mark_widening()
+            holder.add_member(f)
+            return f
+        si
+
+        overload(parameters: Type[]) -> Function is
+            let owner = new_class("OWNER")
+            let f = STATIC_METHOD(loc(), loc(), owner, "f", Semantic.BLOCK_SCOPE())
+            f.arguments = LIST[Type](parameters)
+            f.return_type = _int
+            return f
+        si
+
+        any(f: Function, types: LIST[Type]) -> bool => true
+
+        find(candidates: Function[], arguments: Type[]) -> WIDENED_CALL? =>
+            _search.find(candidates, LIST[Type](arguments), false, any)
+
+        @test()
+        Widening_for_should_be_null_where_the_parameter_takes_the_argument_as_it_is() is
+            is_true(!_search.widening_for(_int, _int)?)
+        si
+
+        @test()
+        Widening_for_should_find_the_widening_to_the_parameter_or_to_the_type_it_is_the_optional_of() is
+            are_equal(_int_to_double, _search.widening_for(_double, _int))
+            are_equal(_int_to_long, _search.widening_for(_long.as_optional(), _int))
+        si
+
+        @test()
+        Widening_for_should_be_null_where_no_widening_reaches_the_parameter() is
+            is_true(!_search.widening_for(_int, _double)?)
+        si
+
+        // An overload that takes every argument as it is needs no
+        // widening, so it is ordinary resolution's to choose, not this
+        // search's.
+        @test()
+        Find_should_not_offer_an_overload_that_needs_no_widening() is
+            let exact = overload([_int])
+
+            is_true(!find([exact], [_int])?)
+        si
+
+        @test()
+        Find_should_choose_the_narrowest_widened_overload() is
+            let to_long = overload([_long])
+            let to_double = overload([_double])
+
+            are_equal(to_long, find([to_double, to_long], [_int])!.function)
+            are_equal(to_long, find([to_long, to_double], [_int])!.function)
+        si
+
+        @test()
+        Find_should_choose_the_overload_needing_fewer_widenings() is
+            let two = overload([_double, _double])
+            let one = overload([_int, _double])
+
+            let found = find([two, one], [_int, _int])!
+
+            are_equal(one, found.function)
+            are_equal(1, found.widening_count)
+        si
+
+        // Each overload is narrower in one argument and wider in the other,
+        // so neither is the narrowest.
+        @test()
+        Find_should_reach_nothing_where_two_overloads_tie() is
+            let left = overload([_long, _double])
+            let right = overload([_double, _long])
+
+            is_true(!find([left, right], [_int, _int])?)
+        si
+
+        // long and other both take an int, but neither widens to the other.
+        @test()
+        Find_should_reach_nothing_where_the_widened_types_are_unrelated() is
+            is_true(!find([overload([_long]), overload([_other])], [_int])?)
+        si
+
+        @test()
+        Find_should_skip_an_overload_that_is_not_accepted() is
+            let to_long = overload([_long])
+            let to_double = overload([_double])
+
+            let found = _search.find([to_long, to_double], LIST[Type]([_int]), false, (f, types) => f == to_double)
+
+            are_equal(to_double, found!.function)
+        si
+
+        @test()
+        Find_should_reach_nothing_for_an_error_argument() is
+            is_true(!find([overload([_double])], [Semantic.Types.ERROR()])?)
+        si
+
+        @test()
+        Widened_types_should_replace_only_the_widened_arguments() is
+            let found = find([overload([_int, _double])], [_int, _int])!
+
+            let types = found.widened_types(LIST[Type]([_int, _int]))
+
+            is_true(types[0].matches(_int))
+            is_true(types[1].matches(_double))
+        si
+
+        @test()
+        Narrowest_target_should_take_the_narrowest_accepted_type() is
+            let target = _search.narrowest_target(_int, t => t.matches(_long) \/ t.matches(_double))
+
+            is_true(target? /\ target.matches(_long))
+        si
+
+        @test()
+        Narrowest_target_should_reach_nothing_where_two_accepted_types_are_unrelated() is
+            is_true(!_search.narrowest_target(_int, t => t.matches(_long) \/ t.matches(_other))?)
+        si
+
+        @test()
+        Narrowest_target_should_reach_nothing_where_nothing_is_accepted() is
+            is_true(!_search.narrowest_target(_int, t => false)?)
+        si
+    si
+si
