@@ -15,7 +15,9 @@ namespace Driver is
     // and nothing one build does reaches the next.
     //
     // The protocol is --build-server's. Each line read is the path of a
-    // response file holding a build's arguments. The build's diagnostics go
+    // response file holding a build's arguments, optionally followed by a
+    // tab and the directory the build runs in, which relative paths in its
+    // arguments and its diagnostics are relative to. The build's diagnostics go
     // to standard error as they would from a process of its own, followed by
     // a line starting with U+0001 that says how it ended. A line "quit", or
     // the end of the input, ends the server, which then writes a line
@@ -51,6 +53,7 @@ namespace Driver is
 
         serve_forked_builds(arguments: LIST[string]) is
             let is_library_file = (path: string) -> bool => library_sources.library_for(Path.get_full_path(path))?
+            let server_directory = IO.Directory.get_current_directory()
 
             if FORK_ARGUMENTS.program_files(arguments, is_library_file).count > 0 then
                 throw INPUT_EXCEPTION("--fork-server compiles the libraries only: each build's response file gives its program's source files")
@@ -83,12 +86,18 @@ namespace Driver is
                     continue
                 fi
 
+                let tab = line.index_of('\t')
+                let response_file = Path.get_full_path(if tab >= 0 then line.substring(0, tab) else line fi)
+                let directory = if tab >= 0 then Path.get_full_path(line.substring(tab + 1)) else server_directory fi
+
                 let request = LIST[string]()
 
-                MAIN.add_arguments(request, ["@{line}"])
+                MAIN.add_arguments(request, ["@{response_file}"])
+
+                let in_directory = (path: string) -> bool => is_library_file(Path.combine(directory, path))
 
                 let from_snapshot =
-                    FORK_ARGUMENTS.can_serve(arguments, request, is_library_file) /\
+                    FORK_ARGUMENTS.can_serve(arguments, request, in_directory) /\
                     _unchanged(library_texts)
 
                 if from_snapshot then
@@ -107,10 +116,12 @@ namespace Driver is
                 if pid == 0 then
                     _gc_atfork_child()
 
+                    IO.Directory.set_current_directory(directory)
+
                     if from_snapshot then
                         _build_from_snapshot(request, is_library_file)
                     else
-                        _build_cold(line)
+                        _build_cold(response_file)
                     fi
                 fi
 

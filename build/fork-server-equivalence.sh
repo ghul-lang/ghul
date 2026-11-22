@@ -9,9 +9,8 @@
 # usage: build/fork-server-equivalence.sh <native compiler> <ghul-runtime> [every]
 #
 # <ghul-runtime> is a checkout of the runtime, core and runtime trees both.
-# Every <every>th test with empty ghulflags, built for both targets, is
-# taken (default 40). ghul-llvm
-# must be on the PATH.
+# Every <every>th test whose test.json is `{}` is taken (default 40).
+# ghul-llvm must be on the PATH.
 set -euo pipefail
 
 if [ $# -lt 2 ]; then
@@ -34,12 +33,7 @@ i=0
 for directory in "$root"/integration-tests/execution/*/; do
     i=$((i + 1))
     [ $((i % every)) -eq 0 ] || continue
-    if [ -e "$directory/ghulflags" ] && grep -q '[^[:space:]]' "$directory/ghulflags"; then
-        continue
-    fi
-    if [ -e "$directory/targets" ] && ! { grep -qw wasm "$directory/targets" && grep -qw llvm "$directory/targets"; }; then
-        continue
-    fi
+    [ "$(tr -d '[:space:]' < "$directory/test.json" 2> /dev/null)" = '{}' ] || continue
     ls "$directory"/*.ghul > /dev/null 2>&1 || continue
     tests+=("$directory")
 done
@@ -67,9 +61,12 @@ check_target() {
 
     local requests=0
 
+    # Each build runs in its test's directory and names its sources
+    # relative to it, as ghul-test runs a build.
     build() {
         local name=$1
-        shift
+        local directory=$2
+        shift 2
 
         mkdir -p "$out/cold/$name" "$out/warm/$name"
 
@@ -77,9 +74,9 @@ check_target() {
         printf '%s\n' "$@" -o "$out/warm/$name/prog" > "$out/$name.warm.rsp"
 
         local cold_status=0
-        "$compiler" @"$out/$name.cold.rsp" 2> "$out/$name.cold.err" > /dev/null || cold_status=$?
+        (cd "$directory" && exec "$compiler" @"$out/$name.cold.rsp") 2> "$out/$name.cold.err" > /dev/null || cold_status=$?
 
-        echo "$out/$name.warm.rsp" >&"$to_server"
+        printf '%s\t%s\n' "$out/$name.warm.rsp" "$directory" >&"$to_server"
         requests=$((requests + 1))
 
         : > "$out/$name.warm.err"
@@ -112,12 +109,18 @@ check_target() {
         fi
     }
 
+    sources() {
+        (cd "$1" && ls *.ghul)
+    }
+
     for directory in "${tests[@]}"; do
-        build "$(basename "$directory")" "${options[@]}" @"$work/libraries.rsp" "$directory"/*.ghul
+        mapfile -t files < <(sources "$directory")
+        build "$(basename "$directory")" "$directory" "${options[@]}" @"$work/libraries.rsp" "${files[@]}"
     done
 
     # A flag the snapshot was not compiled with: built cold by the server.
-    build "with-a-define" "${options[@]}" --define FORK_SERVER_EQUIVALENCE @"$work/libraries.rsp" "${tests[0]}"/*.ghul
+    mapfile -t files < <(sources "${tests[0]}")
+    build "with-a-define" "${tests[0]}" "${options[@]}" --define FORK_SERVER_EQUIVALENCE @"$work/libraries.rsp" "${files[@]}"
 
     echo quit >&"$to_server"
 
