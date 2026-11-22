@@ -9,9 +9,10 @@
 # (--cell-link N-1), written as a shared object by ghul-llvm --emit=cell, and
 # loaded by ghul-host after them, as a session would.
 #
-# Usage: build/llvm-cells.sh <ghul.dll> <ghul-llvm dir> <host dir> [scenario...]
+# Usage: build/llvm-cells.sh <compiler> <ghul-llvm dir> <host dir> [scenario...]
 #
-# <ghul.dll> is the compiler to test, <ghul-llvm dir> and <host dir> are the
+# <compiler> is the compiler to test, a ghul.dll run with dotnet or a native
+# compiler run directly, <ghul-llvm dir> and <host dir> are the
 # unpacked releases (each holding bin/), and the runtime library, core and
 # runtime sources both, is read from libraries/ghul-runtime, or from
 # GHUL_RUNTIME.
@@ -22,11 +23,14 @@
 set -uo pipefail
 
 if [ $# -lt 3 ]; then
-    echo "usage: build/llvm-cells.sh <ghul.dll> <ghul-llvm dir> <host dir> [scenario...]" >&2
+    echo "usage: build/llvm-cells.sh <compiler> <ghul-llvm dir> <host dir> [scenario...]" >&2
     exit 2
 fi
 
-compiler="$(cd "$(dirname "$1")" && pwd)/$(basename "$1")"
+compiler=("$(cd "$(dirname "$1")" && pwd)/$(basename "$1")")
+if [[ "${compiler[0]}" == *.dll ]]; then
+    compiler=(dotnet "${compiler[0]}")
+fi
 tool="$(cd "$2" && pwd)/bin/ghul-llvm"
 host="$(cd "$3" && pwd)/bin/ghul-host"
 shift 3
@@ -67,7 +71,7 @@ for scenario in "${scenarios[@]}"; do
         cells+=("$source")
         name="$(basename "$source" .ghul)"
 
-        if ! dotnet "$compiler" --target llvm --cell-link $(( ${#cells[@]} - 1 )) \
+        if ! "${compiler[@]}" --target llvm --cell-link $(( ${#cells[@]} - 1 )) \
                 --llvm-output "$work/$name.ll" --llvm-no-link -o "$work/$name.out" \
                 "${cells[@]}" "@$scratch/libraries.rsp" > "$work/$name.compile" 2>&1 \
             || ! "$tool" --emit=cell -O0 "$work/$name.ll" -o "$work/$name.so" > "$work/$name.emit" 2>&1; then

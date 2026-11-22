@@ -7,12 +7,13 @@
 # what the compiler said and the text form it wrote, but it has no
 # engine, and it deletes a passing test's module. So a module the tests
 # accept may still be one an engine rejects. This script builds each
-# test's module again, with the compiler in publish/, and asks Node
-# about it through WebAssembly.validate.
+# test's module again and asks Node about it through WebAssembly.validate.
+# Any host's compiler writes the same module, so it can be the native
+# compiler or the .NET one.
 #
-# Usage: build/wasm-validate.sh [test-root]
-#        (default: integration-tests; run from the repository root
-#        after `dotnet publish --output publish/`)
+# Usage: build/wasm-validate.sh [test-root [compiler command...]]
+#        (defaults: integration-tests, and `dotnet publish/ghul.dll` after
+#        `dotnet publish --output publish/`; run from the repository root)
 #
 # Fails when Node is missing, when a test that should build a module
 # does not, or when any module is rejected.
@@ -20,17 +21,24 @@
 set -uo pipefail
 
 root="${1:-integration-tests}"
+if [ $# -gt 0 ]; then
+    shift
+fi
 target=wasm
 test_flags="$(cd "$(dirname "$0")" && pwd)/test-flags.sh"
-compiler="$(pwd)/publish/ghul.dll"
+if [ $# -gt 0 ]; then
+    compiler=("$@")
+else
+    compiler=(dotnet "$(pwd)/publish/ghul.dll")
+fi
 
 if ! command -v node >/dev/null 2>&1; then
     echo "wasm-validate: node is not on the PATH" >&2
     exit 1
 fi
 
-if [ ! -f "$compiler" ]; then
-    echo "wasm-validate: no compiler at $compiler; publish first" >&2
+if [ $# -eq 0 ] && [ ! -f "${compiler[1]}" ]; then
+    echo "wasm-validate: no compiler at ${compiler[1]}; publish first" >&2
     exit 1
 fi
 
@@ -77,7 +85,7 @@ while IFS=$'\t' read -r dir flags_text; do
 
     # Compiled from the test's own directory, as ghul-test compiles it, so
     # a path its flags name is read from there.
-    if ! (cd "$dir" && dotnet "$compiler" "${flags[@]}" -o "$out/module.wasm" ./*.ghul) >"$out/compiler.out" 2>&1; then
+    if ! (cd "$dir" && "${compiler[@]}" "${flags[@]}" -o "$out/module.wasm" ./*.ghul) >"$out/compiler.out" 2>&1; then
         echo "wasm-validate: $dir did not compile:" >&2
         head -5 "$out/compiler.out" >&2
         failed=$((failed + 1))

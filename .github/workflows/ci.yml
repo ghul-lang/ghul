@@ -1085,7 +1085,7 @@ jobs:
   # form it wrote, but no engine reads the modules. This builds each one
   # again with the bootstrapped compiler and has Node validate it.
   wasm_validation:
-    needs: [version, bootstrap]
+    needs: [version, llvm_lineage]
     if: needs.version.outputs.build == 'true'
     name: Validate wasm modules
 
@@ -1096,26 +1096,26 @@ jobs:
     steps:
     - uses: actions/checkout@v7
 
-    - name: Set up .NET 10
-      uses: actions/setup-dotnet@v6
-      with:
-        dotnet-version: '10.0.x'
-
     - name: Set up Node.js
       uses: actions/setup-node@v7
       with:
         node-version: '24'
 
-    # The script runs the compiler at publish/ghul.dll, so the bootstrapped
-    # tool tree goes where a local `dotnet publish` would put it.
-    - name: Download bootstrap compiler tool tree
+    # The modules are built by the llvm lineage's stage 2.
+    - name: Download the native compiler
       uses: actions/download-artifact@v8
       with:
-        name: ghul-compiler-tool
-        path: publish
+        name: ghul-compiler-llvm-x86_64-unknown-linux-musl
+
+    - name: Install the native compiler
+      run: |
+        mkdir -p hosts/llvm
+        tar -xzf ghul-compiler-llvm-x86_64-unknown-linux-musl.tar.gz -O ghul-compiler/ghul-compiler > hosts/llvm/ghul
+        chmod +x hosts/llvm/ghul
+        test "$(hosts/llvm/ghul)" = "ghūl ${{ needs.version.outputs.package }} llvm"
 
     - name: Validate the wasm test modules in Node
-      run: build/wasm-validate.sh
+      run: build/wasm-validate.sh integration-tests "$PWD/hosts/llvm/ghul"
 
   # The integration suite, built and run as a user's build would build and
   # run it: the llvm lineage's stage 2 builds every test for llvm,
@@ -1226,7 +1226,7 @@ jobs:
   # A job of its own, so neither it nor the llvm integration tests run close
   # to the fifteen-minute limit.
   llvm_cells:
-    needs: [version, bootstrap]
+    needs: [version, llvm_lineage]
     if: needs.version.outputs.build == 'true'
     name: Run the llvm cell scenarios
 
@@ -1253,14 +1253,18 @@ jobs:
           exit 1
         fi
 
-    - name: Download bootstrap compiler tool tree
+    # The cells are built by the llvm lineage's stage 2.
+    - name: Download the native compiler
       uses: actions/download-artifact@v8
       with:
-        name: ghul-compiler-tool
-        path: publish
+        name: ghul-compiler-llvm-x86_64-unknown-linux-musl
 
-    - name: Restore local .NET tools
-      run: dotnet tool restore
+    - name: Install the native compiler
+      run: |
+        mkdir -p hosts/llvm
+        tar -xzf ghul-compiler-llvm-x86_64-unknown-linux-musl.tar.gz -O ghul-compiler/ghul-compiler > hosts/llvm/ghul
+        chmod +x hosts/llvm/ghul
+        test "$(hosts/llvm/ghul)" = "ghūl ${{ needs.version.outputs.package }} llvm"
 
     # The runtime the version job chose for the whole run.
     - name: Checkout ghul-runtime
@@ -1280,7 +1284,7 @@ jobs:
       run: |
         host="$(build/ghul-llvm-host.sh "$RUNNER_TEMP/ghul-llvm-host")"
         ghul_llvm="$(dirname "$(dirname "$(command -v ghul-llvm)")")"
-        build/llvm-cells.sh publish/ghul.dll "$ghul_llvm" "$host"
+        build/llvm-cells.sh hosts/llvm/ghul "$ghul_llvm" "$host"
 
   # The llvm tests' one name: every shard and the cell scenarios passed. As
   # for integration_tests, `always()` makes a failed build fail this job
@@ -1312,7 +1316,7 @@ jobs:
   # of the Gate, and run by the scheduled build only, so it holds no pull
   # request: a gap it finds is fixed or filed the next day.
   llvm_tests_arm64:
-    needs: [version, bootstrap]
+    needs: [version, llvm_lineage]
     if: needs.version.outputs.build == 'true' && github.event_name == 'schedule'
     name: Run llvm tests on arm64 (O0)
 
@@ -1325,12 +1329,21 @@ jobs:
     steps:
     - uses: actions/checkout@v7
 
-    - name: Download bootstrap compiler tool tree
+    # The tests are built by the arm64 llvm lineage's stage 2, in hosts/llvm/
+    # where the host-llvm configuration looks for it.
+    - name: Download the native compiler
       uses: actions/download-artifact@v8
       with:
-        name: ghul-compiler-tool
-        path: publish
+        name: ghul-compiler-llvm-aarch64-unknown-linux-musl
 
+    - name: Install the native compiler
+      run: |
+        mkdir -p hosts/llvm
+        tar -xzf ghul-compiler-llvm-aarch64-unknown-linux-musl.tar.gz -O ghul-compiler/ghul-compiler > hosts/llvm/ghul
+        chmod +x hosts/llvm/ghul
+        test "$(hosts/llvm/ghul)" = "ghūl ${{ needs.version.outputs.package }} llvm"
+
+    # ghul-test.
     - name: Restore local .NET tools
       run: dotnet tool restore
 
@@ -1359,7 +1372,7 @@ jobs:
         echo "GHUL_LLVM=$RUNNER_TEMP/ghul-llvm-O0" >> "$GITHUB_ENV"
 
     - name: Run the llvm integration tests
-      run: bash -c "set -o pipefail ; dotnet ghul-test --config llvm integration-tests | tee test-results.txt"
+      run: bash -c "set -o pipefail ; dotnet ghul-test --config host-llvm integration-tests | tee test-results.txt"
 
   # The formatter is the AST serializer, so its output has to parse back to
   # the same tree. Nothing else tests that: its unit and analysis-mode tests
@@ -1919,35 +1932,143 @@ jobs:
   # Sharded, and gated by `rosetta_tests` below, for the reasons given on
   # the integration shards.
   rosetta_shards:
-    needs: [version, bootstrap, llvm_lineage]
+    needs: [version, llvm_lineage]
     if: needs.version.outputs.build == 'true'
-    name: Rosetta Code shard (${{ matrix.target }} ${{ matrix.shard }})
+    name: Rosetta Code shard (wasm ${{ matrix.shard }})
 
     runs-on: ubuntu-latest
 
     timeout-minutes: 15
 
     # Five shards build the tasks for wasm, as the playground runs them, with
-    # the llvm lineage's stage 2 through fork servers, and run them
-    # under Node. One builds the tasks that cannot run on wasm, the ones
-    # scripts/wasm-tasks.sh leaves out, for .NET with the bootstrapped
-    # compiler.
+    # the llvm lineage's stage 2 through fork servers, and run them under
+    # Node. rosetta_dotnet builds the tasks that cannot run on wasm.
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - { target: wasm, shard: 1/5 }
-          - { target: wasm, shard: 2/5 }
-          - { target: wasm, shard: 3/5 }
-          - { target: wasm, shard: 4/5 }
-          - { target: wasm, shard: 5/5 }
-          - { target: dotnet, shard: 1/1 }
+        shard: [1/5, 2/5, 3/5, 4/5, 5/5]
 
     # Build and run every ghul-rosetta-code task (latest main) against the
     # compiler this run built. The tasks are the largest corpus of top-level
     # code, function literals and inferred locals outside the compiler,
     # and each carries an output-asserting test, so a change to inference
     # or narrowing that alters what a solution does shows up here.
+    steps:
+    # Pick `next` over `main` when it exists and is strictly ahead, as
+    # the runtime and examples jobs do, so a compiler change the tasks
+    # cannot build under until they are updated can land first.
+    - name: Resolve ghul-rosetta-code ref
+      id: ref
+      shell: bash
+      env:
+        GIT_AUTH_TOKEN: ${{ github.token }}
+      run: |
+        set -euo pipefail
+        repo=ghul-lang/ghul-rosetta-code
+        authed="https://x-access-token:${GIT_AUTH_TOKEN}@github.com/${repo}"
+        main_sha=$(git ls-remote "${authed}" refs/heads/main | cut -f1)
+        next_sha=$(git ls-remote "${authed}" refs/heads/next | cut -f1 || true)
+        ref=main
+        if [ -n "${next_sha}" ] && [ "${next_sha}" != "${main_sha}" ]; then
+          tmp=$(mktemp -d) && trap "rm -rf '${tmp}' || true" EXIT
+          git clone --quiet --filter=blob:none --no-checkout --branch=next --depth=200 "${authed}" "${tmp}"
+          git -C "${tmp}" fetch --quiet --depth=200 origin main:refs/remotes/origin/main
+          if git -C "${tmp}" merge-base --is-ancestor origin/main next; then
+            ref=next
+            echo "using ${repo}/next"
+          fi
+        fi
+        echo "ref=${ref}" >> "$GITHUB_OUTPUT"
+
+    - name: Checkout ghul-rosetta-code
+      uses: actions/checkout@v7
+      with:
+        repository: ghul-lang/ghul-rosetta-code
+        path: ghul-rosetta-code
+        ref: ${{ steps.ref.outputs.ref }}
+
+    - name: Set up .NET 10
+      uses: actions/setup-dotnet@v6
+      with:
+        dotnet-version: '10.0.x'
+
+    # The harness is the task repository's own, restored below from its
+    # manifest, as the runtime and examples jobs do. The tasks are checked
+    # out at that repository's head, and a task may use a harness feature
+    # newer than anything this repository has needed - a `run.session`
+    # driving an interactive solution, say - so the harness that matches
+    # the corpus is the one pinned alongside it. A pin taken from here
+    # instead goes stale silently: the harness ignores the file it does
+    # not know about, the solution reads end of input at its first prompt,
+    # and the diff blames the compiler under test.
+    - name: Restore local .NET tools
+      working-directory: ghul-rosetta-code
+      run: dotnet tool restore
+
+    # The task repository's default configuration builds a task with the
+    # compiler alone when it references nothing but ghul.runtime, which has to
+    # be in the package cache before the run decides; restoring any one task
+    # puts it there.
+    - name: Restore the runtime the tasks reference
+      working-directory: ghul-rosetta-code
+      run: dotnet restore "$(ls tasks/*/*.ghulproj | head -n 1)"
+
+    # The runtime the version job chose for the whole run, whose source the
+    # wasm builds compile with each task.
+    - name: Checkout ghul-runtime
+      uses: actions/checkout@v7
+      with:
+        repository: ghul-lang/ghul-runtime
+        path: ghul-rosetta-code/libraries/ghul-runtime
+        ref: ${{ needs.version.outputs.runtime }}
+
+    # The graphical tasks build ghul-raster from source for wasm, at the
+    # version the task repository pins.
+    - name: Find the ghul-raster version the tasks pin
+      id: raster
+      working-directory: ghul-rosetta-code
+      run: echo "version=$(sed -n 's/.*Include="ghul.raster" Version="\([^"]*\)".*/\1/p' Directory.Packages.props)" >> "$GITHUB_OUTPUT"
+
+    - name: Checkout ghul-raster
+      uses: actions/checkout@v7
+      with:
+        repository: ghul-lang/ghul-raster
+        path: ghul-rosetta-code/libraries/ghul-raster
+        ref: v${{ steps.raster.outputs.version }}
+
+    - name: Download the native compiler
+      uses: actions/download-artifact@v8
+      with:
+        name: ghul-compiler-llvm-x86_64-unknown-linux-musl
+
+    # The ci-wasm configuration looks for the compiler in hosts/llvm/.
+    - name: Install the native compiler
+      run: |
+        mkdir -p ghul-rosetta-code/hosts/llvm
+        tar -xzf ghul-compiler-llvm-x86_64-unknown-linux-musl.tar.gz -O ghul-compiler/ghul-compiler > ghul-rosetta-code/hosts/llvm/ghul
+        chmod +x ghul-rosetta-code/hosts/llvm/ghul
+        test "$(ghul-rosetta-code/hosts/llvm/ghul)" = "ghūl ${{ needs.version.outputs.package }} llvm"
+
+    - name: Set up Node.js
+      uses: actions/setup-node@v7
+      with:
+        node-version: '24'
+
+    - name: Run Rosetta Code integration tests for wasm
+      working-directory: ghul-rosetta-code
+      run: dotnet ghul-test --config ci-wasm --shard ${{ matrix.shard }} $(scripts/wasm-tasks.sh)
+
+  # The tasks scripts/wasm-tasks.sh leaves out, which cannot run on wasm,
+  # built for .NET with the bootstrapped compiler.
+  rosetta_dotnet:
+    needs: [version, bootstrap]
+    if: needs.version.outputs.build == 'true'
+    name: Rosetta Code shard (dotnet)
+
+    runs-on: ubuntu-latest
+
+    timeout-minutes: 15
+
     steps:
     # Pick `next` over `main` when it exists and is strictly ahead, as
     # the runtime and examples jobs do, so a compiler change the tasks
@@ -2024,69 +2145,16 @@ jobs:
       working-directory: ghul-rosetta-code
       run: dotnet restore "$(ls tasks/*/*.ghulproj | head -n 1)"
 
-    # The runtime the version job chose for the whole run, whose source the
-    # wasm builds compile with each task.
-    - name: Checkout ghul-runtime
-      if: matrix.target == 'wasm'
-      uses: actions/checkout@v7
-      with:
-        repository: ghul-lang/ghul-runtime
-        path: ghul-rosetta-code/libraries/ghul-runtime
-        ref: ${{ needs.version.outputs.runtime }}
-
-    # The graphical tasks build ghul-raster from source for wasm, at the
-    # version the task repository pins.
-    - name: Find the ghul-raster version the tasks pin
-      if: matrix.target == 'wasm'
-      id: raster
-      working-directory: ghul-rosetta-code
-      run: echo "version=$(sed -n 's/.*Include="ghul.raster" Version="\([^"]*\)".*/\1/p' Directory.Packages.props)" >> "$GITHUB_OUTPUT"
-
-    - name: Checkout ghul-raster
-      if: matrix.target == 'wasm'
-      uses: actions/checkout@v7
-      with:
-        repository: ghul-lang/ghul-raster
-        path: ghul-rosetta-code/libraries/ghul-raster
-        ref: v${{ steps.raster.outputs.version }}
-
-    - name: Download the native compiler
-      if: matrix.target == 'wasm'
-      uses: actions/download-artifact@v8
-      with:
-        name: ghul-compiler-llvm-x86_64-unknown-linux-musl
-
-    # The ci-wasm configuration looks for the compiler in hosts/llvm/.
-    - name: Install the native compiler
-      if: matrix.target == 'wasm'
-      run: |
-        mkdir -p ghul-rosetta-code/hosts/llvm
-        tar -xzf ghul-compiler-llvm-x86_64-unknown-linux-musl.tar.gz -O ghul-compiler/ghul-compiler > ghul-rosetta-code/hosts/llvm/ghul
-        chmod +x ghul-rosetta-code/hosts/llvm/ghul
-        test "$(ghul-rosetta-code/hosts/llvm/ghul)" = "ghūl ${{ needs.version.outputs.package }} llvm"
-
-    - name: Set up Node.js
-      if: matrix.target == 'wasm'
-      uses: actions/setup-node@v7
-      with:
-        node-version: '24'
-
-    - name: Run Rosetta Code integration tests for wasm
-      if: matrix.target == 'wasm'
-      working-directory: ghul-rosetta-code
-      run: dotnet ghul-test --config ci-wasm --shard ${{ matrix.shard }} $(scripts/wasm-tasks.sh)
-
     # --compiler names the bootstrapped compiler in place of each task's own,
     # for the reason given on the cross-assembly tests.
     - name: Run Rosetta Code integration tests for .NET
-      if: matrix.target == 'dotnet'
       working-directory: ghul-rosetta-code
       run: dotnet ghul-test --compiler "dotnet ${GITHUB_WORKSPACE}/bootstrap-tool/ghul.dll" $(scripts/wasm-tasks.sh --others)
 
 
   # The required status check; see the note on `integration_tests`.
   rosetta_tests:
-    needs: [version, rosetta_shards]
+    needs: [version, rosetta_shards, rosetta_dotnet]
     name: Run Rosetta Code tests
 
     if: always()
@@ -2098,11 +2166,14 @@ jobs:
     steps:
     - name: Check every shard passed
       env:
-        RESULT: ${{ needs.rosetta_shards.result }}
+        WASM: ${{ needs.rosetta_shards.result }}
+        DOTNET: ${{ needs.rosetta_dotnet.result }}
         BUILD: ${{ needs.version.outputs.build }}
       run: |
-        echo "shards: $RESULT"
-        [ "$RESULT" = success ] || { [ "$RESULT" = skipped ] && [ "$BUILD" != true ]; }
+        echo "wasm shards: $WASM, dotnet: $DOTNET"
+        for result in "$WASM" "$DOTNET"; do
+          [ "$result" = success ] || { [ "$result" = skipped ] && [ "$BUILD" != true ]; } || exit 1
+        done
 
   # The one verdict the publish jobs wait on. On a pull request, and on a
   # release build that runs the suite itself, every test job ran and must
