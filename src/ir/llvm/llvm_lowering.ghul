@@ -3255,6 +3255,9 @@ namespace IR.LLVMTarget is
         // answering the value replaced, `compare_exchange` answering whether
         // it replaced the expected value, and `add` answering the sum. The
         // value is read and written at its stored width, aligned to it.
+        // `exchange` and `compare_exchange` take an integer or a reference,
+        // and `add` an integer other than a `bool`, as LLVM's `atomicrmw`
+        // and `cmpxchg` do; anything else is reported.
         _lower_atomic(operation: string, type: Type, arguments: Value[]) is
             let location = _value_of(arguments[0])
             let stored = _stored(type)
@@ -3279,16 +3282,18 @@ namespace IR.LLVMTarget is
             fi
 
             let value = _narrow(operand, type)
+            let integer = if let i: LLVM.Type.INTEGER = stored then i.width >= 8 else false fi
+            let exchangeable = integer \/ isa LLVM.Type.POINTER(stored)
 
             if operation =~ "atomic.store" then
                 _current.atomic_store(value, location, size, ordering)
-            elif operation =~ "atomic.exchange" then
+            elif operation =~ "atomic.exchange" /\ exchangeable then
                 _push(_widen(_current.read_modify_write(LLVM.AtomicOperator.EXCHANGE, location, value, ordering, size), type))
-            elif operation =~ "atomic.add" /\ _scalar(type)? /\ stored !~ Types.i1 then
+            elif operation =~ "atomic.add" /\ integer /\ _scalar(type) !~ Scalar.BOOL then
                 let before = _current.read_modify_write(LLVM.AtomicOperator.ADD, location, value, ordering, size)
 
                 _push(_widen(_current.binary(BinaryOperator.ADD, IntegerFlags.NONE, before, value), type))
-            elif operation =~ "atomic.compare_exchange" then
+            elif operation =~ "atomic.compare_exchange" /\ exchangeable then
                 if let replacement = _value_of(arguments[2]) then
                     let result = _current.compare_exchange(location, value, _narrow(replacement, type), ordering, ordering, size)
 
