@@ -518,6 +518,11 @@ namespace IR.LLVMTarget is
                 strings.add_exports()
                 arrays.add_exports()
 
+                // A cell's host starts no threads.
+                if !CELL_LINK.is_active then
+                    _add_thread_entry(module)
+                fi
+
                 let getter = LLVM_EXCEPTIONS.message_getter
 
                 LLVM_EXCEPTIONS.add_report_unhandled(module, strings, if let g = getter then callee(FUNCTION_INSTANCE.of(g)) else null fi)
@@ -637,6 +642,28 @@ namespace IR.LLVMTarget is
             let entry = function.add_block("entry")
 
             entry.call(sweep, LIST[LLVM.Value]().to_array())
+            entry.return_void()
+
+            module.add_function(function)
+        si
+
+        /// The name of the function the runtime runs a thread's body through.
+        THREAD_ENTRY_NAME: string static => "$ghul_thread_entry"
+
+        // Exports `$ghul_thread_entry`, which calls `action`, a function
+        // value that takes nothing and answers nothing, for a thread the
+        // runtime started: the closure's layout stays the compiler's.
+        _add_thread_entry(module: MODULE) is
+            let function = FUNCTION(THREAD_ENTRY_NAME, LLVM.Type.VOID, [LLVM.PARAMETER(LLVM.Types.pointer, "action")])
+            let entry = function.add_block("entry")
+            let action = function.parameter(0)
+
+            let read = (offset: int) => entry.load(LLVM.Types.pointer, entry.element_pointer(LLVM.Types.i8, action, [LLVM.Values.i32(offset)], true), 8)
+
+            let callee = read(LLVM_CLOSURES.FUNCTION_OFFSET)
+            let receiver = read(LLVM_CLOSURES.RECEIVER_OFFSET)
+
+            entry.call(LLVM.Types.function(LLVM.Type.VOID, [LLVM.Types.pointer]), callee, [receiver])
             entry.return_void()
 
             module.add_function(function)

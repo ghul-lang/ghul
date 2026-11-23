@@ -864,11 +864,40 @@ namespace IR.LLVMTarget is
             if let memoized: Values.MEMOIZED_DELEGATE = composite /\ memoized.function? then
                 _closure(Values.MAKE_CLOSURE(memoized.type, memoized.function!, Values.NULL(Semantic.Types.NULL())), true)
                 return
+            elif let memoized: Values.MEMOIZED_DELEGATE = composite, (name, type) = _global(memoized.cache_field, true) /\ type =~ Types.pointer then
+                _memoized_delegate(memoized.inner, LLVM.Values.global(name))
+                return
             fi
 
             for value in composite.expand().values do
                 gen(value)
             od
+        si
+
+        // A delegate built at most once and kept in `cache`. The cache is
+        // read with acquire and written with release ordering, so a thread
+        // that finds a delegate there also sees what the delegate holds.
+        _memoized_delegate(inner: Value, cache: LLVM.Value) is
+            let result = _slot(Types.pointer)
+            let found = _current.atomic_load(Types.pointer, cache, 8, LLVM.AtomicOrdering.ACQUIRE)
+            let build = _new_block()
+            let done = _new_block()
+
+            _current.store(found, result, 8)
+            _current.branch(_current.compare(IntegerPredicate.EQ, found, LLVM.Values.null_pointer), build, done)
+                .attach("prof", _module.rarely_taken())
+
+            _start(build)
+
+            if let made = _value_of(inner) then
+                _current.atomic_store(made, cache, 8, LLVM.AtomicOrdering.RELEASE)
+                _current.store(made, result, 8)
+            fi
+
+            _current.branch(done)
+
+            _start(done)
+            _push(_current.load(Types.pointer, result, 8))
         si
 
         visit_address(coalesce: Values.COALESCE_LOAD) is _report("the address of a coalesced load") si
@@ -3168,6 +3197,8 @@ namespace IR.LLVMTarget is
                 _interop_access(call.innate_name =~ "interop.write", call.function.generic_arguments[0], call.arguments)
             elif call.innate_name =~ "interop.elements" then
                 _interop_elements(call.arguments[0])
+            elif call.innate_name.starts_with("atomic.") then
+                _lower_atomic(call.innate_name, call.function.generic_arguments[0], call.arguments)
             elif call.is_lowered then
                 gen(call.lowering)
             else
@@ -3219,6 +3250,55 @@ namespace IR.LLVMTarget is
             fi
         si
 
+        // An atomic operation on the `T` that `arguments[0]`, a `T ref`,
+        // names, sequentially consistent: `load`, `store`, `exchange`
+        // answering the value replaced, `compare_exchange` answering whether
+        // it replaced the expected value, and `add` answering the sum. The
+        // value is read and written at its stored width, aligned to it.
+        _lower_atomic(operation: string, type: Type, arguments: Value[]) is
+            let location = _value_of(arguments[0])
+            let stored = _stored(type)
+
+            if !location? \/ !stored? then
+                _report("the operation {operation} on {type}")
+                return
+            fi
+
+            let size = LLVM_TYPES.size_of(stored)
+            let ordering = LLVM.AtomicOrdering.SEQUENTIALLY_CONSISTENT
+
+            if operation =~ "atomic.load" then
+                _push(_widen(_current.atomic_load(stored, location, size, ordering), type))
+                return
+            fi
+
+            let operand = _value_of(arguments[1])
+
+            if !operand? then
+                return
+            fi
+
+            let value = _narrow(operand, type)
+
+            if operation =~ "atomic.store" then
+                _current.atomic_store(value, location, size, ordering)
+            elif operation =~ "atomic.exchange" then
+                _push(_widen(_current.read_modify_write(LLVM.AtomicOperator.EXCHANGE, location, value, ordering, size), type))
+            elif operation =~ "atomic.add" /\ _scalar(type)? /\ stored !~ Types.i1 then
+                let before = _current.read_modify_write(LLVM.AtomicOperator.ADD, location, value, ordering, size)
+
+                _push(_widen(_current.binary(BinaryOperator.ADD, IntegerFlags.NONE, before, value), type))
+            elif operation =~ "atomic.compare_exchange" then
+                if let replacement = _value_of(arguments[2]) then
+                    let result = _current.compare_exchange(location, value, _narrow(replacement, type), ordering, ordering, size)
+
+                    _push(_current.extract_value(Types.i1, result, [1]))
+                fi
+            else
+                _report("the operation {operation} on {type}")
+            fi
+        si
+
         // The instance a call from this body names: a reference from inside a
         // generic body takes its type arguments from the body's own.
         _instance_of(function: Function) -> FUNCTION_INSTANCE =>
@@ -3248,6 +3328,8 @@ namespace IR.LLVMTarget is
                     _interop_access(operation =~ "interop.write", function.generic_arguments[0], arguments)
                 elif operation =~ "interop.elements" then
                     _interop_elements(arguments[0])
+                elif operation.starts_with("atomic.") then
+                    _lower_atomic(operation, function.generic_arguments[0], arguments)
                 elif operation =~ "build.version" then
                     gen(Values.Literal.STRING(IR.BUILD_VERSION.text, IoC.CONTAINER.instance.innate_symbol_lookup.get_string_type()))
                 elif operation =~ "bigint.is_small" \/ operation =~ "bigint.small" then
@@ -3575,7 +3657,8 @@ namespace IR.LLVMTarget is
         // A host operation is a function the native runtime defines, named
         // for the operation. A string crosses as the address of its code
         // units and their count, and comes back as a string the runtime made
-        // through `ghul_make_string`.
+        // through `ghul_make_string`; any other object crosses as its
+        // address.
         _call_host(operation: string, function: Function, arguments: Value[]) is
             _call_host(operation, function, arguments, function.return_type)
         si
@@ -3632,6 +3715,12 @@ namespace IR.LLVMTarget is
                     parameter_attributes.add(null)
                     values.add(arrays.element_address(_current, array, value, _i32(0)))
                     values.add(arrays.count(_current, value))
+                elif let held = _held(formal) /\ held =~ Types.pointer then
+                    // Any other object, such as a function value or a handle
+                    // the runtime made, crosses as its address.
+                    parameter_types.add(Types.pointer)
+                    parameter_attributes.add(null)
+                    values.add(value)
                 else
                     _report("a host operation taking {formal}")
                     return
@@ -4055,8 +4144,13 @@ namespace IR.LLVMTarget is
 
         // A type's static constructor runs once, before the type is first
         // used: before a static member is read, written or called, and before
-        // an instance is made. Its flag is set before the body runs, so a use
-        // of the type from inside it does not run it again.
+        // an instance is made, however many threads reach it. Its flag is 2
+        // once the constructor has finished, which the test here reads with
+        // acquire ordering, so what the constructor stored is seen; anything
+        // else goes to the runtime's `$ghul_static_init`, which runs the
+        // constructor, waits for another thread running it, or returns at
+        // once to the thread running it, so a use of the type from inside the
+        // constructor does not run it again.
         _ensure_initialised(owner: Semantic.Scope?) is
             if let objects = _objects, type = _owner_class(owner), (constructor, flag) = objects.static_constructor(type) then
                 let callee = _callee(constructor)
@@ -4068,9 +4162,9 @@ namespace IR.LLVMTarget is
 
                 let run = _new_block()
                 let carry_on = _new_block()
-                let state = _current.load(Types.i32, LLVM.Values.global(flag), 4)
+                let state = _current.atomic_load(Types.i32, LLVM.Values.global(flag), 4, LLVM.AtomicOrdering.ACQUIRE)
 
-                _current.branch(_current.compare(IntegerPredicate.EQ, state, _i32(0)), run, carry_on)
+                _current.branch(_current.compare(IntegerPredicate.NE, state, _i32(STATIC_CONSTRUCTOR_DONE)), run, carry_on)
                     .attach("prof", _module.rarely_taken())
 
                 _note_guard(_current, flag, carry_on)
@@ -4079,20 +4173,21 @@ namespace IR.LLVMTarget is
 
                 _emit_call(_initialiser(flag, callee), [])
 
-                // The flag is set by now, but the call could have changed
-                // it as far as the optimiser can tell; storing it again here
-                // lets a later test of it, inlined from elsewhere, fold away.
-                _current.store(_i32(1), LLVM.Values.global(flag), 4)
                 _current.branch(carry_on)
 
                 _start(carry_on)
             fi
         si
 
-        // The module's function that sets `flag` and runs the static
-        // constructor `callee`, added the first time it is asked for: kept
-        // out of line, so a test of the flag inlined into a caller costs
-        // one branch where the type is already initialised.
+        /// The value of a static constructor's flag once it has finished:
+        /// 0 before it starts, and the running thread's mark while it runs.
+        STATIC_CONSTRUCTOR_DONE: int static => 2
+
+        // The module's function that hands `flag` and the static constructor
+        // `callee` to the runtime's `$ghul_static_init`, added the first time
+        // it is asked for: kept out of line, so a test of the flag inlined
+        // into a caller costs one load and one branch where the type is
+        // already initialised.
         _initialiser(flag: string, callee: FUNCTION) -> FUNCTION is
             let name = "$ghul_initialise.{flag}"
 
@@ -4108,8 +4203,9 @@ namespace IR.LLVMTarget is
 
             let entry = initialiser.add_block("entry")
 
-            entry.store(_i32(1), LLVM.Values.global(flag), 4)
-            entry.call(callee, [])
+            let guard = _strings!.runtime(LLVM_STRINGS.STATIC_INIT_NAME, LLVM.Type.VOID, [Types.pointer, Types.pointer])
+
+            entry.call(guard, [LLVM.Values.global(flag), callee.reference])
             entry.return_void()
 
             return _module.add_function(initialiser)
