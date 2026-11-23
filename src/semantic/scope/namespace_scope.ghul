@@ -5,6 +5,9 @@ namespace Semantic is
     use Logging
     use Source
 
+    use Ghul.Pipes.all
+    use Ghul.Pipes.any
+
     use Semantic.Symbols.NAMESPACE
 
     use Types.Type
@@ -34,6 +37,7 @@ namespace Semantic is
         _default_used_symbols: Collections.MAP[string,Symbol]
         _default_used_namespaces: Collections.LIST[Symbols.NAMESPACE]
         _is_adding_defaults: bool
+        _ambiguities: Collections.MAP[string,Collections.LIST[Symbol]]
         _closures: Collections.SET[Symbols.Closure]?
 
         type: Type => Types.NONE.instance
@@ -56,6 +60,7 @@ namespace Semantic is
             _used_namespaces = Collections.LIST[Symbols.NAMESPACE]()
             _default_used_symbols = Collections.MAP[string,Symbol]()
             _default_used_namespaces = Collections.LIST[Symbols.NAMESPACE]()
+            _ambiguities = Collections.MAP[string,Collections.LIST[Symbol]]()
         si
 
         add_closure(closure: Symbols.Closure) is
@@ -101,7 +106,68 @@ namespace Semantic is
         // was first looked up, is otherwise not seen from here.
         forget_lookups() is
             _symbols.clear()
+            _ambiguities.clear()
         si
+
+        /// The distinct symbols a bare name finds in the namespaces this block
+        /// imports whole, when there are two or more and at least one is not a
+        /// function: which one the name means depends only on the order of the
+        /// `use` lines. Empty when this namespace declares the name, a `use`
+        /// imports it by name, one namespace has it, or every one found is a
+        /// function, since functions of one name form one overload group.
+        /// The namespaces `use default` imports are a tier of their own,
+        /// consulted only when no explicit import has the name.
+        /// - name: the name as written, without a qualifier
+        import_ambiguity(name: string) -> Collections.LIST[Symbol] is
+            if _ambiguities.contains_key(name) then
+                return _ambiguities[name]
+            fi
+
+            let result = _find_import_ambiguity(name)
+
+            _ambiguities[name] = result
+
+            return result
+        si
+
+        _find_import_ambiguity(name: string) -> Collections.LIST[Symbol] is
+            let none = Collections.LIST[Symbol](0)
+
+            if find_direct(name)? \/ _used_symbols.contains_key(name) then
+                return none
+            fi
+
+            let found mut = _distinct_in(_used_namespaces, name)
+
+            if found.count == 0 then
+                if _default_used_symbols.contains_key(name) then
+                    return none
+                fi
+
+                found = _distinct_in(_default_used_namespaces, name)
+            fi
+
+            if found.count < 2 \/ found |> all(symbol => _is_function(symbol)) then
+                return none
+            fi
+
+            return found
+        si
+
+        _distinct_in(namespaces: Collections.LIST[Symbols.NAMESPACE], name: string) -> Collections.LIST[Symbol] is
+            let found = Collections.LIST[Symbol]()
+
+            for ns in namespaces do
+                if let symbol = ns.find_direct(name) /\ !(found |> any(f => f == symbol)) then
+                    found.add(symbol)
+                fi
+            od
+
+            return found
+        si
+
+        _is_function(symbol: Symbol) -> bool =>
+            isa Symbols.Function(symbol) \/ isa Symbols.FUNCTION_GROUP(symbol)
 
         find_member(name: string) -> Symbol? =>
             find_enclosing(name)
