@@ -1091,10 +1091,26 @@ jobs:
 
     runs-on: ubuntu-latest
 
+    container: buildpack-deps:noble-scm
+
     timeout-minutes: 10
 
     steps:
     - uses: actions/checkout@v7
+
+    - name: Check the image has no .NET and cannot build C
+      run: |
+        for tool in dotnet cc gcc clang ld ld.lld as opt llc; do
+          if command -v "$tool"; then
+            echo "::error::$tool is installed"
+            exit 1
+          fi
+        done
+
+        if [ -e /usr/include/stdio.h ]; then
+          echo "::error::the C library's headers are installed"
+          exit 1
+        fi
 
     # The configuration names the runtime library's checkout for its wasm
     # builds. The runtime the version job chose for the whole run.
@@ -1108,7 +1124,9 @@ jobs:
     # The modules are built with the commands ghul-test lists for them, by
     # its Native AOT runner, so the job needs no .NET.
     - name: Fetch ghul-test
-      run: echo "GHUL_TEST=$(build/fetch-ghul-test.sh)" >> "$GITHUB_ENV"
+      run: |
+        runner="$(build/fetch-ghul-test.sh)"
+        echo "GHUL_TEST=$runner" >> "$GITHUB_ENV"
 
     - name: Set up Node.js
       uses: actions/setup-node@v7
@@ -1134,7 +1152,7 @@ jobs:
   # The integration suite, built and run as a user's build would build and
   # run it: the llvm lineage's stage 2 builds every test for llvm,
   # through fork servers, and hands each module to the ghul-llvm release
-  # fetched from GitHub, in an image holding the .NET SDK and nothing to
+  # fetched from GitHub, in an image with no .NET and nothing to
   # compile, assemble or link C with, so a program that needs anything from
   # the machine fails here. Every test is built unoptimised, and every test
   # built for wasm runs too, under Node; the tests whose build_targets name
@@ -1152,7 +1170,7 @@ jobs:
 
     runs-on: ubuntu-latest
 
-    container: mcr.microsoft.com/dotnet/sdk:10.0
+    container: buildpack-deps:noble-scm
 
     timeout-minutes: 15
 
@@ -1164,9 +1182,9 @@ jobs:
     steps:
     - uses: actions/checkout@v7
 
-    - name: Check the image cannot build C
+    - name: Check the image has no .NET and cannot build C
       run: |
-        for tool in cc gcc clang ld ld.lld as opt llc; do
+        for tool in dotnet cc gcc clang ld ld.lld as opt llc; do
           if command -v "$tool"; then
             echo "::error::$tool is installed"
             exit 1
@@ -1178,8 +1196,10 @@ jobs:
           exit 1
         fi
 
-    - name: Restore local .NET tools
-      run: dotnet tool restore
+    - name: Fetch the ghul-test runner
+      run: |
+        runner="$(build/fetch-ghul-test.sh)"
+        echo "GHUL_TEST=$runner" >> "$GITHUB_ENV"
 
     # The runtime the version job chose for the whole run.
     - name: Checkout ghul-runtime
@@ -1226,10 +1246,10 @@ jobs:
         node-version: '24'
 
     - name: Run the optimised llvm integration tests
-      run: bash -c "set -o pipefail ; dotnet ghul-test --config ci-native --not-tag llvm-gap --shard ${{ matrix.shard }}/5 integration-tests | tee test-results-O2.txt"
+      run: bash -c "set -o pipefail ; \"$GHUL_TEST\" --config ci-native --not-tag llvm-gap --shard ${{ matrix.shard }}/5 integration-tests | tee test-results-O2.txt"
 
     - name: Run the integration tests
-      run: bash -c "set -o pipefail ; dotnet ghul-test --config ci-native-all --not-tag llvm-gap --shard ${{ matrix.shard }}/5 integration-tests | tee test-results.txt"
+      run: bash -c "set -o pipefail ; \"$GHUL_TEST\" --config ci-native-all --not-tag llvm-gap --shard ${{ matrix.shard }}/5 integration-tests | tee test-results.txt"
 
     - name: Validate the llvm test modules
       if: matrix.shard == 1
@@ -1246,16 +1266,16 @@ jobs:
 
     runs-on: ubuntu-latest
 
-    container: mcr.microsoft.com/dotnet/sdk:10.0
+    container: buildpack-deps:noble-scm
 
     timeout-minutes: 15
 
     steps:
     - uses: actions/checkout@v7
 
-    - name: Check the image cannot build C
+    - name: Check the image has no .NET and cannot build C
       run: |
-        for tool in cc gcc clang ld ld.lld as opt llc; do
+        for tool in dotnet cc gcc clang ld ld.lld as opt llc; do
           if command -v "$tool"; then
             echo "::error::$tool is installed"
             exit 1
@@ -1336,12 +1356,26 @@ jobs:
 
     runs-on: ubuntu-26.04-arm
 
-    container: mcr.microsoft.com/dotnet/sdk:10.0
+    container: buildpack-deps:noble-scm
 
     timeout-minutes: 30
 
     steps:
     - uses: actions/checkout@v7
+
+    - name: Check the image has no .NET and cannot build C
+      run: |
+        for tool in dotnet cc gcc clang ld ld.lld as opt llc; do
+          if command -v "$tool"; then
+            echo "::error::$tool is installed"
+            exit 1
+          fi
+        done
+
+        if [ -e /usr/include/stdio.h ]; then
+          echo "::error::the C library's headers are installed"
+          exit 1
+        fi
 
     # The tests are built by the arm64 llvm lineage's stage 2, in hosts/llvm/
     # where the host-llvm configuration looks for it.
@@ -1357,9 +1391,10 @@ jobs:
         chmod +x hosts/llvm/ghul
         test "$(hosts/llvm/ghul)" = "ghūl ${{ needs.version.outputs.package }} llvm"
 
-    # ghul-test.
-    - name: Restore local .NET tools
-      run: dotnet tool restore
+    - name: Fetch the ghul-test runner
+      run: |
+        runner="$(build/fetch-ghul-test.sh)"
+        echo "GHUL_TEST=$runner" >> "$GITHUB_ENV"
 
     - name: Checkout ghul-runtime
       uses: actions/checkout@v7
@@ -1386,7 +1421,7 @@ jobs:
         echo "GHUL_LLVM=$RUNNER_TEMP/ghul-llvm-O0" >> "$GITHUB_ENV"
 
     - name: Run the llvm integration tests
-      run: bash -c "set -o pipefail ; dotnet ghul-test --config host-llvm integration-tests | tee test-results.txt"
+      run: bash -c "set -o pipefail ; \"$GHUL_TEST\" --config host-llvm integration-tests | tee test-results.txt"
 
   # The formatter is the AST serializer, so its output has to parse back to
   # the same tree. Nothing else tests that: its unit and analysis-mode tests
@@ -1952,6 +1987,8 @@ jobs:
 
     runs-on: ubuntu-latest
 
+    container: buildpack-deps:noble-scm
+
     timeout-minutes: 15
 
     # Five shards build the tasks for wasm, as the playground runs them, with
@@ -1968,6 +2005,25 @@ jobs:
     # and each carries an output-asserting test, so a change to inference
     # or narrowing that alters what a solution does shows up here.
     steps:
+    - name: Check the image has no .NET and cannot build C
+      run: |
+        for tool in dotnet cc gcc clang ld ld.lld as opt llc; do
+          if command -v "$tool"; then
+            echo "::error::$tool is installed"
+            exit 1
+          fi
+        done
+
+        if [ -e /usr/include/stdio.h ]; then
+          echo "::error::the C library's headers are installed"
+          exit 1
+        fi
+
+    # build/fetch-ghul-test.sh, from this repository.
+    - uses: actions/checkout@v7
+      with:
+        sparse-checkout: build
+
     # Pick `next` over `main` when it exists and is strictly ahead, as
     # the runtime and examples jobs do, so a compiler change the tasks
     # cannot build under until they are updated can land first.
@@ -2001,13 +2057,8 @@ jobs:
         path: ghul-rosetta-code
         ref: ${{ steps.ref.outputs.ref }}
 
-    - name: Set up .NET 10
-      uses: actions/setup-dotnet@v6
-      with:
-        dotnet-version: '10.0.x'
-
-    # The harness is the task repository's own, restored below from its
-    # manifest, as the runtime and examples jobs do. The tasks are checked
+    # The harness is the task repository's own: the Native AOT ghul-test of
+    # the version its manifest pins. The tasks are checked
     # out at that repository's head, and a task may use a harness feature
     # newer than anything this repository has needed - a `run.session`
     # driving an interactive solution, say - so the harness that matches
@@ -2015,17 +2066,11 @@ jobs:
     # instead goes stale silently: the harness ignores the file it does
     # not know about, the solution reads end of input at its first prompt,
     # and the diff blames the compiler under test.
-    - name: Restore local .NET tools
+    - name: Fetch the ghul-test runner
       working-directory: ghul-rosetta-code
-      run: dotnet tool restore
-
-    # The task repository's default configuration builds a task with the
-    # compiler alone when it references nothing but ghul.runtime, which has to
-    # be in the package cache before the run decides; restoring any one task
-    # puts it there.
-    - name: Restore the runtime the tasks reference
-      working-directory: ghul-rosetta-code
-      run: dotnet restore "$(ls tasks/*/*.ghulproj | head -n 1)"
+      run: |
+        runner="$("$GITHUB_WORKSPACE/build/fetch-ghul-test.sh" "$PWD/hosts/ghul-test")"
+        echo "GHUL_TEST=$runner" >> "$GITHUB_ENV"
 
     # The runtime the version job chose for the whole run, whose source the
     # wasm builds compile with each task.
@@ -2070,7 +2115,7 @@ jobs:
 
     - name: Run Rosetta Code integration tests for wasm
       working-directory: ghul-rosetta-code
-      run: dotnet ghul-test --config ci-wasm --shard ${{ matrix.shard }} $(scripts/wasm-tasks.sh --fast)
+      run: '"$GHUL_TEST" --config ci-wasm --shard ${{ matrix.shard }} $(scripts/wasm-tasks.sh --fast)'
 
   # The tasks scripts/wasm-tasks.sh leaves out, which cannot run on wasm,
   # built for .NET with the bootstrapped compiler; and the ones too slow
