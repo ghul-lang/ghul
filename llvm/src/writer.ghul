@@ -881,6 +881,74 @@ namespace LLVM is
             fi
         si
 
+        _volatile(is_volatile: bool) is
+            if is_volatile then
+                _out.append("volatile ")
+            fi
+        si
+
+        // A load or a store is atomic unless its ordering is NOT_ATOMIC.
+        // An atomic one needs an explicit alignment, and cannot have
+        // `refused` ordering or ACQUIRE_RELEASE.
+        _atomic(ordering: AtomicOrdering, alignment: int, mnemonic: string, refused: AtomicOrdering) is
+            if ordering == AtomicOrdering.NOT_ATOMIC then
+                return
+            fi
+
+            if ordering == refused \/ ordering == AtomicOrdering.ACQUIRE_RELEASE then
+                throw Ghul.InvalidOperationException("an atomic {mnemonic} cannot have {_ordering_text(ordering)} ordering")
+            fi
+
+            if alignment <= 0 then
+                throw Ghul.InvalidOperationException("an atomic {mnemonic} needs an alignment")
+            fi
+
+            _out.append("atomic ")
+        si
+
+        _at_least_monotonic(ordering: AtomicOrdering, mnemonic: string) is
+            if ordering < AtomicOrdering.MONOTONIC then
+                throw Ghul.InvalidOperationException("{mnemonic} cannot have {_ordering_text(ordering)} ordering")
+            fi
+        si
+
+        _ordering(ordering: AtomicOrdering) is
+            if ordering != AtomicOrdering.NOT_ATOMIC then
+                _out.append(' ')
+                _out.append(_ordering_text(ordering))
+            fi
+        si
+
+        _ordering_text(ordering: AtomicOrdering) -> string =>
+            case ordering
+            when AtomicOrdering.NOT_ATOMIC then "no"
+            when AtomicOrdering.UNORDERED then "unordered"
+            when AtomicOrdering.MONOTONIC then "monotonic"
+            when AtomicOrdering.ACQUIRE then "acquire"
+            when AtomicOrdering.RELEASE then "release"
+            when AtomicOrdering.ACQUIRE_RELEASE then "acq_rel"
+            when AtomicOrdering.SEQUENTIALLY_CONSISTENT then "seq_cst"
+            esac
+
+        _atomic_mnemonic(operator: AtomicOperator) -> string =>
+            case operator
+            when AtomicOperator.EXCHANGE then "xchg"
+            when AtomicOperator.ADD then "add"
+            when AtomicOperator.SUB then "sub"
+            when AtomicOperator.AND then "and"
+            when AtomicOperator.NAND then "nand"
+            when AtomicOperator.OR then "or"
+            when AtomicOperator.XOR then "xor"
+            when AtomicOperator.MAX then "max"
+            when AtomicOperator.MIN then "min"
+            when AtomicOperator.UMAX then "umax"
+            when AtomicOperator.UMIN then "umin"
+            when AtomicOperator.FADD then "fadd"
+            when AtomicOperator.FSUB then "fsub"
+            when AtomicOperator.FMAX then "fmax"
+            when AtomicOperator.FMIN then "fmin"
+            esac
+
         _result(name: string) is
             _out.append(Names.local(name))
             _out.append(" = ")
@@ -908,17 +976,66 @@ namespace LLVM is
                 _alignment(alloca.alignment)
             when load: Operation.LOAD then
                 _result(load.result)
-                _out.append(if load.is_volatile then "load volatile " else "load " fi)
+                _out.append("load ")
+                _atomic(load.ordering, load.alignment, "load", AtomicOrdering.RELEASE)
+                _volatile(load.is_volatile)
                 write(load.type)
                 _out.append(", ")
                 write_operand(load.pointer)
+                _ordering(load.ordering)
                 _alignment(load.alignment)
             when store: Operation.STORE then
-                _out.append(if store.is_volatile then "store volatile " else "store " fi)
+                _out.append("store ")
+                _atomic(store.ordering, store.alignment, "store", AtomicOrdering.ACQUIRE)
+                _volatile(store.is_volatile)
                 write_operand(store.value)
                 _out.append(", ")
                 write_operand(store.pointer)
+                _ordering(store.ordering)
                 _alignment(store.alignment)
+            when exchange: Operation.COMPARE_EXCHANGE then
+                _at_least_monotonic(exchange.success, "cmpxchg")
+                _at_least_monotonic(exchange.failure, "cmpxchg")
+
+                if exchange.failure == AtomicOrdering.RELEASE \/ exchange.failure == AtomicOrdering.ACQUIRE_RELEASE then
+                    throw Ghul.InvalidOperationException("cmpxchg cannot fail with {_ordering_text(exchange.failure)} ordering")
+                fi
+
+                _result(exchange.result)
+                _out.append("cmpxchg ")
+
+                if exchange.is_weak then
+                    _out.append("weak ")
+                fi
+
+                _volatile(exchange.is_volatile)
+                write_operand(exchange.pointer)
+                _out.append(", ")
+                write_operand(exchange.expected)
+                _out.append(", ")
+                write_operand(exchange.replacement)
+                _ordering(exchange.success)
+                _ordering(exchange.failure)
+                _alignment(exchange.alignment)
+            when update: Operation.READ_MODIFY_WRITE then
+                _at_least_monotonic(update.ordering, "atomicrmw")
+                _result(update.result)
+                _out.append("atomicrmw ")
+                _volatile(update.is_volatile)
+                _out.append(_atomic_mnemonic(update.operator))
+                _out.append(' ')
+                write_operand(update.pointer)
+                _out.append(", ")
+                write_operand(update.value)
+                _ordering(update.ordering)
+                _alignment(update.alignment)
+            when fence: Operation.FENCE then
+                if fence.ordering < AtomicOrdering.ACQUIRE then
+                    throw Ghul.InvalidOperationException("fence cannot have {_ordering_text(fence.ordering)} ordering")
+                fi
+
+                _out.append("fence")
+                _ordering(fence.ordering)
             when gep: Operation.GET_ELEMENT_POINTER then
                 _result(gep.result)
                 _out.append(if gep.in_bounds then "getelementptr inbounds " else "getelementptr " fi)

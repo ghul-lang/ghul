@@ -171,14 +171,59 @@ namespace LLVM is
         /// - pointer: where to read it from
         /// - alignment: the alignment of the address in bytes, or zero for the type's own
         load(type: Type, pointer: Value, alignment: int) -> Value =>
-            _produce(name => Operation.LOAD(name, type, pointer, alignment, false), type)
+            _produce(name => Operation.LOAD(name, type, pointer, alignment, false, AtomicOrdering.NOT_ATOMIC), type)
 
         /// Writes `value` through `pointer`.
         /// - value: the value written
         /// - pointer: where to write it
         /// - alignment: the alignment of the address in bytes, or zero for the type's own
         store(value: Value, pointer: Value, alignment: int) =>
-            append(Operation.STORE(value, pointer, alignment, false), null)
+            append(Operation.STORE(value, pointer, alignment, false, AtomicOrdering.NOT_ATOMIC), null)
+
+        /// Reads a value of `type` through `pointer` atomically.
+        /// - type: the type of the value read: an integer, floating point or pointer type
+        /// - pointer: where to read it from
+        /// - alignment: the alignment of the address in bytes, at least the type's size
+        /// - ordering: any ordering but `NOT_ATOMIC`, `RELEASE` or `ACQUIRE_RELEASE`
+        atomic_load(type: Type, pointer: Value, alignment: int, ordering: AtomicOrdering) -> Value =>
+            _produce(name => Operation.LOAD(name, type, pointer, alignment, false, ordering), type)
+
+        /// Writes `value` through `pointer` atomically.
+        /// - value: the value written: an integer, floating point or pointer
+        /// - pointer: where to write it
+        /// - alignment: the alignment of the address in bytes, at least the value's size
+        /// - ordering: any ordering but `NOT_ATOMIC`, `ACQUIRE` or `ACQUIRE_RELEASE`
+        atomic_store(value: Value, pointer: Value, alignment: int, ordering: AtomicOrdering) =>
+            append(Operation.STORE(value, pointer, alignment, false, ordering), null)
+
+        /// Atomically replaces the value at `pointer` with `replacement`
+        /// where it equals `expected`, producing a `{T, i1}` of the value
+        /// found and whether it was replaced.
+        /// - pointer: the address of the value
+        /// - expected: the value compared against: an integer or a pointer
+        /// - replacement: the value stored on a match, of the same type
+        /// - success: the ordering when it is replaced, at least `MONOTONIC`
+        /// - failure: the ordering when it is not, at least `MONOTONIC` and neither `RELEASE` nor `ACQUIRE_RELEASE`
+        /// - alignment: the alignment of the address in bytes, or zero for the type's own
+        compare_exchange(pointer: Value, expected: Value, replacement: Value, success: AtomicOrdering, failure: AtomicOrdering, alignment: int) -> Value =>
+            _produce(
+                name => Operation.COMPARE_EXCHANGE(name, pointer, expected, replacement, success, failure, false, false, alignment),
+                Types.structure([expected.type, Types.i1]))
+
+        /// Atomically combines the value at `pointer` with `value` and
+        /// stores the result, producing the value found before.
+        /// - operator: how the two are combined
+        /// - pointer: the address of the value
+        /// - value: the other operand, whose type is the result's
+        /// - ordering: any ordering but `NOT_ATOMIC` or `UNORDERED`
+        /// - alignment: the alignment of the address in bytes, or zero for the type's own
+        read_modify_write(operator: AtomicOperator, pointer: Value, value: Value, ordering: AtomicOrdering, alignment: int) -> Value =>
+            _produce(name => Operation.READ_MODIFY_WRITE(name, operator, pointer, value, ordering, false, alignment), value.type)
+
+        /// Orders the memory operations before it against those after it.
+        /// - ordering: `ACQUIRE`, `RELEASE`, `ACQUIRE_RELEASE` or `SEQUENTIALLY_CONSISTENT`
+        fence(ordering: AtomicOrdering) =>
+            append(Operation.FENCE(ordering), null)
 
         /// Computes the address of an element within a value of `source`
         /// that `pointer` points at.

@@ -26,10 +26,76 @@ namespace LLVM.UnitTests is
 
         @Test()
         load_and_store__write_their_alignment_and_volatility() is
-            are_equal("%r = load i32, ptr %p", _text(Operation.LOAD("r", Types.i32, _p, 0, false)))
-            are_equal("%r = load volatile i32, ptr %p, align 4", _text(Operation.LOAD("r", Types.i32, _p, 4, true)))
-            are_equal("store i32 %a, ptr %p", _text(Operation.STORE(_a, _p, 0, false)))
-            are_equal("store volatile i32 %a, ptr %p, align 4", _text(Operation.STORE(_a, _p, 4, true)))
+            are_equal("%r = load i32, ptr %p", _text(Operation.LOAD("r", Types.i32, _p, 0, false, AtomicOrdering.NOT_ATOMIC)))
+            are_equal("%r = load volatile i32, ptr %p, align 4", _text(Operation.LOAD("r", Types.i32, _p, 4, true, AtomicOrdering.NOT_ATOMIC)))
+            are_equal("store i32 %a, ptr %p", _text(Operation.STORE(_a, _p, 0, false, AtomicOrdering.NOT_ATOMIC)))
+            are_equal("store volatile i32 %a, ptr %p, align 4", _text(Operation.STORE(_a, _p, 4, true, AtomicOrdering.NOT_ATOMIC)))
+        si
+
+        @Test()
+        atomic_load_and_store__write_atomic_their_ordering_and_alignment() is
+            are_equal(
+                "%r = load atomic i32, ptr %p acquire, align 4",
+                _text(Operation.LOAD("r", Types.i32, _p, 4, false, AtomicOrdering.ACQUIRE)))
+            are_equal(
+                "%r = load atomic volatile i32, ptr %p seq_cst, align 4",
+                _text(Operation.LOAD("r", Types.i32, _p, 4, true, AtomicOrdering.SEQUENTIALLY_CONSISTENT)))
+            are_equal(
+                "store atomic i32 %a, ptr %p release, align 4",
+                _text(Operation.STORE(_a, _p, 4, false, AtomicOrdering.RELEASE)))
+            are_equal(
+                "store atomic volatile i32 %a, ptr %p unordered, align 4",
+                _text(Operation.STORE(_a, _p, 4, true, AtomicOrdering.UNORDERED)))
+        si
+
+        @Test()
+        atomic_load_and_store__refuse_orderings_and_a_missing_alignment_llvm_rejects() is
+            throws(() => _text(Operation.LOAD("r", Types.i32, _p, 4, false, AtomicOrdering.RELEASE)))
+            throws(() => _text(Operation.LOAD("r", Types.i32, _p, 4, false, AtomicOrdering.ACQUIRE_RELEASE)))
+            throws(() => _text(Operation.LOAD("r", Types.i32, _p, 0, false, AtomicOrdering.ACQUIRE)))
+            throws(() => _text(Operation.STORE(_a, _p, 4, false, AtomicOrdering.ACQUIRE)))
+            throws(() => _text(Operation.STORE(_a, _p, 4, false, AtomicOrdering.ACQUIRE_RELEASE)))
+            throws(() => _text(Operation.STORE(_a, _p, 0, false, AtomicOrdering.RELEASE)))
+        si
+
+        @Test()
+        compare_exchange__writes_weak_volatile_both_orderings_and_alignment() is
+            are_equal(
+                "%r = cmpxchg ptr %p, i32 %a, i32 %b acq_rel acquire, align 4",
+                _text(Operation.COMPARE_EXCHANGE("r", _p, _a, _b, AtomicOrdering.ACQUIRE_RELEASE, AtomicOrdering.ACQUIRE, false, false, 4)))
+            are_equal(
+                "%r = cmpxchg weak volatile ptr %p, i32 %a, i32 %b monotonic monotonic",
+                _text(Operation.COMPARE_EXCHANGE("r", _p, _a, _b, AtomicOrdering.MONOTONIC, AtomicOrdering.MONOTONIC, true, true, 0)))
+        si
+
+        @Test()
+        compare_exchange__refuses_orderings_llvm_rejects() is
+            throws(() => _text(Operation.COMPARE_EXCHANGE("r", _p, _a, _b, AtomicOrdering.UNORDERED, AtomicOrdering.MONOTONIC, false, false, 0)))
+            throws(() => _text(Operation.COMPARE_EXCHANGE("r", _p, _a, _b, AtomicOrdering.MONOTONIC, AtomicOrdering.NOT_ATOMIC, false, false, 0)))
+            throws(() => _text(Operation.COMPARE_EXCHANGE("r", _p, _a, _b, AtomicOrdering.SEQUENTIALLY_CONSISTENT, AtomicOrdering.RELEASE, false, false, 0)))
+            throws(() => _text(Operation.COMPARE_EXCHANGE("r", _p, _a, _b, AtomicOrdering.SEQUENTIALLY_CONSISTENT, AtomicOrdering.ACQUIRE_RELEASE, false, false, 0)))
+        si
+
+        @Test()
+        read_modify_write__writes_its_operator_ordering_and_alignment() is
+            are_equal(
+                "%r = atomicrmw add ptr %p, i32 %a seq_cst, align 4",
+                _text(Operation.READ_MODIFY_WRITE("r", AtomicOperator.ADD, _p, _a, AtomicOrdering.SEQUENTIALLY_CONSISTENT, false, 4)))
+            are_equal(
+                "%r = atomicrmw volatile umax ptr %p, i32 %a monotonic",
+                _text(Operation.READ_MODIFY_WRITE("r", AtomicOperator.UMAX, _p, _a, AtomicOrdering.MONOTONIC, true, 0)))
+            are_equal(
+                "%r = atomicrmw fadd ptr %p, double %x release",
+                _text(Operation.READ_MODIFY_WRITE("r", AtomicOperator.FADD, _p, _x, AtomicOrdering.RELEASE, false, 0)))
+            throws(() => _text(Operation.READ_MODIFY_WRITE("r", AtomicOperator.ADD, _p, _a, AtomicOrdering.UNORDERED, false, 0)))
+        si
+
+        @Test()
+        fence__writes_its_ordering_and_refuses_the_weaker_ones() is
+            are_equal("fence acquire", _text(Operation.FENCE(AtomicOrdering.ACQUIRE)))
+            are_equal("fence seq_cst", _text(Operation.FENCE(AtomicOrdering.SEQUENTIALLY_CONSISTENT)))
+            throws(() => _text(Operation.FENCE(AtomicOrdering.MONOTONIC)))
+            throws(() => _text(Operation.FENCE(AtomicOrdering.NOT_ATOMIC)))
         si
 
         @Test()
@@ -313,7 +379,7 @@ namespace LLVM.UnitTests is
             is_true(INSTRUCTION(Operation.RETURN(null), null).is_terminator)
             is_true(INSTRUCTION(Operation.UNREACHABLE, null).is_terminator)
             is_true(INSTRUCTION(Operation.RESUME(_a), null).is_terminator)
-            is_false(INSTRUCTION(Operation.STORE(_a, _p, 0, false), null).is_terminator)
+            is_false(INSTRUCTION(Operation.STORE(_a, _p, 0, false, AtomicOrdering.NOT_ATOMIC), null).is_terminator)
             is_false(INSTRUCTION(Operation.LANDING_PAD("r", Types.i32, true, []), null).is_terminator)
         si
 
