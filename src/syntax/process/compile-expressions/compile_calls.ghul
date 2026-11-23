@@ -1004,16 +1004,29 @@ namespace Syntax.Process is
                 _logger.speculate()
                 _flow.restore()
 
+                let chosen = overload_result.function
+
                 for (index, a) in argument_expressions |> index() do
-                    // let use debug_despose = debug_enter();
-                    if a.value? /\ isa Trees.Expressions.FUNCTION(a) then
+                    // A delegate formal is pushed onto any argument, as a
+                    // call pushes it: a function named as the argument is
+                    // then built as that delegate rather than at its own
+                    // function type.
+                    if
+                        a.value? /\
+                        (
+                            isa Trees.Expressions.FUNCTION(a) \/
+                            (index < chosen.arguments.count /\ _delegate_shape.is_named_delegate(chosen.arguments[index], _innate_symbol_lookup))
+                        )
+                    then
                         let shapes = overload_result.literal_shapes
-                        let f = (if shapes? then shapes[index] else null fi) ?? overload_result.function.arguments[index]
+                        let f = (if shapes? then shapes[index] else null fi) ?? chosen.arguments[index]
 
                         a.set_expected_type(f, "{{0}} is not assignable to {{1}}")
                         _visitor.rewalk(a)
 
-                        argument_types[index] = a.value!.type!
+                        if let a.value? /\ value.type? then
+                            argument_types[index] = value.type
+                        fi
                     else
                         // ensure any error messages are committed
                         _visitor.rewalk(a)
@@ -1023,6 +1036,14 @@ namespace Syntax.Process is
                         arguments[index] = a.value
                     fi
                 od
+
+                let unconvertible = _unconvertible_delegate_argument(chosen, argument_types)
+
+                if unconvertible >= 0 then
+                    _report_unconvertible_delegate_argument(argument_expressions.expressions[unconvertible].location, chosen, argument_types, unconvertible)
+
+                    return (cast Value(Load.SYMBOL(null, function_group)), cast Value(DUMMY(Semantic.Types.ERROR(), location)))
+                fi
 
                 overload_result = _overload_resolver.resolve(location, function_group, argument_types, false, true, true, named_restrict)
 
@@ -3411,20 +3432,43 @@ namespace Syntax.Process is
             // Reject those here: letting one through would emit a value
             // of one delegate type into a slot of another, which the CLR
             // does not convert.
-            for (index, formal) in push_function.arguments |> index() do
-                if _delegate_shape.is_named_delegate(formal, _innate_symbol_lookup) /\ !formal.is_assignable_from(argument_types[index]) then
-                    use IoC.CONTAINER.instance.name_display.qualifying_alike(argument_types[index], formal)
-                    _logger.error(
-                        slots.location(index),
-                        "cannot-convert-type", "'{argument_types[index]}' is not assignable to '{formal}'")
+            let unconvertible = _unconvertible_delegate_argument(push_function, argument_types)
 
-                    return null
-                fi
-            od
+            if unconvertible >= 0 then
+                _report_unconvertible_delegate_argument(slots.location(unconvertible), push_function, argument_types, unconvertible)
+
+                return null
+            fi
 
             return _prefer_phantom_specialised(
                 _overload_resolver.resolve(argument_location, function_group, argument_types, false, want_instance, false, named_restrict),
                 push_function)
+        si
+
+        // The first argument whose formal is a delegate the argument, re-walked
+        // against it, still could not be built as, or -1 where there is none.
+        _unconvertible_delegate_argument(function: Semantic.Symbols.Function, argument_types: Type[]) -> int is
+            for (index, formal) in function.arguments |> index() do
+                if
+                    index < argument_types.count /\
+                    _delegate_shape.is_named_delegate(formal, _innate_symbol_lookup) /\
+                    !formal.is_assignable_from(argument_types[index])
+                then
+                    return index
+                fi
+            od
+
+            return -1
+        si
+
+        _report_unconvertible_delegate_argument(location: LOCATION, function: Semantic.Symbols.Function, argument_types: Type[], index: int) is
+            let formal = function.arguments[index]
+
+            use IoC.CONTAINER.instance.name_display.qualifying_alike(argument_types[index], formal)
+
+            _logger.error(
+                location,
+                "cannot-convert-type", "'{argument_types[index]}' is not assignable to '{formal}'")
         si
 
         // The parameter at `index` of the nested function `callee` names,
