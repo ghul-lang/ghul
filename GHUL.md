@@ -1888,6 +1888,27 @@ A void body accepts a returned task whose `await` gives no value, in the same wa
 
 *More detail on this section: [asynchronous code](docs/async.md#asynchronous-code).*
 
+### threads
+
+`Ghul.Threads` starts threads on the `dotnet` and `llvm` targets. `start(body)` runs `body` on a new thread, with an 8 MB stack or the size in bytes passed as a second argument, and gives a `Thread[T]`, or a `Thread` for a body that gives nothing. `join()` waits for the thread to finish and gives what the body gave, or throws what it threw, each time it is called. `Mutex` is a lock that one thread holds at a time: `lock()`, `try_lock()`, `unlock()`, and `hold(body)`, which runs `body` holding the lock and releases it however `body` ends. It is not reentrant: a thread that takes it again gets `InvalidOperationException`. `AtomicInt`, `AtomicLong`, `AtomicBool` and `Atomic[T]` (for a reference) have `load`, `store`, `exchange` and `compare_exchange(expected, replacement)`, and the integer ones have `add` and `increment`, which give the new value.
+
+```ghul
+use Ghul.Threads
+
+let hits = AtomicInt(0)
+let workers = [start(() => hits.increment()) for _ in 0..4]
+
+for w in workers do
+    w.join()
+od
+
+write_line("{hits.load()}")   // 4
+```
+
+A program that changes a value while another thread reads or changes it, with nothing ordering the two, has a bug, and what either thread then sees is not defined. `join`, a `Mutex`, and the atomics order memory: what a thread wrote before its body ended is seen after `join` gives, what one thread wrote while holding a `Mutex` is seen by the next thread to take it, and the atomic operations are sequentially consistent, so every thread sees them in one order. Collections, pipes, a `memo` cache, the coroutine scheduler and the prime functions' sieve are not safe to use from more than one thread at a time; a program shares them under a `Mutex`. A static constructor runs once, however many threads reach the type together, and they all see what it set up. The state the library keeps out of the program's sight, such as what an interpolation is rendering and the task scheduler, is kept for each thread or locked, so ordinary code on one thread pays nothing for threads. The `wasm` target runs one thread and has no `Ghul.Threads`.
+
+*More detail on this section: [threads on llvm](docs/targets.md#threads).*
+
 ### generators
 
 A function that returns `T{}` (an `Iterable[T]`) and contains `yield` is a *generator*. Each `yield` gives the next element to the consumer and suspends the function. The function resumes at the same point when the consumer asks for another element. The generator produces its elements lazily, so it can produce an unbounded sequence.
