@@ -83,6 +83,8 @@ On the `llvm` target, a thread from `Ghul.Threads.start` is a POSIX thread that 
 
 A static constructor is guarded on `llvm` by one acquire load where the type is used: once it has run, nothing else happens there. A thread that reaches the type while another is running its constructor waits for it. If the constructor throws, the next use runs it again.
 
+On `llvm` each thread runs its own tasks, and the continuation of an `await` on a thread is handed back to the thread that awaited. While a thread waits, in `join` or for a task's `result`, it runs its own queued work and what other threads hand back to it, and sleeps on a condition variable when there is none. A wait throws `InvalidOperationException` only when no work is queued, no delay is pending and no other thread owes the waiting thread anything. A thread that never waits on another thread pays nothing for this.
+
 ## conditional compilation
 
 `@IF.<name>()` before a definition or a statement keeps it only when `<name>` is on. `@IF.not.<name>()` keeps it only when `<name>` is off. The name of the target being built is on, and the other targets' names are off. So `@IF.dotnet()`, `@IF.wasm()` and `@IF.llvm()` give each target its own declaration. `@IF.source_core()` is on for every target whose core library is compiled from source, which is `wasm` and `llvm`. It is off for `dotnet`. So a declaration that only needs the absence of the .NET base class library is written once:
