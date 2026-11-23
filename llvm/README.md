@@ -128,6 +128,8 @@ What the matrix covers:
 - `memory`, `integer-arithmetic`, `float-arithmetic`, `comparisons`,
   `conversions`, `aggregates` - every instruction that is not a call or a
   terminator, with every flag each one takes.
+- `atomics` - atomic loads and stores, `cmpxchg`, every `atomicrmw`
+  operator, and `fence`, with each ordering that each one takes.
 - `calls`, `control` - direct, indirect, variadic, tail and fast calls, and
   the terminators.
 - `exceptions` - invoke, a landing pad that cleans up and catches, and

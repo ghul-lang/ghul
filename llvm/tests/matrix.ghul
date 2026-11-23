@@ -28,6 +28,8 @@ namespace LLVM.Tests is
     use LLVM.MetadataNode
     use LLVM.DebugEmission
     use LLVM.ModuleFlagBehavior
+    use LLVM.AtomicOrdering
+    use LLVM.AtomicOperator
 
     // The whole modules the suite checks against LLVM itself, one named
     // method each.
@@ -51,6 +53,7 @@ namespace LLVM.Tests is
                 "attributes",
                 "names",
                 "memory",
+                "atomics",
                 "integer-arithmetic",
                 "float-arithmetic",
                 "comparisons",
@@ -75,6 +78,7 @@ namespace LLVM.Tests is
             when "attributes" then attributes()
             when "names" then names_module()
             when "memory" then memory()
+            when "atomics" then atomics()
             when "integer-arithmetic" then integer_arithmetic()
             when "float-arithmetic" then float_arithmetic()
             when "comparisons" then comparisons()
@@ -357,11 +361,61 @@ namespace LLVM.Tests is
                 Operation.ALLOCA("counted", Types.i8, Values.i32(16), 16),
                 Values.local(Types.pointer, "counted"))
             entry.append(
-                Operation.LOAD("volatile", Types.i64, many, 1, true),
+                Operation.LOAD("volatile", Types.i64, many, 1, true, AtomicOrdering.NOT_ATOMIC),
                 Values.local(Types.i64, "volatile"))
-            entry.append(Operation.STORE(Values.i64(1L), f.parameter(0), 0, true), null)
+            entry.append(Operation.STORE(Values.i64(1L), f.parameter(0), 0, true, AtomicOrdering.NOT_ATOMIC), null)
 
             entry.return_value(read)
+
+            return module
+        si
+
+        atomics() -> MODULE static is
+            let module = MODULE()
+
+            let f = _function(module, "atomics", Types.i64, [_parameter(Types.pointer, "p"), _parameter(Types.pointer, "q")])
+            let entry = f.add_block("entry")
+            let p = f.parameter(0)
+            let q = f.parameter(1)
+
+            let read = entry.atomic_load(Types.i64, p, 8, AtomicOrdering.ACQUIRE)
+            entry.atomic_store(read, p, 8, AtomicOrdering.RELEASE)
+            entry.atomic_store(Values.i32(1), q, 4, AtomicOrdering.UNORDERED)
+            let pointer = entry.atomic_load(Types.pointer, p, 8, AtomicOrdering.SEQUENTIALLY_CONSISTENT)
+
+            let exchanged = entry.compare_exchange(p, read, Values.i64(0L), AtomicOrdering.ACQUIRE_RELEASE, AtomicOrdering.ACQUIRE, 8)
+            let found = entry.extract_value(Types.i64, exchanged, [0])
+
+            entry.append(
+                Operation.COMPARE_EXCHANGE("weak", q, Values.i32(0), Values.i32(1), AtomicOrdering.MONOTONIC, AtomicOrdering.MONOTONIC, true, true, 0),
+                Values.local(Types.structure([Types.i32, Types.i1]), "weak"))
+
+            let added = entry.read_modify_write(AtomicOperator.ADD, p, found, AtomicOrdering.SEQUENTIALLY_CONSISTENT, 8)
+
+            for operator in [
+                AtomicOperator.EXCHANGE, AtomicOperator.SUB, AtomicOperator.AND, AtomicOperator.NAND,
+                AtomicOperator.OR, AtomicOperator.XOR, AtomicOperator.MAX, AtomicOperator.MIN,
+                AtomicOperator.UMAX, AtomicOperator.UMIN
+            ] do
+                entry.read_modify_write(operator, q, Values.i32(1), AtomicOrdering.MONOTONIC, 0)
+            od
+
+            for operator in [AtomicOperator.FADD, AtomicOperator.FSUB, AtomicOperator.FMAX, AtomicOperator.FMIN] do
+                entry.read_modify_write(operator, q, Values.of_double(1.0), AtomicOrdering.RELEASE, 8)
+            od
+
+            entry.read_modify_write(AtomicOperator.EXCHANGE, q, pointer, AtomicOrdering.ACQUIRE, 8)
+
+            entry.append(
+                Operation.READ_MODIFY_WRITE("volatile", AtomicOperator.ADD, q, Values.i32(1), AtomicOrdering.MONOTONIC, true, 4),
+                Values.local(Types.i32, "volatile"))
+
+            entry.fence(AtomicOrdering.ACQUIRE)
+            entry.fence(AtomicOrdering.RELEASE)
+            entry.fence(AtomicOrdering.ACQUIRE_RELEASE)
+            entry.fence(AtomicOrdering.SEQUENTIALLY_CONSISTENT)
+
+            entry.return_value(added)
 
             return module
         si
