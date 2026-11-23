@@ -17,8 +17,8 @@ These options control an `llvm` build:
 - `--llvm-program-only` keeps in that text only the functions compiled from the program's own sources.
 - `--debug` adds line tables and variables, so a debugger and a crash's backtrace show ghūl files, lines and variables.
 - `--optimise <0-3>` sets the optimisation level. The default is 2, and 0 for a `--debug` build that sets no level.
-- `--llvm-parallel-gc` links the collector that marks with several threads: as many as there are processors, up to four, or `GC_MARKERS` of them where that is set. It is for programs that keep a large heap. On the compiler's own native build, with about 500 MB live, a full mark falls from about 350 ms to about 150 ms. It is not for general programs yet: a small program starts with about 7 MB resident rather than under 1 MB, and one that allocates many short-lived objects ran about 50% slower.
-- `--llvm-link-mode static|dynamic` chooses how the executable is linked. `static`, the default, links it against musl, and the program runs on any Linux of the same architecture. `dynamic` links it against the glibc of the machine it is built on, and lets `--native-library` name the system's shared libraries (see [foreign functions](#foreign-functions)). The program then needs glibc 2.34 or later and those libraries where it runs. Linking dynamically needs no C compiler and no development packages. `--llvm-parallel-gc` is not available with it yet.
+- `--llvm-parallel-gc` is accepted and has no effect: every `llvm` program links the collector that marks with several threads, as many as there are processors up to four, or `GC_MARKERS` of them where that is set.
+- `--llvm-link-mode static|dynamic` chooses how the executable is linked. `static`, the default, links it against musl, and the program runs on any Linux of the same architecture. `dynamic` links it against the glibc of the machine it is built on, and lets `--native-library` name the system's shared libraries (see [foreign functions](#foreign-functions)). The program then needs glibc 2.34 or later and those libraries where it runs. Linking dynamically needs no C compiler and no development packages.
 
 A library build writes the module's text and links nothing.
 
@@ -76,6 +76,12 @@ At an instantiation where `T` is a value type that is not itself optional, wasm 
 - a present value is the boxed value on wasm and llvm, so `isa Ghul.MAYBE[int](o)` is false there, where on .NET `o` is a boxed `Ghul.MAYBE[int]`
 
 A type object's name, as `typeof` and `get_type` give it, differs by target. On .NET a type object is .NET's own, so it reports the CLR name: `System.Int32` for `int`, ``System.Collections.Generic.IReadOnlyList`1[System.String]`` for `typeof string[]`. On wasm and llvm it reports the name as ghūl source writes it: `int`, `string`, `object`, `ARRAY[int]`, `Collections.LIST[int]`, `(int, string)`, `Collections.List[string]` for `typeof string[]`, the list trait, and `Box[int]` for a class declared in a file with top-level statements. So code that compares a type's name with text is target-specific; comparing type objects with `==` is not.
+
+## threads
+
+On the `llvm` target, a thread from `Ghul.Threads.start` is a POSIX thread that the collector knows about, with the stack size `start` was given (8 MB unless it says otherwise; musl's own default of 128 KB would not hold much recursion). A stack that runs out on a thread is reported as `Stack overflow.` with the frames it was in, as on the main thread, and the process ends with the signal. An exception that a thread's body throws is caught and thrown again by `join`; its trace then shows the `join`, not where it was first thrown. On `dotnet`, `Ghul.Threads` wraps `System.Threading.Thread`, `System.Threading.Lock`, `Interlocked` and `Volatile`, and the trace of an exception thrown again by `join` is the original one.
+
+A static constructor is guarded on `llvm` by one acquire load where the type is used: once it has run, nothing else happens there. A thread that reaches the type while another is running its constructor waits for it. If the constructor throws, the next use runs it again.
 
 ## conditional compilation
 

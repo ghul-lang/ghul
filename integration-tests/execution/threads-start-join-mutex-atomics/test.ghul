@@ -1,0 +1,60 @@
+// Threads through Ghul.Threads: a result and an exception come back at
+// join, a counter guarded by a Mutex and one kept in an AtomicInt both
+// see every update, and the atomics answer as documented.
+use default
+use Ghul.Threads
+
+let answer = start(() => 6 * 7)
+write_line("answer {answer.join()} {answer.join()} finished {answer.is_finished}")
+
+let said = AtomicBool(false)
+start(() is said.store(true) si).join()
+write_line("void body ran {said.load()}")
+
+let thrower = start(() is throw Ghul.InvalidOperationException("boom") si)
+
+for attempt in 0..2 do
+    try
+        thrower.join()
+    catch e: Ghul.InvalidOperationException
+        write_line("join {attempt} rethrew {e.message}")
+    yrt
+od
+
+let mutex = Mutex()
+let guarded mut = 0
+let hits = AtomicInt(0)
+let workers = LIST[Thread]()
+
+for n in 0..8 do
+    workers.add(start(() is
+        for i in 0..5000 do
+            mutex.hold(() is guarded = guarded + 1 si)
+            hits.increment()
+        od
+    si))
+od
+
+for w in workers do
+    w.join()
+od
+
+write_line("guarded {guarded} atomic {hits.load()}")
+
+let total = AtomicLong(1L)
+write_line("long {total.add(41L)} {total.exchange(7L)} {total.compare_exchange(7L, 8L)} {total.compare_exchange(7L, 9L)} {total.load()}")
+
+let first = "first"
+let slot = Atomic[string](first)
+write_line("reference {slot.compare_exchange(first, "second")} {slot.compare_exchange(first, "third")} {slot.load()}")
+
+mutex.lock()
+
+try
+    mutex.lock()
+catch e: Ghul.InvalidOperationException
+    write_line("relock rejected")
+yrt
+
+write_line("try_lock while held {mutex.try_lock()}")
+mutex.unlock()
