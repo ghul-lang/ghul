@@ -1,0 +1,86 @@
+// Four threads count to 10,000 each with an atomic add, and each reads a
+// static whose constructor is slow, so they race to run it: it runs once,
+// and every thread sees what it stored. Then the other atomic operations
+// on one thread. The exit status is 0 where everything checks out, and
+// otherwise has a bit set for each check that failed.
+namespace Test is
+    class COUNTER is
+        value: int field
+        init() is si
+    si
+
+    class NODE is
+        init() is si
+    si
+
+    class LOG is
+        runs: int static public
+        init() is si
+    si
+
+    class SLOW is
+        value: int static
+
+        init() static is
+            LOG.runs = LOG.runs + 1
+            sleep(100)
+            value = 42
+        si
+
+        init() is si
+
+        get() -> int static => value
+    si
+
+    entry() -> int is
+        let counter = COUNTER()
+        let saw = COUNTER()
+
+        let work = () is
+            if SLOW.get() == 42 then
+                atomic_add(saw.value ref, 1)
+            fi
+
+            let i mut = 0
+
+            while i < 10_000 do
+                atomic_add(counter.value ref, 1)
+                i = i + 1
+            od
+        si
+
+        let a = thread_start(work, 0L)!
+        let b = thread_start(work, 0L)!
+        let c = thread_start(work, 0L)!
+        let d = thread_start(work, 0L)!
+
+        thread_join(a)
+        thread_join(b)
+        thread_join(c)
+        thread_join(d)
+
+        let status mut = 0
+
+        if !(atomic_load(counter.value ref) == 40_000) then status = status + 1 fi
+        if !(saw.value == 4) then status = status + 2 fi
+        if !(LOG.runs == 1) then status = status + 4 fi
+
+        let flag = COUNTER()
+        let swapped = atomic_compare_exchange(flag.value ref, 0, 5)
+        let refused = atomic_compare_exchange(flag.value ref, 0, 9)
+        let before = atomic_exchange(flag.value ref, 7)
+
+        if !(swapped /\ !refused /\ before == 5 /\ flag.value == 7) then status = status + 8 fi
+
+        let first = NODE()
+        let second = NODE()
+        let held: NODE mut = first
+        let replaced = atomic_compare_exchange(held ref, first, second)
+
+        atomic_store(counter.value ref, 3)
+
+        if !(replaced /\ held == second /\ counter.value == 3) then status = status + 16 fi
+
+        return status
+    si
+si
