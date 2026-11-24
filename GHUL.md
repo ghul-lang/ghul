@@ -135,7 +135,7 @@ A function with parameters, every one of them typed, and no return type doesn't 
 
 In a file with a namespace block, a function with no return type returns void, its return type isn't inferred, and every parameter needs its type. So does every function in a build with whole-file inference turned off (`--no-whole-file-inference`).
 
-A function whose signature is inferred is private to its file. That includes a function with no parameters and no return type, whose return is inferred. Where files share a namespace (under `--global-namespace`, or in a whole-file namespace several files declare), another file can call such a function only once its signature names every type; for a function with no parameters, a return type is enough, such as `-> void`. Anything in its own file can call it, including a class, a trait, an operator or a generic function. A function called with arguments of more than one type takes their join, such as `int[]` for an `ARRAY[int]` and an `int[]`. A function can only read a top-level `let` written above it, and a top-level statement can't call a function that reads a top-level `let` declared below that statement, directly or through the functions it calls. Like a function literal, such a function can be marked `memo` or `pure`: `fib(n) memo => ...`. A function whose signature is inferred and that awaits returns `Tasks.TASK` when it returns no value; one that returns a value after awaiting needs its return type written, such as `-> Tasks.TASK[int]`.
+A function whose signature is inferred is private to its file. That includes a function with no parameters and no return type, whose return is inferred. Where files share a namespace (under `--global-namespace`, or in a whole-file namespace several files declare), another file can call such a function only once its signature names every type; for a function with no parameters, a return type is enough, such as `-> void`. Anything in its own file can call it, including a class, a trait, an operator or a generic function. A function called with arguments of more than one type takes their join, such as `int[]` for an `ARRAY[int]` and an `int[]`. A function can only read a top-level `let` written above it, and a top-level statement can't call a function that reads a top-level `let` declared below that statement, directly or through the functions it calls. Like a function literal, such a function can be marked `memo` or `pure`: `fib(n) memo => ...`. A function whose signature is inferred and that awaits returns `Tasks.Future` when it returns no value; one that returns a value after awaiting needs its return type written, such as `-> Tasks.Future[int]`.
 
 A `use` statement brings names into scope, so code can refer to them without qualification. A `use` of a namespace imports every public symbol in it. A `use` of a single symbol imports that symbol:
 
@@ -1867,10 +1867,10 @@ lookup(key: string?) -> int =>
 
 ### asynchronous code
 
-A function is asynchronous when its declared return type is `Tasks.TASK[T]` (the .NET `Task<T>`) or `Tasks.TASK` (the non-generic `Task`). Inside an asynchronous function, `await e` is an expression. It waits for the task `e` to complete, and its value is the task's result. So `let x = await e;` initializes `x` to the result, and the function then continues:
+A function is asynchronous when its declared return type is `Tasks.Future[T]` (the .NET `Task<T>`) or `Tasks.Future` (the non-generic `Task`). Inside an asynchronous function, `await e` is an expression. It waits for the task `e` to complete, and its value is the task's result. So `let x = await e;` initializes `x` to the result, and the function then continues:
 
 ```ghul
-compute() -> Tasks.TASK[int] is
+compute() -> Tasks.Future[int] is
     let a = await double_async(10);
     let b = await add_async(a, 1);
     return b;
@@ -1879,7 +1879,7 @@ si
 
 The code reads from top to bottom, although execution suspends at each `await`. `await e;` as a statement waits for the task to complete, and discards any result.
 
-A function declared `-> Tasks.TASK[T]` can `return` a bare `T`. The compiler gives the value to the completed task. When the body has no suspension, the compiler wraps the value as `Tasks.TASK.from_result(...)`. The function can also `return` a task, or any other awaitable value, whose result is a `T`:
+A function declared `-> Tasks.Future[T]` can `return` a bare `T`. The compiler gives the value to the completed task. When the body has no suspension, the compiler wraps the value as `Tasks.Future.from_result(...)`. The function can also `return` a task, or any other awaitable value, whose result is a `T`:
 
 - When the body does not `await`, the caller receives that task.
 - When the body does `await`, the caller already has the function's own task, and the returned task can only complete it. So the compiler awaits the returned task and uses its result. `return t` and `return await t` then do the same thing.
@@ -2277,7 +2277,7 @@ ghūl compiles to .NET IL, and can use most types in any .NET assembly. The comp
 
 - Method, property and field names become `snake_case`.
 - Enum members become `UPPER_SNAKE_CASE`.
-- Type names keep their .NET names, without .NET's generic arity suffix, except a short list of core types that ghūl renames, in `UPPER_SNAKE_CASE` where an abstract alternative exists (`LIST`, `MAP`, `SET`, `TASK`, ...) and in `PascalCase` where none does (`StringBuilder`, `DateTime`, ...), listed below. So `SortedSet<T>` is `Collections.SortedSet[T]`.
+- Type names keep their .NET names, without .NET's generic arity suffix, except a short list of core types that ghūl renames, in `UPPER_SNAKE_CASE` where an abstract alternative exists (`LIST`, `MAP`, `SET`, ...) and in `PascalCase` where none does (`StringBuilder`, `DateTime`, `Future`, ...), listed below. So `SortedSet<T>` is `Collections.SortedSet[T]`.
 - The namespace `System.Collections.Generic` is `Collections`, and `System.IO` is `IO`.
 
 Some common types have different names:
@@ -2287,6 +2287,7 @@ Some common types have different names:
 - `IReadOnlySet<T>` is `Collections.Set[T]`.
 - `IEnumerable<T>` is `Collections.Iterable[T]`.
 - `IComparable<T>` and `IEquatable<T>` are `Ghul.Comparable[T]` and `Ghul.Equatable[T]`.
+- `Task` and `Task<T>` are `Tasks.Future` and `Tasks.Future[T]`, and `TaskCompletionSource` and `TaskCompletionSource<T>` are `Tasks.Completer` and `Tasks.Completer[T]`. Their former names, `Tasks.TASK` and `Tasks.TaskCompletionSource`, still work.
 - `IComparer<T>` and `IEqualityComparer<T>` are `Collections.Comparer[T]` and `Collections.EqualityComparer[T]`. So the .NET classes `Comparer<T>` and `EqualityComparer<T>` are `Collections.ComparerBase[T]` and `Collections.EqualityComparerBase[T]`.
 
 The dotnet-integration page has the full table of names.
@@ -2426,13 +2427,13 @@ si
 get_product(
     @Microsoft.AspNetCore.Mvc.FromServices() store: ProductStore,
     @Microsoft.AspNetCore.Mvc.FromRoute() index: int
-) -> Tasks.TASK[IResult] is
+) -> Tasks.Future[IResult] is
     ...
 si
 
 app.map_get(
     "/products/{index}",
-    (@Microsoft.AspNetCore.Mvc.FromRoute() index: int, store: ProductStore) -> Tasks.TASK[IResult] is
+    (@Microsoft.AspNetCore.Mvc.FromRoute() index: int, store: ProductStore) -> Tasks.Future[IResult] is
         ...
     si
 );

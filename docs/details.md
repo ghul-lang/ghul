@@ -333,17 +333,17 @@ An override or trait implementation can narrow its return type to a subtype of t
 A class member with the same name and arguments as a member it inherits from another class, but with a return type that is neither the same nor narrower, does not override the inherited member. It hides it. The new member has its own slot. A caller that holds the subclass calls the subclass's member. A caller that holds the base class calls the base class's member, even for an instance of the subclass. This looks like an override and is not one, so it gives a `hides-inherited` warning, which can be suppressed on the member. A task with a result is the case that hiding exists for, in the same way that .NET's `Task<TResult>` hides the awaiter of `Task`:
 
 ```ghul
-class TASK is
+class Future is
     get_awaiter() -> TASK_AWAITER => TASK_AWAITER(self)
 si
 
-class TASK[T]: TASK is
+class Future[T]: Future is
     @suppress("hides-inherited")
     get_awaiter() -> TASK_AWAITER[T] => TASK_AWAITER[T](self)
 si
 ```
 
-Awaiting a `TASK[int]` gives its `int`. Awaiting the same task through a `TASK` uses the base class's awaiter, which waits for the task and discards the result, as on .NET. `super.get_awaiter()` calls the hidden member.
+Awaiting a `Future[int]` gives its `int`. Awaiting the same task through a `Future` uses the base class's awaiter, which waits for the task and discards the result, as on .NET. `super.get_awaiter()` calls the hidden member.
 
 An override or trait implementation must keep the overridden member's optionality contract. It can strengthen the contract: a non-optional return type or property where the base member is optional, or an optional parameter where the base member's parameter is non-optional. Weakening the contract in either position is a compile error:
 

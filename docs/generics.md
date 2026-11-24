@@ -205,7 +205,7 @@ let h: (int) -> string = zero_of;         // T pinned by the return slot
 
 When no slot type is in scope, there is nothing to infer from, and the bare name is an error (`cannot infer the type arguments`). Write the type arguments explicitly.
 
-A namespace can declare the same name with different numbers of type parameters. `class BOX` and `class BOX[T]` are two types, as `Tasks.TASK` and `Tasks.TASK[T]` are. With type arguments, the name refers to the type with that number of type parameters. Without type arguments, the name refers to the type with none.
+A namespace can declare the same name with different numbers of type parameters. `class BOX` and `class BOX[T]` are two types, as `Tasks.Future` and `Tasks.Future[T]` are. With type arguments, the name refers to the type with that number of type parameters. Without type arguments, the name refers to the type with none.
 
 So the generic type has no bare spelling. This matters in a `typeof`. An *open* generic is a generic type with no type arguments supplied, and only reflection can hold one. A bare `BOX` in a `typeof` refers to the type with no type parameters. `BOX[_]` refers to the open generic, with one `_` for each type parameter:
 

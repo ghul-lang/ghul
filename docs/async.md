@@ -10,7 +10,7 @@ The operand of `await` does not have to be a task. `await` accepts any value tha
 - have a parameterless `get_result()`
 - implement `System.Runtime.CompilerServices.INotifyCompletion` or `ICriticalNotifyCompletion`
 
-The `await` expression has the type that `get_result` returns, which can be void. `Tasks.ValueTask[T]`, `Tasks.TASK.yield()` and `task.configure_await(false)` all follow the pattern. A type written in ghūl can follow it too. For example, a struct awaitable that gives its continuation to a scheduler implements cooperative multitasking without allocating a task for each suspension:
+The `await` expression has the type that `get_result` returns, which can be void. `Tasks.ValueTask[T]`, `Tasks.Future.yield()` and `task.configure_await(false)` all follow the pattern. A type written in ghūl can follow it too. For example, a struct awaitable that gives its continuation to a scheduler implements cooperative multitasking without allocating a task for each suspension:
 
 ```ghul
 use System.Runtime.CompilerServices.ICriticalNotifyCompletion;
@@ -30,7 +30,7 @@ si
 
 An `await` on a value that does not follow the pattern is an error, and the error names the first missing member.
 
-The return type of an asynchronous function does not have to be `Tasks.TASK` or `Tasks.TASK[T]` either. Any type with .NET's `AsyncMethodBuilderAttribute` is a *task-like* return type. The attribute names a builder type, and the compiler uses that builder instead of the Task builder. `Tasks.ValueTask[T]` and `Tasks.ValueTask` work this way. So does a type declared in ghūl source. A library uses this to give its coroutines their own return type, instead of a Task:
+The return type of an asynchronous function does not have to be `Tasks.Future` or `Tasks.Future[T]` either. Any type with .NET's `AsyncMethodBuilderAttribute` is a *task-like* return type. The attribute names a builder type, and the compiler uses that builder instead of the Task builder. `Tasks.ValueTask[T]` and `Tasks.ValueTask` work this way. So does a type declared in ghūl source. A library uses this to give its coroutines their own return type, instead of a Task:
 
 ```ghul
 @System.Runtime.CompilerServices.AsyncMethodBuilder(typeof(COROUTINE_BUILDER))
@@ -52,7 +52,7 @@ A builder written in ghūl declares its members with their ghūl names:
 
 .NET's own builders have the same members.
 
-An `async` function declared `-> COROUTINE[int]` awaits, suspends and returns a bare `int` exactly as a `Tasks.TASK[int]` function does. A generic task-like type has exactly one type parameter, and it is the result type, as for `Task` and `ValueTask`. A non-generic task-like type has no result. These are errors, reported at the function that returns the task-like type:
+An `async` function declared `-> COROUTINE[int]` awaits, suspends and returns a bare `int` exactly as a `Tasks.Future[int]` function does. A generic task-like type has exactly one type parameter, and it is the result type, as for `Task` and `ValueTask`. A non-generic task-like type has no result. These are errors, reported at the function that returns the task-like type:
 
 - a builder that does not declare one of the required members
 - a builder member that does not take the by-reference parameter that the compiler passes
@@ -63,7 +63,7 @@ A function literal is asynchronous under the same rules:
 - A literal that declares a task-like return type uses that type's builder, as a named function does.
 - A literal that declares no return type takes its task-like type from the slot it goes into: a typed local variable, a parameter or a return. When the slot leaves the result type open, as `spawn[T](body: () -> COROUTINE[T])` does, the compiler infers the result type from the body's returns.
 - When several overloads take the same number of arguments, the body chooses the overload. A body that produces a value goes to a parameter whose task-like type has a result. A body that produces no value goes to a parameter whose task-like type has no result.
-- A literal with no other information returns `Tasks.TASK` or `Tasks.TASK[T]`.
+- A literal with no other information returns `Tasks.Future` or `Tasks.Future[T]`.
 
 ```ghul
 let tick = (name: string) -> COROUTINE is
@@ -78,6 +78,6 @@ let handle = scheduler.spawn(s is
 si);                                   // COROUTINE[int], through spawn[T]
 ```
 
-An asynchronous function whose return type has no result (`Tasks.TASK`, or a task-like type with no type argument) completes when its body reaches the end. So it needs no `return`, and gives no `definite-return` warning without one. An asynchronous function whose return type has a result still gives the warning, as any function that returns a value does. This applies whether or not the body awaits, because the declaration alone makes the function asynchronous. A bare `return;` returns the same completed result. A `Tasks.TASK` function completes through `Tasks.TASK.completed_task`. A task-like type declared in source completes through its builder, and the compiler calls the builder's members directly.
+An asynchronous function whose return type has no result (`Tasks.Future`, or a task-like type with no type argument) completes when its body reaches the end. So it needs no `return`, and gives no `definite-return` warning without one. An asynchronous function whose return type has a result still gives the warning, as any function that returns a value does. This applies whether or not the body awaits, because the declaration alone makes the function asynchronous. A bare `return;` returns the same completed result. A `Tasks.Future` function completes through `Tasks.Future.completed_task`. A task-like type declared in source completes through its builder, and the compiler calls the builder's members directly.
 
 `await` can be used in the body of a `for` or `while` loop, and a `return` in such a body returns from the function through the loop. A `try`, `catch` or `finally` around code that awaits works as expected, including a `return` inside the `try`. An `await` inside a `catch` or `finally` *handler* is not yet supported. Reading `.result` on a returned task that faulted throws a `System.AggregateException`.
