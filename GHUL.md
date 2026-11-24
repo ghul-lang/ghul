@@ -135,7 +135,7 @@ A function with parameters, every one of them typed, and no return type doesn't 
 
 In a file with a namespace block, a function with no return type returns void, its return type isn't inferred, and every parameter needs its type. So does every function in a build with whole-file inference turned off (`--no-whole-file-inference`).
 
-A function whose signature is inferred is private to its file. That includes a function with no parameters and no return type, whose return is inferred. Where files share a namespace (under `--global-namespace`, or in a whole-file namespace several files declare), another file can call such a function only once its signature names every type; for a function with no parameters, a return type is enough, such as `-> void`. Anything in its own file can call it, including a class, a trait, an operator or a generic function. A function called with arguments of more than one type takes their join, such as `int[]` for an `ARRAY[int]` and an `int[]`. A function can only read a top-level `let` written above it, and a top-level statement can't call a function that reads a top-level `let` declared below that statement, directly or through the functions it calls. Like a function literal, such a function can be marked `memo` or `pure`: `fib(n) memo => ...`. A function whose signature is inferred and that awaits returns `Tasks.Future` when it returns no value; one that returns a value after awaiting needs its return type written, such as `-> Tasks.Future[int]`.
+A function whose signature is inferred is private to its file. That includes a function with no parameters and no return type, whose return is inferred. Where files share a namespace (under `--global-namespace`, or in a whole-file namespace several files declare), another file can call such a function only once its signature names every type; for a function with no parameters, a return type is enough, such as `-> void`. Anything in its own file can call it, including a class, a trait, an operator or a generic function. A function called with arguments of more than one type takes their join, such as `int[]` for an `ARRAY[int]` and an `int[]`. A function can only read a top-level `let` written above it, and a top-level statement can't call a function that reads a top-level `let` declared below that statement, directly or through the functions it calls. Like a function literal, such a function can be marked `memo` or `pure`: `fib(n) memo => ...`. A function whose signature is inferred and that awaits returns `Concurrency.Future` when it returns no value; one that returns a value after awaiting needs its return type written, such as `-> Concurrency.Future[int]`.
 
 A `use` statement brings names into scope, so code can refer to them without qualification. A `use` of a namespace imports every public symbol in it. A `use` of a single symbol imports that symbol:
 
@@ -1867,10 +1867,10 @@ lookup(key: string?) -> int =>
 
 ### asynchronous code
 
-A function is asynchronous when its declared return type is `Tasks.Future[T]` (the .NET `Task<T>`) or `Tasks.Future` (the non-generic `Task`). Inside an asynchronous function, `await e` is an expression. It waits for the task `e` to complete, and its value is the task's result. So `let x = await e;` initializes `x` to the result, and the function then continues:
+A function is asynchronous when its declared return type is `Concurrency.Future[T]` (the .NET `Task<T>`) or `Concurrency.Future` (the non-generic `Task`). Inside an asynchronous function, `await e` is an expression. It waits for the task `e` to complete, and its value is the task's result. So `let x = await e;` initializes `x` to the result, and the function then continues:
 
 ```ghul
-compute() -> Tasks.Future[int] is
+compute() -> Concurrency.Future[int] is
     let a = await double_async(10);
     let b = await add_async(a, 1);
     return b;
@@ -1879,7 +1879,7 @@ si
 
 The code reads from top to bottom, although execution suspends at each `await`. `await e;` as a statement waits for the task to complete, and discards any result.
 
-A function declared `-> Tasks.Future[T]` can `return` a bare `T`. The compiler gives the value to the completed task. When the body has no suspension, the compiler wraps the value as `Tasks.Future.from_result(...)`. The function can also `return` a task, or any other awaitable value, whose result is a `T`:
+A function declared `-> Concurrency.Future[T]` can `return` a bare `T`. The compiler gives the value to the completed task. When the body has no suspension, the compiler wraps the value as `Concurrency.Future.from_result(...)`. The function can also `return` a task, or any other awaitable value, whose result is a `T`:
 
 - When the body does not `await`, the caller receives that task.
 - When the body does `await`, the caller already has the function's own task, and the returned task can only complete it. So the compiler awaits the returned task and uses its result. `return t` and `return await t` then do the same thing.
@@ -1890,16 +1890,16 @@ A void body accepts a returned task whose `await` gives no value, in the same wa
 
 ### threads
 
-`Ghul.Threads` starts threads on the `dotnet` and `llvm` targets. `start(body)` runs `body` on a new thread, with an 8 MB stack or the size in bytes passed as a second argument, and gives a `Thread[T]`, or a `Thread` for a body that gives nothing. `join()` waits for the thread to finish and gives what the body gave, or throws what it threw, each time it is called. `AtomicInt`, `AtomicLong`, `AtomicBool` and `Atomic[T]` (for a reference) have `load`, `store`, `exchange` and `compare_exchange(expected, replacement)`, and the integer ones have `add` and `increment`, which give the new value. Each atomic operation is indivisible: no other thread sees it half done, and it takes no lock.
+`Concurrency` starts threads on the `dotnet` and `llvm` targets. `start(body)` runs `body` on a new thread, with an 8 MB stack or the size in bytes passed as a second argument, and gives a `Thread[T]`, or a `Thread` for a body that gives nothing. `join()` waits for the thread to finish and gives what the body gave, or throws what it threw, each time it is called. `AtomicInt`, `AtomicLong`, `AtomicBool` and `Atomic[T]` (for a reference) have `load`, `store`, `exchange` and `compare_exchange(expected, replacement)`, and the integer ones have `add` and `increment`, which give the new value. Each atomic operation is indivisible: no other thread sees it half done, and it takes no lock.
 
-Each thread runs its asynchronous code on an event loop of its own: work queued on the loop runs one piece at a time, and code that awaits carries on on the thread that awaited. `run(body)` runs the asynchronous `body` on the calling thread's loop until the `Tasks.Future` it gives completes, then gives the future's result or throws what it threw; calling `run` from code the same loop is running is an `InvalidOperationException`. `sleep(milliseconds)` gives a future that completes once that time has passed, and `pause()` one that completes once the loop has run the work already queued on it. `start(body)` with an asynchronous body runs it on a new thread's own loop and gives a `Tasks.Future` for its result. Any thread can complete a future, through a `Tasks.Completer` or by finishing the function that gives it, and the code awaiting the future resumes on its own thread.
+Each thread runs its asynchronous code on an event loop of its own: work queued on the loop runs one piece at a time, and code that awaits carries on on the thread that awaited. `run(body)` runs the asynchronous `body` on the calling thread's loop until the `Concurrency.Future` it gives completes, then gives the future's result or throws what it threw; calling `run` from code the same loop is running is an `InvalidOperationException`. `sleep(milliseconds)` gives a future that completes once that time has passed, and `pause()` one that completes once the loop has run the work already queued on it. `start(body)` with an asynchronous body runs it on a new thread's own loop and gives a `Concurrency.Future` for its result. Any thread can complete a future, through a `Concurrency.Completer` or by finishing the function that gives it, and the code awaiting the future resumes on its own thread.
 
 An asynchronous function can also `await` a `Thread`: the `await` gives what the body gave, or throws what it threw, once the thread finishes.
 
 `Mutex`, `Semaphore` and `Channel[T]` are safe to share between threads, and each has a form to await and a form that blocks. `Mutex` is a lock that one holder has at a time: `acquire()` gives a future that completes once the caller holds it, `release()` hands it on, and `try_lock()` takes it only if it is free; `lock()`, `unlock()` and `hold(body)`, which runs `body` holding the lock and releases it however `body` ends, block the thread instead. It is not reentrant: a thread that locks it again gets `InvalidOperationException`. `Semaphore(permits)` has `available`, `acquire()`, `try_acquire()`, `release()` and the blocking `lock()`. `Channel[T]` has `send(value)`, which never waits, `receive()`, which gives a future for the next value, and the blocking `take()`.
 
 ```ghul
-use Ghul.Threads
+use Concurrency
 
 let hits = AtomicInt(0)
 let workers = [start(() => hits.increment()) for _ in 0..4]
@@ -2291,7 +2291,7 @@ Some common types have different names:
 - `IReadOnlySet<T>` is `Collections.Set[T]`.
 - `IEnumerable<T>` is `Collections.Iterable[T]`.
 - `IComparable<T>` and `IEquatable<T>` are `Ghul.Comparable[T]` and `Ghul.Equatable[T]`.
-- `Task` and `Task<T>` are `Tasks.Future` and `Tasks.Future[T]`, and `TaskCompletionSource` and `TaskCompletionSource<T>` are `Tasks.Completer` and `Tasks.Completer[T]`. Their former names, `Tasks.TASK` and `Tasks.TaskCompletionSource`, still work.
+- `Task` and `Task<T>` are `Concurrency.Future` and `Concurrency.Future[T]`, and `TaskCompletionSource` and `TaskCompletionSource<T>` are `Concurrency.Completer` and `Concurrency.Completer[T]`. Their former names, `Tasks.Future`, `Tasks.TASK`, `Tasks.Completer` and `Tasks.TaskCompletionSource`, still resolve to them.
 - `IComparer<T>` and `IEqualityComparer<T>` are `Collections.Comparer[T]` and `Collections.EqualityComparer[T]`. So the .NET classes `Comparer<T>` and `EqualityComparer<T>` are `Collections.ComparerBase[T]` and `Collections.EqualityComparerBase[T]`.
 
 The dotnet-integration page has the full table of names.
@@ -2431,13 +2431,13 @@ si
 get_product(
     @Microsoft.AspNetCore.Mvc.FromServices() store: ProductStore,
     @Microsoft.AspNetCore.Mvc.FromRoute() index: int
-) -> Tasks.Future[IResult] is
+) -> Concurrency.Future[IResult] is
     ...
 si
 
 app.map_get(
     "/products/{index}",
-    (@Microsoft.AspNetCore.Mvc.FromRoute() index: int, store: ProductStore) -> Tasks.Future[IResult] is
+    (@Microsoft.AspNetCore.Mvc.FromRoute() index: int, store: ProductStore) -> Concurrency.Future[IResult] is
         ...
     si
 );
