@@ -1,32 +1,90 @@
 namespace Semantic.Symbols is
-    // Types the language renamed, each with the name it had before. Either
-    // name finds the type where a namespace declares or imports only the
-    // other, so source written against the old name still compiles, and so
-    // does a library declaring the type under either.
-    class FORMER_NAMES is
-        _pairs: (namespace_name: string, former: string, current: string)[] static =>
-            [
-                (".Tasks", "TASK", "Future"),
-                (".Tasks", "TaskCompletionSource", "Completer")
-            ]
+    use Collections.LIST
+    use Collections.MAP
 
-        // The other name of the type `namespace_name` would hold as `name`,
-        // or null where it was never renamed.
+    // Types and functions that have more than one place or spelling. Each
+    // group lists every place one thing is known by: a lookup in any place
+    // of a group also finds what a library declares at any other, so source
+    // written for either spelling compiles against a library using either.
+    class FORMER_NAMES is
+        _places: MAP[string, MAP[string, LIST[Place]]] static
+
+        _none: LIST[Place] static
+
+        _namespaces: MAP[string, string] static
+
+        init() static is
+            _places = MAP[string, MAP[string, LIST[Place]]]()
+            _none = LIST[Place]()
+            _namespaces = MAP[string, string]()
+
+            // A namespace with no members of its own: a `use` of it reaches
+            // the namespace that holds them.
+            _namespaces["Ghul.Threads"] = "Concurrency"
+
+            _add([Place(".Concurrency", "Future"), Place(".Tasks", "Future"), Place(".Tasks", "TASK")])
+            _add([Place(".Concurrency", "Completer"), Place(".Tasks", "Completer"), Place(".Tasks", "TaskCompletionSource")])
+            _add([Place(".Concurrency", "TASK_BUILDER"), Place(".Tasks", "TASK_BUILDER")])
+
+            for name in [
+                "run", "sleep", "pause", "start",
+                "Thread", "Mutex", "Semaphore", "Channel",
+                "AtomicBool", "AtomicInt", "AtomicLong", "Atomic"
+            ] do
+                _add([Place(".Concurrency", name), Place(".Ghul.Threads", name)])
+            od
+        si
+
+        // The other places a namespace's `name` is known by, or none where
+        // it has only the one.
         //
         // - namespace_name: the qualified name the namespace is keyed under
         // - name: the name looked up
-        other_name(namespace_name: string, name: string) -> string? static is
-            for (ns, former, current) in _pairs do
-                if ns =~ namespace_name then
-                    if name =~ former then
-                        return current
-                    elif name =~ current then
-                        return former
-                    fi
+        other_places(namespace_name: string, name: string) -> LIST[Place] static is
+            if _places.contains_key(namespace_name) then
+                let names = _places[namespace_name]
+
+                if names.contains_key(name) then
+                    return names[name]
                 fi
-            od
+            fi
+
+            return _none
+        si
+
+        // The namespace that holds the members of a namespace that declares
+        // none, written as source names it, or null where there is none.
+        //
+        // - name: the namespace as a `use` spells it
+        moved_namespace(name: string) -> string? static is
+            if _namespaces.contains_key(name) then
+                return _namespaces[name]
+            fi
 
             return null
         si
+
+        _add(group: Place[]) static is
+            for place in group do
+                if !_places.contains_key(place.namespace_name) then
+                    _places[place.namespace_name] = MAP[string, LIST[Place]]()
+                fi
+
+                let names = _places[place.namespace_name]
+
+                if !names.contains_key(place.name) then
+                    names[place.name] = LIST[Place]()
+                fi
+
+                for other in group do
+                    if !(other.namespace_name =~ place.namespace_name /\ other.name =~ place.name) then
+                        names[place.name].add(other)
+                    fi
+                od
+            od
+        si
     si
+
+    // A name in a namespace, the namespace keyed under its qualified name.
+    struct Place(namespace_name: string public, name: string public)
 si
