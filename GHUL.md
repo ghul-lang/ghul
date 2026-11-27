@@ -1681,7 +1681,7 @@ A `when` with a list of expressions matches its labels by value. Each label is t
 
 ```ghul
 ~[T](value: T, test: (T) -> bool) -> bool => test(value);
-~(value: int, r: Ghul.Range[int]) -> bool => value >= r.from /\ value < r.to;
+~(value: int, r: Ghul.Range[int]) -> bool pure => value >= r.from /\ value < r.to;
 
 let size = case n
 when x => x > 100 then "big"
