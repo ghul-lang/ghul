@@ -2664,6 +2664,15 @@ namespace Syntax.Process is
             left_value: Value,
             right_value: Value,
             location: Source.LOCATION
+        ) -> Value? =>
+            _build_null_safe_equality(left_value, right_value, location, null)
+
+        // With `preferred`, as for _try_equality_test.
+        _build_null_safe_equality(
+            left_value: Value,
+            right_value: Value,
+            location: Source.LOCATION,
+            preferred: Semantic.Symbols.Function?
         ) -> Value? is
             let left_type = left_value.type
             let right_type = right_value.type
@@ -2680,7 +2689,9 @@ namespace Syntax.Process is
             fi
 
             let comparison =
-                _null_safe_comparison(left_type, right_type, left_inner, right_inner, location)
+                _prefer_operator(
+                    _null_safe_comparison(left_type, right_type, left_inner, right_inner, location),
+                    preferred)
 
             if !comparison? then
                 return null
@@ -2800,11 +2811,163 @@ namespace Syntax.Process is
         si
 
 
+        // The test a pattern value performs against the subject at its
+        // position: a whole `case` arm's value, or a leaf of a pattern.
+        //
+        // A `~` and a `=~` are each resolved as a written operator of
+        // that name would be, and the better fit wins, `~` on an exact
+        // tie: a type can match differently from how it compares, and a
+        // poor `~` never beats a good `=~`. With neither, the structural
+        // equalities answer as for any `=~` test, then `<>`. Null where
+        // nothing applies, or where an operand is still being inferred.
+        //
+        // An optional subject is tested as it stands by a `~` that
+        // declares its first parameter optional; any other `~` is
+        // resolved against the present type, and an absent subject does
+        // not match it.
+        try_pattern_test(
+            subject: Value,
+            pattern_value: Value,
+            location: Source.LOCATION
+        ) -> PATTERN_TEST? is
+            let subject_type = subject.type
+            let value_type = pattern_value.type
+
+            if !subject_type? \/ !value_type? then
+                return null
+            fi
+
+            if _is_unsettled(subject_type) \/ _is_unsettled(value_type) then
+                Semantic.OBLIGATIONS.defer("pattern-test", if _is_unsettled(subject_type) then subject_type else value_type fi, location)
+
+                return null
+            fi
+
+            let present_type = _non_optional(subject_type) ?? subject_type
+
+            let match_types mut = Collections.LIST[Type]([subject_type, value_type])
+            let match mut = resolve_operator(location, "~", match_types)
+            let guarded mut = false
+
+            if !match? /\ subject_type.is_optional then
+                match_types = Collections.LIST[Type]([present_type, value_type])
+                match = resolve_operator(location, "~", match_types)
+                guarded = match?
+            fi
+
+            // The `=~` a written `subject =~ value` would call. It is
+            // what the `~` is ranked against, and what the equality
+            // test calls where the type's own member would otherwise
+            // answer first.
+            let equal_types = Collections.LIST[Type]([present_type, _non_optional(value_type) ?? value_type])
+            let equal = resolve_operator(location, "=~", equal_types)
+
+            if let found = match then
+                let ranked_equal =
+                    if guarded \/ !subject_type.is_optional then
+                        equal
+                    else
+                        resolve_operator(location, "=~", match_types)
+                    fi
+
+                if PATTERN_TEST.prefers_match(found.score, ranked_equal?.score) then
+                    let test = _build_match_call(found.function, subject, pattern_value, guarded, location)
+
+                    if !test? then
+                        return null
+                    fi
+
+                    return PATTERN_TEST(test, found.function)
+                fi
+            fi
+
+            let test =
+                _try_equality_test(subject, pattern_value, "=~", location, equal?.function) ??
+                _try_equality_test(subject, pattern_value, "<>", location, null)
+
+            if !test? then
+                return null
+            fi
+
+            return PATTERN_TEST(test, null)
+        si
+
+        _is_unsettled(type: Type) -> bool =>
+            !type.is_settled \/ type.contains_inferred
+
+        // A call of the `~` chosen for a pattern test. Where the `~` was
+        // resolved against the present form of an optional subject, an
+        // absent subject answers false without calling it.
+        _build_match_call(
+            function: Semantic.Symbols.Function,
+            subject: Value,
+            pattern_value: Value,
+            guarded: bool,
+            location: Source.LOCATION
+        ) -> Value? is
+            let bool_type = _innate_symbol_lookup.get_bool_type()
+            let return_type = function.return_type
+
+            if !return_type? \/ !return_type.matches(bool_type) then
+                _logger.error(
+                    location,
+                    "match-operator-not-bool",
+                    "'{function}' returns '{return_type}' where a pattern expects 'bool'")
+
+                return DUMMY(Semantic.Types.ERROR(), location)
+            fi
+
+            if !guarded then
+                return _build_operator_call(function, "~", subject, pattern_value, location)
+            fi
+
+            let block = IR.Values.BLOCK(bool_type)
+
+            let load_subject = subject.get_temp_copier(block, "match_subject")
+
+            let operand = OPTIONAL_OPERAND(IoC.CONTAINER.instance.symbol_loader, bool_type)
+
+            if !operand.can_split(location, load_subject()) then
+                return null
+            fi
+
+            let presence = operand.presence(location, load_subject())
+            let payload = operand.payload(location, load_subject())
+
+            if !presence? \/ !payload? then
+                return null
+            fi
+
+            block.add(
+                ALL_OF(
+                    Collections.LIST[Value]([
+                        presence,
+                        _build_operator_call(function, "~", payload, pattern_value, location)
+                    ]),
+                    bool_type))
+
+            block.close()
+
+            return block
+        si
+
         _try_equality_test(
             left_value: Value,
             right_value: Value,
             op_name: string,
             location: Source.LOCATION
+        ) -> Value? =>
+            _try_equality_test(left_value, right_value, op_name, location, null)
+
+        // With `preferred`, the operator a written `=~` over these
+        // operands resolves to, which takes the place of the one the
+        // type's own member tier picks where the two differ.
+        _try_equality_test(
+            left_value: Value,
+            right_value: Value,
+            op_name: string,
+            location: Source.LOCATION,
+            preferred: Semantic.Symbols.Function?
         ) -> Value? is
             let left_type = left_value.type
             let right_type = right_value.type
@@ -2817,7 +2980,7 @@ namespace Syntax.Process is
 
             if op_name =~ "=~" then
                 if optional then
-                    let null_safe = _build_null_safe_equality(left_value, right_value, location)
+                    let null_safe = _build_null_safe_equality(left_value, right_value, location, preferred)
 
                     if null_safe? then
                         return null_safe
@@ -2831,7 +2994,7 @@ namespace Syntax.Process is
                     return _try_global_equals_operator(left_value, right_value, location)
                 fi
 
-                let lowering = _choose_equality(left_type, right_type, location)
+                let lowering = _prefer_operator(_choose_equality(left_type, right_type, location), preferred)
 
                 if !lowering? \/ isa EqualityLowering.IDENTITY(lowering) then
                     return null
@@ -2857,6 +3020,30 @@ namespace Syntax.Process is
             return null
         si
 
+
+        // The operator a pattern test calls where the equality chosen
+        // for the operand types is an operator and a written `=~`
+        // resolves to a different one. Every other lowering stands.
+        _prefer_operator(
+            lowering: EqualityLowering?,
+            preferred: Semantic.Symbols.Function?
+        ) -> EqualityLowering? is
+            if
+                let chosen: EqualityLowering.OPERATOR = lowering, wanted = preferred /\
+                !chosen.function.is_same_function_as(wanted)
+            then
+                let bool_type = _innate_symbol_lookup.get_bool_type()
+
+                if
+                    NULL_SAFE_EQUALITY_GATE.accepts_operator(wanted, bool_type) \/
+                    NULL_SAFE_EQUALITY_GATE.accepts_global_operator(wanted, bool_type)
+                then
+                    return EqualityLowering.OPERATOR(wanted)
+                fi
+            fi
+
+            return lowering
+        si
 
         _non_optional(type: Type) -> Type? =>
             if type.is_optional then
@@ -3272,7 +3459,19 @@ namespace Syntax.Process is
             location: Source.LOCATION,
             name: string,
             operand_types: Collections.LIST[Type]
-        ) -> Semantic.Symbols.Function? is
+        ) -> Semantic.Symbols.Function? =>
+            resolve_operator(location, name, operand_types)?.function
+
+        // The same resolution, with how well the chosen operator fits:
+        // the lower score of the static candidates over every operand
+        // and the left type's instance candidates over the rest, the
+        // instance member on a tie. For a caller that ranks the
+        // operators of two names against each other.
+        resolve_operator(
+            location: Source.LOCATION,
+            name: string,
+            operand_types: Collections.LIST[Type]
+        ) -> Semantic.OVERLOAD_RESOLVE_RESULT? is
             let static_result: Semantic.OVERLOAD_RESOLVE_RESULT? mut = null
             let member_result: Semantic.OVERLOAD_RESOLVE_RESULT? mut = null
 
@@ -3316,17 +3515,13 @@ namespace Syntax.Process is
 
             if member_result? /\ static_result? then
                 if cast int(member_result.score) <= cast int(static_result.score) then
-                    return member_result.function
+                    return member_result
                 fi
 
-                return static_result.function
-            elif member_result? then
-                return member_result.function
-            elif static_result? then
-                return static_result.function
+                return static_result
             fi
 
-            return null
+            return member_result ?? static_result
         si
 
         // Resolve an operator overload under speculation, so a failed

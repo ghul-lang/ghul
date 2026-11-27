@@ -1239,6 +1239,16 @@ An operator's precedence comes from its first character. A declaration cannot se
 
 `**` raises its left operand to the power of its right one, as `pow` does, and is reached as `pow` is, through `use default` or ``use Ghul.Math.`**``. An integer or `bigint` base takes an `int` exponent, and a `double` base takes a `double`. So `2 ** 10` is 1024, `2L ** 40` is a `long`, and `x ** 0.5` is a square root. An integer power that does not fit its type throws `OverflowException`, where `*` wraps, and a negative integer exponent throws `ArgumentOutOfRangeException`. `**` binds tighter than `*`, so `2 * 3 ** 2` is 18. It groups to the left like every other operator, so `2 ** 3 ** 2` is `(2 ** 3) ** 2`, which is 64. A chain like that has a warning, because mathematics groups a power to the right; parentheses around one pair silence it. A prefix operator applies before `**`, as before any binary operator, so `-2 ** 2` is `(-2) ** 2`, which is 4.
 
+`~` is the *match* operator: `value ~ pattern` asks whether a value fits a pattern value, such as a range, a set or a predicate. Nothing declares it built in: it means what the `~` functions in scope say, and in an expression it resolves like any other operator, so `a ~ b` with no `~` for its operands is an error and does not fall back to `=~`. Its value is a `bool`. Where it earns its keep is in a pattern (see [case](#case)), which tests a value with whichever of `~` and `=~` fits it better. `~` has no negated form. `!~` is the negation of `=~`, not of `~`, so beside `~` it reads as "does not match" but still means "not equal".
+
+```ghul
+struct Below(limit: double public);
+
+~(value: double, b: Below) -> bool => value < b.limit;
+
+let cold = 3.5 ~ Below(4.0);    // true
+```
+
 The unary `\` is the bitwise complement of an integer. Its result has the operand's type: `\5` is `-6` for an `int`, `\0` is `-1`, and `\x` is `250` for a `ubyte` `x` of 5. `\` is the unary partner of the binary `&`, `|` and `^`. `!` is the logical not of a `bool`. The boolean operators `/\` and `\/` are each one token.
 
 An operator is a function value wherever a function of its type is expected, whether it is declared as a function or built in (see [language details](docs/details.md#operators)). A built-in operator is an instruction rather than a method, so the compiler synthesises a function that applies it, once for each type it is used at in a function body. The name is written with the backtick escape: ``int.`+`` names the `+` of `int`, and a bare `` `+ `` names whichever `+` the expression `a + b` would resolve to for operands of the expected function type's parameter types: the same candidates, by the same overload resolution, so a `+` declared on the right operand's type or at namespace scope is found exactly as it would be in the expression. So `xs |> reduce(0, `+)` sums an `int` sequence, and `pairs |> map(`+)` adds the elements of each pair. A bare spelling with no expected function type is an error, as is one for which no operator resolves. A bare spelling can also head a call, where the written arguments resolve it as the operands of `a - b` would and a `*` takes the formal of the operator chosen: `` `-(10, *) `` is `x => 10 - x`, and `xs |> map(`+(*, 1))` adds one to each element. A call whose every argument is `*` has nothing to resolve from and is an error. `<`, `<=`, `>`, `>=`, `!=` and `!~` are derived from `<>`, `==` and `=~` and are not functions. An instance member is not a value, whether or not it is an operator, because it needs a receiver: ``string.`<>`` is an error, and a function literal takes its place.
@@ -1490,9 +1500,27 @@ if let (~expected, name) = pair then
 fi
 ```
 
-The compiler reads the marked value at the pattern, so the value does not need to be a constant. A local variable, a parameter and a field all work. A dotted name cannot express these. `~` is valid on any leaf that is a valid value to match. So `~` can be written on a literal or a dotted name, where it has no effect: `(~1, s)` and `(~Colour.RED, s)` match exactly as `(1, s)` and `(Colour.RED, s)` do. A marked leaf counts towards exhaustiveness exactly as the same leaf without `~` does. Marked enum members and booleans can cover their whole set of values. A value from a set too large to list leaves the `case` needing an `else`.
+The compiler reads the marked value at the pattern, so the value does not need to be a constant. A local variable, a parameter and a field all work. A dotted name cannot express these. `~` is valid on any leaf that is a valid value to match. So `~` can be written on a literal or a dotted name, where it has no effect: `(~1, s)` and `(~Colour.RED, s)` match exactly as `(1, s)` and `(Colour.RED, s)` do.
 
-Matching leaves (literal, dotted or marked) are valid only in refutable contexts: `if let`, `while let` and `case` `when` patterns. A plain `let` with a matching leaf is an error, because the test would never run. For the same reason, `~` is an error on a formal argument and on a lambda parameter, where a leaf can only declare a variable. `~` is also an error on a whole destructure group; it is valid only on a leaf.
+A `~` can also mark an expression, which the leaf tests the value at its position against. The expression is parsed as a call argument is, and ends at the `,`, `)` or `]` that ends the element, so `(~Below(0.0), s)`, `(~0..10, s)`, `(~limit + 1, s)` and `(~xs[0], s)` need no parentheses. `~(` opens a parenthesised expression, so `~(a, b)` is a marked tuple value. A run of operator characters is one token, so a marker before an operator takes a space or parentheses: `(~ -1, s)` or `(~(-1), s)`, and `~ * < 3`. A leaf is tested in the same way as a `when` label: with whichever of `~` and `=~` fits better.
+
+A function literal or a partial application as a pattern value is a predicate, which a `~` that takes a function can call on the value at that position. Its parameter takes that value's type, as it would take a function parameter's type as a call argument:
+
+```ghul
+~[T](value: T, test: (T) -> bool) -> bool => test(value);
+
+let kind = case (a, b)
+when (~x => x % 2 == 0, _) then "first even"
+when (_, ~ * < 3) then "second small"
+else "other"
+esac;
+```
+
+A placeholder covers only the operator it is an operand of, so `~(* % 2 == 0)` compares a function with zero and is an error, as it is in an argument list. Write `~x => x % 2 == 0`.
+
+A leaf tested with `=~` counts towards exhaustiveness exactly as the same leaf without `~` does. Marked enum members and booleans can cover their whole set of values. A value from a set too large to list leaves the `case` needing an `else`, and so does a leaf tested with `~`.
+
+Matching leaves (literal, dotted or marked) are valid only in refutable contexts: `if let`, `while let` and `case` `when` patterns. A plain `let` with a matching leaf is an error, because the test would never run. For the same reason, `~` is an error on a formal argument and on a lambda parameter, where a leaf can only declare a variable. `~` is also an error on a sequence pattern, `~[...]`; it is valid only on a leaf.
 
 *Guards* add conditions, after the test, separated by `/\`. The new variable is in scope in each guard:
 
@@ -1649,7 +1677,20 @@ else
 esac
 ```
 
-A `when` with a list of expressions matches its labels by value. `case` compares the scrutinee with each label as `=~` does, and uses `<>` when the type has no `=~`. So a `string` scrutinee, and a scrutinee of a user type that declares `=~`, compare with labels by content, not by identity. An optional scrutinee compares in the same way. `=~` handles null, so a `T?` scrutinee matches a non-null label only when it holds an equal value, and never throws on an absent value. A `when null` label matches an absent value in all three optional representations: a null reference for a reference type `T`, and an absent `Nullable[T]` or `MAYBE[T]` for a value type or generic `T`.
+A `when` with a list of expressions matches its labels by value. Each label is tested with whichever of `~` and `=~` fits the scrutinee's type and the label's type better, by the same overload resolution an expression uses: the operator whose parameters need less conversion wins, and `~` wins an exact tie. The `=~` taken part is the one `a =~ b` would resolve, member or namespace scope alike. With neither, `case` compares the scrutinee with the label as `=~` does, and uses `<>` when the type has no `=~`. A label that neither matches nor compares, such as a `string` label on an `int` scrutinee, is an error. A label may carry the `~` marker, which changes nothing there, so `when ~Below(0.0) then` and `when Below(0.0) then` are the same arm. A function literal or a partial application as a label takes its parameter type from the scrutinee, for a `~` that calls it:
+
+```ghul
+~[T](value: T, test: (T) -> bool) -> bool => test(value);
+~(value: int, r: Ghul.Range[int]) -> bool pure => value >= r.from /\ value < r.to;
+
+let size = case n
+when x => x > 100 then "big"
+when 0..10 then "small"
+else "medium"
+esac;
+```
+
+A `~` arm says nothing about which values it covers, so it never completes a closed set: a `case` over a `bool` with a `~` arm still needs arms for `true` and `false`, or an `else`. Otherwise `case` compares as before. So a `string` scrutinee, and a scrutinee of a user type that declares `=~`, compare with labels by content, not by identity. An optional scrutinee compares in the same way. `=~` handles null, so a `T?` scrutinee matches a non-null label only when it holds an equal value, and never throws on an absent value. A `when null` label matches an absent value in all three optional representations: a null reference for a reference type `T`, and an absent `Nullable[T]` or `MAYBE[T]` for a value type or generic `T`.
 
 `case` is also an expression. The last expression of each arm's body is the arm's value, and the `case` expression's value is the value of the arm that matched. A `case` expression needs one of these:
 
@@ -1668,7 +1709,7 @@ esac;
 A `when` arm can have a pattern instead of a list of expressions. The patterns are the same as in `if let`:
 
 - `when v: T then` tests the type `T`. When it matches, `v` holds the narrowed value.
-- `when (a, b) then` destructures a tuple scrutinee into named variables. A type after the pattern tests the value: `when (c, d): (CAT, DOG) then` matches when the first value is a `CAT` and the second a `DOG`, and so does `when (c: CAT, d: DOG) then`. `_` discards an element. A literal leaf, as in `when (1, label) then` or `when (Color.RED, label) then`, tests that position for equality. A leaf marked with `~`, as in `when (~expected, label) then`, tests the position against the value the name holds, and declares no variable.
+- `when (a, b) then` destructures a tuple scrutinee into named variables. A type after the pattern tests the value: `when (c, d): (CAT, DOG) then` matches when the first value is a `CAT` and the second a `DOG`, and so does `when (c: CAT, d: DOG) then`. `_` discards an element. A literal leaf, as in `when (1, label) then` or `when (Color.RED, label) then`, tests that position for equality. A leaf marked with `~`, as in `when (~expected, label) then` or `when (~Below(0.0), label) then`, tests the position against that value, with `~` or `=~`, and declares no variable.
 - `when _: T then` tests the type only, and declares no variable.
 
 Pattern arms follow the same refutability rules as `if let`. An optional scrutinee gives the pattern its unwrapped value. A value-type pattern on a plain value-type scrutinee has nothing to test. It is an error, reported once, and the pattern's variables get the error type:

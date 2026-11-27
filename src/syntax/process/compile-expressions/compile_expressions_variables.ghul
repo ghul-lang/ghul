@@ -898,7 +898,7 @@ namespace Syntax.Process is
 
             if right_value? /\ right_value.type? then
                 left.expression.set_expected_type(
-                    right_value.type,
+                    pattern_value_expected_type(left.expression, right_value.type),
                     "literal pattern type {{0}} is not comparable to source position type {{1}}"
                 )
             fi
@@ -912,6 +912,7 @@ namespace Syntax.Process is
 
             leaf_state.match_test = null
             leaf_state.match_operand = null
+            leaf_state.is_match = false
 
             // A matching leaf in a non-refutable context (plain `let`)
             // is a silent no-op at runtime — the pattern would never
@@ -929,69 +930,66 @@ namespace Syntax.Process is
                 return
             fi
 
-            // A leaf whose type is incompatible with the source
-            // position's type can never match — the runtime equality
-            // test is statically dead. Reject with a clear diagnostic
-            // here rather than letting the IL emit and surface as a
-            // less helpful comparison-operator error later.
             if let
                 rv = leaf_state.right_value, source_type = rv.type,
                 ev = left.expression.value, literal_type = ev.type
             then
-                if
-                    !source_type.is_assignable_from(literal_type) /\
-                    !literal_type.is_assignable_from(source_type)
-                then
-                    _logger.error(
-                        left.location,
-                        "leaf-type-mismatch", "a leaf of type '{literal_type}' cannot match source position of type '{source_type}'"
-                    )
-
-                    return
+                // A leaf no `~` matches and no equality compares, of a
+                // type unrelated to its position's, can never match.
+                // Reported here, before IL generation, rather than left to
+                // a raw compare that is statically dead.
+                if !_build_literal_leaf_test(left, source_type, ev) then
+                    report_unmatchable_pattern_value(left.location, source_type, literal_type)
                 fi
-
-                _build_literal_leaf_test(left, source_type, ev)
             fi
         si
 
-        // Build the runtime test a literal leaf performs against its
-        // source position, the way `=~` (falling back to `<>`) would, so
-        // a leaf whose type declares an equality operator matches by
-        // value rather than by reference. Shares the `case` `when`
-        // label builder, so the two refutable constructs agree on what
-        // a literal matches.
+        // Build the runtime test a leaf performs against its source
+        // position, as a `case` arm's value does: a `~` that matches, or
+        // the equality a `=~` (falling back to `<>`) gives, so a leaf
+        // whose type declares an equality operator matches by value
+        // rather than by reference. Shares the `case` `when` label
+        // builder, so the two refutable constructs agree on what a
+        // value matches.
         //
         // The source position's value does not exist until IL
         // generation walks the pattern, so the test is built against a
-        // hole that generation fills in. Leaving the test unbuilt is
-        // always safe: generation falls back to the raw compare, which
-        // is what a bare `==` does too.
+        // hole that generation fills in. Where nothing is built,
+        // generation falls back to the raw compare, which is what a bare
+        // `==` does too. Answers whether a test was built, or nothing
+        // needed one.
         _build_literal_leaf_test(
             left: Trees.Variables.LITERAL_VARIABLE_LEFT,
             source_type: Semantic.Types.Type,
             literal_value: IR.Values.Value
-        ) is
+        ) -> bool is
             // A `null` leaf is a presence test rather than a value
             // comparison; a null operand would build a null-typed temp
             // the back end cannot encode. Generation matches absence.
             if literal_value.type?.is_null ?? false then
-                return
+                return true
             fi
 
             let operand = IR.Values.WRAPPER(IR.Values.DUMMY(source_type, left.location))
 
-            let test =
-                build_equality_test(operand, literal_value, "=~", left.location) ??
-                build_equality_test(operand, literal_value, "<>", left.location)
+            let pattern_test = build_pattern_test(operand, literal_value, left.location)
 
-            if !test? then
-                return
+            if !pattern_test? then
+                return false
             fi
 
             let state = _variable_left_state.get_or_add(left)
 
             state.match_operand = operand
-            state.match_test = test
+            state.match_test = pattern_test.value
+            state.is_match = pattern_test.is_match
+
+            // A marked leaf has a token for the `~` it calls.
+            if let marker = left.marker_location, function = pattern_test.match_function then
+                _symbol_use_locations.add_symbol_use(marker, function)
+            fi
+
+            return true
         si
 
         // The local an initializer `[]` would type, when the literal has

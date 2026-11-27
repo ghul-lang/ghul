@@ -1004,6 +1004,7 @@ namespace Syntax.Process is
                         fi
 
                     let tests = Collections.LIST[IR.Values.Value?]()
+                    let matches = Collections.LIST[bool]()
 
                     for e in arm.expressions.expressions do
                         // A label names a value of the scrutinee's
@@ -1013,13 +1014,14 @@ namespace Syntax.Process is
                             let scrutinee_type = _case_scrutinee_stack[_case_scrutinee_stack.count - 1]
 
                             if scrutinee_type? /\ scrutinee_type.is_settled then
-                                e.set_expected_type(scrutinee_type, "")
+                                e.set_expected_type(_visitor.pattern_value_expected_type(e, scrutinee_type), "")
                             fi
                         fi
 
                         e.walk(_visitor)
 
                         let test: IR.Values.Value? mut = null
+                        let is_match mut = false
                         let label_value: IR.Values.Value? mut = e.value
 
                         if label_value? /\ label_value.is_type_expression then
@@ -1042,15 +1044,20 @@ namespace Syntax.Process is
                         // end cannot encode), leaving a null test for
                         // generate-il to handle as match-absence.
                         if label_value? /\ scrutinee_load? /\ !(label_value.type?.is_null ?? false) then
-                            test =
-                                _visitor.build_equality_test(scrutinee_load, label_value, "=~", arm.location) ??
-                                _visitor.build_equality_test(scrutinee_load, label_value, "<>", arm.location)
+                            if let pattern_test = _visitor.build_pattern_test(scrutinee_load, label_value, e.location) then
+                                test = pattern_test.value
+                                is_match = pattern_test.is_match
+                            else
+                                _visitor.report_unmatchable_pattern_value(e.location, scrutinee_load.type, label_value.type)
+                            fi
                         fi
 
                         tests.add(test)
+                        matches.add(is_match)
                     od
 
                     arm.match_state.tests = tests
+                    arm.match_state.matches = matches
                 fi
 
                 arm.statements.walk(_visitor)
@@ -1305,7 +1312,11 @@ namespace Syntax.Process is
             fi
 
             if !`case.is_poisoned then
-                _case_exhaustiveness_checker.check(`case, left => _visitor.pattern_has_failing_test(left, false))
+                _case_exhaustiveness_checker.check(
+                    `case,
+                    left => _visitor.pattern_has_failing_test(left, false),
+                    left => _visitor.is_match_leaf(left)
+                )
             fi
 
             // Deferred from `pre_case`, and placed after the check so it
