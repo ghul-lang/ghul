@@ -1,6 +1,7 @@
 namespace Semantic.Symbols is
     use Collections.LIST
     use Collections.MAP
+    use Ghul.Pipes.any
 
     // Types and functions that have more than one place or spelling. Each
     // group lists every place one thing is known by: a lookup in any place
@@ -18,21 +19,25 @@ namespace Semantic.Symbols is
             _none = LIST[Place]()
             _namespaces = MAP[string, string]()
 
-            // A namespace with no members of its own: a `use` of it reaches
-            // the namespace that holds them.
-            _namespaces["Ghul.Threads"] = "Concurrency"
+            // Nothing has a former name at present. A type or function that
+            // moves keeps its old place resolving with a group listing every
+            // place it is known by, the current one first:
+            //
+            //     _add([Place(".New", "Thing"), Place(".Old", "Thing")])
+            //
+            // and a namespace whose members all moved, so that a `use` of it
+            // still reaches them, with:
+            //
+            //     _namespaces["Old"] = "New"
+        si
 
-            _add([Place(".Concurrency", "Future"), Place(".Tasks", "Future"), Place(".Tasks", "TASK")])
-            _add([Place(".Concurrency", "Completer"), Place(".Tasks", "Completer"), Place(".Tasks", "TaskCompletionSource")])
-            _add([Place(".Concurrency", "TASK_BUILDER"), Place(".Tasks", "TASK_BUILDER")])
+        // Tests only: records `group` as init() records a moved name.
+        add_for_testing(group: Place[]) static => _add(group)
 
-            for name in [
-                "run", "sleep", "pause", "start",
-                "Thread", "Mutex", "Semaphore", "Channel",
-                "AtomicBool", "AtomicInt", "AtomicLong", "Atomic"
-            ] do
-                _add([Place(".Concurrency", name), Place(".Ghul.Threads", name)])
-            od
+        // Tests only: records that the members of namespace `name` moved to
+        // `moved_to`.
+        add_moved_namespace_for_testing(name: string, moved_to: string) static is
+            _namespaces[name] = moved_to
         si
 
         // The other places a namespace's `name` is known by, or none where
@@ -76,13 +81,17 @@ namespace Semantic.Symbols is
                     names[place.name] = LIST[Place]()
                 fi
 
+                let others = names[place.name]
+
                 for other in group do
-                    if !(other.namespace_name =~ place.namespace_name /\ other.name =~ place.name) then
-                        names[place.name].add(other)
+                    if !_same(other, place) /\ !(others |> any(o => _same(o, other))) then
+                        others.add(other)
                     fi
                 od
             od
         si
+
+        _same(a: Place, b: Place) -> bool static => a.namespace_name =~ b.namespace_name /\ a.name =~ b.name
     si
 
     // A name in a namespace, the namespace keyed under its qualified name.
