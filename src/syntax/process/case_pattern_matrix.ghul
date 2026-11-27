@@ -71,8 +71,14 @@ namespace Syntax.Process is
     // close and leave the no-match path unreachable in the checker's
     // view alone.
     class CASE_PATTERN_BUILDER is
+        // Whether a value leaf is tested by a `~`, which says nothing
+        // about which values it covers.
+        is_match_leaf: (Trees.Variables.LITERAL_VARIABLE_LEFT) -> bool public
+
         init() is
             super.init()
+
+            is_match_leaf = left => false
         si
 
         // The rows this arm contributes, or null when its shape
@@ -91,8 +97,17 @@ namespace Syntax.Process is
             let rows = Collections.LIST[CASE_PATTERN[]]()
 
             if let expressions = arm.expressions then
-                for expression in expressions.expressions do
-                    let pattern = _from_expression(expression, domain)
+                let matches = arm.match_state.matches
+
+                for i in 0..expressions.expressions.count do
+                    let expression = expressions.expressions[i]
+
+                    let pattern =
+                        if matches? /\ i < matches.count /\ matches[i] then
+                            _opaque()
+                        else
+                            _from_expression(expression, domain)
+                        fi
 
                     if !pattern? then
                         return null
@@ -212,6 +227,10 @@ namespace Syntax.Process is
             fi
 
             if let literal: Trees.Variables.LITERAL_VARIABLE_LEFT = left then
+                if is_match_leaf(literal) then
+                    return _opaque()
+                fi
+
                 return _from_expression(literal.expression, domain)
             fi
 
@@ -362,14 +381,17 @@ namespace Syntax.Process is
                 return CASE_PATTERN(unit_constructor, Collections.LIST[CASE_PATTERN]())
             fi
 
-            // A value drawn from a domain too large to enumerate. It
-            // is distinct from every other alternative, including any
-            // other literal, so it can never complete a domain.
-            return CASE_PATTERN(
+            // A value drawn from a domain too large to enumerate.
+            return _opaque()
+        si
+
+        // A pattern distinct from every other alternative, including any
+        // literal, so it can never complete a domain.
+        _opaque() -> CASE_PATTERN =>
+            CASE_PATTERN(
                 PATTERN_CONSTRUCTOR(ConstructorKind.OPAQUE, "_", Collections.LIST[PATTERN_DOMAIN?]()),
                 Collections.LIST[CASE_PATTERN]()
             )
-        si
 
         _leaf(domain: PATTERN_DOMAIN?, kind: ConstructorKind) -> CASE_PATTERN? is
             if !domain? then
