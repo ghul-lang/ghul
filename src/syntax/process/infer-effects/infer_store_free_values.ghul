@@ -187,6 +187,14 @@ namespace Syntax.Process is
                 return
             fi
 
+            // A constructor chain is a construction whatever it compiled
+            // to, so it is recognised before the compiled call is read as
+            // an ordinary one.
+            if let member: Trees.Expressions.MEMBER = call.function /\ _is_constructor_chain(member) then
+                _add_constructor_chain_edges(member, call.value)
+                return
+            fi
+
             // Study-only: after compile-expressions the call carries the
             // value it compiled to, which names the callee directly
             // whatever shape the target expression has.
@@ -250,6 +258,42 @@ namespace Syntax.Process is
             od
         si
 
+        // `super.init(...)` or `self.init(...)` runs on the object this
+        // constructor is itself being run on, so it is bounded the same
+        // way a construction is - and writes that receiver's own state,
+        // so it disqualifies the strict bit just as writing a field
+        // directly does. Bounded by the constructor the call compiled
+        // to, where it has one, and otherwise by every constructor the
+        // receiver's type declares.
+        _add_constructor_chain_edges(member: Trees.Expressions.MEMBER, compiled: IR.Values.Value?) is
+            _disqualify_strict_only()
+
+            if _resolved_mode /\ compiled? then
+                if let chained: IR.Values.Call.INSTANCE = compiled then
+                    _note_overload_site(chained.function, chained.from, chained.arguments)
+                    _add_construction_callee(chained.function)
+                    _study_note_call_arguments(chained.function, chained.arguments)
+                    return
+                fi
+
+                if let chained: IR.Values.Call.STRUCT = compiled then
+                    _note_overload_site(chained.function, chained.from, chained.arguments)
+                    _add_construction_callee(chained.function)
+                    _study_note_call_arguments(chained.function, chained.arguments)
+                    return
+                fi
+            fi
+
+            let receiver_type = _typer.try_type(member.left)
+
+            if !receiver_type? then
+                _disqualify_because("ctor-chain-receiver-untyped")
+                return
+            fi
+
+            _add_construction_edges(receiver_type.find_member("init"))
+        si
+
         _add_call_target_edges(target: Trees.Expressions.Expression?) is
             if !target? then
                 _disqualify_because("call-target-null")
@@ -273,22 +317,7 @@ namespace Syntax.Process is
                 let member = cast Trees.Expressions.MEMBER(target)
 
                 if _is_constructor_chain(member) then
-                    // `super.init(…)` or `self.init(…)` runs on the
-                    // object this constructor is itself being run on,
-                    // so it is bounded the same way a construction is —
-                    // and writes that receiver's own state, so it
-                    // disqualifies the strict bit just as writing a
-                    // field directly does
-                    _disqualify_strict_only()
-
-                    let receiver_type = _typer.try_type(member.left)
-
-                    if !receiver_type? then
-                        _disqualify_because("ctor-chain-receiver-untyped")
-                        return
-                    fi
-
-                    _add_construction_edges(receiver_type.find_member("init"))
+                    _add_constructor_chain_edges(member, null)
                     return
                 fi
 
