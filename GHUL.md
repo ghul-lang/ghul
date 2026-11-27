@@ -1502,7 +1502,21 @@ fi
 
 The compiler reads the marked value at the pattern, so the value does not need to be a constant. A local variable, a parameter and a field all work. A dotted name cannot express these. `~` is valid on any leaf that is a valid value to match. So `~` can be written on a literal or a dotted name, where it has no effect: `(~1, s)` and `(~Colour.RED, s)` match exactly as `(1, s)` and `(Colour.RED, s)` do.
 
-A `~` can also mark an expression, which the leaf tests the value at its position against. The expression binds at range precedence and tighter, so `(~Below(0.0), s)`, `(~0..10, s)` and `(~xs[0], s)` need no parentheses, and anything looser, such as `(~(limit + 1), s)`, is written in parentheses. `~(` opens a parenthesised expression, so `~(a, b)` is a marked tuple value. The `~` must be followed by a space or a parenthesis when the expression starts with an operator: `~-1` is one operator token, so write `~(-1)`. A leaf is tested in the same way as a `when` label: with whichever of `~` and `=~` fits better.
+A `~` can also mark an expression, which the leaf tests the value at its position against. The expression is parsed as a call argument is, and ends at the `,`, `)` or `]` that ends the element, so `(~Below(0.0), s)`, `(~0..10, s)`, `(~limit + 1, s)` and `(~xs[0], s)` need no parentheses. `~(` opens a parenthesised expression, so `~(a, b)` is a marked tuple value. A marker followed by an operator is read as the marker and that operator, so `(~-1, s)` tests against `-1`. A leaf is tested in the same way as a `when` label: with whichever of `~` and `=~` fits better.
+
+A function literal or a partial application as a pattern value is a predicate, which a `~` that takes a function can call on the value at that position. Its parameter takes that value's type, as it would take a function parameter's type as a call argument:
+
+```ghul
+~[T](value: T, test: (T) -> bool) -> bool => test(value);
+
+let kind = case (a, b)
+when (~x => x % 2 == 0, _) then "first even"
+when (_, ~* < 3) then "second small"
+else "other"
+esac;
+```
+
+A placeholder covers only the operator it is an operand of, so `~(* % 2 == 0)` compares a function with zero and is an error, as it is in an argument list. Write `~x => x % 2 == 0`.
 
 A leaf tested with `=~` counts towards exhaustiveness exactly as the same leaf without `~` does. Marked enum members and booleans can cover their whole set of values. A value from a set too large to list leaves the `case` needing an `else`, and so does a leaf tested with `~`.
 
@@ -1663,7 +1677,7 @@ else
 esac
 ```
 
-A `when` with a list of expressions matches its labels by value. Each label is tested with whichever of `~` and `=~` fits the scrutinee's type and the label's type better, by the same overload resolution an expression uses: the operator whose parameters need less conversion wins, and `~` wins an exact tie. The `=~` taken part is the one `a =~ b` would resolve, member or namespace scope alike. With neither, `case` compares the scrutinee with the label as `=~` does, and uses `<>` when the type has no `=~`. A label that neither matches nor compares, such as a `string` label on an `int` scrutinee, is an error. A label may carry the `~` marker, which changes nothing there, so `when ~Below(0.0) then` and `when Below(0.0) then` are the same arm. A function literal as a label takes its parameter type from the scrutinee, for a `~` that calls it:
+A `when` with a list of expressions matches its labels by value. Each label is tested with whichever of `~` and `=~` fits the scrutinee's type and the label's type better, by the same overload resolution an expression uses: the operator whose parameters need less conversion wins, and `~` wins an exact tie. The `=~` taken part is the one `a =~ b` would resolve, member or namespace scope alike. With neither, `case` compares the scrutinee with the label as `=~` does, and uses `<>` when the type has no `=~`. A label that neither matches nor compares, such as a `string` label on an `int` scrutinee, is an error. A label may carry the `~` marker, which changes nothing there, so `when ~Below(0.0) then` and `when Below(0.0) then` are the same arm. A function literal or a partial application as a label takes its parameter type from the scrutinee, for a `~` that calls it:
 
 ```ghul
 ~[T](value: T, test: (T) -> bool) -> bool => test(value);
