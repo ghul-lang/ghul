@@ -2291,7 +2291,7 @@ Some common types have different names:
 - `IReadOnlySet<T>` is `Collections.Set[T]`.
 - `IEnumerable<T>` is `Collections.Iterable[T]`.
 - `IComparable<T>` and `IEquatable<T>` are `Ghul.Comparable[T]` and `Ghul.Equatable[T]`.
-- `Task` and `Task<T>` are `Concurrency.Future` and `Concurrency.Future[T]`, and `TaskCompletionSource` and `TaskCompletionSource<T>` are `Concurrency.Completer` and `Concurrency.Completer[T]`. Their former names, `Tasks.Future`, `Tasks.TASK`, `Tasks.Completer` and `Tasks.TaskCompletionSource`, still resolve to them.
+- `Task` and `Task<T>` are `Concurrency.Future` and `Concurrency.Future[T]`, and `TaskCompletionSource` and `TaskCompletionSource<T>` are `Concurrency.Completer` and `Concurrency.Completer[T]`.
 - `IComparer<T>` and `IEqualityComparer<T>` are `Collections.Comparer[T]` and `Collections.EqualityComparer[T]`. So the .NET classes `Comparer<T>` and `EqualityComparer<T>` are `Collections.ComparerBase[T]` and `Collections.EqualityComparerBase[T]`.
 
 The dotnet-integration page has the full table of names.
