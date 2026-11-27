@@ -18,12 +18,25 @@ namespace Syntax.Parsers.Expressions is
                 // application's placeholder: `* + 1`, `2 * *`, `- *`.
                 // Followed by anything else it is the prefix operator `*`
                 // applied to what follows.
-                let operator = context.current_string!
-                let location = context.location
+                if context.current.value_string =~ "*" /\ _placeholder_follows(context) then
+                    let location = context.location
+                    context.next_token()
 
+                    return Trees.Expressions.PLACEHOLDER(location)
+                fi
+
+                let name = Trees.Identifiers.Identifier(context.location, context.current_string!)
                 context.next_token()
+                let right = parse(context)!
 
-                parse_after_operator(context, operator, location)
+                let unary = Trees.Expressions.UNARY(name.location::right.location, name, right)
+
+                // `- *` is `-(*)`: a partial application of the operator.
+                if Trees.Expressions.PARTIAL_APPLICATION.is_placeholder_operand(right) then
+                    Trees.Expressions.PARTIAL_APPLICATION(unary.location, unary)
+                else
+                    unary
+                fi
             elif context.current.token == Lexical.TOKEN.AWAIT then
                 let start = context.location
                 context.next_token()
@@ -40,30 +53,11 @@ namespace Syntax.Parsers.Expressions is
                 expression_secondary_parser.parse(context)
             fi
 
-        // The expression that starts with the operator `operator`, already
-        // read at `location`: a partial application's placeholder or a
-        // prefix operator applied to what follows.
-        parse_after_operator(context: CONTEXT, operator: string, location: LOCATION) -> Trees.Expressions.Expression? is
-            if operator =~ "*" /\ _placeholder_follows(context) then
-                return Trees.Expressions.PLACEHOLDER(location)
-            fi
-
-            let name = Trees.Identifiers.Identifier(location, operator)
-            let right = parse(context)!
-
-            let unary = Trees.Expressions.UNARY(name.location::right.location, name, right)
-
-            // `- *` is `-(*)`: a partial application of the operator.
-            if Trees.Expressions.PARTIAL_APPLICATION.is_placeholder_operand(right) then
-                return Trees.Expressions.PARTIAL_APPLICATION(unary.location, unary)
-            fi
-
-            return unary
-        si
-
-        // Whether what follows a `*` makes it a placeholder rather than a
-        // prefix operator.
         _placeholder_follows(context: CONTEXT) -> bool is
+            use context.tokenizer_speculate_then_backtrack_bounded()
+
+            context.next_token()
+
             let token = context.current.token
 
             return

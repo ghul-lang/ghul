@@ -1502,7 +1502,7 @@ fi
 
 The compiler reads the marked value at the pattern, so the value does not need to be a constant. A local variable, a parameter and a field all work. A dotted name cannot express these. `~` is valid on any leaf that is a valid value to match. So `~` can be written on a literal or a dotted name, where it has no effect: `(~1, s)` and `(~Colour.RED, s)` match exactly as `(1, s)` and `(Colour.RED, s)` do.
 
-A `~` can also mark an expression, which the leaf tests the value at its position against. The expression is parsed as a call argument is, and ends at the `,`, `)` or `]` that ends the element, so `(~Below(0.0), s)`, `(~0..10, s)`, `(~limit + 1, s)` and `(~xs[0], s)` need no parentheses. `~(` opens a parenthesised expression, so `~(a, b)` is a marked tuple value. A marker followed by an operator is read as the marker and that operator, so `(~-1, s)` tests against `-1`. A leaf is tested in the same way as a `when` label: with whichever of `~` and `=~` fits better.
+A `~` can also mark an expression, which the leaf tests the value at its position against. The expression is parsed as a call argument is, and ends at the `,`, `)` or `]` that ends the element, so `(~Below(0.0), s)`, `(~0..10, s)`, `(~limit + 1, s)` and `(~xs[0], s)` need no parentheses. `~(` opens a parenthesised expression, so `~(a, b)` is a marked tuple value. A run of operator characters is one token, so a marker before an operator takes a space or parentheses: `(~ -1, s)` or `(~(-1), s)`, and `~ * < 3`. A leaf is tested in the same way as a `when` label: with whichever of `~` and `=~` fits better.
 
 A function literal or a partial application as a pattern value is a predicate, which a `~` that takes a function can call on the value at that position. Its parameter takes that value's type, as it would take a function parameter's type as a call argument:
 
@@ -1511,7 +1511,7 @@ A function literal or a partial application as a pattern value is a predicate, w
 
 let kind = case (a, b)
 when (~x => x % 2 == 0, _) then "first even"
-when (_, ~* < 3) then "second small"
+when (_, ~ * < 3) then "second small"
 else "other"
 esac;
 ```

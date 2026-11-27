@@ -6,8 +6,7 @@ namespace Syntax.Parsers.Variables is
         identifier_parser: Parser[Trees.Identifiers.Identifier],
         qualified_identifier_parser: Parser[Trees.Identifiers.Identifier],
         type_parser: Parser[Trees.TypeExpressions.TypeExpression],
-        expression_parser: LAZY_PARSER[Trees.Expressions.Expression],
-        expression_tertiary_parser: LAZY_PARSER[Trees.Expressions.Expression]
+        expression_parser: Parser[Trees.Expressions.Expression]
     ): Base[Trees.Variables.DESTRUCTURING_VARIABLE_LEFT] is
         super()
 
@@ -58,12 +57,9 @@ namespace Syntax.Parsers.Variables is
         // The expression a marked leaf tests against. It is a full
         // expression, as a call argument is, so it ends at the `,`, `)`
         // or `]` that ends the element: `~x => x > 0`, `~0.0..1.0` and
-        // `~* < 3` need no parentheses.
+        // `~ * < 3` need no parentheses.
         _parse_marked_expression(context: CONTEXT) -> Trees.Expressions.Expression? =>
-            _expression.parse(context)
-
-        _expression: Parsers.Expressions.EXPRESSION =>
-            cast Parsers.Expressions.EXPRESSION(expression_parser.value())
+            expression_parser.parse(context)
 
         _parse_literal_expression(context: CONTEXT) -> Trees.Expressions.Expression? is
             let location = context.location
@@ -138,20 +134,10 @@ namespace Syntax.Parsers.Variables is
                 // matchable at all, and is accepted (as a no-op) on the
                 // leaf forms that already match, so every matching leaf
                 // can be written the same way.
-                // `~` scanned as one token with the operator after it, as
-                // in `~-1` or `~* < 3`, is the marker followed by that
-                // operator.
-                let is_joined = context.in_refutable_pattern /\ is_joined_match_marker(context)
-                let marker_location = if is_joined then match_marker_location(context) else context.location fi
-                let is_marked mut = is_joined \/ is_match_marker(context)
+                let marker_location = context.location
+                let is_marked mut = is_match_marker(context)
 
-                if is_joined then
-                    let expr = _expression.parse_after_joined_match_marker(context)
-
-                    let leaf = Trees.Variables.LITERAL_VARIABLE_LEFT(marker_location::expr.location, expr, true)
-                    leaf.marker_location = marker_location
-                    element = leaf
-                elif is_marked then
+                if is_marked then
                     context.next_token()
 
                     // Outside a refutable pattern a leaf can only bind,
@@ -169,9 +155,7 @@ namespace Syntax.Parsers.Variables is
                     fi
                 fi
 
-                if is_joined then
-                    // parsed above
-                elif context.current.token == Lexical.TOKEN.OPERATOR /\ context.current.value_string =~ ".." then
+                if context.current.token == Lexical.TOKEN.OPERATOR /\ context.current.value_string =~ ".." then
                     // The rest of a sequence: `..name`, `.._` or a bare `..`.
                     // `..` means this only here; anywhere else it is an
                     // ordinary operator and is not looked at.
