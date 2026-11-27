@@ -339,7 +339,7 @@ namespace Syntax.Process is
                 return
             fi
 
-            _add_operator_edges(binary.operation, binary.left, binary.right)
+            _add_operator_edges(binary.operation, binary.left, binary.right, binary.value)
         si
 
         visit(unary: Expressions.UNARY) is
@@ -347,7 +347,7 @@ namespace Syntax.Process is
                 return
             fi
 
-            _add_operator_edges(unary.operation, unary.right, null)
+            _add_operator_edges(unary.operation, unary.right, null, unary.value)
         si
 
         // A `case` value arm and a pattern leaf test their value with a
@@ -356,20 +356,86 @@ namespace Syntax.Process is
         // covers only the operators this compilation declares; one
         // imported from another assembly is bounded only through these
         // edges. A `null` value is a presence test and calls nothing.
-        _add_pattern_test_edges(value: Trees.Expressions.Expression) is
+        // `test` is the test the value compiled to, where there is one.
+        _add_pattern_test_edges(value: Trees.Expressions.Expression, test: IR.Values.Value?) is
             if !_current? \/ isa Expressions.NULL(value) then
                 return
             fi
 
+            if _add_compiled_operator_edge(test, ["~", "=~", "<>"]) then
+                return
+            fi
+
             for name in ["~", "=~", "<>"] do
-                _add_operator_edges(Identifiers.Identifier(value.location, name), null, value)
+                _add_operator_edges(Identifiers.Identifier(value.location, name), null, value, null)
+            od
+        si
+
+        // Bounds an operator expression by what it compiled to, where
+        // that is one call or one built-in operation, possibly negated
+        // or compared with zero: an edge to the operator called where it
+        // is a namespace-scope or static function of one of `names`, and
+        // none otherwise - a member, a built-in operation or a helper is
+        // no operator in scope. False where the compiled value has any
+        // other shape, or there is none, and every operator of the name
+        // in scope has to bound the expression instead.
+        _add_compiled_operator_edge(compiled: IR.Values.Value?, names: string[]) -> bool is
+            if !_resolved_mode \/ !compiled? then
+                return false
+            fi
+
+            if let view: IR.Values.NARROW_VIEW = compiled then
+                return _add_compiled_operator_edge(view.underlying, names)
+            fi
+
+            // An operator's operands are spilled only where it needs
+            // them more than once, which a single call or operation
+            // never does.
+            if let block: IR.Values.BLOCK = compiled then
+                return block.values.count == 1 /\ _add_compiled_operator_edge(block.values[0], names)
+            fi
+
+            if let negation: IR.Values.NOT = compiled then
+                return _add_compiled_operator_edge(negation.value, names)
+            fi
+
+            if let order: IR.Values.COMPARE_ORDER_TO_ZERO = compiled then
+                return _add_compiled_operator_edge(order.value, names)
+            fi
+
+            if let call: IR.Values.Call.GLOBAL = compiled then
+                _add_operator_callee(call.written_function, names)
+                return true
+            fi
+
+            if let call: IR.Values.Call.STATIC = compiled then
+                _add_operator_callee(call.function, names)
+                return true
+            fi
+
+            return
+                isa IR.Values.Call.INSTANCE(compiled) \/
+                isa IR.Values.Call.STRUCT(compiled) \/
+                isa IR.Values.Call.INNATE(compiled) \/
+                isa IR.Values.RUNTIME(compiled) \/
+                isa IR.Values.ARITHMETIC(compiled) \/
+                isa IR.Values.COMPARE(compiled)
+        si
+
+        _add_operator_callee(callee: Function, names: string[]) is
+            for name in names do
+                if callee.name =~ name then
+                    _add_callee(callee)
+                    return
+                fi
             od
         si
 
         _add_operator_edges(
             operation: Identifiers.Identifier?,
             left: Trees.Expressions.Expression?,
-            right: Trees.Expressions.Expression?
+            right: Trees.Expressions.Expression?,
+            compiled: IR.Values.Value?
         ) is
             if !operation? then
                 _disqualify_because("operator-unresolved")
@@ -379,10 +445,12 @@ namespace Syntax.Process is
             // the operators in scope that take every operand as an
             // argument, as the operator compiler gathers them; instance
             // operators are bounded through the operand types below
-            let group = SCOPE_OPERATOR_CANDIDATES.find(_symbol_table, operation.location, operation.name)
+            if !_add_compiled_operator_edge(compiled, [operation.name]) then
+                let group = SCOPE_OPERATOR_CANDIDATES.find(_symbol_table, operation.location, operation.name)
 
-            if group? then
-                _add_callee_edges(group)
+                if group? then
+                    _add_callee_edges(group)
+                fi
             fi
 
             // `==` has a single compiler-generated implementation:
