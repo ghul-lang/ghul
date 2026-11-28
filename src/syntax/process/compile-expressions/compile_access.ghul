@@ -1461,7 +1461,7 @@ namespace Syntax.Process is
                     // so the canonical "unwrap to the sole field"
                     // rule is preserved.
                     unwrap.compile_expressions_state.value =
-                        build_default_variant_unwrap(
+                        build_default_variant_unwrap_or_throw(
                             unwrap.location,
                             unwrap_left_value,
                             classy,
@@ -1813,6 +1813,115 @@ namespace Syntax.Process is
             fi
 
             return variant_value
+        si
+
+        // `u!` where `u` may hold a variant other than the default one: the
+        // default variant's projection, or a throw when it holds anything
+        // else. The runtime's `ErrorException` is thrown when what the value
+        // holds instead is a `Ghul.Error`, and its `UnwrapFailedException[T]`
+        // otherwise. What the value holds is the field of the only other
+        // variant where that variant has exactly one, and the value itself
+        // where not. Where the runtime declares neither class, the checked
+        // cast `build_default_variant_unwrap` builds throws instead.
+        build_default_variant_unwrap_or_throw(
+            location: LOCATION,
+            operand: Value,
+            classy: Semantic.Symbols.Classy,
+            default_variant: Semantic.Symbols.VARIANT
+        ) -> Value is
+            let operand_type = operand.type!
+
+            if classy.is_variant \/ operand_type.is_optional then
+                return build_default_variant_unwrap(location, operand, classy, default_variant)
+            fi
+
+            let variant_type = _condition_analyzer.try_get_variant_type_for_classy(operand_type, default_variant)
+
+            if !variant_type? then
+                return build_default_variant_unwrap(location, operand, classy, default_variant)
+            fi
+
+            let failure = _build_unwrap_failure(location, operand_type, classy, default_variant)
+
+            if !failure? then
+                return build_default_variant_unwrap(location, operand, classy, default_variant)
+            fi
+
+            let value_extract = build_default_variant_unwrap(location, IR.Values.STACK_TOP(operand_type), classy, default_variant)
+
+            return IR.Values.UNWRAP_OR_THROW(
+                operand,
+                build_default_variant_isa(location, IR.Values.STACK_TOP(operand_type), default_variant, _innate_symbol_lookup.get_bool_type()),
+                value_extract,
+                failure.extract,
+                failure.payload,
+                failure.exception,
+                value_extract.type!
+            )
+        si
+
+        // What a failed `u!` throws, and how to read what it holds from the
+        // value on the stack, or null where the runtime declares no class
+        // to throw.
+        _build_unwrap_failure(
+            location: LOCATION,
+            operand_type: Type,
+            classy: Semantic.Symbols.Classy,
+            default_variant: Semantic.Symbols.VARIANT
+        ) -> (extract: Value, payload: IR.LOCAL, exception: Value)? is
+            let others = Collections.LIST[Semantic.Symbols.VARIANT]()
+
+            for alternative in classy.closed_alternatives do
+                if let variant: Semantic.Symbols.VARIANT = alternative /\ variant != default_variant then
+                    others.add(variant)
+                fi
+            od
+
+            let extract: Value mut = IR.Values.STACK_TOP(operand_type)
+            let payload_type: Type mut = operand_type
+
+            if others.count == 1 /\ others[0].field_count == 1 then
+                let other = others[0]
+
+                if
+                    let other_type = _condition_analyzer.try_get_variant_type_for_classy(operand_type, other),
+                    field_name = other.get_destructure_member_name(0),
+                    field_member = other_type.find_member(field_name)
+                then
+                    let loaded = field_member.load(location, IR.Values.CAST(other_type, IR.Values.STACK_TOP(operand_type), true), _symbol_loader)
+
+                    if let field_type = loaded.type /\ !field_type.is_error then
+                        extract = loaded
+                        payload_type = field_type
+                    fi
+                fi
+            fi
+
+            let payload = IR.LOCAL(".unwrap.payload.{IR.TEMP.get_next_id()}", payload_type)
+
+            let arguments = Collections.LIST[Value]()
+            arguments.add(payload.load())
+
+            if
+                let error_trait = _innate_symbol_lookup.find_error_trait_type() /\ error_trait.is_assignable_from(payload_type),
+                error_exception = _innate_symbol_lookup.find_error_exception_type(),
+                init = Semantic.KNOWN_MEMBERS.find(error_exception, "init", [error_trait])
+            then
+                return (extract, payload, _function_caller.call_constructor(init, arguments, error_exception))
+            fi
+
+            if let generic = _innate_symbol_lookup.find_unwrap_failed_exception_class() then
+                let type_arguments = Collections.LIST[Type]()
+                type_arguments.add(payload_type)
+
+                let exception_type = cast Type(Semantic.Types.GENERIC(location, generic, type_arguments))
+
+                if let init = Semantic.KNOWN_MEMBERS.find(exception_type, "init", [payload_type]) then
+                    return (extract, payload, _function_caller.call_constructor(init, arguments, exception_type))
+                fi
+            fi
+
+            return null
         si
 
         // Build a hinted "narrow further" message when a member

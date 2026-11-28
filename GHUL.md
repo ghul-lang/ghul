@@ -1119,7 +1119,9 @@ union Result[T, E] is
 si
 ```
 
-`r?` is then true when `r` holds `OK`. `r!` returns the `OK` value, and throws if `r` holds `ERROR`. A default variant with one field unwraps to that field, by position; the field does not need to be named `value`. A default variant with several fields unwraps to the variant. Inside `if r?`, `r` is narrowed to the default variant, so code reads its fields directly, with no `!`. The `else` branch narrows `r` to the other variant or variants. This is the same narrowing that `isa OK(r)` does.
+`r?` is then true when `r` holds `OK`. `r!` returns the `OK` value, and throws if `r` holds `ERROR`. A default variant with one field unwraps to that field, by position; the field does not need to be named `value`. A default variant with several fields unwraps to the variant.
+
+A failed `!` throws an exception that holds what the value held instead. When the union has one other variant and that variant has exactly one field, that field is held. Otherwise the value itself is held. When the held value's type implements `Ghul.Error`, `!` throws `Ghul.ErrorException`. Its `error` is the held value, and its message is the error's `message`. Otherwise `!` throws `Ghul.UnwrapFailedException[T]`, whose `payload` is the held value. So `r!` on a `Result[int, string]` holding `ERROR("oops")` throws `UnwrapFailedException[string]` with payload `"oops"`. Catch the non-generic `Ghul.UnwrapFailedException` to handle any `UnwrapFailedException[T]` whatever it holds. An `ErrorException` is not an `UnwrapFailedException`. Inside `if r?`, `r` is narrowed to the default variant, so code reads its fields directly, with no `!`. The `else` branch narrows `r` to the other variant or variants. This is the same narrowing that `isa OK(r)` does.
 
 A union can declare a **primary-constructor header** for state that every variant shares. Each variant includes the shared parameters in its field list with `..`:
 
@@ -1938,6 +1940,8 @@ si
 ```
 
 The code reads from top to bottom, although execution suspends at each `await`. `await e;` as a statement waits for the task to complete, and discards any result.
+
+`await` takes the whole member-access and call chain after it, but a `!` or `?` that ends the chain applies to the awaited value. So `await f()!` is `(await f())!`: it unwraps the result. `await a().b()!` awaits `a().b()` and unwraps the result. A `!` or `?` that a member access, call or index follows stays inside the chain, as in `await f()!.g()`. To unwrap an optional task before awaiting it, put the unwrap in parentheses: `await (f()!)`.
 
 A function declared `-> Concurrency.Future[T]` can `return` a bare `T`. The compiler gives the value to the completed task. When the body has no suspension, the compiler wraps the value as `Concurrency.Future.from_result(...)`. The function can also `return` a task, or any other awaitable value, whose result is a `T`:
 

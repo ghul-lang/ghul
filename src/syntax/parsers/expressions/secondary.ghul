@@ -133,6 +133,12 @@ namespace Syntax.Parsers.Expressions is
         parse(context: CONTEXT) -> Trees.Expressions.Expression is
             let use tokenizer_state = context.tokenizer_speculate_then_commit()
 
+            // Taken here, so an expression nested inside this one - an
+            // argument, an index, a parenthesised operand - is read as
+            // usual.
+            let is_await_operand = context.is_await_operand
+            context.is_await_operand = false
+
             let start = context.location
 
             // `* .name` makes a partial application's `*` the receiver of
@@ -140,12 +146,12 @@ namespace Syntax.Parsers.Expressions is
             if is_placeholder_receiver(context) then
                 context.next_token()
 
-                return _parse_trailers(context, start, Trees.Expressions.PLACEHOLDER(start), tokenizer_state)
+                return _parse_trailers(context, start, Trees.Expressions.PLACEHOLDER(start), tokenizer_state, null, null, is_await_operand)
             fi
 
             let result = expression_primary_parser.parse(context)!
 
-            return _parse_trailers(context, start, result, tokenizer_state)
+            return _parse_trailers(context, start, result, tokenizer_state, null, null, is_await_operand)
         si
 
         // The right side of `|>` or `~>`, with `subject` threaded in as
@@ -363,13 +369,50 @@ namespace Syntax.Parsers.Expressions is
             return (is_recursive, memo, is_pure)
         si
 
+        // Whether the `!` or `?` at the current token starts a run of them
+        // that nothing else in the chain follows: no member access, call or
+        // index after it. `f()!` and `f()!?` end that way; `f()!.x` and
+        // `f()?.x` do not.
+        _ends_with_trailing_unwraps(context: CONTEXT) -> bool is
+            use context.tokenizer_speculate_then_backtrack_bounded()
+
+            while true do
+                if context.current.token == Lexical.TOKEN.OPERATOR /\ context.current_string =~ "!" then
+                    context.next_token()
+                elif context.current.token == Lexical.TOKEN.QUESTION then
+                    context.next_token()
+
+                    if context.current.token == Lexical.TOKEN.DOT then
+                        return false
+                    fi
+                else
+                    break
+                fi
+            od
+
+            let token = context.current.token
+
+            if token == Lexical.TOKEN.DOT then
+                return false
+            fi
+
+            return
+                context.current.first_on_line \/
+                (
+                    token != Lexical.TOKEN.PAREN_OPEN /\
+                    token != Lexical.TOKEN.SQUARE_OPEN /\
+                    token != Lexical.TOKEN.SQUARE_OPEN_TICK /\
+                    token != Lexical.TOKEN.REF
+                )
+        si
+
         _parse_trailers(
             context: CONTEXT,
             start: LOCATION,
             result_in: Trees.Expressions.Expression,
             tokenizer_state: Syntax.Parsers.TOKEN_LOOKAHEAD_SPECULATE_THEN_COMMIT
         ) -> Trees.Expressions.Expression =>
-            _parse_trailers(context, start, result_in, tokenizer_state, null, null)
+            _parse_trailers(context, start, result_in, tokenizer_state, null, null, false)
 
         // A member name written on the line after its `.`. Wrapping a chain
         // that way is legal, but so is a `.` left dangling at the end of a
@@ -384,7 +427,8 @@ namespace Syntax.Parsers.Expressions is
             start: LOCATION,
             left: Trees.Expressions.Expression,
             completion_target_start: LOCATION,
-            tokenizer_state: Syntax.Parsers.TOKEN_LOOKAHEAD_SPECULATE_THEN_COMMIT
+            tokenizer_state: Syntax.Parsers.TOKEN_LOOKAHEAD_SPECULATE_THEN_COMMIT,
+            is_await_operand: bool
         ) -> Trees.Expressions.Expression is
             let missing_at = context.previous_end
 
@@ -402,7 +446,8 @@ namespace Syntax.Parsers.Expressions is
                     Trees.Expressions.MEMBER(start::member.location, left, member, completion_target_start::member.location),
                     tokenizer_state,
                     left,
-                    member
+                    member,
+                    is_await_operand
                 )
 
             if !result.is_poisoned /\ context.logger.error_count == errors_before then
@@ -431,7 +476,8 @@ namespace Syntax.Parsers.Expressions is
             result_in: Trees.Expressions.Expression,
             tokenizer_state: Syntax.Parsers.TOKEN_LOOKAHEAD_SPECULATE_THEN_COMMIT,
             previous_left_in: Trees.Expressions.Expression?,
-            previous_identifier_in: Trees.Identifiers.Identifier?
+            previous_identifier_in: Trees.Identifiers.Identifier?,
+            is_await_operand: bool
         ) -> Trees.Expressions.Expression is
             let result: Trees.Expressions.Expression mut = result_in
             let previous_left: Trees.Expressions.Expression? mut = previous_left_in
@@ -596,7 +642,7 @@ namespace Syntax.Parsers.Expressions is
                         context.current.token == Lexical.TOKEN.IDENTIFIER /\
                         context.current.first_on_line
                     then
-                        return _parse_member_on_next_line(context, start, result, completion_target_start, tokenizer_state)
+                        return _parse_member_on_next_line(context, start, result, completion_target_start, tokenizer_state, is_await_operand)
                     elif
                         context.current.token == Lexical.TOKEN.IDENTIFIER
                     then
@@ -858,6 +904,12 @@ namespace Syntax.Parsers.Expressions is
                     fi
 
                 when Lexical.TOKEN.QUESTION then
+                    // `await` takes what is before a trailing `?`; it
+                    // applies the `?` to the awaited value itself.
+                    if is_await_operand /\ _ends_with_trailing_unwraps(context) then
+                        return result
+                    fi
+
                     let question_location = context.location
                     tokenizer_state.commit_if_speculating()
 
@@ -920,6 +972,12 @@ namespace Syntax.Parsers.Expressions is
                     tokenizer_state.commit_if_speculating()
 
                     if context.current_string =~ "!" then
+                        // `await` takes what is before a trailing `!`; it
+                        // applies the `!` to the awaited value itself.
+                        if is_await_operand /\ _ends_with_trailing_unwraps(context) then
+                            return result
+                        fi
+
                         result = Trees.Expressions.UNWRAP(start::context.location, result)
 
                         context.next_token()
