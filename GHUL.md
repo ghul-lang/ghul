@@ -163,7 +163,7 @@ use MaybeName = string?;
 use Numbers = Collections.LIST[int];
 ```
 
-`use default` imports a fixed set of names that most files want. By default the set is `IO.Std.write_line`, `Ghul.parse`, `Ghul.Pipes`, `Collections`, `Ghul.Math`, `Ghul.NumberTheory` and `Ghul.Functional`, plus `dbl` and `sgl` as aliases for `double` and `single`. A project replaces the set with `--default-use`, one name per comma-separated entry; an entry may be `alias=name`, importing the name under a different name, as `dbl=double` imports `double` as `dbl`. The alias stands in the same default tier as a plain name, so an explicit `use` of the alias wins the same way. A name in the default set that the runtime doesn't define is skipped. The set is a fallback: a name that an explicit `use` in the same block imports, before or after the `use default`, means what that import says, and the default set's import of it is not a duplicate. A function the default set imports is another overload of its name, unless an explicit import or the program's own declaration takes the same parameters, which wins. In every other way `use default` is an ordinary `use`: it applies to the namespace block that contains it. Unless the project asks for an implicit import with `--implicit-default-use`, a file that does not write `use default` gets none of these names.
+`use default` imports a fixed set of names that most files want. By default the set is `IO.Std.write_line`, `Ghul.parse`, `Ghul.Pipes`, `Collections`, `Ghul.Math`, `Ghul.NumberTheory`, `Ghul.Functional` and `Concurrency.run`, plus `dbl` and `sgl` as aliases for `double` and `single`. A project replaces the set with `--default-use`, one name per comma-separated entry; an entry may be `alias=name`, importing the name under a different name, as `dbl=double` imports `double` as `dbl`. The alias stands in the same default tier as a plain name, so an explicit `use` of the alias wins the same way. A name in the default set that the runtime doesn't define is skipped. The set is a fallback: a name that an explicit `use` in the same block imports, before or after the `use default`, means what that import says, and the default set's import of it is not a duplicate. A function the default set imports is another overload of its name, unless an explicit import or the program's own declaration takes the same parameters, which wins. In every other way `use default` is an ordinary `use`: it applies to the namespace block that contains it. Unless the project asks for an implicit import with `--implicit-default-use`, a file that does not write `use default` gets none of these names.
 
 ```ghul
 use default
@@ -475,9 +475,9 @@ xs[1..<0];       // 20, 30, 40, 50 — to the end
 xs[3..<<0];      // 30, 40, 50   — the last three
 ```
 
-The slice is an `E[]` that reads the source. Nothing is copied, so a later change to a mutable source is visible in the slice. Arrays, strings and any type that implements `Collections.List[E]` accept a range index. A range index on a string returns a string, which is a copy of the slice. A range index is read-only: a slice cannot be assigned through. A type can declare its own `[r: System.Range]` indexer, and the compiler uses that indexer first.
+The slice is an `E[]` that reads the source. Nothing is copied, so a later change to a mutable source is visible in the slice. Arrays, strings and any type that implements `Collections.List[E]` accept a range index. A range index on a string returns a string, which is a copy of the slice. A range index is read-only: a slice cannot be assigned through. A type can declare its own `[r: Ghul.IndexRange]` indexer, and the compiler uses that indexer first.
 
-The from-the-end operators build a `System.Range`. A `System.Range` has endpoints that only have values relative to a length, so a `System.Range` cannot be iterated. `..` and `::` can be iterated. `for i in 1..<1 do` is an error.
+The from-the-end operators build a `Ghul.IndexRange`. A `Ghul.IndexRange` has endpoints that only have values relative to a length, so a `Ghul.IndexRange` cannot be iterated. `..` and `::` can be iterated. `for i in 1..<1 do` is an error.
 
 A **two-dimensional array** of `E` is written `E[,]`, and a three-dimensional one `E[,,]`. Higher ranks are an error. `E[,]` is `Collections.Matrix2[E]`, a list of its rows, and `E[,,]` is `Collections.Matrix3[E]`, a list of its planes. Diagnostics, hover and inlays show `E[,]` and `E[,,]`. Both are read-only and covariant:
 
@@ -631,7 +631,7 @@ This recognition applies only to a global function found by name: the default `e
 
 A function with the build's entry-point name and any other signature is an error at the function. The error names the part of the signature that is invalid:
 
-- a return type that is neither `int` nor `void`, nor one of the two `Future` types above. Another task-like type, such as `Tasks.ValueTask`, has this error.
+- a return type that is neither `int` nor `void`, nor one of the two `Future` types above. Another task-like type, such as `System.Threading.Tasks.ValueTask`, has this error.
 - a `Concurrency.Future[T]` whose `T` is not `int`
 - more than one parameter
 - a parameter of any other type
@@ -2363,7 +2363,9 @@ The core types have ghūl names in ghūl namespaces:
 - `Text` has functions for numbers in a base and bytes as text: `to_base(value, base)` writes an integer in base 2, 8, 10 or 16, and `from_base(text, base)` reads one back as a `long?`; `to_hex`, `to_hex_lower` and `from_hex` write and read bytes as hexadecimal; `to_base64` and `from_base64` do the same in Base64. Each `from_` function answers null for text it can't read. `System.Convert` is still there and still throws.
 - The bit-level numeric types are in `Ghul.Math`, beside the maths functions: `System.Numerics.BitOperations` is `Ghul.Math.BitOperations` and `System.BitConverter` is `Ghul.Math.BitConverter`. `System.Numerics.Complex` is the built-in `complex`.
 - The reflection types are in `Ghul.Reflection`, beside `Ghul.Type`: `System.Reflection.Assembly`, `FieldInfo`, `ParameterInfo`, `ConstructorInfo`, `MethodInfo`, `PropertyInfo`, `BindingFlags` and `AmbiguousMatchException` are the same names in `Ghul.Reflection`, and `System.Activator` is `Ghul.Reflection.Activator`. `Ghul.Reflection.get_type(name)`, `get_function(name)` and `get_function(name, types)` find a type, and a global function as a static `MethodInfo`, by the name the source gives it, such as `Ghul.Math.abs`, on every target.
-- The language's own types are in `Ghul`: `System.GC`, `System.ObsoleteAttribute`, `System.Runtime.CompilerServices.MethodImplAttribute` and `MethodImplOptions` are `Ghul.GC`, `Ghul.ObsoleteAttribute`, `Ghul.MethodImplAttribute` and `Ghul.MethodImplOptions`, and `System.IFormattable` is `Ghul.Formattable`. `System.Threading.Thread` is `Tasks.Thread`.
+- The language's own types are in `Ghul`: `System.GC`, `System.ObsoleteAttribute`, `System.Runtime.CompilerServices.MethodImplAttribute` and `MethodImplOptions` are `Ghul.GC`, `Ghul.ObsoleteAttribute`, `Ghul.MethodImplAttribute` and `Ghul.MethodImplOptions`, and `System.IFormattable` is `Ghul.Formattable`. The types the core library also provides on wasm and llvm have the same names on .NET: `System.Index` and `System.Range` are `Ghul.Index` and `Ghul.IndexRange`, and `System.Enum` and `System.Attribute` are `Ghul.Enum` and `Ghul.Attribute`.
+- The asynchronous-function protocol is in `Concurrency`: `System.Runtime.CompilerServices.IAsyncStateMachine`, `INotifyCompletion` and `ICriticalNotifyCompletion` are `Concurrency.AsyncStateMachine`, `Concurrency.NotifyCompletion` and `Concurrency.CriticalNotifyCompletion`, and `AsyncMethodBuilderAttribute` is `Concurrency.AsyncMethodBuilderAttribute`.
+- `System.Threading.Thread`, and the types in `System.Threading.Tasks` other than `Concurrency.Future` and `Concurrency.Completer`, such as `System.Threading.Tasks.ValueTask`, keep their .NET names.
 - `System.Uri` is `IO.Uri`.
 - The hashes are in `Crypto`: `System.Security.Cryptography.MD5`, `SHA1` and `SHA256` are `Crypto.MD5`, `Crypto.SHA1` and `Crypto.SHA256`, and each has `hash_data(bytes)`, which returns the digest. `System.Security.Cryptography.RandomNumberGenerator`, the secure generator, is `Crypto.RandomNumberGenerator`.
 - `System.Random` is `Ghul.Random`.
@@ -2373,7 +2375,7 @@ The core types have ghūl names in ghūl namespaces:
 - `KeyValuePair<K, V>` is `Collections.KeyValuePair[K, V]`. `Ghul.Box`, `Collections.PriorityQueue`, `Ghul.Pipes.IndexedValue` and `Ghul.Interop.Pinned` are the PascalCase names of the library types.
 - `IComparer<T>` and `IEqualityComparer<T>` are `Collections.Comparer[T]` and `Collections.EqualityComparer[T]`, as above.
 
-These are the only names for these types, on every target: the .NET name of a type in this list, and any earlier ghūl spelling of it, such as `Text.STRING_BUILDER`, is not found.
+These are the only names for these types, on every target: the .NET name of a type in this list, and any earlier ghūl spelling of it, such as `Text.STRING_BUILDER`, is not found. For now there are exceptions: the .NET names of the index, range, enum, attribute and asynchronous-function types above still compile, as do `Tasks` for `System.Threading.Tasks` and `Tasks.Thread` for `System.Threading.Thread`. A later major release removes them.
 
 `Ghul.Equatable[T]` and `Ghul.Comparable[T]` are declared with operators, not named methods. `Ghul.Equatable[T]` requires `=~`, and `Ghul.Comparable[T]` requires `<>`. So a type implements them by defining the operator. Every .NET type that implements these interfaces gets the operator too. This is how `=~` compares a `System.DateTime`, and how the relational operators order a `System.Version`.
 

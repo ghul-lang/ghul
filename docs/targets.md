@@ -247,7 +247,7 @@ Reflection on the `wasm` and `llvm` targets is a subset of .NET reflection, with
 - a `Type`'s `get_methods`, `get_method(name)` and `get_method(name, types)`, and a `MethodInfo`'s `get_parameters`, `declaring_type`, `return_type` and `invoke`, with a null instance for a static method. Each overload is its own `MethodInfo`. `get_method(name)` throws `Ghul.Reflection.AmbiguousMatchException` where the name is overloaded, and `get_method(name, types)` matches the parameter types exactly.
 - `Ghul.Reflection.get_type(name)`, `Ghul.Reflection.get_function(name)` and `Ghul.Reflection.get_function(name, types)`, which find a type, and a global function as a static `MethodInfo`, by the name the source gives it, such as `Ghul.Math.abs`. They work the same on every target, and ignore an assembly that qualifies a type's name.
 - `Nullable.get_underlying_type`
-- an enum's names and values, through `System.Enum`
+- an enum's names and values, through `Ghul.Enum`
 
 The methods described are a type's tests, and the other methods it declares: those of the program's own types, and those of a library type marked `@reflected()`. Global functions are described in the same way, as static methods of their namespace's `$globals` type: the program's own, and those of a library namespace marked `@reflected()`. A method or global function with type parameters of its own, one taking an argument by reference, one taking more than six arguments, an operator, a property's accessor, and a global function the target computes where it is called, such as `Ghul.Math.sqrt`, are not described. Under `--rtti-roots`, only the methods of a type marked `@reflected()` and the global functions of a namespace marked so are described.
 
