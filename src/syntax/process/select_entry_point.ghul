@@ -211,6 +211,16 @@ namespace Syntax.Process is
 
                 let rank = if function.wraps_top_level_entry then _TOP_LEVEL_RANK else _NAMED_RANK fi
 
+                // The wrapper of an asynchronous entry returns what the
+                // entry's task carries, which is held to the same shapes.
+                if function.runs_asynchronous_entry /\ _entry_point_shape_fault(symbol)? then
+                    if _build_flags.want_executable /\ !_build_flags.want_library /\ !_rejected_named? then
+                        _rejected_named = REJECTED_ENTRY_NAME(wrapped_location, wrapped_name, "the task's result type is neither int nor void")
+                    fi
+
+                    return true
+                fi
+
                 _candidates.add(
                     ENTRY_POINT_CANDIDATE(
                         rank,
@@ -379,9 +389,10 @@ namespace Syntax.Process is
 
             let lookup = IoC.CONTAINER.instance.innate_symbol_lookup
 
-            // An asynchronous function is ruled out here too, by the
-            // task-like it returns rather than by anything else about
-            // it: neither a task nor a task-like is int or void.
+            // A function returning a task is ruled out here: one that
+            // returns a `Concurrency.Future` reaches here as the wrapper
+            // that runs it, and any other task-like is neither int nor
+            // void.
             if !return_type.matches(lookup.get_int_type()) /\ !return_type.matches(lookup.get_void_type()) then
                 return "the return type is neither int nor void"
             fi

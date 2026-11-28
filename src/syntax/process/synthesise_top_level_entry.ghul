@@ -109,6 +109,8 @@ namespace Syntax.Process is
             // after that.
             let entry = _synthesise_entry(statements, _keeps_both_parameters(list))
 
+            _reject_await_in_cell(entry)
+
             list.push(entry)
 
             _form_unit(list, entry, let_names)
@@ -643,6 +645,28 @@ namespace Syntax.Process is
             fi
 
             return false
+        si
+
+        // A cell returns the value of its final expression to whatever runs
+        // the session, which runs it synchronously, so its statements cannot
+        // await. Reported at the first `await`, before anything else is
+        // known about the cell.
+        _reject_await_in_cell(entry: Definitions.FUNCTION) is
+            if !IoC.CONTAINER.instance.build_flags.is_session_step then
+                return
+            fi
+
+            let scanner = AWAIT_SCANNER()
+
+            scanner.scan(entry.body)
+
+            if let at = scanner.first then
+                _logger.error(
+                    at,
+                    "await-in-cell", "a cell's top-level statements cannot await",
+                    at,
+                    "help: run the asynchronous code to completion with 'Concurrency.run(() => ...)'")
+            fi
         si
 
         // Whether the entry keeps both parameters whatever its statements
