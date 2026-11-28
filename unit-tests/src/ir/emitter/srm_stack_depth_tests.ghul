@@ -1,0 +1,159 @@
+@@IF.dotnet()
+
+namespace IR.Emitter.UnitTests is
+    use System.Reflection.Metadata.ILOpCode
+    use System.Reflection.Metadata.EntityHandle
+    use System.Reflection.Metadata.Ecma335.MetadataTokens
+
+    use IR.Emitter.SRM_CALL_EFFECT
+    use IR.Emitter.SRM_CALL_EFFECTS
+    use IR.Emitter.SRM_METHOD_BODY_EMITTER
+    use Assertions
+
+    // The evaluation stack depth a method body is followed at, and the
+    // call effects read from method signatures that it follows calls by.
+    class SRM_STACK_DEPTH_TESTS is
+        init() is si
+
+        @test()
+        decode__should_read_a_static_method_taking_two_arguments_and_returning_nothing() is
+            // DEFAULT, two parameters, void, int32, int32
+            let effect = SRM_CALL_EFFECT.decode([0x00ub, 0x02ub, 0x01ub, 0x08ub, 0x08ub])!
+
+            are_equal(2, effect.arguments)
+            is_true(!effect.has_this, "a static method takes no receiver")
+            is_true(!effect.returns, "a void method leaves no result")
+            are_equal(2, effect.call_pops)
+        si
+
+        @test()
+        decode__should_read_an_instance_method_returning_a_value() is
+            // HASTHIS, one parameter, int32 result, string parameter
+            let effect = SRM_CALL_EFFECT.decode([0x20ub, 0x01ub, 0x08ub, 0x0Eub])!
+
+            are_equal(1, effect.arguments)
+            is_true(effect.has_this, "an instance method takes a receiver")
+            is_true(effect.returns, "an int32 result is left on the stack")
+            are_equal(2, effect.call_pops)
+        si
+
+        @test()
+        decode__should_skip_the_generic_parameter_count_of_a_generic_method() is
+            // GENERIC, one type parameter, three parameters, void
+            let effect = SRM_CALL_EFFECT.decode([0x10ub, 0x01ub, 0x03ub, 0x01ub, 0x1Eub, 0x00ub, 0x08ub, 0x08ub])!
+
+            are_equal(3, effect.arguments)
+            is_true(!effect.returns, "a void method leaves no result")
+        si
+
+        @test()
+        decode__should_skip_custom_modifiers_on_the_return_type() is
+            // DEFAULT, no parameters, modopt(type token 0x05), void
+            let effect = SRM_CALL_EFFECT.decode([0x00ub, 0x00ub, 0x20ub, 0x05ub, 0x01ub])!
+
+            is_true(!effect.returns, "a modified void return is still void")
+        si
+
+        @test()
+        decode__should_answer_null_for_a_field_signature() is
+            is_true(!SRM_CALL_EFFECT.decode([0x06ub, 0x08ub])?, "a field signature describes no call")
+        si
+
+        @test()
+        depth__should_follow_pushes_pops_and_calls() is
+            let effects = SRM_CALL_EFFECTS()
+            let target = _method(1)
+
+            effects.record(target, SRM_CALL_EFFECT(2, false, true))
+
+            let body = SRM_METHOD_BODY_EMITTER()
+
+            body.track_stack(effects)
+
+            body.ldc_i4(1)
+            body.ldc_i4(2)
+            body.ldc_i4(3)
+            are_equal(3, body.depth!)
+
+            body.call(target)
+            are_equal(2, body.depth!)
+
+            body.op(ILOpCode.ADD)
+            are_equal(1, body.depth!)
+
+            body.pop()
+            are_equal(0, body.depth!)
+        si
+
+        @test()
+        depth__should_be_unknown_after_an_unconditional_branch_until_a_label_a_branch_reached() is
+            let body = SRM_METHOD_BODY_EMITTER()
+
+            body.track_stack(SRM_CALL_EFFECTS())
+
+            let target = LABEL()
+
+            body.ldc_i4(1)
+            body.branch(ILOpCode.BR, target)
+            is_true(!body.depth?, "nothing falls through an unconditional branch")
+
+            body.mark_label(target)
+            are_equal(1, body.depth!)
+        si
+
+        @test()
+        depth__should_be_unknown_where_the_body_is_not_followed() is
+            let body = SRM_METHOD_BODY_EMITTER()
+
+            body.ldc_i4(1)
+
+            is_true(!body.depth?, "a body without call effects is not followed")
+        si
+
+        @test()
+        mark_label__should_fail_where_two_paths_reach_a_label_at_different_depths() is
+            let body = SRM_METHOD_BODY_EMITTER()
+
+            body.track_stack(SRM_CALL_EFFECTS())
+
+            let target = LABEL()
+
+            body.ldc_i4(1)
+            body.branch(ILOpCode.BRTRUE, target)
+            body.ldc_i4(2)
+
+            is_true(_fails(() => body.mark_label(target)), "a label reached at depths 0 and 1 was accepted")
+        si
+
+        @test()
+        pop__should_fail_on_an_empty_stack() is
+            let body = SRM_METHOD_BODY_EMITTER()
+
+            body.track_stack(SRM_CALL_EFFECTS())
+
+            is_true(_fails(() => body.pop()), "a pop from an empty stack was accepted")
+        si
+
+        @test()
+        call__should_fail_for_a_target_with_no_recorded_effect() is
+            let body = SRM_METHOD_BODY_EMITTER()
+
+            body.track_stack(SRM_CALL_EFFECTS())
+
+            is_true(_fails(() => body.call(_method(2))), "a call with no recorded effect was accepted")
+        si
+
+        _method(row: int) -> EntityHandle =>
+            cast EntityHandle(MetadataTokens.method_definition_handle(row))
+
+        _fails(action: () -> void) -> bool is
+            try
+                action()
+            catch e: Ghul.AssertFailedException
+                return true
+            yrt
+
+            return false
+        si
+    si
+si

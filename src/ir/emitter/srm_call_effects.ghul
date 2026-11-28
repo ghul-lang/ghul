@@ -1,0 +1,117 @@
+@@IF.dotnet()
+
+namespace IR.Emitter is
+    use System.Reflection.Metadata.EntityHandle
+    use System.Reflection.Metadata.Ecma335.MetadataTokens
+
+    // How a call to each method a body can name changes the evaluation
+    // stack: how many arguments it takes, whether it takes a receiver
+    // as well, and whether it leaves a result. Keyed by the token the
+    // call instruction carries, and recorded where the token is made,
+    // so the body emitter can follow the stack depth exactly through
+    // every call it encodes.
+    class SRM_CALL_EFFECTS is
+        _effects: Collections.MAP[int, SRM_CALL_EFFECT]
+
+        init() is
+            _effects = Collections.MAP[int, SRM_CALL_EFFECT]()
+        si
+
+        record(handle: EntityHandle, effect: SRM_CALL_EFFECT) is
+            _effects[MetadataTokens.get_token(handle)] = effect
+        si
+
+        // Records the effect a method signature blob describes. A blob
+        // that is not a method signature, such as a field's, records
+        // nothing.
+        record_signature(handle: EntityHandle, signature: ARRAY[ubyte]) is
+            if let effect = SRM_CALL_EFFECT.decode(signature) then
+                record(handle, effect)
+            fi
+        si
+
+        // Records that `specification` calls as `method` does: an
+        // instantiation of a generic method takes the arguments its open
+        // method takes.
+        record_instantiation(specification: EntityHandle, method: EntityHandle) is
+            if let effect = effect_of(method) then
+                record(specification, effect)
+            fi
+        si
+
+        effect_of(handle: EntityHandle) -> SRM_CALL_EFFECT? is
+            let effect: SRM_CALL_EFFECT mut
+
+            if _effects.try_get_value(MetadataTokens.get_token(handle), effect ref) then
+                return effect
+            fi
+
+            return null
+        si
+    si
+
+    // How one method's calls change the evaluation stack.
+    //
+    // - arguments: the parameters the signature declares, not counting
+    //   the receiver
+    // - has_this: whether the method also takes a receiver
+    // - returns: whether a call leaves a result on the stack
+    class SRM_CALL_EFFECT(arguments: int, has_this: bool, returns: bool) is
+        // What a `call` or `callvirt` pops.
+        call_pops: int => arguments + (if has_this then 1 else 0 fi)
+
+        // The effect an ECMA-335 method signature blob describes, or null
+        // where the blob is not a method signature.
+        decode(signature: ARRAY[ubyte]) -> SRM_CALL_EFFECT? static is
+            if signature.count == 0 then
+                return null
+            fi
+
+            let header = int(signature[0])
+
+            // The low four bits are the calling convention; a field,
+            // local, property or generic instantiation signature is
+            // above the method kinds.
+            if (header & 0x0F) > 5 then
+                return null
+            fi
+
+            let position mut = 1
+
+            if (header & 0x10) != 0 then
+                let (_, after_generic_count) = _compressed(signature, position)
+                position = after_generic_count
+            fi
+
+            let (arguments, after_count) = _compressed(signature, position)
+            position = after_count
+
+            // Custom modifiers on the return type each name a type.
+            while signature[position] == 0x1Fub \/ signature[position] == 0x20ub do
+                let (_, after_modifier) = _compressed(signature, position + 1)
+                position = after_modifier
+            od
+
+            return SRM_CALL_EFFECT(arguments, (header & 0x20) != 0, signature[position] != 0x01ub)
+        si
+
+        // An ECMA-335 compressed unsigned integer at `position`, and the
+        // position after it.
+        _compressed(signature: ARRAY[ubyte], position: int) -> (value: int, next: int) static is
+            let first = int(signature[position])
+
+            if (first & 0x80) == 0 then
+                return (first, position + 1)
+            elif (first & 0xC0) == 0x80 then
+                return (((first & 0x3F) << 8) | int(signature[position + 1]), position + 2)
+            fi
+
+            return (
+                ((first & 0x1F) << 24) |
+                (int(signature[position + 1]) << 16) |
+                (int(signature[position + 2]) << 8) |
+                int(signature[position + 3]),
+                position + 4)
+        si
+    si
+si

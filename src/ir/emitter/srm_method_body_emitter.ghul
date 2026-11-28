@@ -65,12 +65,34 @@ namespace IR.Emitter is
         // The body as encoded by `flush`.
         _encoding: SRM_BODY_ENCODING?
 
+        // The call effects the evaluation stack depth is followed through,
+        // set by `track_stack`. A body without them, such as one the
+        // structure walk writes, is not followed.
+        _call_effects: SRM_CALL_EFFECTS?
+
+        // The depth where the next instruction goes, or null where no
+        // instruction falls through to it and no branch has said what it
+        // is: after an unconditional transfer, until the next label a
+        // branch has reached.
+        _depth: int?
+
+        // The depth each label is reached at, from the first branch or
+        // fall-through that reaches it. Every other must agree.
+        _label_depths: Collections.MAP[IR.LABEL, int]
+
+        // How many values are being lowered around the current position
+        // as operands of other values, so that an exit with a nonzero
+        // count can be leaving from the middle of an expression. Kept by
+        // the lowering.
+        operand_nesting: int public
+
         init() is
             _body = Collections.LIST[BufferedInstruction]()
 
             _local_slots = Collections.MAP[IR.LOCAL, int]()
             _local_types = Collections.LIST[Type]()
             _regions = Collections.LIST[(try_start: int, try_end: int, handler_start: int, handler_end: int, catch_type: EntityHandle?)]()
+            _label_depths = Collections.MAP[IR.LABEL, int]()
         si
 
         // Marks the current position and returns a handle on it that
@@ -115,10 +137,106 @@ namespace IR.Emitter is
 
         mark_label(label: IR.LABEL) is
             _body.add(LABEL(label))
+
+            if !_call_effects? then
+                return
+            fi
+
+            if let depth = _depth then
+                _arrive(label, depth)
+            elif _label_depths.contains_key(label) then
+                _depth = _label_depths[label]
+            fi
         si
 
         branch(op_code: ILOpCode, label: IR.LABEL) is
             _body.add(BRANCH(op_code, label))
+
+            if !_call_effects? \/ !_depth? then
+                return
+            fi
+
+            case op_code
+            when ILOpCode.LEAVE then
+                // A leave empties the stack.
+                _arrive(label, 0)
+                _depth = null
+            when ILOpCode.BR then
+                _arrive(label, _depth!)
+                _depth = null
+            when ILOpCode.BRTRUE, ILOpCode.BRFALSE then
+                _change(1, 0)
+                _arrive(label, _depth!)
+            when
+                ILOpCode.BEQ, ILOpCode.BGE, ILOpCode.BGE_UN, ILOpCode.BGT, ILOpCode.BGT_UN,
+                ILOpCode.BLE, ILOpCode.BLE_UN, ILOpCode.BLT, ILOpCode.BLT_UN, ILOpCode.BNE_UN
+            then
+                _change(2, 0)
+                _arrive(label, _depth!)
+            else
+                assert false else "the stack effect of branch {op_code} is not modelled"
+            esac
+        si
+
+        // Follows the evaluation stack depth through this body from here
+        // on, with `call_effects` giving each call's. A depth that goes
+        // below zero, or that differs between two paths to one label,
+        // fails at once rather than encoding a body the runtime rejects.
+        track_stack(call_effects: SRM_CALL_EFFECTS) is
+            _call_effects = call_effects
+            _depth = 0
+        si
+
+        // The evaluation stack depth where the next instruction goes, or
+        // null where it is not known: the body is not followed, or the
+        // instruction is unreachable by falling through.
+        depth: int? => if _call_effects? then _depth else null fi
+
+        // A handler starts with the exception on the stack when it is a
+        // catch, and with nothing when it is a finally.
+        begin_handler(is_catch: bool) is
+            if _call_effects? then
+                _depth = if is_catch then 1 else 0 fi
+            fi
+        si
+
+        _arrive(label: IR.LABEL, depth: int) is
+            if _label_depths.contains_key(label) then
+                let expected = _label_depths[label]
+
+                assert depth == expected else
+                    "evaluation stack depth {depth} at {label}, which is also reached at depth {expected}"
+            else
+                _label_depths[label] = depth
+            fi
+        si
+
+        // An instruction that pops `pops` values and pushes `pushes`.
+        _change(pops: int, pushes: int) is
+            if !_call_effects? then
+                return
+            fi
+
+            if let depth = _depth then
+                assert depth >= pops else
+                    "evaluation stack underflow: an instruction pops {pops} where the stack holds {depth}"
+
+                _depth = depth - pops + pushes
+            fi
+        si
+
+        // An instruction no instruction after it falls through from.
+        _end_flow() is
+            _depth = null
+        si
+
+        _call_effect(target: EntityHandle) -> SRM_CALL_EFFECT is
+            let effect = _call_effects!.effect_of(target)
+
+            assert effect? else
+                "no stack effect is recorded for call target {System.Reflection.Metadata.Ecma335.MetadataTokens.get_token(target):X8}"
+
+            return effect
         si
 
         // Declaring the same local twice is not an error: at least one
@@ -151,70 +269,130 @@ namespace IR.Emitter is
         has_locals: bool => _local_types.count > 0
         local_types: Type[] => _local_types
 
-        ldloc(local: IR.LOCAL) is _body.add(LOCAL(ILOpCode.LDLOC, _slot(local))); si
-        stloc(local: IR.LOCAL) is _body.add(LOCAL(ILOpCode.STLOC, _slot(local))); si
-        ldloca(local: IR.LOCAL) is _body.add(LOCAL(ILOpCode.LDLOCA, _slot(local))); si
+        ldloc(local: IR.LOCAL) is _body.add(LOCAL(ILOpCode.LDLOC, _slot(local))); _change(0, 1); si
+        stloc(local: IR.LOCAL) is _body.add(LOCAL(ILOpCode.STLOC, _slot(local))); _change(1, 0); si
+        ldloca(local: IR.LOCAL) is _body.add(LOCAL(ILOpCode.LDLOCA, _slot(local))); _change(0, 1); si
 
-        ldarg(index: int) is _body.add(ARGUMENT(ILOpCode.LDARG, index)); si
-        starg(index: int) is _body.add(ARGUMENT(ILOpCode.STARG, index)); si
-        ldarga(index: int) is _body.add(ARGUMENT(ILOpCode.LDARGA, index)); si
+        ldarg(index: int) is _body.add(ARGUMENT(ILOpCode.LDARG, index)); _change(0, 1); si
+        starg(index: int) is _body.add(ARGUMENT(ILOpCode.STARG, index)); _change(1, 0); si
+        ldarga(index: int) is _body.add(ARGUMENT(ILOpCode.LDARGA, index)); _change(0, 1); si
 
         ldstr(metadata: SRM_ASSEMBLY_EMITTER, value: string) is
             _body.add(STRING(metadata.get_or_add_user_string(value)))
+            _change(0, 1)
         si
 
-        ldc_i4(value: int) is _body.add(CONSTANT_I4(value)); si
-        ldc_i8(value: long) is _body.add(CONSTANT_I8(value)); si
-        ldc_r4(value: single) is _body.add(CONSTANT_R4(value)); si
-        ldc_r8(value: double) is _body.add(CONSTANT_R8(value)); si
-        ldnull() is _body.add(OP(ILOpCode.LDNULL)); si
+        ldc_i4(value: int) is _body.add(CONSTANT_I4(value)); _change(0, 1); si
+        ldc_i8(value: long) is _body.add(CONSTANT_I8(value)); _change(0, 1); si
+        ldc_r4(value: single) is _body.add(CONSTANT_R4(value)); _change(0, 1); si
+        ldc_r8(value: double) is _body.add(CONSTANT_R8(value)); _change(0, 1); si
+        ldnull() is _body.add(OP(ILOpCode.LDNULL)); _change(0, 1); si
 
-        call(target: EntityHandle) is _token(ILOpCode.CALL, target, true); si
+        call(target: EntityHandle) is
+            _token(ILOpCode.CALL, target, true, 0, 0)
+            _change_for_call(target)
+        si
 
         // Prefixes the following call with the type its receiver is
         // reached through, which is how a call on a value whose type is
         // a type parameter dispatches without the caller knowing whether
         // that parameter will be a value or a reference type.
-        constrained(type: EntityHandle) is _token(ILOpCode.CONSTRAINED, type, false); si
-        call_virtual(target: EntityHandle) is _token(ILOpCode.CALLVIRT, target, true); si
-        new_object(constructor: EntityHandle) is _token(ILOpCode.NEWOBJ, constructor, true); si
+        constrained(type: EntityHandle) is _token(ILOpCode.CONSTRAINED, type, false, 0, 0); si
 
-        ldfld(`field: EntityHandle) is _token(ILOpCode.LDFLD, `field, false); si
-        ldflda(`field: EntityHandle) is _token(ILOpCode.LDFLDA, `field, false); si
-        stfld(`field: EntityHandle) is _token(ILOpCode.STFLD, `field, false); si
-        ldsfld(`field: EntityHandle) is _token(ILOpCode.LDSFLD, `field, true); si
-        ldsflda(`field: EntityHandle) is _token(ILOpCode.LDSFLDA, `field, true); si
-        stsfld(`field: EntityHandle) is _token(ILOpCode.STSFLD, `field, false); si
+        call_virtual(target: EntityHandle) is
+            _token(ILOpCode.CALLVIRT, target, true, 0, 0)
+            _change_for_call(target)
+        si
 
-        ldtoken(type: EntityHandle) is _token(ILOpCode.LDTOKEN, type, true); si
+        new_object(constructor: EntityHandle) is
+            _token(ILOpCode.NEWOBJ, constructor, true, 0, 0)
 
-        box(type: EntityHandle) is _token(ILOpCode.BOX, type, false); si
-        size_of(type: EntityHandle) is _token(ILOpCode.SIZEOF, type, true); si
-        unbox_any(type: EntityHandle) is _token(ILOpCode.UNBOX_ANY, type, false); si
-        cast_class(type: EntityHandle) is _token(ILOpCode.CASTCLASS, type, false); si
-        is_instance(type: EntityHandle) is _token(ILOpCode.ISINST, type, false); si
+            if _call_effects? then
+                _change(_call_effect(constructor).arguments, 1)
+            fi
+        si
 
-        new_array(element_type: EntityHandle) is _token(ILOpCode.NEWARR, element_type, false); si
-        store_element(element_type: EntityHandle) is _token(ILOpCode.STELEM, element_type, false); si
-        load_element(element_type: EntityHandle) is _token(ILOpCode.LDELEM, element_type, false); si
-        load_element_address(element_type: EntityHandle) is _token(ILOpCode.LDELEMA, element_type, false); si
+        ldfld(`field: EntityHandle) is _token(ILOpCode.LDFLD, `field, false, 1, 1); si
+        ldflda(`field: EntityHandle) is _token(ILOpCode.LDFLDA, `field, false, 1, 1); si
+        stfld(`field: EntityHandle) is _token(ILOpCode.STFLD, `field, false, 2, 0); si
+        ldsfld(`field: EntityHandle) is _token(ILOpCode.LDSFLD, `field, true, 0, 1); si
+        ldsflda(`field: EntityHandle) is _token(ILOpCode.LDSFLDA, `field, true, 0, 1); si
+        stsfld(`field: EntityHandle) is _token(ILOpCode.STSFLD, `field, false, 1, 0); si
 
-        load_object(type: EntityHandle) is _token(ILOpCode.LDOBJ, type, false); si
-        store_object(type: EntityHandle) is _token(ILOpCode.STOBJ, type, false); si
+        ldtoken(type: EntityHandle) is _token(ILOpCode.LDTOKEN, type, true, 0, 1); si
 
-        load_function_pointer(method: EntityHandle) is _token(ILOpCode.LDFTN, method, true); si
-        load_virtual_function_pointer(method: EntityHandle) is _token(ILOpCode.LDVIRTFTN, method, false); si
+        box(type: EntityHandle) is _token(ILOpCode.BOX, type, false, 1, 1); si
+        size_of(type: EntityHandle) is _token(ILOpCode.SIZEOF, type, true, 0, 1); si
+        unbox_any(type: EntityHandle) is _token(ILOpCode.UNBOX_ANY, type, false, 1, 1); si
+        cast_class(type: EntityHandle) is _token(ILOpCode.CASTCLASS, type, false, 1, 1); si
+        is_instance(type: EntityHandle) is _token(ILOpCode.ISINST, type, false, 1, 1); si
 
-        _token(op_code: ILOpCode, handle: EntityHandle, pushes: bool) is
+        new_array(element_type: EntityHandle) is _token(ILOpCode.NEWARR, element_type, false, 1, 1); si
+        store_element(element_type: EntityHandle) is _token(ILOpCode.STELEM, element_type, false, 3, 0); si
+        load_element(element_type: EntityHandle) is _token(ILOpCode.LDELEM, element_type, false, 2, 1); si
+        load_element_address(element_type: EntityHandle) is _token(ILOpCode.LDELEMA, element_type, false, 2, 1); si
+
+        load_object(type: EntityHandle) is _token(ILOpCode.LDOBJ, type, false, 1, 1); si
+        store_object(type: EntityHandle) is _token(ILOpCode.STOBJ, type, false, 2, 0); si
+
+        load_function_pointer(method: EntityHandle) is _token(ILOpCode.LDFTN, method, true, 0, 1); si
+        load_virtual_function_pointer(method: EntityHandle) is _token(ILOpCode.LDVIRTFTN, method, false, 1, 1); si
+
+        _token(op_code: ILOpCode, handle: EntityHandle, pushes: bool, pops_values: int, pushes_values: int) is
             _body.add(TOKEN(op_code, handle, pushes))
+            _change(pops_values, pushes_values)
+        si
+
+        _change_for_call(target: EntityHandle) is
+            if _call_effects? then
+                let effect = _call_effect(target)
+
+                _change(effect.call_pops, if effect.returns then 1 else 0 fi)
+            fi
         si
 
         op(op_code: ILOpCode) is
             _body.add(OP(op_code))
+
+            if !_call_effects? then
+                return
+            fi
+
+            case op_code
+            when ILOpCode.NOP then
+                _change(0, 0)
+            when
+                ILOpCode.LDLEN, ILOpCode.NEG, ILOpCode.NOT,
+                ILOpCode.CONV_I, ILOpCode.CONV_I1, ILOpCode.CONV_I2, ILOpCode.CONV_I4, ILOpCode.CONV_I8,
+                ILOpCode.CONV_U, ILOpCode.CONV_U1, ILOpCode.CONV_U2, ILOpCode.CONV_U4, ILOpCode.CONV_U8,
+                ILOpCode.CONV_R4, ILOpCode.CONV_R8, ILOpCode.CONV_R_UN
+            then
+                _change(1, 1)
+            when
+                ILOpCode.ADD, ILOpCode.SUB, ILOpCode.MUL, ILOpCode.DIV, ILOpCode.DIV_UN,
+                ILOpCode.REM, ILOpCode.REM_UN, ILOpCode.AND, ILOpCode.OR, ILOpCode.XOR,
+                ILOpCode.SHL, ILOpCode.SHR, ILOpCode.SHR_UN,
+                ILOpCode.CEQ, ILOpCode.CGT, ILOpCode.CGT_UN, ILOpCode.CLT, ILOpCode.CLT_UN
+            then
+                _change(2, 1)
+            when ILOpCode.DUP then
+                _change(1, 2)
+            when ILOpCode.POP then
+                _change(1, 0)
+            when ILOpCode.LDNULL then
+                _change(0, 1)
+            when ILOpCode.THROW then
+                _change(1, 0)
+                _end_flow()
+            when ILOpCode.RET, ILOpCode.ENDFINALLY, ILOpCode.RETHROW then
+                _end_flow()
+            else
+                assert false else "the stack effect of {op_code} is not modelled"
+            esac
         si
 
-        ret() is _body.add(OP(ILOpCode.RET)); si
-        pop() is _body.add(OP(ILOpCode.POP)); si
+        ret() is op(ILOpCode.RET); si
+        pop() is op(ILOpCode.POP); si
 
         // An upper bound on the evaluation stack depth anywhere in the
         // body, for the header's max stack. The depth only grows at an
