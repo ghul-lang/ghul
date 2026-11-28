@@ -1005,6 +1005,7 @@ namespace Syntax.Process is
             // in pre_return / visit_return; nested val-blocks override
             // the current top while their own body is walked.
             _val_block_stack.add(block)
+            _val_block_exit_envs.add(Collections.LIST[NARROW_ENV]())
 
             return false
         si
@@ -1020,6 +1021,22 @@ namespace Syntax.Process is
             let top = _val_block_stack[_val_block_stack.count - 1]
             assert top? /\ top == block else "val_block_stack head is not the block being visited"
             _val_block_stack.remove_at(_val_block_stack.count - 1)
+
+            // The block ends where its tail falls through and where each
+            // return that leaves it goes, so what holds after it is what
+            // holds on all of those paths.
+            let exits = _val_block_exit_envs[_val_block_exit_envs.count - 1]
+            _val_block_exit_envs.remove_at(_val_block_exit_envs.count - 1)
+
+            if exits.count > 0 then
+                let after mut = _flow.current_env.copy()
+
+                for exit in exits do
+                    after = NARROW_ENV.join(after, exit)
+                od
+
+                _flow.set_env(after)
+            fi
 
             // A body that yields no value in a void-tolerant position
             // (an inferred function-literal return) makes the block
@@ -1133,6 +1150,14 @@ namespace Syntax.Process is
                 // through so downstream phases see a real Value and
                 // diagnose at the original location.
                 block.compile_expressions_state.value = block.body.value
+            elif _flow.is_unreachable then
+                // Every path through the body diverges, and none returns
+                // a value: the block has none to give, and control does
+                // not reach whatever would consume one. It takes the
+                // type its context expects, or is void.
+                block.compile_expressions_state.value = IR.Values.BLOCK(
+                    block.expected_type ?? _innate_symbol_lookup.get_void_type()
+                )
             else
                 // Body's tail doesn't provide a value and there are
                 // no returns to LUB with. The body walk has already

@@ -27,6 +27,10 @@ namespace Syntax.Process is
     class COMPILE_OPERATORS is
         _deferred_operands: Collections.LIST[DEFERRED_OPERANDS] field
 
+        // The `??` expressions whose right operand diverges on every path,
+        // as of their latest walk. Such an operand contributes no type.
+        _diverging_fallbacks: Collections.SET[Trees.Expressions.BINARY]
+
         _logger: Logger
         _symbol_table: Semantic.SYMBOL_TABLE
         _innate_symbol_lookup: Semantic.Lookups.InnateSymbolLookup
@@ -73,6 +77,7 @@ namespace Syntax.Process is
             _visitor = visitor
             _value_boxer = IR.VALUE_BOXER(logger)
             _deferred_operands = Collections.LIST[DEFERRED_OPERANDS]()
+            _diverging_fallbacks = Collections.SET[Trees.Expressions.BINARY]()
         si
 
         visit_unary(unary: Trees.Expressions.UNARY) is
@@ -323,6 +328,27 @@ namespace Syntax.Process is
                 RETRY_SITE_STATS.note("operators.pre_binary_deferred")
                 _logger.speculate()
                 _flow.speculate()
+            fi
+
+            // The right operand of `??` runs only where the left is absent,
+            // so what holds after the operator is what holds on either path:
+            // the left present, or the right evaluated.
+            if op =~ "??" then
+                binary.left.walk(_visitor)
+
+                let present = _flow.current_env.copy()
+
+                binary.right.walk(_visitor)
+
+                if _flow.is_unreachable then
+                    _diverging_fallbacks.add(binary)
+                else
+                    _diverging_fallbacks.remove(binary)
+                fi
+
+                _flow.set_env(NARROW_ENV.join(present, _flow.current_env))
+
+                return true
             fi
 
             return false
@@ -3554,6 +3580,9 @@ namespace Syntax.Process is
             let left_value = binary.left.value!
             let right_value = binary.right.value!
 
+            if _diverging_fallbacks.contains(binary) /\ _visit_diverging_coalesce(binary, left_value, right_value) then
+                return
+            fi
 
             left_value.check_is_consumable(_logger, binary.left.location)
             right_value.check_is_consumable(_logger, binary.right.location)
@@ -3659,6 +3688,50 @@ namespace Syntax.Process is
 
             let absent_arm = _coerce_coalesce_arm(right_value, result_type)
 
+            _build_coalesce(binary, left_value, left_type, left_inner, absent_arm, result_type)
+        si
+
+        // `a ?? b` where `b` diverges on every path, by a return, break,
+        // continue or throw: `b` runs only for its exit and contributes no
+        // type, so the result is the present type of `a`. False where
+        // `a` is not a plain optional, which the general rule handles.
+        _visit_diverging_coalesce(binary: Trees.Expressions.BINARY, left_value: Value, right_value: Value) -> bool is
+            let left_type = left_value.type
+
+            if !left_type? \/ left_type.is_error \/ left_type.is_inferred \/ !left_type.is_optional then
+                return false
+            fi
+
+            left_value.check_is_consumable(_logger, binary.left.location)
+
+            let left_inner = left_type.optional_inner_type
+
+            if !left_inner? then
+                return false
+            fi
+
+            // The default after the exit is never reached; it gives the
+            // arm the value every target needs to see at the join.
+            let absent_arm = IR.Values.BLOCK(left_inner)
+
+            absent_arm.add(right_value)
+            absent_arm.add(IR.Values.DEFAULT(left_inner))
+
+            _build_coalesce(binary, left_value, left_type, left_inner, absent_arm, left_inner)
+
+            return true
+        si
+
+        // The short-circuit shell of `a ?? b`, given the arm that runs where
+        // `a` is absent, already coerced to `result_type`.
+        _build_coalesce(
+            binary: Trees.Expressions.BINARY,
+            left_value: Value,
+            left_type: Type,
+            left_inner: Type,
+            absent_arm: Value,
+            result_type: Type
+        ) is
             if !left_type.is_value_type then
                 binary.compile_expressions_state.value = NULL_COALESCE(left_value, absent_arm, result_type)
                 return
