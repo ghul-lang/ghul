@@ -1,0 +1,158 @@
+use default
+use Ghul.Result
+
+union Failure: Ghul.Error is
+    DISK_FULL(device: string)
+    DENIED(message: string)
+si
+
+union Fault: Ghul.Error is
+    TIMEOUT(seconds: int)
+si
+
+union Outcome is
+    DONE(value: int) default
+    DISK(failure: Failure)
+    NETWORK(fault: Fault)
+si
+
+read(text: string) -> Result[int, Failure] =>
+    if text =~ "full" then
+        Result.ERROR(Failure.DISK_FULL("sda"))
+    elif text =~ "denied" then
+        Result.ERROR(Failure.DENIED("no access"))
+    else
+        Result.OK(text.length)
+    fi
+
+show[T](r: Result[T, Failure]) -> string =>
+    if let ok: Result.OK[T, Failure] = r then "ok {ok.value}" else "error {cast Result.ERROR[T, Failure](r).error.message}" fi
+
+double(n: int) -> int => n * 2
+
+// the value of a default variant unwraps; another variant's error is returned
+plain(text: string) -> Result[int, Failure] => Result.OK(read(text)! + 1)
+
+// a failed unwrap in an argument leaves the function from the middle of the call
+in_argument(text: string) -> Result[int, Failure] => Result.OK(double(read(text)!))
+
+// and from an operand of ??
+in_coalesce(text: string, fallback: int?) -> Result[int, Failure] => Result.OK(fallback ?? read(text)!)
+
+// and from inside a loop
+in_loop(texts: string[]) -> Result[int, Failure] is
+    let total mut = 0
+
+    for text in texts do
+        total = total + read(text)!
+        write_line("  read {text}, total {total}")
+    od
+
+    return Result.OK(total)
+si
+
+// a finally runs on the way out, and a catch does not see the error
+in_try(text: string) -> Result[int, Failure] is
+    try
+        return Result.OK(read(text)!)
+    catch e: Ghul.Exception
+        write_line("  not reached: caught {e.message}")
+        return Result.OK(-1)
+    finally
+        write_line("  finally ran")
+    yrt
+si
+
+// a parenthesised block does not stop it
+through_block(text: string) -> Result[int, Failure] is
+    let n = (let raw = read(text)!; raw * 10)
+    return Result.OK(n)
+si
+
+// the error is returned at the function's return type
+widened(text: string) -> Result[string, Ghul.Error] => Result.OK("{read(text)!}")
+
+// each other variant is returned as itself
+outcome(n: int) -> Outcome =>
+    case n
+    when 1 then Outcome.DISK(Failure.DENIED("disk"))
+    when 2 then Outcome.NETWORK(Fault.TIMEOUT(30))
+    else Outcome.DONE(n)
+    esac
+
+describe(o: Outcome) -> string =>
+    case o
+    when d: Outcome.DONE then "done {d.value}"
+    when d: Outcome.DISK then "disk {d.failure.message}"
+    when n: Outcome.NETWORK then "network {n.fault.message}"
+    esac
+
+chained(n: int) -> Outcome => Outcome.DONE(outcome(n)! + 100)
+
+// asynchronous: the type inside the Future
+read_later(text: string) -> Concurrency.Future[Result[int, Failure]] => Concurrency.Future.from_result(read(text))
+
+in_async(text: string) -> Concurrency.Future[Result[int, Failure]] is
+    let n = await read_later(text)!
+    // a typed local until ghul#4291: `return Result.OK(n * 3)` does not infer here
+    let tripled: Result[int, Failure] = Result.OK(n * 3)
+    return tripled
+si
+
+// a literal that declares its return type returns from itself
+in_literal(text: string) -> Result[int, Failure] is
+    let attempt = (t: string) -> Result[int, Failure] => Result.OK(read(t)! - 1)
+    let inner = attempt(text)
+    write_line("  literal gave {show(inner)}")
+    return Result.OK(42)
+si
+
+// a literal whose return type is inferred throws
+in_inferred_literal(text: string) -> Result[int, Failure] is
+    try
+        let length_of = (t: string) => read(t)!
+        return Result.OK(length_of(text))
+    catch e: Ghul.ErrorException
+        write_line("  inferred literal threw: {e.message}")
+        return Result.OK(0)
+    yrt
+si
+
+// an optional still throws
+optional_throws(name: string?) -> Result[int, Failure] is
+    try
+        return Result.OK(name!.length)
+    catch e: Ghul.Exception
+        write_line("  optional threw")
+        return Result.OK(0)
+    yrt
+si
+
+write_line("plain: {show(plain("abc"))} / {show(plain("full"))}")
+write_line("argument: {show(in_argument("abcd"))} / {show(in_argument("denied"))}")
+write_line("coalesce: {show(in_coalesce("full", 7))} / {show(in_coalesce("full", null))}")
+write_line("loop:")
+write_line("  {show(in_loop(["a", "bb", "full", "ccc"]))}")
+write_line("try:")
+write_line("  {show(in_try("full"))}")
+write_line("block: {show(through_block("ab"))} / {show(through_block("denied"))}")
+
+let w = widened("full")
+write_line("widened: {if let e: Result.ERROR[string, Ghul.Error] = w then e.error.message else "ok" fi}")
+
+write_line("chained: {describe(chained(5))} / {describe(chained(1))} / {describe(chained(2))}")
+write_line("async: {show(await in_async("abc"))} / {show(await in_async("full"))}")
+write_line("literal:")
+write_line("  {show(in_literal("denied"))}")
+write_line("inferred literal:")
+write_line("  {show(in_inferred_literal("full"))}")
+write_line("optional:")
+write_line("  {show(optional_throws(null))}")
+
+// top-level statements throw
+try
+    let n = read("full")!
+    write_line("not reached {n}")
+catch e: Ghul.ErrorException
+    write_line("top level threw: {e.message}")
+yrt

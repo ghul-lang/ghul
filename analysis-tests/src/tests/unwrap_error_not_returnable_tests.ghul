@@ -1,0 +1,59 @@
+namespace Analysis.Tests is
+    use Collections.LIST;
+
+    use IO.File;
+    use IO.Path;
+
+    use Analysis.Protocol.ANALYSER_PROCESS;
+    use Analysis.Protocol.DIAGNOSTIC;
+    use Analysis.Protocol.Response;
+
+    use Microsoft.VisualStudio.TestTools.UnitTesting.Assert;
+    use TestClass = Microsoft.VisualStudio.TestTools.UnitTesting.TestClassAttribute;
+    use Test = Microsoft.VisualStudio.TestTools.UnitTesting.TestMethodAttribute;
+    use Assertions;
+
+    // A failed `!` whose error does not fit the function's return type is
+    // reported once the walk has finished, from state on the UNWRAP node.
+    // The report must follow the source through edits: appear when the
+    // return type stops fitting, and go when it fits again.
+    @TestClass()
+    class UNWRAP_ERROR_NOT_RETURNABLE_TESTS is
+        init() is si
+
+        _codes_of(analyser: ANALYSER_PROCESS, source: string) -> LIST[DIAGNOSTIC] static is
+            analyser.send_edit("source.ghul", source);
+
+            let response = analyser.read_response();
+            assert isa Response.DIAGNOSTICS(response) else "expected DIAGNOSTICS response";
+
+            return LIST[DIAGNOSTIC](user_diagnostics_of(response));
+        si
+
+        @Test()
+        unreturnable_error_appears_and_clears_across_edits() is
+            let dir = fixture_dir("unwrap-error-not-returnable");
+            let clean_source = File.read_all_text(Path.combine(dir, "clean.ghul"));
+            let broken_source = File.read_all_text(Path.combine(dir, "broken.ghul"));
+
+            let use analyser = ANALYSER_PROCESS();
+
+            let first = _codes_of(analyser, clean_source);
+            are_equal(0, first.count, diagnostics_summary("clean source had diagnostics", first));
+
+            let broken = _codes_of(analyser, broken_source);
+            are_equal(1, broken.count, diagnostics_summary("broken source should have exactly one diagnostic", broken));
+            is_true(
+                broken[0].code? /\ broken[0].code =~ "unwrap-error-not-returnable",
+                diagnostics_summary("expected code 'unwrap-error-not-returnable'", broken)
+            );
+
+            let again = _codes_of(analyser, clean_source);
+            are_equal(
+                0,
+                again.count,
+                "{diagnostics_summary("clean source after the broken edit kept diagnostics", again)}\n--- analyser stderr ---\n{analyser.stderr_capture}"
+            );
+        si
+    si
+si
