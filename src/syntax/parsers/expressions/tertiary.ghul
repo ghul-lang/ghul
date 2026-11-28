@@ -40,9 +40,28 @@ namespace Syntax.Parsers.Expressions is
             elif context.current.token == Lexical.TOKEN.AWAIT then
                 let start = context.location
                 context.next_token()
-                let right = parse(context)!
 
-                Trees.Expressions.AWAIT(start::right.location, right)
+                context.is_await_operand = true
+                let right = parse(context)!
+                context.is_await_operand = false
+
+                // A trailing `!` or `?` applies to the awaited value:
+                // `await f()!` is `(await f())!`.
+                let result: Trees.Expressions.Expression mut = Trees.Expressions.AWAIT(start::right.location, right)
+
+                while !context.current.first_on_line do
+                    if context.current.token == Lexical.TOKEN.OPERATOR /\ context.current_string =~ "!" then
+                        result = Trees.Expressions.UNWRAP(start::context.location, result)
+                        context.next_token()
+                    elif context.current.token == Lexical.TOKEN.QUESTION then
+                        result = Trees.Expressions.HAS_VALUE(start::context.location, result)
+                        context.next_token()
+                    else
+                        break
+                    fi
+                od
+
+                result
             elif context.current.token == Lexical.TOKEN.USE then
                 let start = context.location
                 context.next_token()

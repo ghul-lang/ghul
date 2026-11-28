@@ -1939,6 +1939,8 @@ si
 
 The code reads from top to bottom, although execution suspends at each `await`. `await e;` as a statement waits for the task to complete, and discards any result.
 
+`await` takes the whole member-access and call chain after it, but a `!` or `?` that ends the chain applies to the awaited value. So `await f()!` is `(await f())!`: it unwraps the result. `await a().b()!` awaits `a().b()` and unwraps the result. A `!` or `?` that a member access, call or index follows stays inside the chain, as in `await f()!.g()`. To unwrap an optional task before awaiting it, put the unwrap in parentheses: `await (f()!)`.
+
 A function declared `-> Concurrency.Future[T]` can `return` a bare `T`. The compiler gives the value to the completed task. When the body has no suspension, the compiler wraps the value as `Concurrency.Future.from_result(...)`. The function can also `return` a task, or any other awaitable value, whose result is a `T`:
 
 - When the body does not `await`, the caller receives that task.
