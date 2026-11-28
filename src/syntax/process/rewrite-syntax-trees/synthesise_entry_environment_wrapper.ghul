@@ -33,6 +33,13 @@ namespace Syntax.Process is
     // the ordinary ghul tail-return rule regardless of whether that type
     // is `int` or void.
     //
+    // An entry that runs asynchronously - top-level statements that
+    // await, or an entry function written to return a `Concurrency.Future`
+    // - is wrapped whatever its parameters, an `ARRAY[string]` or none
+    // among them. Its wrapper's body runs the call to completion with
+    // `Concurrency.run`, and returns what the entry's future carries: the
+    // `int` of a `Concurrency.Future[int]`, or nothing.
+    //
     // The original function is marked so select-entry-point excludes it
     // from candidacy outright: its own signature is never Main-compatible,
     // and the wrapper is what stands in for it.
@@ -120,8 +127,9 @@ namespace Syntax.Process is
             fi
 
             let variables = function.arguments.variables
+            let is_async = _is_asynchronous(function, uses)
 
-            if variables.count < 1 \/ variables.count > 2 then
+            if variables.count > 2 \/ (variables.count < 1 /\ !is_async) then
                 return null
             fi
 
@@ -129,7 +137,7 @@ namespace Syntax.Process is
             let env_variable: Variables.VARIABLE? mut = null
 
             for variable in variables do
-                if _is_args_shaped(variable.type_expression) then
+                if _is_args_shaped(variable.type_expression) \/ (is_async /\ _is_string_array(variable.type_expression)) then
                     if args_variable? then
                         return null
                     fi
@@ -157,13 +165,37 @@ namespace Syntax.Process is
                 fi
             fi
 
-            if !env_variable? /\ !args_needs_wrapper then
+            if !env_variable? /\ !args_needs_wrapper /\ !is_async then
                 return null
             fi
 
             function.wrapped_by_synthesized_main = true
 
-            return _synthesise_wrapper(function, args_variable?, env_variable, function.is_top_level_entry)
+            return _synthesise_wrapper(function, args_variable?, env_variable, function.is_top_level_entry, is_async)
+        si
+
+        // Whether the entry runs asynchronously, so the wrapper has to run
+        // it to completion: top-level statements that await outside any
+        // function they nest, or an entry written to return a
+        // `Concurrency.Future`. A cell's statements return their value to
+        // whatever runs the session, and cannot await.
+        _is_asynchronous(function: Definitions.FUNCTION, uses: Definitions.USE[]) -> bool =>
+            if function.is_top_level_entry /\ IoC.CONTAINER.instance.build_flags.is_session_step then
+                false
+            elif function.is_top_level_entry then
+                if let body = function.body then AWAIT_SCANNER().body_has_await(body) else false fi
+            else
+                _names_type(function.type_expression, uses, "Concurrency", "Future")
+            fi
+
+        // `ARRAY[string]`, which the runtime enters at already, so it needs
+        // a wrapper only for an entry that runs asynchronously.
+        _is_string_array(type_expression: TypeExpressions.TypeExpression) -> bool is
+            if let generic = cast TypeExpressions.GENERIC?(type_expression) /\ generic.arguments.count == 1 then
+                return !generic.name.is_qualified /\ generic.name.name =~ "ARRAY" /\ _is_bare_named(generic.arguments.elements[0], "string")
+            fi
+
+            return false
         si
 
         _is_args_shaped(type_expression: TypeExpressions.TypeExpression) -> bool is
@@ -180,11 +212,17 @@ namespace Syntax.Process is
         // in) bring `Ghul.Environment` into scope under that name - the
         // three ordinary (non-type-alias) import shapes: `use Ghul;`,
         // `use Ghul.Environment;`, and `use X = Ghul.Environment;`.
-        _is_environment_shaped(type_expression: TypeExpressions.TypeExpression, uses: Definitions.USE[]) -> bool is
+        _is_environment_shaped(type_expression: TypeExpressions.TypeExpression, uses: Definitions.USE[]) -> bool =>
+            _names_type(type_expression, uses, "Ghul", "Environment")
+
+        // Whether a type expression names `outer.name`, directly or through
+        // one of the block's uses. A generic type expression names it too,
+        // so `Concurrency.Future[int]` names `Concurrency.Future`.
+        _names_type(type_expression: TypeExpressions.TypeExpression, uses: Definitions.USE[], outer: string, name: string) -> bool is
             if let named = cast TypeExpressions.NAMED?(type_expression) then
                 let id = named.name
 
-                if _names_ghul_environment(id) then
+                if _names(id, outer, name) then
                     return true
                 fi
 
@@ -195,14 +233,14 @@ namespace Syntax.Process is
                 for u in uses do
                     if let imported = u.`use then
                         if let alias = u.name then
-                            if alias.name =~ id.name /\ _names_ghul_environment(imported) then
+                            if alias.name =~ id.name /\ _names(imported, outer, name) then
                                 return true
                             fi
                         elif imported.is_qualified then
-                            if imported.name =~ id.name /\ _names_ghul_environment(imported) then
+                            if imported.name =~ id.name /\ _names(imported, outer, name) then
                                 return true
                             fi
-                        elif imported.name =~ "Ghul" /\ id.name =~ "Environment" then
+                        elif imported.name =~ outer /\ id.name =~ name then
                             return true
                         fi
                     fi
@@ -212,10 +250,10 @@ namespace Syntax.Process is
             return false
         si
 
-        _names_ghul_environment(id: Identifiers.Identifier) -> bool =>
-            id.name =~ "Environment" /\
+        _names(id: Identifiers.Identifier, outer: string, name: string) -> bool =>
+            id.name =~ name /\
                 id.qualifier? /\
-                id.qualifier.name =~ "Ghul" /\
+                id.qualifier.name =~ outer /\
                 !id.qualifier.qualifier?
 
         _is_bare_named(type_expression: TypeExpressions.TypeExpression, name: string) -> bool is
@@ -230,7 +268,8 @@ namespace Syntax.Process is
             original: Definitions.FUNCTION,
             has_args: bool,
             env_variable: Variables.VARIABLE?,
-            wraps_top_level: bool
+            wraps_top_level: bool,
+            is_async: bool
         ) -> Definitions.FUNCTION is
             // The wrapper stands where the function it wraps stands, but
             // nothing inside it does: the parts carry an internal location,
@@ -268,7 +307,7 @@ namespace Syntax.Process is
 
             let body_statements = Collections.LIST[Statements.Statement]()
 
-            body_statements.add(Statements.EXPRESSION(internal, call))
+            body_statements.add(Statements.EXPRESSION(internal, if is_async then _run_to_completion(call, location) else call fi))
 
             let body = Bodies.BLOCK(internal, Statements.LIST(internal, body_statements))
             let modifiers = Modifiers.LIST(internal, null, null)
@@ -279,7 +318,7 @@ namespace Syntax.Process is
                     Identifiers.Identifier(LOCATION.internal, _WRAPPER_NAME),
                     TypeExpressions.LIST(location, Collections.LIST[TypeExpressions.TypeExpression](0)),
                     arg_list,
-                    original.type_expression.copy(),
+                    if is_async then _result_type(original) else original.type_expression.copy() fi,
                     modifiers,
                     body
                 )
@@ -287,9 +326,47 @@ namespace Syntax.Process is
             wrapper.mark_synthesized()
             wrapper.is_synthesized_main_wrapper = true
             wrapper.wraps_top_level_entry = wraps_top_level
+            wrapper.runs_asynchronous_entry = is_async
 
             return wrapper
         si
+
+        // `Concurrency.run(() => call)`, which runs the event loop until the
+        // future the call returns completes, and gives its result or throws
+        // the exception it failed with.
+        _run_to_completion(call: Expressions.Expression, location: LOCATION) -> Expressions.Expression is
+            let internal = LOCATION.internal
+
+            let body =
+                Expressions.FUNCTION(
+                    internal,
+                    Expressions.LIST(internal, Collections.LIST[Expressions.Expression]()),
+                    TypeExpressions.INFER(internal),
+                    Bodies.EXPRESSION(internal, call),
+                    false
+                )
+
+            let run =
+                Expressions.MEMBER(
+                    internal,
+                    Expressions.IDENTIFIER(internal, Identifiers.Identifier(internal, "Concurrency")),
+                    Identifiers.Identifier(internal, "run"),
+                    internal)
+
+            return Expressions.CALL(location, run, Expressions.LIST(internal, Collections.LIST[Expressions.Expression]([body])))
+        si
+
+        // What the wrapper of an asynchronous entry returns: the result the
+        // entry's future carries, `int` for a `Concurrency.Future[int]`, or
+        // nothing. Top-level statements return no value.
+        _result_type(original: Definitions.FUNCTION) -> TypeExpressions.TypeExpression =>
+            if let generic = cast TypeExpressions.GENERIC?(original.type_expression) /\ generic.arguments.count == 1 then
+                generic.arguments.elements[0].copy()
+            elif original.is_top_level_entry then
+                original.type_expression.copy()
+            else
+                TypeExpressions.NAMED(LOCATION.internal, Identifiers.Identifier(LOCATION.internal, "void"))
+            fi
 
         _environment_instance_expression(location: LOCATION) -> Expressions.Expression is
             let ghul = Expressions.IDENTIFIER(location, Identifiers.Identifier(location, "Ghul"))

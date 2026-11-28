@@ -98,7 +98,7 @@ si
 
 A whole-file namespace must be the first declaration in the file, after any `@@` pragmas. It cannot be nested inside another namespace. An `is` after the name still opens a namespace block, whether it is on the same line or a later one. A `use` written after a whole-file namespace declaration applies to the rest of the file.
 
-A file with no namespace declaration can contain statements at the top level of the file, and so can a file whose namespace is a whole-file namespace. These top-level statements run in source order as the program's entry point, so a short program needs no `entry` function. Top-level statements can be mixed with global definitions. A global definition is visible everywhere in the file, wherever it appears. A file with top-level statements cannot declare a namespace block.
+A file with no namespace declaration can contain statements at the top level of the file, and so can a file whose namespace is a whole-file namespace. These top-level statements run in source order as the program's entry point, so a short program needs no `entry` function. Top-level statements can be mixed with global definitions. A global definition is visible everywhere in the file, wherever it appears. A file with top-level statements cannot declare a namespace block. Top-level statements can `await`, and the program then ends when the last of them finishes, as described under [asynchronous code](#asynchronous-code).
 
 In a file with no namespace declaration, or whose namespace is a whole-file namespace, a function that leaves any type out of its signature has the types it leaves out inferred from the file. That includes a function with no parameters and no return type. Its argument types come from its calls in the file and its return type from its body; a type it writes stays as written. The file's functions can call each other in any order, including recursively, whether their signatures are inferred or written. The top-level `let`s a function uses take their types from those uses too:
 
@@ -623,15 +623,16 @@ An `entry` function can declare any subset of two parameters. The compiler recog
 - a `string[]`, or an `ARRAY[string]`, holds the command-line arguments
 - a `Ghul.Environment` gives access to the process environment. `Ghul.Environment` is a ghul-runtime trait that reads and writes the process's environment variables.
 
-So `entry()`, `entry(args: string[])`, `entry(env: Ghul.Environment)` and `entry(args: string[], env: Ghul.Environment)` are all valid, with the parameters in either order. The compiler also recognises the environment parameter when its type is named through a `use`: `use Ghul;` then `entry(env: Environment)`, `use Ghul.Environment;` then `entry(env: Environment)`, or the alias `use X = Ghul.Environment;` then `entry(env: X)`. `entry` returns either nothing or an `int` exit status.
+So `entry()`, `entry(args: string[])`, `entry(env: Ghul.Environment)` and `entry(args: string[], env: Ghul.Environment)` are all valid, with the parameters in either order. The compiler also recognises the environment parameter when its type is named through a `use`: `use Ghul;` then `entry(env: Environment)`, `use Ghul.Environment;` then `entry(env: Environment)`, or the alias `use X = Ghul.Environment;` then `entry(env: X)`. `entry` returns nothing, an `int` exit status, a `Concurrency.Future`, or a `Concurrency.Future[int]` whose `int` is the exit status. The compiler recognises the two `Future` types by name, as it recognises `Ghul.Environment`: written in full, or through a `use` of `Concurrency`, of `Concurrency.Future`, or an alias for it.
 
-The real entry-point signature takes no parameters or one `ARRAY[string]`. When `entry` declares the environment parameter, or declares its arguments as a `string[]`, the compiler synthesises a private wrapper with that signature, which resolves `Ghul.Environment`, and calls `entry`. Otherwise `entry` compiles directly to the program's real entry point.
+The real entry-point signature takes no parameters or one `ARRAY[string]`. When `entry` declares the environment parameter, declares its arguments as a `string[]`, or returns a `Concurrency.Future`, the compiler synthesises a private wrapper with that signature, which resolves `Ghul.Environment`, and calls `entry`. For an `entry` that returns a `Concurrency.Future`, the wrapper runs the call to completion with `Concurrency.run`. Otherwise `entry` compiles directly to the program's real entry point.
 
 This recognition applies only to a global function found by name: the default `entry`, or the name that `--entry` gives. It does not apply to a class's static method used as the entry point. Such a method takes an `ARRAY[string]` or no parameters.
 
 A function with the build's entry-point name and any other signature is an error at the function. The error names the part of the signature that is invalid:
 
-- a return type that is neither `int` nor `void`. An asynchronous `entry` has this error, because it returns a task. To run asynchronous work, read `.result` on the returned task.
+- a return type that is neither `int` nor `void`, nor one of the two `Future` types above. Another task-like type, such as `Tasks.ValueTask`, has this error.
+- a `Concurrency.Future[T]` whose `T` is not `int`
 - more than one parameter
 - a parameter of any other type
 
@@ -1926,6 +1927,20 @@ A function declared `-> Concurrency.Future[T]` can `return` a bare `T`. The comp
 - When the body does `await`, the caller already has the function's own task, and the returned task can only complete it. So the compiler awaits the returned task and uses its result. `return t` and `return await t` then do the same thing.
 
 A void body accepts a returned task whose `await` gives no value, in the same way.
+
+A program can start asynchronously. Top-level statements can `await`: they then run as an asynchronous function returning a `Concurrency.Future`, and the program runs it to completion before it ends. An `entry` function declared `-> Concurrency.Future` or `-> Concurrency.Future[int]` runs in the same way, and the `int` is the exit status. An exception that escapes ends the program as an unhandled exception, as it does without an `await`. The statements of a REPL or session cell cannot `await`, because the session runs a cell and takes its value synchronously; `Concurrency.run(() => ...)` runs asynchronous code to completion there.
+
+```ghul
+use IO.Std.write_line
+
+fetch(n: int) -> Concurrency.Future[int] is
+    await Concurrency.sleep(10)
+    return n * 2
+si
+
+write_line("start")
+write_line("got {await fetch(21)}")
+```
 
 *More detail on this section: [asynchronous code](docs/async.md#asynchronous-code).*
 
