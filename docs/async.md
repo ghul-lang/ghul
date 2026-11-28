@@ -8,14 +8,14 @@ The operand of `await` does not have to be a task. `await` accepts any value tha
 
 - have a `bool` property `is_completed`
 - have a parameterless `get_result()`
-- implement `System.Runtime.CompilerServices.INotifyCompletion` or `ICriticalNotifyCompletion`
+- implement `Concurrency.NotifyCompletion` or `Concurrency.CriticalNotifyCompletion`
 
-The `await` expression has the type that `get_result` returns, which can be void. `Tasks.ValueTask[T]`, `Concurrency.Future.yield()` and `task.configure_await(false)` all follow the pattern. A type written in ghūl can follow it too. For example, a struct awaitable that gives its continuation to a scheduler implements cooperative multitasking without allocating a task for each suspension:
+The `await` expression has the type that `get_result` returns, which can be void. `System.Threading.Tasks.ValueTask[T]`, `Concurrency.Future.yield()` and `task.configure_await(false)` all follow the pattern. A type written in ghūl can follow it too. For example, a struct awaitable that gives its continuation to a scheduler implements cooperative multitasking without allocating a task for each suspension:
 
 ```ghul
-use System.Runtime.CompilerServices.ICriticalNotifyCompletion;
+use Concurrency.CriticalNotifyCompletion;
 
-struct PAUSE: ICriticalNotifyCompletion is
+struct PAUSE: CriticalNotifyCompletion is
     _ready: Collections.Queue[() -> void];
 
     init(ready: Collections.Queue[() -> void]) is _ready = ready; si
@@ -30,7 +30,7 @@ si
 
 An `await` on a value that does not follow the pattern is an error, and the error names the first missing member.
 
-The return type of an asynchronous function does not have to be `Concurrency.Future` or `Concurrency.Future[T]` either. Any type with .NET's `AsyncMethodBuilderAttribute` is a *task-like* return type. The attribute names a builder type, and the compiler uses that builder instead of the Task builder. `Tasks.ValueTask[T]` and `Tasks.ValueTask` work this way. So does a type declared in ghūl source. A library uses this to give its coroutines their own return type, instead of a Task:
+The return type of an asynchronous function does not have to be `Concurrency.Future` or `Concurrency.Future[T]` either. Any type with `Concurrency.AsyncMethodBuilderAttribute` is a *task-like* return type. The attribute names a builder type, and the compiler uses that builder instead of the Task builder. `System.Threading.Tasks.ValueTask[T]` and `ValueTask` work this way. So does a type declared in ghūl source. A library uses this to give its coroutines their own return type, instead of a Task:
 
 ```ghul
 @System.Runtime.CompilerServices.AsyncMethodBuilder(typeof(COROUTINE_BUILDER))
@@ -86,6 +86,6 @@ An asynchronous function whose return type has no result (`Concurrency.Future`, 
 
 Top-level statements that `await` outside any function or function literal they contain become an entry returning `Concurrency.Future`. An `entry` function written to return `Concurrency.Future` or `Concurrency.Future[int]` is asynchronous in the same way. In either case the compiler synthesises the program's real entry point beside it, a private `_entry` taking no parameters or one `ARRAY[string]`, whose body is `Concurrency.run(() => entry(args, env))`. `run` drives the thread's event loop until the future completes, then returns the future's result, which is the exit status for a `Concurrency.Future[int]`, or throws what the future threw. That behaves the same on every target: the program's output is in the order its awaits resume, an exception that escapes is an unhandled exception, with exit status 134, and the `int` an entry returns is the exit status.
 
-An asynchronous `entry` takes the parameters any `entry` takes, `string[]` or `ARRAY[string]` and `Ghul.Environment`, in either order. The compiler decides that an `entry` is asynchronous from its declaration, before it knows any types, so it recognises the return type by name: `Concurrency.Future` or `Concurrency.Future[int]` written in full, or `Future` named through a `use` of `Concurrency`, of `Concurrency.Future`, or an alias for it. Another task-like type, such as `Tasks.ValueTask`, is not recognised, and the entry is rejected for its return type. A `Concurrency.Future[T]` whose `T` is not `int` is rejected as `the task's result type is neither int nor void`.
+An asynchronous `entry` takes the parameters any `entry` takes, `string[]` or `ARRAY[string]` and `Ghul.Environment`, in either order. The compiler decides that an `entry` is asynchronous from its declaration, before it knows any types, so it recognises the return type by name: `Concurrency.Future` or `Concurrency.Future[int]` written in full, or `Future` named through a `use` of `Concurrency`, of `Concurrency.Future`, or an alias for it. Another task-like type, such as `System.Threading.Tasks.ValueTask`, is not recognised, and the entry is rejected for its return type. A `Concurrency.Future[T]` whose `T` is not `int` is rejected as `the task's result type is neither int nor void`.
 
 Top-level statements return no value, asynchronous or not, so a `return` among them takes no value. A cell of a REPL or a session (`--submission`, `--cells`, `--session`, `--cell-link`) cannot `await` at the top level: the session runs a cell and takes the value of its final expression synchronously. The error is reported at the first `await`. Asynchronous code still runs to completion inside a cell through `Concurrency.run(() => ...)`.
