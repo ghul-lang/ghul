@@ -28,6 +28,64 @@ namespace Syntax.Process is
             return true
         si
 
+        // A failed `!` that returns its error: the operand is held, and
+        // where it holds a variant other than the default one, that
+        // variant is rebuilt at the function's return type around the same
+        // error and returned. The value is built in the block
+        // compile-expressions left in its place, so the operand is still
+        // evaluated where the value is used.
+        visit(unwrap: Trees.Expressions.UNWRAP) is
+            let propagation = unwrap.propagation
+
+            if !propagation? then
+                return
+            fi
+
+            let block = cast IR.Values.BLOCK?(unwrap.value)
+
+            if !block? then
+                return
+            fi
+
+            enter_block(block)
+
+            let held = TEMP(current_block, "unwrap", propagation.operand)
+
+            let present = _open_region(LABEL())
+
+            add(Values.BREAK(present, BRANCH.NZ, Values.STEPS([held.load(), propagation.presence_test]:Value)))
+
+            let last = propagation.failures.count - 1
+
+            for (index, failure) in propagation.failures |> index() do
+                let other =
+                    if index < last then
+                        let skip = _open_region(LABEL())
+                        add(Values.BREAK(skip, BRANCH.Z, Values.STEPS([held.load(), failure.variant_test]:Value)))
+                        skip
+                    else
+                        null
+                    fi
+
+                let error = TEMP(current_block, "unwrap_error", Values.STEPS([held.load(), failure.error_extract]:Value))
+
+                let arguments = Collections.LIST[Value]()
+                arguments.add(error.load())
+
+                _emit_function_exit(_function_caller.call_constructor(failure.constructor, arguments, failure.returned_type))
+
+                if let skip = other then
+                    _close_structured(skip)
+                fi
+            od
+
+            _close_structured(present)
+
+            add(Values.STEPS([held.load(), propagation.value_extract]:Value))
+
+            leave_block()
+        si
+
         visit(`await: Trees.Expressions.AWAIT) is
             // Emit AWAIT_SUSPEND eagerly, stash the result into a
             // fresh frame field (NOT a CLR local — CLR locals reset

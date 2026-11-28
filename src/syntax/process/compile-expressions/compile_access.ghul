@@ -41,6 +41,7 @@ namespace Syntax.Process is
         // a named unknown, handed from _resolve_bare_operator to
         // visit_identifier in place of a symbol.
         _deferred_operator_value: IR.Values.Value?
+        _unreturnable_unwraps: Collections.LIST[Trees.Expressions.UNWRAP]
 
         init(
             logger: Logger,
@@ -67,6 +68,7 @@ namespace Syntax.Process is
             _function_caller = function_caller
             _unit_variant_constructor = unit_variant_constructor
             _flow = flow
+            _unreturnable_unwraps = Collections.LIST[Trees.Expressions.UNWRAP]()
             _condition_analyzer = condition_analyzer
             _build_flags = build_flags
             _visitor = visitor
@@ -1405,6 +1407,8 @@ namespace Syntax.Process is
         si
 
         visit_unwrap(unwrap: Trees.Expressions.UNWRAP) is
+            unwrap.propagation = null
+            unwrap.unreturnable_error = null
 
             let need_store = unwrap.value? /\ isa Need.STORE(unwrap.value)
 
@@ -1460,13 +1464,30 @@ namespace Syntax.Process is
                     // to that variant), with single-field projection
                     // so the canonical "unwrap to the sole field"
                     // rule is preserved.
+                    let (propagation, unreturnable) = _build_unwrap_propagation(unwrap.location, unwrap_left_value, classy, default_variant)
+
+                    unwrap.propagation = propagation
+                    unwrap.unreturnable_error = unreturnable
+
+                    let is_mismatch = unreturnable?
+
+                    if is_mismatch then
+                        _unreturnable_unwraps.add(unwrap)
+                    fi
+
                     unwrap.compile_expressions_state.value =
-                        build_default_variant_unwrap_or_throw(
-                            unwrap.location,
-                            unwrap_left_value,
-                            classy,
-                            default_variant
-                        )
+                        if is_mismatch then
+                            DUMMY(Semantic.Types.ERROR(), unwrap.location)
+                        elif let propagation = unwrap.propagation then
+                            IR.Values.BLOCK(propagation.value_extract.type!)
+                        else
+                            build_default_variant_unwrap_or_throw(
+                                unwrap.location,
+                                unwrap_left_value,
+                                classy,
+                                default_variant
+                            )
+                        fi
                 else
                     // a plain reference type: `!` asserts non-null. The
                     // result type drops the `?` so an inferred `let`
@@ -1858,6 +1879,166 @@ namespace Syntax.Process is
                 failure.exception,
                 value_extract.type!
             )
+        si
+
+        // How a failed `u!` returns its error from the enclosing function, or
+        // null where it throws instead. It returns where every variant other
+        // than the default one holds exactly one field of its own, of a type
+        // that implements `Ghul.Error`, and the function declares a return
+        // type of the same union, or a `Concurrency.Future` of one in an
+        // asynchronous function. Each error is returned in the same variant
+        // at the return type, so each must be assignable to that variant's
+        // field there, and one that is not is reported.
+        _build_unwrap_propagation(
+            location: LOCATION,
+            operand: Value,
+            classy: Semantic.Symbols.Classy,
+            default_variant: Semantic.Symbols.VARIANT
+        ) -> (propagation: Syntax.Process.UNWRAP_PROPAGATION?, unreturnable: string?) is
+            let operand_type = operand.type!
+
+            if classy.is_variant \/ operand_type.is_optional then
+                return (null, null)
+            fi
+
+            let returned_type = _propagation_return_type()
+
+            if !returned_type? \/ _condition_analyzer.get_classy_for_narrowing(returned_type) != classy then
+                return (null, null)
+            fi
+
+            let error_trait = _innate_symbol_lookup.find_error_trait_type()
+
+            if !error_trait? then
+                return (null, null)
+            fi
+
+            let errors = Collections.LIST[(variant: Semantic.Symbols.VARIANT, field_name: string, error_type: Type)]()
+
+            for alternative in classy.closed_alternatives do
+                if let variant: Semantic.Symbols.VARIANT = alternative /\ variant != default_variant then
+                    if variant.field_count != 1 \/ variant.own_field_count != 1 then
+                        return (null, null)
+                    fi
+
+                    let field_name = variant.get_destructure_member_name(0)
+                    let variant_type = _condition_analyzer.try_get_variant_type_for_classy(operand_type, variant)
+
+                    if !field_name? \/ !variant_type? then
+                        return (null, null)
+                    fi
+
+                    let error_type = variant_type.find_member(field_name)?.type
+
+                    if !error_type? \/ error_type.is_error \/ !error_trait.is_assignable_from(error_type) then
+                        return (null, null)
+                    fi
+
+                    errors.add((variant, field_name, error_type))
+                fi
+            od
+
+            if errors.count == 0 then
+                return (null, null)
+            fi
+
+            let failures = Collections.LIST[Syntax.Process.UNWRAP_PROPAGATED_FAILURE]()
+            let bool_type = _innate_symbol_lookup.get_bool_type()
+
+            for error in errors do
+                let returned_variant_type = _condition_analyzer.try_get_variant_type_for_classy(returned_type, error.variant)
+                let declared = returned_variant_type?.find_member(error.field_name)?.type
+
+                    if !returned_variant_type? \/ !declared? then
+                    return (null, null)
+                fi
+
+                if !declared.is_assignable_from(error.error_type) then
+                    use IoC.CONTAINER.instance.name_display.qualifying_alike(error.error_type, declared)
+
+                    return (null, "cannot return this '{error.error_type}' error from a function returning '{returned_type}', whose '{error.variant.name}' holds '{declared}'")
+                fi
+
+                let constructor = Semantic.KNOWN_MEMBERS.find(returned_variant_type, "init", [declared])
+
+                if !constructor? then
+                    return (null, null)
+                fi
+
+                let operand_variant_type = _condition_analyzer.try_get_variant_type_for_classy(operand_type, error.variant)!
+                let field_member = operand_variant_type.find_member(error.field_name)!
+
+                failures.add(
+                    Syntax.Process.UNWRAP_PROPAGATED_FAILURE(
+                        build_default_variant_isa(location, IR.Values.STACK_TOP(operand_type), error.variant, bool_type),
+                        field_member.load(location, IR.Values.CAST(operand_variant_type, IR.Values.STACK_TOP(operand_type), true), _symbol_loader),
+                        error.error_type,
+                        constructor,
+                        returned_variant_type
+                    )
+                )
+            od
+
+            let propagation =
+                Syntax.Process.UNWRAP_PROPAGATION(
+                    operand,
+                    build_default_variant_isa(location, IR.Values.STACK_TOP(operand_type), default_variant, bool_type),
+                    build_default_variant_unwrap(location, IR.Values.STACK_TOP(operand_type), classy, default_variant),
+                    failures
+                )
+
+            return (propagation, null)
+        si
+
+        // The type a failed `!` can return its error as: the enclosing
+        // function's declared return type, or what its `Concurrency.Future`
+        // completes with in an asynchronous function. Null where the return
+        // type is inferred, and in a generator or a file's top-level
+        // statements, where a failed `!` throws.
+        _propagation_return_type() -> Type? is
+            let function = _symbol_table.current_function
+
+            if
+                !function? \/
+                function.is_top_level_entry \/
+                function.return_type_was_inferred \/
+                function.inferred_return_origin? \/
+                Semantic.Symbols.state_machine_for(function)?
+            then
+                return null
+            fi
+
+            if let machine = Semantic.Symbols.async_state_machine_for(function) then
+                let frame = machine.frame
+
+                if !frame? \/ frame.is_void_async then
+                    return null
+                fi
+
+                return frame.result_type
+            fi
+
+            let declared = function.return_type
+
+            if !declared? \/ declared.is_error then
+                return null
+            fi
+
+            return declared
+        si
+
+        // Reports each unwrap whose error does not fit its function's return
+        // type, as its latest walk left it. A walk under speculation can
+        // have its diagnostics rolled back without walking the unwrap again,
+        // so these are reported once the whole walk has finished.
+        report_unreturnable_errors() is
+            for unwrap in _unreturnable_unwraps do
+                if let message = unwrap.unreturnable_error /\ !_logger.has_error_at(unwrap.location) then
+                    _logger.error(unwrap.location, "unwrap-error-not-returnable", message)
+                fi
+            od
+
+            _unreturnable_unwraps.clear()
         si
 
         // What a failed `u!` throws, and how to read what it holds from the

@@ -1123,6 +1123,17 @@ si
 
 A failed `!` throws an exception that holds what the value held instead. When the union has one other variant and that variant has exactly one field, that field is held. Otherwise the value itself is held. When the held value's type implements `Ghul.Error`, `!` throws `Ghul.ErrorException`. Its `error` is the held value, and its message is the error's `message`. Otherwise `!` throws `Ghul.UnwrapFailedException[T]`, whose `payload` is the held value. So `r!` on a `Result[int, string]` holding `ERROR("oops")` throws `UnwrapFailedException[string]` with payload `"oops"`. Catch the non-generic `Ghul.UnwrapFailedException` to handle any `UnwrapFailedException[T]` whatever it holds. An `ErrorException` is not an `UnwrapFailedException`. Inside `if r?`, `r` is narrowed to the default variant, so code reads its fields directly, with no `!`. The `else` branch narrows `r` to the other variant or variants. This is the same narrowing that `isa OK(r)` does.
 
+A failed `!` returns from the enclosing function instead of throwing when the union has no primary-constructor header, every variant other than the default one has exactly one field, the type of each of those fields implements `Ghul.Error`, and the function declares a return type of the same union. An `async` function counts when it declares a `Concurrency.Future` of that union. The function then returns the same variant, holding the same error, at its own return type:
+
+```ghul
+read(path: string) -> Result[string, Failure] => ...
+
+count_lines(path: string) -> Result[int, Failure] =>
+    Result.OK(read(path)!.split('\n').count)
+```
+
+Here a `Failure` from `read` is returned from `count_lines` as `Result.ERROR(failure)`. The return leaves from wherever the `!` is, including from inside a call's arguments, a loop or a `try`. A `finally` on the way out runs, and a `catch` does not see the return. Each error must be assignable to the matching field at the function's return type, so a function returning `Result[int, Ghul.Error]` can return a `Failure`. An error that is not assignable is the error `unwrap-error-not-returnable`: widen the function's error type, or convert the error before the `!`. A failed `!` still throws in a function or literal whose return type is inferred, including a literal that takes its return type only from the slot it is passed or stored in, in a generator, in a file's top-level statements, and in a function that returns any other type. To keep the throw in a function that returns a matching union, move the `!` into a function that returns some other type and call that.
+
 A union can declare a **primary-constructor header** for state that every variant shares. Each variant includes the shared parameters in its field list with `..`:
 
 ```ghul
