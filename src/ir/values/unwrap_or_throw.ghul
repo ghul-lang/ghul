@@ -1,0 +1,68 @@
+namespace IR.Values is
+    use Semantic.Types.Type
+
+    // `u!` on a union that may hold a variant other than its default one:
+    // the default variant's projection, or a throw of `failure` when the
+    // value holds anything else. The receiver is held in a temporary,
+    // which the presence test, the value extract and the failure extract
+    // read from the stack. What the failure holds lands in
+    // `payload_local`, which `failure` reads, so the exception's
+    // constructor never takes an argument from the stack.
+    //
+    // Built by COMPILE_ACCESS.build_default_variant_unwrap_or_throw.
+    class UNWRAP_OR_THROW: Composite is
+        receiver: Value
+        presence_test: Value
+        value_extract: Value
+        failure_extract: Value
+        payload_local: LOCAL
+        failure: Value
+        _result_type: Type
+
+        type: Type => _result_type
+        is_lightweight_pure: bool => false
+
+        init(
+            receiver: Value,
+            presence_test: Value,
+            value_extract: Value,
+            failure_extract: Value,
+            payload_local: LOCAL,
+            failure: Value,
+            result_type: Type
+        ) is
+            super.init()
+
+            self.receiver = receiver
+            self.presence_test = presence_test
+            self.value_extract = value_extract
+            self.failure_extract = failure_extract
+            self.payload_local = payload_local
+            self.failure = failure
+            self._result_type = result_type
+        si
+
+        expand() -> BLOCK is
+            let expansion = IR.EXPANSION(type)
+            let held = expansion.temp("unwrap", receiver.type!)
+
+            expansion.store(held, receiver)
+
+            expansion.declare(payload_local)
+
+            let present = expansion.region()
+
+            expansion.exit_if(present, IR.BRANCH.NZ, STEPS([held.load(), presence_test]:Value))
+            expansion.store(payload_local, STEPS([held.load(), failure_extract]:Value))
+            expansion.add(THROW(failure))
+            expansion.close(present)
+
+            expansion.add(STEPS([held.load(), value_extract]:Value))
+
+            return expansion.result
+        si
+
+        to_string() -> string =>
+            "unwrap-or-throw:[{type}]({receiver},{failure})"
+    si
+si

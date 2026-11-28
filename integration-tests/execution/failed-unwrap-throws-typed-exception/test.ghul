@@ -1,0 +1,108 @@
+use IO.Std.write_line
+
+union Failure: Ghul.Error is
+    DISK_FULL(device: string)
+    DENIED(message: string)
+si
+
+union Answer is
+    GOT(value: int) default
+    MISSING(key: string)
+si
+
+union Checked is
+    PASSED(value: int) default
+    FAILED(failure: Failure)
+si
+
+union Pair is
+    BOTH(left: int, right: int) default
+    NEITHER(reason: string, code: int)
+si
+
+union Three is
+    ONE(value: int) default
+    TWO(text: string)
+    NONE
+si
+
+struct Point(x: int public, y: int public);
+
+union Located is
+    HERE(value: int) default
+    THERE(point: Point)
+si
+
+// each value is read at its union's type, as a value whose variant is
+// not known where it is unwrapped
+answer(a: Answer) -> Answer => a
+located(l: Located) -> Located => l
+checked(c: Checked) -> Checked => c
+pair(p: Pair) -> Pair => p
+three(t: Three) -> Three => t
+
+// the field of the only other variant is what the exception holds
+try
+    let n = answer(Answer.MISSING("width"))!
+    write_line("not reached {n}")
+catch e: Ghul.UnwrapFailedException[string]
+    write_line("held: {e.payload}")
+yrt
+
+// a struct is held as itself
+try
+    let n = located(Located.THERE(Point(3, 4)))!
+    write_line("not reached {n}")
+catch e: Ghul.UnwrapFailedException[Point]
+    write_line("point: {e.payload.x},{e.payload.y}")
+yrt
+
+// a Ghul.Error is thrown as ErrorException, with the error's message
+try
+    let n = checked(Checked.FAILED(Failure.DENIED("no access")))!
+    write_line("not reached {n}")
+catch e: Ghul.ErrorException
+    write_line("error: {e.message}")
+
+    if let denied: Failure.DENIED = e.error then
+        write_line("the error comes back: {denied.message}")
+    fi
+yrt
+
+// a variant with more than one field is held as the whole value
+try
+    let p = pair(Pair.NEITHER("gone", 7))!
+    write_line("not reached {p.left}")
+catch e: Ghul.UnwrapFailedException[Pair]
+    if let neither: Pair.NEITHER = e.payload then
+        write_line("whole value: {neither.reason} {neither.code}")
+    fi
+yrt
+
+// so is a union with more than one other variant
+try
+    let n = three(Three.NONE)!
+    write_line("not reached {n}")
+catch e: Ghul.UnwrapFailedException
+    write_line("caught by the base")
+yrt
+
+// a value holding the default variant unwraps as before
+let ok = Answer.GOT(42)!
+let both = Pair.BOTH(1, 2)!
+write_line("ok: {ok} {both.left} {both.right} {Checked.PASSED(5)!} {Three.ONE(6)!}")
+
+// a generic union's other variant holding a Ghul.Error
+use Ghul.Result
+
+parse(text: string) -> Result[int, Failure] =>
+    if text =~ "full" then Result.ERROR(Failure.DISK_FULL("sda")) else Result.OK(text.length) fi
+
+write_line("parsed: {parse("abc")!}")
+
+try
+    let n = parse("full")!
+    write_line("not reached {n}")
+catch e: Ghul.ErrorException
+    write_line("result error: {e.message}")
+yrt

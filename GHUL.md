@@ -1119,7 +1119,9 @@ union Result[T, E] is
 si
 ```
 
-`r?` is then true when `r` holds `OK`. `r!` returns the `OK` value, and throws if `r` holds `ERROR`. A default variant with one field unwraps to that field, by position; the field does not need to be named `value`. A default variant with several fields unwraps to the variant. Inside `if r?`, `r` is narrowed to the default variant, so code reads its fields directly, with no `!`. The `else` branch narrows `r` to the other variant or variants. This is the same narrowing that `isa OK(r)` does.
+`r?` is then true when `r` holds `OK`. `r!` returns the `OK` value, and throws if `r` holds `ERROR`. A default variant with one field unwraps to that field, by position; the field does not need to be named `value`. A default variant with several fields unwraps to the variant.
+
+A failed `!` throws an exception that holds what the value held instead. When the union has one other variant and that variant has exactly one field, that field is held. Otherwise the value itself is held. When the held value's type implements `Ghul.Error`, `!` throws `Ghul.ErrorException`. Its `error` is the held value, and its message is the error's `message`. Otherwise `!` throws `Ghul.UnwrapFailedException[T]`, whose `payload` is the held value. So `r!` on a `Result[int, string]` holding `ERROR("oops")` throws `UnwrapFailedException[string]` with payload `"oops"`. Catch the non-generic `Ghul.UnwrapFailedException` to handle any `UnwrapFailedException[T]` whatever it holds. An `ErrorException` is not an `UnwrapFailedException`. Inside `if r?`, `r` is narrowed to the default variant, so code reads its fields directly, with no `!`. The `else` branch narrows `r` to the other variant or variants. This is the same narrowing that `isa OK(r)` does.
 
 A union can declare a **primary-constructor header** for state that every variant shares. Each variant includes the shared parameters in its field list with `..`:
 
