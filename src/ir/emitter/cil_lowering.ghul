@@ -32,14 +32,48 @@ namespace IR.Emitter is
 
         gen(value: Values.Value?) is
             if value? then
+                let operand = _is_operand(value)
+
+                _enter_operand(operand)
                 value.accept(self)
+                _leave_operand(operand)
             else
                 _context.fixme("null value")
             fi
         si
 
         gen_address(value: Values.Value) is
+            let operand = _is_operand(value)
+
+            _enter_operand(operand)
             value.accept_address(self)
+            _leave_operand(operand)
+        si
+
+        // Whether `value` can be lowered with operands of its own already
+        // pushed. A block or a structured node lowers a sequence of
+        // values, each starting on the stack the sequence started on.
+        _is_operand(value: Values.Value) -> bool =>
+            !isa Values.BLOCK(value) /\
+            !isa Values.Breakable(value) /\
+            !isa Values.Exit(value) /\
+            !isa Values.RET(value) /\
+            !isa CilValue(value)
+
+        _enter_operand(operand: bool) is
+            if operand then
+                if let body = _context.current_srm_body_emitter then
+                    body.operand_nesting = body.operand_nesting + 1
+                fi
+            fi
+        si
+
+        _leave_operand(operand: bool) is
+            if operand then
+                if let body = _context.current_srm_body_emitter then
+                    body.operand_nesting = body.operand_nesting - 1
+                fi
+            fi
         si
 
         // Lowers an operand as a block lowers each of its values,
@@ -695,6 +729,10 @@ namespace IR.Emitter is
         si
 
         visit(ret: Values.RET) is
+            if ret.is_source_exit then
+                _context.fit_stack_to_exit(null, ret.carried_type)
+            fi
+
             _body.ret()
         si
 
