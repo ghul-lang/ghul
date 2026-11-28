@@ -632,12 +632,74 @@ namespace Semantic is
             fi
         si
 
+        // A member pulled into a generic union is a specialized copy whose
+        // owner is the union's specialization, so the trait that declares
+        // it is the owner of the declaration it was specialized from.
+        _is_trait_instance_property(property: Symbols.Property) -> bool =>
+            property.is_instance /\ property.read_function? /\ (cast Classy?(property.root_specialized_from.owner)?.is_trait ?? false)
+
+        // A variant field named like a property of a trait the union
+        // implements is that variant's implementation of the property. The
+        // field keeps its name in the variant's scope, so the property is
+        // implemented by a getter of its own that reads the field: it
+        // overrides the trait's read accessor, and dispatch through the
+        // trait or the union reaches it. Variants without such a field keep
+        // whatever the trait or the union supplies.
+        _implement_trait_property(
+            variant: Symbols.VARIANT,
+            variant_field: Symbols.VARIANT_FIELD,
+            property: Symbols.Property,
+            logger: Logging.Logger
+        ) is
+            let property_type = property.type
+            let field_type = variant_field.type
+
+            if !property_type? \/ !field_type? then
+                return
+            fi
+
+            if !property_type.is_assignable_from(field_type) then
+                logger.error(
+                    variant_field.location,
+                    "variant-field-trait-property-mismatch", "variant field '{variant.name}.{variant_field.name}: {field_type}' cannot implement '{property}' because '{field_type}' is not assignable to '{property_type}'",
+                    property.location,
+                    "trait property declared here"
+                )
+
+                return
+            fi
+
+            let read = property.read_function!
+
+            let getter = Symbols.INSTANCE_METHOD(variant_field.location, variant_field.location, variant, read.name, variant)
+
+            getter.set_arguments(Collections.LIST[string](), Collections.LIST[Type]())
+            getter.set_return_type(property_type)
+            getter.il_name_override = read.il_name_override
+            getter.mark_synthesized()
+
+            getter.add_overridee(read)
+            read.add_overrider(getter)
+
+            variant.add_trait_property_getter(getter, variant_field)
+        si
+
         handle_non_property_overrider(
             overrider_symbol: Symbol,
             overridee_symbols: Iterable[Symbol],
             logger: Logging.Logger
         )
         is
+            if let variant_field: Symbols.VARIANT_FIELD = overrider_symbol, variant: Symbols.VARIANT = into then
+                for overridee in overridee_symbols do
+                    if let property: Symbols.Property = overridee /\ _is_trait_instance_property(property) then
+                        _implement_trait_property(variant, variant_field, property, logger)
+                    fi
+                od
+
+                return
+            fi
+
             if overrider_symbol.can_hide_inherited then
                 // we don't care if this particular symbol hides an inherited symbol
                 return

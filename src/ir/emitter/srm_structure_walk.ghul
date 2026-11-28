@@ -2082,7 +2082,78 @@ namespace IR.Emitter is
                 result.add(SRM_INTERFACE_ANCESTOR(_type_token(ancestor), ancestor))
             od
 
+            // A variant whose field implements a trait property lists that
+            // trait again, though its union already implements it: the
+            // runtime maps a trait's members afresh only for a type that
+            // names the trait itself, and the getter takes the property's
+            // slot by name and signature.
+            if let variant: Semantic.Symbols.VARIANT = type then
+                for trait_type in _reimplemented_traits(variant) do
+                    result.add(SRM_INTERFACE_ANCESTOR(_type_token(trait_type), trait_type))
+                od
+            fi
+
             return result
+        si
+
+        // The traits, as `variant` sees them, that own the properties its
+        // fields implement, each once.
+        _reimplemented_traits(variant: Semantic.Symbols.VARIANT) -> Collections.LIST[Semantic.Types.Type] is
+            let result = Collections.LIST[Semantic.Types.Type]()
+
+            for (getter, _) in variant.trait_property_getters do
+                let overridees = getter.overridees
+
+                if !overridees? then
+                    continue
+                fi
+
+                for overridee in overridees do
+                    if let owner = cast Classy?(overridee.owner), trait_type = _trait_ancestor(variant, owner.unspecialized_symbol, 0) then
+                        let seen mut = false
+
+                        for listed in result do
+                            if listed.symbol == trait_type.symbol then
+                                seen = true
+                            fi
+                        od
+
+                        if !seen then
+                            result.add(trait_type)
+                        fi
+                    fi
+                od
+            od
+
+            return result
+        si
+
+        // The ancestor of `from`, direct or further up, that is the trait
+        // `unspecialized`, or null.
+        _trait_ancestor(from: Classy, unspecialized: Semantic.Symbols.Symbol, depth: int) -> Semantic.Types.Type? is
+            if depth > 64 then
+                return null
+            fi
+
+            for ancestor in from.ancestors do
+                if ancestor.is_trait /\ ancestor.symbol? /\ ancestor.symbol.unspecialized_symbol == unspecialized then
+                    return ancestor
+                fi
+
+                // A constructed generic answers its declaration's ancestors,
+                // which are written in the declaration's own type
+                // parameters, so what is found there is put in this
+                // construction's terms.
+                if let generic: Semantic.Symbols.GENERIC = ancestor.symbol then
+                    if let found = _trait_ancestor(generic.symbol, unspecialized, depth + 1) then
+                        return found.specialize(generic.type_map)
+                    fi
+                elif let ancestor_symbol = cast Classy?(ancestor.symbol), found = _trait_ancestor(ancestor_symbol, unspecialized, depth + 1) then
+                    return found
+                fi
+            od
+
+            return null
         si
 
         // A type named in a row rather than in a signature. A
