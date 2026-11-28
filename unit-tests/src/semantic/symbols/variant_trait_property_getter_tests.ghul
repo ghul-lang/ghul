@@ -1,0 +1,126 @@
+namespace Semantic.Symbols.UnitTests is
+    use Collections.LIST
+
+    use Source.LOCATION
+
+    use Semantic.Types.Type
+    use Assertions
+
+    // Pins how a variant field with the name of a trait property the union
+    // implements is taken as that variant's implementation of it: the
+    // variant's pull-down synthesizes a getter overriding the property's
+    // read accessor, and resetting the pull-down takes the getter away
+    // again, so a re-resolution does not record it twice.
+    class VARIANT_TRAIT_PROPERTY_GETTER_TESTS is
+        init() is si
+
+        loc() -> LOCATION => LOCATION("test.ghul", 1, 1, 1, 1)
+
+        names() -> LIST[string] => LIST[string]()
+
+        class_type(name: string) -> Type =>
+            CLASS(loc(), loc(), Semantic.BLOCK_SCOPE(), name, names(), Semantic.BLOCK_SCOPE()).type!
+
+        // A trait declaring `message: <type>` with a read accessor.
+        trait_with_property(property_type: Type) -> (`trait: TRAIT, read: INSTANCE_METHOD) is
+            let `trait = TRAIT(loc(), loc(), Semantic.BLOCK_SCOPE(), "Failure", names(), Semantic.BLOCK_SCOPE())
+
+            let read = INSTANCE_METHOD(loc(), loc(), `trait, "$get_message", Semantic.BLOCK_SCOPE())
+            read.arguments = LIST[Type]()
+            read.return_type = property_type
+
+            let property = INSTANCE_PROPERTY(loc(), loc(), `trait, "message", false, false)
+            property.set_type(property_type)
+            property.read_function = read
+
+            `trait.add_member(property)
+
+            return (`trait, read)
+        si
+
+        // A union implementing `trait`, with one variant whose field
+        // `message` has type `field_type`.
+        variant_with_field(`trait: TRAIT, field_type: Type) -> VARIANT is
+            let `union = UNION(loc(), loc(), Semantic.BLOCK_SCOPE(), "Lookup", names(), Semantic.BLOCK_SCOPE())
+            `union.add_ancestor(`trait.type!)
+            `union.pull_down_super_symbols()
+
+            let variant = VARIANT(loc(), loc(), `union, "OTHER", names(), `union)
+            variant.add_ancestor(`union.type!)
+
+            let message = VARIANT_FIELD(loc(), variant, "message")
+            message.set_type(field_type)
+            variant.add_member(message)
+
+            return variant
+        si
+
+        // Synthesizing the getter gives it a function type, which comes
+        // from the container's innate lookup.
+        with_innate_lookup(action: () -> void) is
+            let saved = IoC.CONTAINER.instance.innate_symbol_lookup
+
+            IoC.CONTAINER.instance.set_innate_symbol_lookup_for_testing(Semantic.UnitTests.TEST_INNATE_SYMBOL_LOOKUP())
+
+            try
+                action()
+            finally
+                IoC.CONTAINER.instance.set_innate_symbol_lookup_for_testing(saved)
+            yrt
+        si
+
+        getter_count(variant: VARIANT) -> int is
+            let result mut = 0
+
+            for _ in variant.trait_property_getters do
+                result = result + 1
+            od
+
+            return result
+        si
+
+        @test()
+        Pull_down__a_variant_field_named_as_a_trait_property__gets_a_getter_overriding_the_read_accessor() is
+            let string_type = class_type("string")
+            let (`trait, read) = trait_with_property(string_type)
+            let variant = variant_with_field(`trait, string_type)
+
+            with_innate_lookup(() is variant.pull_down_super_symbols() si)
+
+            are_equal(1, getter_count(variant))
+
+            for (getter, reads) in variant.trait_property_getters do
+                are_equal("message", reads.name)
+                are_equal(read.name, getter.name)
+                are_same(variant, getter.owner)
+                is_true(getter.is_internal, "expected the getter marked as synthesized")
+
+                let overrides_read mut = false
+
+                for overridee in getter.overridees! do
+                    if overridee == read then
+                        overrides_read = true
+                    fi
+                od
+
+                is_true(overrides_read, "expected the getter to override the trait's read accessor")
+            od
+        si
+
+        @test()
+        Reset__after_pull_down__removes_the_getter_so_a_second_pull_down_records_one() is
+            let string_type = class_type("string")
+            let (`trait, _) = trait_with_property(string_type)
+            let variant = variant_with_field(`trait, string_type)
+
+            with_innate_lookup(() is variant.pull_down_super_symbols() si)
+            variant.reset_pulled_down_symbols()
+
+            are_equal(0, getter_count(variant))
+
+            with_innate_lookup(() is variant.pull_down_super_symbols() si)
+
+            are_equal(1, getter_count(variant))
+        si
+    si
+si

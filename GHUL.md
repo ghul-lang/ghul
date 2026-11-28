@@ -1133,6 +1133,24 @@ si
 
 The primary parameters become fields of the union base class. So `t.location` is readable on any `TRIVIA` value, whatever its variant. A field declared in a variant, such as `text`, belongs to that variant only. The `..` can be at any position in the variant's field list. The order of fields in the synthesised constructor and in positional destructuring (`let (a, b) = trivia`) is the source order. A variant with no fields of its own can omit the field list (`BLANK_LINE;`), and is treated as `(..)`. A variant with its own fields must include exactly one `..`. This works in the same way as `..` in a class's secondary `init` ([primary constructors](#primary-constructors)).
 
+A variant field with the same name as a property of a trait the union implements is that variant's implementation of the property. A read of the property through the trait, through the union type or through the variant type gives the field's value. Variants without such a field keep the trait's default:
+
+```ghul
+trait Failure is
+    message: string => "no message";
+si
+
+union Lookup: Failure is
+    NOT_FOUND(program: string);
+    OTHER(message: string);
+si
+
+let failure: Failure = Lookup.OTHER("disk full");   // failure.message is "disk full"
+let missing: Failure = Lookup.NOT_FOUND("ghul");     // missing.message is "no message"
+```
+
+The field's type must be assignable to the property's type. If it is not, the compiler reports an error rather than letting the field hide the property.
+
 *More detail on this section: [language details](docs/details.md#unions).*
 
 ### enums

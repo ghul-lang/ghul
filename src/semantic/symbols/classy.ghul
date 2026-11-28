@@ -1585,6 +1585,43 @@ namespace Semantic.Symbols is
     class VARIANT: Classy, Types.Typed is
         _field_names: Collections.LIST[string]
 
+        _trait_property_getters: Collections.LIST[(getter: Function, reads: VARIANT_FIELD)]
+
+        /// The getters through which this variant's fields implement trait
+        /// properties of the same name, each with the field it reads. A
+        /// getter is not a member of the variant's scope: the field keeps
+        /// the name, and the getter is reached only by dispatch through the
+        /// trait property it overrides.
+        trait_property_getters: Collections.Iterable[(getter: Function, reads: VARIANT_FIELD)] => _trait_property_getters
+
+        /// Records that `getter` implements a trait property by reading
+        /// `reads`.
+        ///
+        /// - getter: the synthesized read accessor
+        /// - reads: the field of this variant it reads
+        add_trait_property_getter(getter: Function, reads: VARIANT_FIELD) is
+            _trait_property_getters.add((getter, reads))
+
+            if let journal = INHERITANCE_JOURNAL.current then
+                journal.record(InheritanceOp.TRAIT_PROPERTY_GETTER_ADDED(self, getter))
+            fi
+        si
+
+        /// Forgets a getter `add_trait_property_getter` recorded.
+        ///
+        /// - getter: the getter to forget
+        remove_trait_property_getter(getter: Function) is
+            let i mut = _trait_property_getters.count - 1
+
+            while i >= 0 do
+                if _trait_property_getters[i].getter == getter then
+                    _trait_property_getters.remove_at(i)
+                fi
+
+                i = i - 1
+            od
+        si
+
         short_description: string => "variant {name}"
 
         // No `variant` keyword: a variant has no standalone declaration
@@ -1652,6 +1689,7 @@ namespace Semantic.Symbols is
             super.init(location, span, owner, name, arguments, enclosing_scope)
 
             _field_names = Collections.LIST[string]()
+            _trait_property_getters = Collections.LIST[(getter: Function, reads: VARIANT_FIELD)]()
         si
 
         _calc_depth() -> int => 2 // object -> union -> variant
